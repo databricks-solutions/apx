@@ -29,6 +29,7 @@ wheels = [
 name = "apx"
 source = { editable = "." }
 dependencies = [
+    { name = "fastapi" },
     { name = "jinja2" },
     { name = "typer" },
 ]
@@ -40,6 +41,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", specifier = ">=0.119.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "typer", specifier = ">=0.19.2" },
 ]
