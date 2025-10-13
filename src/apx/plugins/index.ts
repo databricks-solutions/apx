@@ -1,2 +1,2 @@
-export * from "./ensure-gitignore";
-export * from "./run-on-reload";
+export { ensureGitignore } from "./ensure-gitignore";
+export { runOnReload } from "./run-on-reload";

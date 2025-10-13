@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { type Plugin } from "vite";
 
-export default function ensureGitignore(): Plugin {
+export function ensureGitignore(): Plugin {
   let outDir: string;
   return {
     name: "ensure-gitignore",
