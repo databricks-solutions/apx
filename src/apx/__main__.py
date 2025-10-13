@@ -277,18 +277,32 @@ def openapi(
     ),
     output_path: Path = Argument(..., help="The path to the output file"),
 ):
-    # import the app
+    # Split the app_name into module path and attribute name (like uvicorn does)
+    if ":" not in app_name:
+        print(f"Invalid app name format. Expected format: some.package.file:app")
+        return Exit(code=1)
+
+    module_path, attribute_name = app_name.split(":", 1)
+
+    # Import the module
     try:
-        app = importlib.import_module(app_name)
-    except ImportError:
-        print(f"App module {app_name} not found.")
+        module = importlib.import_module(module_path)
+    except ImportError as e:
+        print(f"Failed to import module {module_path}: {e}")
         return Exit(code=1)
 
-    if not isinstance(app, FastAPI):
-        print("App is not a FastAPI app.")
+    # Get the app attribute from the module
+    try:
+        app_instance = getattr(module, attribute_name)
+    except AttributeError:
+        print(f"Module {module_path} does not have attribute '{attribute_name}'")
         return Exit(code=1)
 
-    spec = app.openapi()
+    if not isinstance(app_instance, FastAPI):
+        print(f"'{attribute_name}' is not a FastAPI app instance.")
+        return Exit(code=1)
+
+    spec = app_instance.openapi()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(spec, indent=2))
 
