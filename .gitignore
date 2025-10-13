@@ -9,3 +9,5 @@ wheels/
 # Virtual environments
 .venv
 src/apx/_version.py
+
+sample/

@@ -1,0 +1,29 @@
+from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from importlib import resources
+from pathlib import Path
+from {{app_name}} import __version__
+
+dist_path: Path = resources.files(f"{{app_name}}").joinpath("dist") # type: ignore
+
+app = FastAPI()
+api = FastAPI(title="API", description="API for {{app_name}}")
+
+ui = StaticFiles(directory=dist_path, html=True, check_dir=True)
+
+class VersionInfo(BaseModel):
+    version: str
+
+@app.get('/version', response_model=VersionInfo, operation_id="version")
+async def version():
+    return VersionInfo(version=__version__)
+
+# note the order of mounts!
+
+api.mount("/api", ui)
+app.mount("/", ui)
+
+@app.exception_handler(404)
+async def client_side_routing(_, __):
+    return FileResponse(dist_path / "index.html")

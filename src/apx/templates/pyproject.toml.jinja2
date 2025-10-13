@@ -1,15 +1,10 @@
 [project]
-name = "apx"
+name = "{{app_name}}"
 dynamic = ["version"]
-description = "Quickstarter for a Python + React project"
+description = "Add your description here"
 readme = "README.md"
-authors = [
-    { name = "renardeinside", email = "polarpersonal@gmail.com" }
-]
 requires-python = ">=3.11"
-dependencies = [
-    "typer>=0.19.2",
-]
+dependencies = []
 
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning>=0.7.0"]
@@ -20,18 +15,14 @@ source = "uv-dynamic-versioning"
 
 [tool.uv-dynamic-versioning]
 vcs = "git"
-format-jinja = "{{version}}"
-
-[dependency-groups]
-dev = [
-    "fastapi>=0.119.0",
-]
-
-[project.scripts]
-apx = "apx.__main__:app"
+format-jinja = "{% raw %}{{version}}{% endraw %}"
 
 [tool.hatch.build.hooks.version]
-path = "src/apx/_version.py"
+path = "src/{{app_name}}/_version.py"
 template = '''
 version = "{version}"
 '''
+
+[tool.hatch.build]
+artifacts = ["src/{{app_name}}/dist"]
+exclude = ["src/{{app_name}}/ui"]
