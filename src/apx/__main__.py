@@ -165,7 +165,7 @@ def init(
     pyproject_file.write_text(pyproject_toml_template.render(app_name=app_name))
 
     # run uv sync in the project directory
-    subprocess.run(["uv", "sync", "--active"], cwd=app_path)
+    subprocess.run(["uv", "sync"], cwd=app_path)
 
     # add src/{{app_name}}/api directory
     api_dir = src_dir.joinpath("api")
@@ -263,6 +263,14 @@ def init(
     routes_dir = ui_dir.joinpath("routes")
     routes_dir.mkdir(parents=True, exist_ok=True)
 
+    # add app_path/src/{{app_name}}/__dist__ directory
+    dist_dir = app_path.joinpath("src", app_name, "__dist__")
+    dist_dir.mkdir(parents=True, exist_ok=True)
+
+    # add a .gitkeep file to the dist directory
+    dist_gitkeep_file = dist_dir.joinpath(".gitkeep")
+    dist_gitkeep_file.touch()
+
     # add ui/routes/index.tsx
     routes_index_tsx_template = templates_dir.joinpath("routes/index.tsx")
     shutil.copy(routes_index_tsx_template, routes_dir.joinpath("index.tsx"))
@@ -323,7 +331,7 @@ def init(
     )
 
     # run bun run vite build in the project directory
-    subprocess.run(["bun", "run", "vite", "build"], cwd=app_path)
+    # subprocess.run(["bun", "run", "vite", "build"], cwd=app_path)
 
 
 @app.command(name="openapi", help="Generate OpenAPI schema from FastAPI app")
@@ -366,6 +374,7 @@ def openapi(
 
 def entrypoint():
     app()
+
 
 if __name__ == "__main__":
     entrypoint()

@@ -1,7 +1,7 @@
 
 re-init:
     rm -rf sample/
-    apx init --app-path sample
+    uv run apx init --app-path sample --app-name sample
 
 [working-directory: 'sample']
 build-sample:
