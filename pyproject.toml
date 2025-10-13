@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "jinja2>=3.1.6",
     "typer>=0.19.2",
 ]
 
