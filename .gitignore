@@ -12,3 +12,5 @@ src/apx/_version.py
 
 sample/
 .ruff_cache/
+
+node_modules/
