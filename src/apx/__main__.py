@@ -5,7 +5,7 @@ from pathlib import Path
 import random
 import shutil
 import subprocess
-from typer import Exit, Typer, Option
+from typer import Argument, Exit, Typer, Option
 from rich import print
 from apx._version import version as apx_version
 import jinja2
@@ -272,10 +272,10 @@ def init(
 
 @app.command(name="openapi", help="Generate OpenAPI schema from FastAPI app")
 def openapi(
-    app_name: str = Option(
+    app_name: str = Argument(
         ..., help="App module name in form of some.package.file:app"
     ),
-    output_path: Path = Option(..., help="The path to the output file"),
+    output_path: Path = Argument(..., help="The path to the output file"),
 ):
     # import the app
     try:
