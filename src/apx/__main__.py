@@ -364,5 +364,8 @@ def openapi(
     output_path.write_text(json.dumps(spec, indent=2))
 
 
-if __name__ == "__main__":
+def entrypoint():
     app()
+
+if __name__ == "__main__":
+    entrypoint()

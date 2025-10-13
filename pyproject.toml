@@ -31,7 +31,7 @@ dev = [
 ]
 
 [project.scripts]
-apx = "apx.__main__:app"
+apx = "apx.__main__:entrypoint"
 
 [tool.hatch.build.hooks.version]
 path = "src/apx/_version.py"
