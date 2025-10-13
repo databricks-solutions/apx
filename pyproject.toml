@@ -20,7 +20,7 @@ source = "uv-dynamic-versioning"
 
 [tool.uv-dynamic-versioning]
 vcs = "git"
-format-jinja = "{{version}}.{{commit}}"
+format-jinja = "{{version}}"
 
 [project.scripts]
 apx = "apx.__main__:app"
