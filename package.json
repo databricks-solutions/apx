@@ -2,17 +2,31 @@
   "name": "apx",
   "version": "0.1.0",
   "type": "module",
-  "module": "src/apx/plugins/index.ts",
-  "types": "src/apx/plugins/index.ts",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
-    ".": "./src/apx/plugins/index.ts"
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
   },
   "engines": {
-    "bun": ">=1.1.20"
+    "node": ">=18"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build:types": "tsc --emitDeclarationOnly",
+    "build:js": "bun build src/apx/plugins/index.ts --format esm --target node --outdir dist --sourcemap",
+    "build": "bun run build:js && bun run build:types",
+    "prepublishOnly": "bun run build"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/node": "^24.7.2"
+    "@types/node": "^24.7.2",
+    "typescript": "^5.9.3"
   },
   "peerDependencies": {
     "typescript": "^5.9.3"
