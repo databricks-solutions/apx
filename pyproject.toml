@@ -27,6 +27,7 @@ format-jinja = "{{version}}"
 [dependency-groups]
 dev = [
     "fastapi>=0.119.0",
+    "ruff>=0.14.0",
 ]
 
 [project.scripts]

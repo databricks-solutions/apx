@@ -11,10 +11,33 @@ from apx._version import version as apx_version
 import jinja2
 from fastapi import FastAPI
 
-app = Typer(name="apx | project quickstarter")
+
+def version_callback(value: bool):
+    if value:
+        print(f"apx version: {apx_version}")
+        raise Exit(code=0)
+
+
+app = Typer(
+    name="apx | project quickstarter",
+)
 
 templates_dir: Path = resources.files("apx").joinpath("templates")  # type: ignore
 jinja2_env = jinja2.Environment(loader=jinja2.FileSystemLoader(templates_dir))
+
+
+@app.callback()
+def main(
+    version: bool = Option(
+        None,
+        "--version",
+        callback=version_callback,
+        is_eager=True,
+        help="Show the version and exit.",
+    ),
+):
+    """Project quickstarter CLI."""
+    pass
 
 
 @app.command(name="version", help="Show the version of apx")
@@ -75,6 +98,15 @@ def random_name():
     return f"{random.choice(adjectives)}_{random.choice(animals)}"
 
 
+version_option = Option(
+    None,
+    "--version",
+    help="Show the version of apx",
+    callback=version_callback,
+    is_eager=True,
+)
+
+
 @app.command(name="init", help="Initialize a new project")
 def init(
     app_name: str | None = Option(None, help="The name of the project"),
@@ -82,6 +114,7 @@ def init(
         None,
         help="The path to the app. If not provided, the app will be created in the current working directory",
     ),
+    version: bool | None = version_option,
 ):
     # check if `uv` is installed
     if not is_uv_installed():
@@ -111,9 +144,6 @@ def init(
 
     # create the project directory
     app_path.mkdir(parents=True, exist_ok=True)
-    pyproject_toml_template = jinja2_env.get_template("pyproject.toml.jinja2")
-    pyproject_file = app_path.joinpath("pyproject.toml")
-    pyproject_file.write_text(pyproject_toml_template.render(app_name=app_name))
 
     readme_template = jinja2_env.get_template("README.md.jinja2")
     readme_file = app_path.joinpath("README.md")
@@ -130,8 +160,12 @@ def init(
     gitignore_file = app_path.joinpath(".gitignore")
     gitignore_file.write_text(gitignore_template.render(app_name=app_name))
 
+    pyproject_toml_template = jinja2_env.get_template("pyproject.toml.jinja2")
+    pyproject_file = app_path.joinpath("pyproject.toml")
+    pyproject_file.write_text(pyproject_toml_template.render(app_name=app_name))
+
     # run uv sync in the project directory
-    subprocess.run(["uv", "sync"], cwd=app_path)
+    subprocess.run(["uv", "sync", "--active"], cwd=app_path)
 
     # add src/{{app_name}}/api directory
     api_dir = src_dir.joinpath("api")
@@ -254,20 +288,42 @@ def init(
     # add ui/types directory
     ui_dir.joinpath("types").mkdir(parents=True, exist_ok=True)
 
-    # add ui/plugins directory
-    ui_dir.joinpath("plugins").mkdir(parents=True, exist_ok=True)
-
     # copy vite-env.d.ts to the ui/types directory
     vite_env_d_ts_template = templates_dir.joinpath("vite-env.d.ts")
     shutil.copy(vite_env_d_ts_template, ui_dir.joinpath("types", "vite-env.d.ts"))
 
-    # run bun run vite build in the project directory
-    subprocess.run(["bun", "run", "vite", "build"], cwd=app_path)
+    # copy selector.ts to the ui/lib directory
+    selector_ts_template = templates_dir.joinpath("selector.ts")
+    shutil.copy(selector_ts_template, ui_dir.joinpath("lib", "selector.ts"))
+
+    # render and copy .cursor/rules/project.mdc to the project directory
+    # prepare .cursor/rules directory
+    app_path.joinpath(".cursor", "rules").mkdir(parents=True, exist_ok=True)
+    project_mdc_template = jinja2_env.get_template(".cursor/rules/project.mdc.jinja2")
+    project_mdc_file = app_path.joinpath(".cursor", "rules", "project.mdc")
+    project_mdc_file.write_text(project_mdc_template.render(app_name=app_name))
+
     # copy app.py to the project directory
     app_py_template = jinja2_env.get_template("app.py.jinja2")
-    (app_path.joinpath("src", app_name, "app.py")).write_text(
+    (app_path.joinpath("src", app_name, "api", "app.py")).write_text(
         app_py_template.render(app_name=app_name)
     )
+
+    # run uv run apx openapi {{app_name}}.api.app:app node_modules/.tmp/openapi.json
+    subprocess.run(
+        [
+            "uv",
+            "run",
+            "apx",
+            "openapi",
+            f"{app_name}.api.app:app",
+            "node_modules/.tmp/openapi.json",
+        ],
+        cwd=app_path,
+    )
+
+    # run bun run vite build in the project directory
+    subprocess.run(["bun", "run", "vite", "build"], cwd=app_path)
 
 
 @app.command(name="openapi", help="Generate OpenAPI schema from FastAPI app")
@@ -276,6 +332,7 @@ def openapi(
         ..., help="App module name in form of some.package.file:app"
     ),
     output_path: Path = Argument(..., help="The path to the output file"),
+    version: bool | None = version_option,
 ):
     # Split the app_name into module path and attribute name (like uvicorn does)
     if ":" not in app_name:

@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from importlib import resources
 from pathlib import Path
 from {{app_name}} import __version__
+from pydantic import BaseModel
 
 dist_path: Path = resources.files(f"{{app_name}}").joinpath("dist") # type: ignore
 

@@ -4,7 +4,18 @@ dynamic = ["version"]
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fastapi>=0.119.0",
+    "uvicorn>=0.37.0",
+]
+
+[tool.uv.sources]
+apx = { git = "https://github.com/renardeinside/apx.git" }
+
+[dependency-groups]
+dev = [
+    "apx",
+]
 
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning>=0.7.0"]

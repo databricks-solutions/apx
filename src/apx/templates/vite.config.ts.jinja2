@@ -1,52 +1,92 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
+import { generate, type  } from "orval";
+import { spawn } from "child_process";
 
-import { execSync } from "child_process";
-import type { Plugin } from "vite";
-import {generate} from "orval";
+const APP_NAME = "{{app_name}}";
+const APP_UI_PATH = "./src/" + APP_NAME + "/ui";
 
-export function runOnReload(
-  tasks: Array<string | (() => void | Promise<void>)>
-): Plugin {
+type StepAction = () => void | Promise<void>;
+type StepSpec = { name: string; action: StepAction };
+const Step = (s: StepSpec) => s;
+
+function runOnReload(steps: StepSpec[]): Plugin {
+  let timer: NodeJS.Timeout | null = null;
+  let stopping = false;
+
   async function runAll() {
-    for (const task of tasks) {
-      if (typeof task === "string") {
-        console.log(`[vite-plugin-run] exec: ${task}`);
-        execSync(task, { stdio: "inherit" });
-      } else {
-        console.log(`[vite-plugin-run] run function`);
-        await task();
+    for (const s of steps) {
+      if (stopping) break;
+      const start = Date.now();
+      try {
+        await s.action();
+        console.log(`[vite-plugin-run] ${s.name} ✓ (${Date.now() - start} ms)`);
+      } catch (err) {
+        console.error(`[vite-plugin-run] ${s.name} ✗`, err);
       }
     }
   }
 
+  function stop() {
+    if (stopping) return;
+    stopping = true;
+    if (timer) clearTimeout(timer);
+    console.log("[vite-plugin-run] stopping...");
+  }
+
   return {
     name: "vite-plugin-run",
-    apply: "serve",
-    async handleHotUpdate() {
-      await runAll();
+    apply: () => true,
+    configResolved() {
+      process.on("SIGINT", stop);
+      process.on("SIGTERM", stop);
+    },
+    configureServer(server) {
+      server.httpServer?.once("close", stop);
     },
     async buildStart() {
       await runAll();
+    },
+    handleHotUpdate() {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => (timer = null, void runAll()), 100);
+    },
+    closeBundle() {
+      stop();
     },
   };
 }
 
 
+
 // https://vite.dev/config/
 export default defineConfig({
-  root: "src/{{app_name}}/ui",
+  root: APP_UI_PATH,
   plugins: [
     runOnReload([
-      "uvx git+https://github.com/renardeinside/apx.git apx openapi {{app_name}}.app:app node_modules/.tmp/openapi.json",
+      Step({
+        name: "openapi",
+        action: () => {
+          spawn("uv", ["run", "apx", "openapi", `${APP_NAME}.api.app:app`, "node_modules/.tmp/openapi.json"], { stdio: "inherit" });
+        },
+      }),
+      Step({
+        name: "generate",
+        action: () => generate({
+          input: "node_modules/.tmp/openapi.json",
+          output: {
+            target: `${APP_UI_PATH}/lib/api.ts`,
+          },
+        }),
+      }),
     ]),
     tanstackRouter({
       target: "react",
       autoCodeSplitting: true,
-      routesDirectory: "src/{{app_name}}/ui/routes",
+      routesDirectory: APP_UI_PATH + "/routes",
       generatedRouteTree: "./types/routeTree.gen.ts",
     }),
     react(),
@@ -77,7 +117,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "src/{{app_name}}/ui"),
+      "@": path.resolve(__dirname, APP_UI_PATH),
     },
   },
 });
