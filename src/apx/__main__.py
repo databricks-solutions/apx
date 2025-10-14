@@ -330,8 +330,12 @@ def init(
         cwd=app_path,
     )
 
-    # run bun run vite build in the project directory
-    # subprocess.run(["bun", "run", "vite", "build"], cwd=app_path)
+    # if git is installed, initialize the project
+    if shutil.which("git") is not None:
+        subprocess.run(["git", "init"], cwd=app_path)
+
+    # run the build
+    subprocess.run(["bun", "run", "build"], cwd=app_path)
 
 
 @app.command(name="openapi", help="Generate OpenAPI schema from FastAPI app")
