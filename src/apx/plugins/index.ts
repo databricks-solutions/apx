@@ -27,7 +27,6 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
   let timer: NodeJS.Timeout | null = null;
   let stopping = false;
   let resolvedIgnores: string[] = [];
-  let isServeMode = false;
 
   async function executeAction(action: StepAction): Promise<void> {
     if (typeof action === "string") {
@@ -56,19 +55,28 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
     }
   }
 
-  function ensureGitignoreInOutDir(): void {
+  /**
+   * Ensures the output directory exists and contains a .gitignore file.
+   * This is called at multiple points to guarantee the directory is always present.
+   */
+  function ensureOutDirAndGitignore(): void {
     if (!outDir) return;
 
-    // Create the output directory if it doesn't exist
-    if (!existsSync(outDir)) {
-      mkdirSync(outDir, { recursive: true });
-    }
+    try {
+      // Always ensure the output directory exists
+      if (!existsSync(outDir)) {
+        mkdirSync(outDir, { recursive: true });
+        console.log(`[apx] created output directory: ${outDir}`);
+      }
 
-    // Ensure .gitignore exists in output directory
-    const gitignorePath = join(outDir, ".gitignore");
-    if (!existsSync(gitignorePath)) {
-      writeFileSync(gitignorePath, "*\n");
-      console.log(`[apx] ensured ${gitignorePath}`);
+      // Always ensure .gitignore exists in output directory
+      const gitignorePath = join(outDir, ".gitignore");
+      if (!existsSync(gitignorePath)) {
+        writeFileSync(gitignorePath, "*\n");
+        console.log(`[apx] created ${gitignorePath}`);
+      }
+    } catch (err) {
+      console.error(`[apx] failed to ensure output directory:`, err);
     }
   }
 
@@ -90,7 +98,6 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
 
     configResolved(config) {
       outDir = config.build.outDir;
-      isServeMode = config.command === "serve";
       resolvedIgnores = ignore.map((pattern) =>
         resolve(process.cwd(), pattern),
       );
@@ -101,18 +108,21 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
       // Setup signal handlers for graceful shutdown
       process.on("SIGINT", stop);
       process.on("SIGTERM", stop);
+
+      // Ensure directory exists as soon as we know the outDir
+      ensureOutDirAndGitignore();
     },
 
     configureServer(server) {
       server.httpServer?.once("close", stop);
+
+      // Ensure directory exists when server starts
+      ensureOutDirAndGitignore();
     },
 
     async buildStart() {
-      // Only ensure gitignore in serve mode at start
-      // In build mode, we'll do it after files are written
-      if (isServeMode) {
-        ensureGitignoreInOutDir();
-      }
+      // Ensure directory exists before build starts
+      ensureOutDirAndGitignore();
 
       if (steps.length > 0) {
         await runAllSteps();
@@ -120,6 +130,9 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
     },
 
     handleHotUpdate(ctx) {
+      // Ensure directory exists on every HMR update
+      ensureOutDirAndGitignore();
+
       // Check if file should be ignored
       if (resolvedIgnores.some((pattern) => ctx.file.includes(pattern))) {
         return;
@@ -127,20 +140,26 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
 
       // Debounce step execution on HMR updates
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => {
+      timer = setTimeout(async () => {
         timer = null;
-        void runAllSteps();
+
+        // Ensure directory exists before running steps
+        ensureOutDirAndGitignore();
+        await runAllSteps();
+
+        // Ensure directory exists after running steps
+        ensureOutDirAndGitignore();
       }, 100);
     },
 
     writeBundle() {
-      // In build mode, ensure gitignore after all files are written
-      if (!isServeMode) {
-        ensureGitignoreInOutDir();
-      }
+      // Ensure directory exists after files are written
+      ensureOutDirAndGitignore();
     },
 
     closeBundle() {
+      // Ensure directory exists one final time
+      ensureOutDirAndGitignore();
       stop();
     },
   };
