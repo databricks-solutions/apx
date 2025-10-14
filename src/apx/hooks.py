@@ -3,6 +3,7 @@ from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from pathlib import Path
 import subprocess
 import shutil
+from hatchling.plugin import hookimpl
 
 
 class ApxHook(BuildHookInterface):
@@ -35,7 +36,8 @@ class ApxHook(BuildHookInterface):
             f"Finalizing build hook for project {self.metadata.name} in directory {Path.cwd()} with artifact path {artifact_path}"
         )
         # cleanup the .build directory
-        build_dir = Path.cwd() / ".build"
+        build_path = self.config.get("build_path", ".build")
+        build_dir = Path.cwd() / build_path
         if build_dir.exists():
             self.app.display_info(f"Removing {build_dir}")
             shutil.rmtree(build_dir)
@@ -58,3 +60,8 @@ class ApxHook(BuildHookInterface):
         reqs_file.write_text(f"{artifact_path.name}\n")
 
         self.app.display_info(f"Build dir {build_dir} is ready for deployment")
+
+
+@hookimpl
+def hatch_register_environment():
+    return ApxHook

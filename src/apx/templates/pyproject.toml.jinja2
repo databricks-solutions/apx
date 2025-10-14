@@ -32,3 +32,6 @@ version = "{version}"
 [tool.hatch.build]
 artifacts = ["src/{{app_name}}/dist"]
 exclude = ["src/{{app_name}}/ui"]
+
+[tool.hatch.build.hooks.apx]
+build_path = ".build"
