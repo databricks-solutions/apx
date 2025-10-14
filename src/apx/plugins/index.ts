@@ -27,6 +27,7 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
   let timer: NodeJS.Timeout | null = null;
   let stopping = false;
   let resolvedIgnores: string[] = [];
+  let isServeMode = false;
 
   async function executeAction(action: StepAction): Promise<void> {
     if (typeof action === "string") {
@@ -78,15 +79,24 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
     console.log("[apx] stopping...");
   }
 
+  function reset(): void {
+    stopping = false;
+    timer = null;
+  }
+
   return {
     name: "apx",
     apply: () => true,
 
     configResolved(config) {
       outDir = config.build.outDir;
+      isServeMode = config.command === "serve";
       resolvedIgnores = ignore.map((pattern) =>
         resolve(process.cwd(), pattern),
       );
+
+      // Reset state for new build
+      reset();
 
       // Setup signal handlers for graceful shutdown
       process.on("SIGINT", stop);
@@ -98,7 +108,11 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
     },
 
     async buildStart() {
-      ensureGitignoreInOutDir();
+      // Only ensure gitignore in serve mode at start
+      // In build mode, we'll do it after files are written
+      if (isServeMode) {
+        ensureGitignoreInOutDir();
+      }
 
       if (steps.length > 0) {
         await runAllSteps();
@@ -119,8 +133,14 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
       }, 100);
     },
 
+    writeBundle() {
+      // In build mode, ensure gitignore after all files are written
+      if (!isServeMode) {
+        ensureGitignoreInOutDir();
+      }
+    },
+
     closeBundle() {
-      ensureGitignoreInOutDir();
       stop();
     },
   };
