@@ -12,13 +12,8 @@ dependencies = [
 [tool.uv.sources]
 apx = { git = "https://github.com/renardeinside/apx.git" }
 
-[dependency-groups]
-dev = [
-    "apx",
-]
-
 [build-system]
-requires = ["hatchling", "uv-dynamic-versioning>=0.7.0"]
+requires = ["hatchling", "uv-dynamic-versioning>=0.7.0", "apx"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
