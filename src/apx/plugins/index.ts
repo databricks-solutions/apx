@@ -49,8 +49,14 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
   let timer: NodeJS.Timeout | null = null;
   let stopping = false;
   let resolvedIgnores: string[] = [];
+  let isRunningSteps = false;
 
   async function executeAction(action: StepAction): Promise<void> {
+    if (stopping) {
+      console.log(`[apx] skipping action (stopping): ${action}`);
+      return;
+    }
+    
     console.log(`[apx] executing action: ${action}`);
     ensureOutDirAndGitignore();
     if (typeof action === "string") {
@@ -66,17 +72,38 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
   }
 
   async function runAllSteps(): Promise<void> {
-    for (const step of steps) {
-      if (stopping) break;
-      const start = Date.now();
-      try {
-        console.log(`[apx] ${step.name} ⏳`);
-        await executeAction(step.action);
-        console.log(`[apx] ${step.name} ✓ (${Date.now() - start} ms)`);
-      } catch (err) {
-        console.error(`[apx] ${step.name} ✗`, err);
-        throw err;
+    if (stopping) {
+      console.log(`[apx] skipping steps (stopping)`);
+      return;
+    }
+    
+    if (isRunningSteps) {
+      console.log(`[apx] steps already running, skipping`);
+      return;
+    }
+    
+    isRunningSteps = true;
+    console.log(`[apx] starting ${steps.length} step(s)`);
+    
+    try {
+      for (const step of steps) {
+        if (stopping) {
+          console.log(`[apx] stopping steps early`);
+          break;
+        }
+        const start = Date.now();
+        try {
+          console.log(`[apx] ${step.name} ⏳`);
+          await executeAction(step.action);
+          console.log(`[apx] ${step.name} ✓ (${Date.now() - start} ms)`);
+        } catch (err) {
+          console.error(`[apx] ${step.name} ✗`, err);
+          throw err;
+        }
       }
+    } finally {
+      isRunningSteps = false;
+      console.log(`[apx] finished running steps`);
     }
   }
 
@@ -107,17 +134,25 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
   }
 
   function stop(): void {
-    if (stopping) return;
+    if (stopping) {
+      console.log("[apx] already stopping, ignoring");
+      return;
+    }
+    console.log("[apx] stop() called");
     stopping = true;
     if (timer) {
+      console.log("[apx] clearing pending timer");
       clearTimeout(timer);
       timer = null;
     }
+    console.log("[apx] stopped");
   }
 
   function reset(): void {
+    console.log("[apx] reset() called");
     stopping = false;
     timer = null;
+    isRunningSteps = false;
   }
 
   return {
@@ -125,7 +160,9 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
     apply: () => true,
 
     configResolved(config) {
+      console.log("[apx] configResolved() called");
       outDir = resolve(config.root, config.build.outDir);
+      console.log(`[apx] outDir resolved to: ${outDir}`);
       resolvedIgnores = ignore.map((pattern) =>
         resolve(process.cwd(), pattern),
       );
@@ -138,13 +175,18 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
     },
 
     configureServer(server) {
-      server.httpServer?.once("close", stop);
+      console.log("[apx] configureServer() called");
+      server.httpServer?.once("close", () => {
+        console.log("[apx] server.httpServer 'close' event fired");
+        stop();
+      });
 
       // Ensure directory exists when server starts
       ensureOutDirAndGitignore();
     },
 
     async buildStart() {
+      console.log("[apx] buildStart() called");
       // Ensure directory exists before build starts
       ensureOutDirAndGitignore();
 
@@ -154,17 +196,24 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
     },
 
     handleHotUpdate(ctx) {
+      console.log(`[apx] handleHotUpdate() called for: ${ctx.file}`);
       // Ensure directory exists on every HMR update
       ensureOutDirAndGitignore();
 
       // Check if file should be ignored
       if (resolvedIgnores.some((pattern) => ctx.file.includes(pattern))) {
+        console.log(`[apx] file ignored: ${ctx.file}`);
         return;
       }
 
       // Debounce step execution on HMR updates
-      if (timer) clearTimeout(timer);
+      if (timer) {
+        console.log("[apx] clearing existing timer");
+        clearTimeout(timer);
+      }
+      console.log("[apx] setting timer for step execution");
       timer = setTimeout(async () => {
+        console.log("[apx] timer fired, running steps");
         timer = null;
 
         // Ensure directory exists before running steps
@@ -174,14 +223,19 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
         // Ensure directory exists after running steps
         ensureOutDirAndGitignore();
       }, 100);
+      
+      // Allow the process to exit even if this timer is pending
+      timer.unref();
     },
 
     writeBundle() {
+      console.log("[apx] writeBundle() called");
       // Ensure directory exists after files are written
       ensureOutDirAndGitignore();
     },
 
     closeBundle() {
+      console.log("[apx] closeBundle() called");
       // Ensure directory exists one final time
       ensureOutDirAndGitignore();
       stop();
