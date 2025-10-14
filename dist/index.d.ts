@@ -18,7 +18,7 @@ export declare const OpenAPI: (appModule: string, outputPath: string) => StepSpe
  * @param input - Path to the OpenAPI spec file
  * @param output - Orval output configuration
  */
-export declare const Orval: ({ input, output }: {
+export declare const Orval: ({ input, output, }: {
     input: string;
     output: OutputOptions;
 }) => StepSpec;

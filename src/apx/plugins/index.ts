@@ -1,12 +1,9 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { join, resolve } from "path";
 import { type Plugin } from "vite";
-import { exec } from "child_process";
-import { promisify } from "util";
+import { spawn, type ChildProcess } from "child_process";
 import { createHash } from "crypto";
 import { generate, type OutputOptions } from "orval";
-
-const execAsync = promisify(exec);
 
 // Cache for OpenAPI spec hashes to detect changes
 const specHashCache = new Map<string, string>();
@@ -36,7 +33,13 @@ export const OpenAPI = (appModule: string, outputPath: string): StepSpec => ({
  * @param input - Path to the OpenAPI spec file
  * @param output - Orval output configuration
  */
-export const Orval = ({input, output}: {input: string, output: OutputOptions}): StepSpec => ({
+export const Orval = ({
+  input,
+  output,
+}: {
+  input: string;
+  output: OutputOptions;
+}): StepSpec => ({
   name: "orval",
   action: async () => {
     // Check if spec file exists
@@ -82,30 +85,106 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
   let stopping = false;
   let resolvedIgnores: string[] = [];
   let isRunningSteps = false;
-  let currentAbortController: AbortController | null = null;
+  let childProcesses: ChildProcess[] = [];
+
+  /**
+   * Executes a shell command using spawn, with proper signal handling
+   */
+  function executeShellCommand(command: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (stopping) {
+        console.log(`[apx] Skipping command (stopping): ${command}`);
+        resolve();
+        return;
+      }
+
+      console.log(`[apx] Executing: ${command}`);
+
+      // Parse command into command and args
+      const parts = command.split(/\s+/);
+      const cmd = parts[0];
+      const args = parts.slice(1);
+
+      // Spawn process with proper signal handling
+      const child = spawn(cmd, args, {
+        stdio: "inherit", // Forward stdout/stderr to parent
+        shell: true, // Use shell for proper command parsing
+        detached: false, // Keep in same process group for signal propagation
+      });
+
+      // Track child process for cleanup
+      childProcesses.push(child);
+      console.log(`[apx] Started process PID: ${child.pid}`);
+
+      child.on("error", (err) => {
+        console.error(`[apx] Process error:`, err);
+        reject(err);
+      });
+
+      child.on("exit", (code, signal) => {
+        // Remove from tracking
+        childProcesses = childProcesses.filter((p) => p.pid !== child.pid);
+
+        if (signal) {
+          console.log(
+            `[apx] Process ${child.pid} exited with signal: ${signal}`,
+          );
+          resolve(); // Treat signal termination as success for cleanup scenarios
+        } else if (code !== 0) {
+          console.error(`[apx] Process ${child.pid} exited with code: ${code}`);
+          reject(new Error(`Command failed with exit code ${code}`));
+        } else {
+          console.log(`[apx] Process ${child.pid} completed successfully`);
+          resolve();
+        }
+      });
+
+      // If we're stopping, kill the process immediately
+      if (stopping && child.pid) {
+        console.log(`[apx] Killing process ${child.pid} (stopping)`);
+        killProcess(child);
+      }
+    });
+  }
+
+  /**
+   * Kills a process and all its children
+   */
+  function killProcess(proc: ChildProcess): void {
+    if (!proc.pid) return;
+
+    try {
+      // On Unix-like systems, kill the process group
+      // Negative PID kills the entire process group
+      if (process.platform !== "win32") {
+        process.kill(-proc.pid, "SIGTERM");
+        console.log(`[apx] Sent SIGTERM to process group -${proc.pid}`);
+      } else {
+        // On Windows, just kill the process
+        proc.kill("SIGTERM");
+        console.log(`[apx] Sent SIGTERM to process ${proc.pid}`);
+      }
+    } catch (err) {
+      console.error(`[apx] Error killing process ${proc.pid}:`, err);
+      // Try forceful kill as fallback
+      try {
+        proc.kill("SIGKILL");
+      } catch (e) {
+        // Ignore errors on forceful kill
+      }
+    }
+  }
 
   async function executeAction(action: StepAction): Promise<void> {
-    if (stopping) return;
+    if (stopping) {
+      console.log(`[apx] Skipping action (stopping)`);
+      return;
+    }
 
     ensureOutDirAndGitignore();
     if (typeof action === "string") {
-      // Execute as shell command with abort support
-      currentAbortController = new AbortController();
-      try {
-        const { stdout, stderr } = await execAsync(action, {
-          signal: currentAbortController.signal,
-        });
-        if (stdout) console.log(stdout.trim());
-        if (stderr) console.error(stderr.trim());
-      } catch (err: any) {
-        if (err.name === 'AbortError' || stopping) {
-          console.log(`[apx] Command aborted`);
-          return;
-        }
-        throw err;
-      } finally {
-        currentAbortController = null;
-      }
+      // Execute as shell command
+      await executeShellCommand(action);
     } else {
       // Execute as function
       if (stopping) return;
@@ -115,13 +194,25 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
   }
 
   async function runAllSteps(): Promise<void> {
-    if (stopping || isRunningSteps) return;
+    if (stopping) {
+      console.log(`[apx] Skipping steps (stopping)`);
+      return;
+    }
 
+    if (isRunningSteps) {
+      console.log(`[apx] Steps already running, skipping...`);
+      return;
+    }
+
+    console.log(`[apx] Running ${steps.length} step(s)...`);
     isRunningSteps = true;
 
     try {
       for (const step of steps) {
-        if (stopping) break;
+        if (stopping) {
+          console.log(`[apx] Stopping during step execution`);
+          break;
+        }
         const start = Date.now();
         try {
           console.log(`[apx] ${step.name} ⏳`);
@@ -132,6 +223,7 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
           throw err;
         }
       }
+      console.log(`[apx] All steps completed`);
     } finally {
       isRunningSteps = false;
     }
@@ -165,23 +257,37 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
 
   function stop(): void {
     if (stopping) return;
+    console.log(`[apx] Stopping... (${childProcesses.length} child processes)`);
     stopping = true;
+
+    // Clear any pending timers
     if (timer) {
       clearTimeout(timer);
       timer = null;
     }
-    // Abort any running shell commands
-    if (currentAbortController) {
-      currentAbortController.abort();
-      currentAbortController = null;
+
+    // Kill all tracked child processes
+    if (childProcesses.length > 0) {
+      console.log(
+        `[apx] Killing ${childProcesses.length} child process(es)...`,
+      );
+      childProcesses.forEach((proc) => {
+        if (proc.pid) {
+          killProcess(proc);
+        }
+      });
+      childProcesses = [];
     }
+
+    console.log(`[apx] Stopped`);
   }
 
   function reset(): void {
+    console.log(`[apx] Resetting plugin state`);
     stopping = false;
     timer = null;
     isRunningSteps = false;
-    currentAbortController = null;
+    childProcesses = [];
   }
 
   return {
@@ -202,14 +308,13 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
     },
 
     configureServer(server) {
-      server.httpServer?.once("close", stop);
-
-      // Handle process signals for clean shutdown
-      const signalHandler = () => {
+      // Let Vite handle SIGINT/SIGTERM - we'll clean up via server.close and closeBundle
+      // DON'T add signal handlers here as they interfere with Vite's signal handling
+      // See: https://github.com/vitejs/vite/issues/11434
+      server.httpServer?.once("close", () => {
+        console.log(`[apx] Server closing, stopping plugin...`);
         stop();
-      };
-      process.once("SIGINT", signalHandler);
-      process.once("SIGTERM", signalHandler);
+      });
 
       // Ensure directory exists when server starts
       ensureOutDirAndGitignore();
@@ -228,17 +333,38 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
       // Ensure directory exists on every HMR update
       ensureOutDirAndGitignore();
 
-      // Check if file should be ignored
-      if (resolvedIgnores.some((pattern) => ctx.file.includes(pattern))) {
+      // Don't trigger updates if stopping
+      if (stopping) {
+        console.log(`[apx] HMR update ignored (stopping)`);
         return;
       }
 
+      // Check if file should be ignored
+      if (resolvedIgnores.some((pattern) => ctx.file.includes(pattern))) {
+        console.log(
+          `[apx] HMR update ignored (matches ignore pattern): ${ctx.file}`,
+        );
+        return;
+      }
+
+      console.log(`[apx] HMR update detected: ${ctx.file}`);
+
       // Debounce step execution on HMR updates
-      if (timer) clearTimeout(timer);
+      if (timer) {
+        clearTimeout(timer);
+        console.log(`[apx] HMR debounced (resetting timer)`);
+      }
 
       timer = setTimeout(async () => {
         timer = null;
 
+        // Double-check we're not stopping before running
+        if (stopping) {
+          console.log(`[apx] HMR callback cancelled (stopping)`);
+          return;
+        }
+
+        console.log(`[apx] HMR triggered step execution`);
         // Ensure directory exists before running steps
         ensureOutDirAndGitignore();
         await runAllSteps();
