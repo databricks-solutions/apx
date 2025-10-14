@@ -82,18 +82,33 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
   let stopping = false;
   let resolvedIgnores: string[] = [];
   let isRunningSteps = false;
+  let currentAbortController: AbortController | null = null;
 
   async function executeAction(action: StepAction): Promise<void> {
     if (stopping) return;
 
     ensureOutDirAndGitignore();
     if (typeof action === "string") {
-      // Execute as shell command
-      const { stdout, stderr } = await execAsync(action);
-      if (stdout) console.log(stdout.trim());
-      if (stderr) console.error(stderr.trim());
+      // Execute as shell command with abort support
+      currentAbortController = new AbortController();
+      try {
+        const { stdout, stderr } = await execAsync(action, {
+          signal: currentAbortController.signal,
+        });
+        if (stdout) console.log(stdout.trim());
+        if (stderr) console.error(stderr.trim());
+      } catch (err: any) {
+        if (err.name === 'AbortError' || stopping) {
+          console.log(`[apx] Command aborted`);
+          return;
+        }
+        throw err;
+      } finally {
+        currentAbortController = null;
+      }
     } else {
       // Execute as function
+      if (stopping) return;
       await action();
     }
     ensureOutDirAndGitignore();
@@ -155,12 +170,18 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
       clearTimeout(timer);
       timer = null;
     }
+    // Abort any running shell commands
+    if (currentAbortController) {
+      currentAbortController.abort();
+      currentAbortController = null;
+    }
   }
 
   function reset(): void {
     stopping = false;
     timer = null;
     isRunningSteps = false;
+    currentAbortController = null;
   }
 
   return {
@@ -182,6 +203,13 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
 
     configureServer(server) {
       server.httpServer?.once("close", stop);
+
+      // Handle process signals for clean shutdown
+      const signalHandler = () => {
+        stop();
+      };
+      process.once("SIGINT", signalHandler);
+      process.once("SIGTERM", signalHandler);
 
       // Ensure directory exists when server starts
       ensureOutDirAndGitignore();
