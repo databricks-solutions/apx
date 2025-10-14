@@ -62,6 +62,8 @@ class ApxHook(BuildHookInterface):
         self.app.display_info(f"Build dir {build_dir} is ready for deployment")
 
 
+# note: name of the hook must be `hatch_register_build_hook`
+# and shouldn't be changed!
 @hookimpl
 def hatch_register_build_hook():
     return ApxHook
