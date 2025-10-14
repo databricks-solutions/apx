@@ -24,7 +24,7 @@ export const Step = (spec: StepSpec): StepSpec => spec;
  */
 export const OpenAPI = (appModule: string, outputPath: string): StepSpec => ({
   name: "openapi",
-  action: `uv run apx openapi ${appModule} ${outputPath}`,
+  action: `uv run --no-sync apx openapi ${appModule} ${outputPath}`,
 });
 
 /**

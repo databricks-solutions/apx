@@ -333,7 +333,7 @@ def init(
         subprocess.run(["git", "init"], cwd=app_path)
 
     # run uv sync in the project directory
-    # subprocess.run(["uv", "sync"], cwd=app_path)
+    # subprocess.run(["uv", "sync", "--no-build"], cwd=app_path)
 
     # # run uv run apx openapi {{app_name}}.api.app:app node_modules/.tmp/openapi.json
     # subprocess.run(
