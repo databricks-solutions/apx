@@ -49,9 +49,6 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
   let timer: NodeJS.Timeout | null = null;
   let stopping = false;
   let resolvedIgnores: string[] = [];
-  
-  // Store signal handler references for cleanup
-  const signalHandlers = new Map<NodeJS.Signals, () => void>();
 
   async function executeAction(action: StepAction): Promise<void> {
     console.log(`[apx] executing action: ${action}`);
@@ -116,12 +113,6 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
       clearTimeout(timer);
       timer = null;
     }
-    
-    // Clean up signal handlers to prevent interference with Vite's shutdown
-    for (const [signal, handler] of signalHandlers) {
-      process.off(signal, handler);
-    }
-    signalHandlers.clear();
   }
 
   function reset(): void {
@@ -141,18 +132,6 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
 
       // Reset state for new build
       reset();
-
-      // Setup signal handlers for graceful shutdown (only if not already registered)
-      if (signalHandlers.size === 0) {
-        const handleSIGINT = () => stop();
-        const handleSIGTERM = () => stop();
-        
-        signalHandlers.set("SIGINT", handleSIGINT);
-        signalHandlers.set("SIGTERM", handleSIGTERM);
-        
-        process.on("SIGINT", handleSIGINT);
-        process.on("SIGTERM", handleSIGTERM);
-      }
 
       // Ensure directory exists as soon as we know the outDir
       ensureOutDirAndGitignore();
