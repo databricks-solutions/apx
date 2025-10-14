@@ -207,6 +207,7 @@ def init(
             "bun",
             "add",
             "-D",
+            "github:renardeinside/apx",
             "orval",
             "vite",
             "typescript",
@@ -220,9 +221,6 @@ def init(
         ],
         cwd=app_path,
     )
-
-    # add apx to the bun dependencies
-    subprocess.run(["bun", "add", "-D", "github:renardeinside/apx"], cwd=app_path)
 
     # copy utils.ts to the ui/lib directory
     ui_dir.joinpath("lib").mkdir(parents=True, exist_ok=True)
@@ -329,8 +327,7 @@ def init(
     )
 
     # initialize the project
-    if app_path is not None:
-        subprocess.run(["git", "init"], cwd=app_path)
+    subprocess.run(["git", "init"], cwd=app_path)
 
     # run uv sync in the project directory
     subprocess.run(["uv", "sync"], cwd=app_path)
