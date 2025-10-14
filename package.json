@@ -21,7 +21,7 @@
   ],
   "scripts": {
     "build:types": "tsc --emitDeclarationOnly --outDir dist",
-    "build:js": "bun build src/apx/plugins/index.ts --format esm --target node --outfile dist/index.js --sourcemap",
+    "build:js": "bun build src/apx/plugins/index.ts --format esm --target node --outfile dist/index.js --sourcemap --external orval --external vite",
     "build": "bun run build:js && bun run build:types",
     "prepublishOnly": "bun run build"
   },
