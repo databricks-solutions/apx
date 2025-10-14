@@ -114,7 +114,6 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
 
       // Track child process for cleanup
       childProcesses.push(child);
-      console.log(`[apx] Started process PID: ${child.pid}`);
 
       child.on("error", (err) => {
         console.error(`[apx] Process error:`, err);
@@ -134,7 +133,6 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
           console.error(`[apx] Process ${child.pid} exited with code: ${code}`);
           reject(new Error(`Command failed with exit code ${code}`));
         } else {
-          console.log(`[apx] Process ${child.pid} completed successfully`);
           resolve();
         }
       });
@@ -341,9 +339,6 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
 
       // Check if file should be ignored
       if (resolvedIgnores.some((pattern) => ctx.file.includes(pattern))) {
-        console.log(
-          `[apx] HMR update ignored (matches ignore pattern): ${ctx.file}`,
-        );
         return;
       }
 
@@ -352,7 +347,6 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
       // Debounce step execution on HMR updates
       if (timer) {
         clearTimeout(timer);
-        console.log(`[apx] HMR debounced (resetting timer)`);
       }
 
       timer = setTimeout(async () => {
@@ -360,11 +354,8 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
 
         // Double-check we're not stopping before running
         if (stopping) {
-          console.log(`[apx] HMR callback cancelled (stopping)`);
           return;
         }
-
-        console.log(`[apx] HMR triggered step execution`);
         // Ensure directory exists before running steps
         ensureOutDirAndGitignore();
         await runAllSteps();

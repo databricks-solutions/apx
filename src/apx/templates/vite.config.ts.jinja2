@@ -1,6 +1,7 @@
 const APP_NAME = "sample";
 const APP_UI_PATH = `./src/${APP_NAME}/ui`;
 const OUT_DIR = `../__dist__`; // relative to APP_UI_PATH!
+const OPENAPI_JSON_PATH = "node_modules/.tmp/openapi.json";
 
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
@@ -8,6 +9,8 @@ import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import { defineConfig } from "vite";
 import { resolve } from "path";
 import { apx, OpenAPI, Orval } from "apx/vite-plugin";
+
+
 
 export default defineConfig({
   root: APP_UI_PATH,
@@ -20,9 +23,9 @@ export default defineConfig({
     }),
     apx({
       steps: [
-        OpenAPI(`${APP_NAME}.api.app:app`, "node_modules/.tmp/openapi.json"),
+        OpenAPI(`${APP_NAME}.api.app:app`, OPENAPI_JSON_PATH),
         Orval({
-          input: "node_modules/.tmp/openapi.json",
+          input: OPENAPI_JSON_PATH,
           output: {
             target: `${APP_UI_PATH}/lib/api.ts`,
             baseUrl: "/api",
