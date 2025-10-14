@@ -228,6 +228,9 @@ def init(
         cwd=app_path,
     )
 
+    # add apx to the bun dependencies
+    subprocess.run(["bun", "add", "-D", "github:renardeinside/apx"], cwd=app_path)
+
     # copy utils.ts to the ui/lib directory
     ui_dir.joinpath("lib").mkdir(parents=True, exist_ok=True)
     utils_template = templates_dir.joinpath("utils.ts")
