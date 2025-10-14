@@ -16,7 +16,8 @@
     "node": ">=18"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
     "build:types": "tsc --emitDeclarationOnly --outDir dist",

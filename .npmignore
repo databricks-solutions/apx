@@ -1,0 +1,32 @@
+# Exclude everything by default
+*
+
+# Then explicitly include what we want
+!dist/
+!dist/**
+!README.md
+!package.json
+!LICENSE
+
+# Make sure these are excluded
+sample/
+node_modules/
+.git/
+.gitignore
+.cursorignore
+*.log
+*.lock
+bun.lockb
+uv.lock
+tsconfig.json
+Justfile
+pyproject.toml
+.DS_Store
+*.pyc
+__pycache__/
+
+# include only src/apx/plugins
+!src/apx/plugins/
+
+# exclude rest of the src
+src/
