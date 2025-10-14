@@ -21,3 +21,7 @@ release:
 reinstall:
     bun remove apx
     bun add github:renardeinside/apx
+
+[working-directory: 'sample']
+sample-dev:
+    bun run vite dev
