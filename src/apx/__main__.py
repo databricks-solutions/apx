@@ -125,6 +125,11 @@ def init(
         print("bun is not installed. Please install bun to continue.")
         return Exit(code=1)
 
+    # if git is not installed, raise an error
+    if shutil.which("git") is None:
+        print("git is not installed. Please install git to continue.")
+        return Exit(code=1)
+
     if app_name is None:
         app_name = random_name()
     else:
@@ -163,6 +168,10 @@ def init(
     pyproject_toml_template = jinja2_env.get_template("pyproject.toml.jinja2")
     pyproject_file = app_path.joinpath("pyproject.toml")
     pyproject_file.write_text(pyproject_toml_template.render(app_name=app_name))
+
+    # initialize the project
+    if app_path is not None:
+        subprocess.run(["git", "init"], cwd=app_path)
 
     # run uv sync in the project directory
     subprocess.run(["uv", "sync"], cwd=app_path)
@@ -329,10 +338,6 @@ def init(
         ],
         cwd=app_path,
     )
-
-    # if git is installed, initialize the project
-    if shutil.which("git") is not None:
-        subprocess.run(["git", "init"], cwd=app_path)
 
     # run the build
     subprocess.run(["bun", "run", "build"], cwd=app_path)

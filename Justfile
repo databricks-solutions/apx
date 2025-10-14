@@ -1,7 +1,7 @@
 
 re-init:
     rm -rf sample/
-    uv run apx init --app-path sample --app-name sample
+    uvx git+https://github.com/renardeinside/apx.git init --app-path sample --app-name sample
 
 [working-directory: 'sample']
 build-sample:
