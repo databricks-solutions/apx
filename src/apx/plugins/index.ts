@@ -29,6 +29,8 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
   let resolvedIgnores: string[] = [];
 
   async function executeAction(action: StepAction): Promise<void> {
+    console.log(`[apx] executing action: ${action}`);
+    ensureOutDirAndGitignore();
     if (typeof action === "string") {
       // Execute as shell command
       const { stdout, stderr } = await execAsync(action);
@@ -38,6 +40,7 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
       // Execute as function
       await action();
     }
+    ensureOutDirAndGitignore();
   }
 
   async function runAllSteps(): Promise<void> {
@@ -60,7 +63,10 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
    * This is called at multiple points to guarantee the directory is always present.
    */
   function ensureOutDirAndGitignore(): void {
-    if (!outDir) return;
+    if (!outDir) {
+      console.error(`[apx] outDir is not set`);
+      return;
+    }
 
     try {
       // Always ensure the output directory exists
