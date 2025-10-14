@@ -16,7 +16,7 @@
     "declarationMap": true,
     "emitDeclarationOnly": false,
     "outDir": "dist",
-    "rootDir": "src",
+    "rootDir": "src/apx/plugins",
 
     // Best practices
     "strict": true,
