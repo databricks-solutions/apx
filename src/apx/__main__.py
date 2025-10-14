@@ -5,6 +5,7 @@ from pathlib import Path
 import random
 import shutil
 import subprocess
+from typing import Annotated
 from typer import Argument, Exit, Typer, Option
 from rich import print
 from apx._version import version as apx_version
@@ -109,11 +110,13 @@ version_option = Option(
 
 @app.command(name="init", help="Initialize a new project")
 def init(
-    app_name: str | None = Option(None, help="The name of the project"),
-    app_path: Path | None = Option(
-        None,
-        help="The path to the app. If not provided, the app will be created in the current working directory",
-    ),
+    app_name: Annotated[str | None, Argument(help="The name of the project")] = None,
+    app_path: Annotated[
+        Path | None,
+        Argument(
+            help="The path to the app. If not provided, the app will be created in the current working directory",
+        ),
+    ] = None,
     version: bool | None = version_option,
 ):
     # check if `uv` is installed
