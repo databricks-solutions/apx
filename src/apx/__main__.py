@@ -169,13 +169,6 @@ def init(
     pyproject_file = app_path.joinpath("pyproject.toml")
     pyproject_file.write_text(pyproject_toml_template.render(app_name=app_name))
 
-    # initialize the project
-    if app_path is not None:
-        subprocess.run(["git", "init"], cwd=app_path)
-
-    # run uv sync in the project directory
-    subprocess.run(["uv", "sync"], cwd=app_path)
-
     # add src/{{app_name}}/api directory
     api_dir = src_dir.joinpath("api")
     api_dir.mkdir(parents=True, exist_ok=True)
@@ -275,13 +268,19 @@ def init(
     routes_dir = ui_dir.joinpath("routes")
     routes_dir.mkdir(parents=True, exist_ok=True)
 
+    # add app_path/src/{{app_name}}/_version.pyi file
+    version_pyi_template = templates_dir.joinpath("_version.pyi")
+    shutil.copy(
+        version_pyi_template, app_path.joinpath("src", app_name, "_version.pyi")
+    )
+
     # add app_path/src/{{app_name}}/__dist__ directory
     dist_dir = app_path.joinpath("src", app_name, "__dist__")
     dist_dir.mkdir(parents=True, exist_ok=True)
 
-    # add a .gitkeep file to the dist directory
-    dist_gitkeep_file = dist_dir.joinpath(".gitkeep")
-    dist_gitkeep_file.touch()
+    # add gitignore to the dist directory
+    dist_gitignore_file = dist_dir.joinpath(".gitignore")
+    dist_gitignore_file.write_text("*\n")
 
     # add ui/routes/index.tsx
     routes_index_tsx_template = templates_dir.joinpath("routes/index.tsx")
@@ -329,21 +328,28 @@ def init(
         app_py_template.render(app_name=app_name)
     )
 
-    # run uv run apx openapi {{app_name}}.api.app:app node_modules/.tmp/openapi.json
-    subprocess.run(
-        [
-            "uv",
-            "run",
-            "apx",
-            "openapi",
-            f"{app_name}.api.app:app",
-            "node_modules/.tmp/openapi.json",
-        ],
-        cwd=app_path,
-    )
+    # initialize the project
+    if app_path is not None:
+        subprocess.run(["git", "init"], cwd=app_path)
 
-    # run the build
-    subprocess.run(["bun", "run", "build"], cwd=app_path)
+    # run uv sync in the project directory
+    # subprocess.run(["uv", "sync"], cwd=app_path)
+
+    # # run uv run apx openapi {{app_name}}.api.app:app node_modules/.tmp/openapi.json
+    # subprocess.run(
+    #     [
+    #         "uv",
+    #         "run",
+    #         "apx",
+    #         "openapi",
+    #         f"{app_name}.api.app:app",
+    #         "node_modules/.tmp/openapi.json",
+    #     ],
+    #     cwd=app_path,
+    # )
+
+    # # run the build
+    # subprocess.run(["bun", "run", "build"], cwd=app_path)
 
 
 @app.command(name="openapi", help="Generate OpenAPI schema from FastAPI app")

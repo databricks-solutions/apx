@@ -63,5 +63,5 @@ class ApxHook(BuildHookInterface):
 
 
 @hookimpl
-def hatch_register_environment():
+def hatch_register_build_hook():
     return ApxHook
