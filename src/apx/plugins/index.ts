@@ -4,7 +4,7 @@ import { type Plugin } from "vite";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { createHash } from "crypto";
-import { generate } from "orval";
+import { generate, type OutputOptions } from "orval";
 
 const execAsync = promisify(exec);
 
@@ -30,37 +30,13 @@ export const OpenAPI = (appModule: string, outputPath: string): StepSpec => ({
   action: `uv run apx openapi ${appModule} ${outputPath}`,
 });
 
-export interface OrvalOutputOptions {
-  target: string;
-  baseUrl?: string;
-  client?:
-    | "react-query"
-    | "swr"
-    | "vue-query"
-    | "svelte-query"
-    | "fetch"
-    | "axios"
-    | "angular";
-  httpClient?: "fetch" | "axios";
-  prettier?: boolean;
-  override?: {
-    query?: {
-      useQuery?: boolean;
-      useSuspenseQuery?: boolean;
-      [key: string]: any;
-    };
-    [key: string]: any;
-  };
-  [key: string]: any;
-}
-
 /**
  * Predefined step for generating API client with Orval
  * Skips generation if the OpenAPI spec hasn't changed since last run
  * @param input - Path to the OpenAPI spec file
  * @param output - Orval output configuration
  */
-export const Orval = (input: string, output: OrvalOutputOptions): StepSpec => ({
+export const Orval = ({input, output}: {input: string, output: OutputOptions}): StepSpec => ({
   name: "orval",
   action: async () => {
     // Check if spec file exists
