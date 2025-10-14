@@ -1,14 +1,15 @@
-import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { join, resolve } from "path";
 import { type Plugin } from "vite";
 import { exec } from "child_process";
 import { promisify } from "util";
-import { generate, type OptionsExport as OrvalConfig } from "orval";
+import { createHash } from "crypto";
+import { generate } from "orval";
 
 const execAsync = promisify(exec);
 
-// Re-export OrvalConfig for convenience
-export type { OrvalConfig };
+// Cache for OpenAPI spec hashes to detect changes
+const specHashCache = new Map<string, string>();
 
 export type StepAction = string | (() => void | Promise<void>);
 
@@ -29,14 +30,69 @@ export const OpenAPI = (appModule: string, outputPath: string): StepSpec => ({
   action: `uv run apx openapi ${appModule} ${outputPath}`,
 });
 
+export interface OrvalOutputOptions {
+  target: string;
+  baseUrl?: string;
+  client?:
+    | "react-query"
+    | "swr"
+    | "vue-query"
+    | "svelte-query"
+    | "fetch"
+    | "axios"
+    | "angular";
+  httpClient?: "fetch" | "axios";
+  prettier?: boolean;
+  override?: {
+    query?: {
+      useQuery?: boolean;
+      useSuspenseQuery?: boolean;
+      [key: string]: any;
+    };
+    [key: string]: any;
+  };
+  [key: string]: any;
+}
+
 /**
  * Predefined step for generating API client with Orval
- * @param config - Orval configuration object
+ * Skips generation if the OpenAPI spec hasn't changed since last run
+ * @param input - Path to the OpenAPI spec file
+ * @param output - Orval output configuration
  */
-export const Orval = (config: OrvalConfig): StepSpec => ({
+export const Orval = (input: string, output: OrvalOutputOptions): StepSpec => ({
   name: "orval",
-  action: () => generate(config),
+  action: async () => {
+    // Check if spec file exists
+    if (!existsSync(input)) {
+      console.warn(
+        `[apx] OpenAPI spec not found at ${input}, skipping Orval generation`,
+      );
+      return;
+    }
+
+    // Read and hash the spec file
+    const specContent = readFileSync(input, "utf-8");
+    const specHash = createHash("sha256").update(specContent).digest("hex");
+
+    // Check if spec has changed
+    const cachedHash = specHashCache.get(input);
+    if (cachedHash === specHash) {
+      console.log(`[apx] OpenAPI spec unchanged, skipping Orval generation`);
+      return;
+    }
+
+    // Generate API client
+    await generate({
+      input,
+      output,
+    });
+
+    // Update cache
+    specHashCache.set(input, specHash);
+  },
 });
+
 export interface ApxPluginOptions {
   steps?: StepSpec[];
   ignore?: string[];
@@ -53,7 +109,7 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
 
   async function executeAction(action: StepAction): Promise<void> {
     if (stopping) return;
-    
+
     ensureOutDirAndGitignore();
     if (typeof action === "string") {
       // Execute as shell command
@@ -69,9 +125,9 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
 
   async function runAllSteps(): Promise<void> {
     if (stopping || isRunningSteps) return;
-    
+
     isRunningSteps = true;
-    
+
     try {
       for (const step of steps) {
         if (stopping) break;
@@ -175,7 +231,7 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
 
       // Debounce step execution on HMR updates
       if (timer) clearTimeout(timer);
-      
+
       timer = setTimeout(async () => {
         timer = null;
 
@@ -186,7 +242,7 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
         // Ensure directory exists after running steps
         ensureOutDirAndGitignore();
       }, 100);
-      
+
       // Allow the process to exit even if this timer is pending
       timer.unref();
     },
