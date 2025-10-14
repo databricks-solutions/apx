@@ -34,3 +34,30 @@ uvx git+https://github.com/renardeinside/apx.git init my-app my-app
 ```
 
 This will create a new app in the `my-app` directory with the app name `my-app`.
+
+## Project Structure
+
+The project structure is as follows:
+
+```
+my-app/
+├── src/
+│   ├── my-app/
+│   │   ├── __dist__/
+│   │   ├── api/app.py
+│   │   ├── api/api.py
+│   │   ├── api/config.py
+│   │   ├── ui/
+│   │   ├── ├── lib/
+│   │   ├── ├── styles/
+│   │   ├── ├── routes/
+│   │   ├── ├── components/
+│   │   ├── ├── types/
+│   │   ├── ├── main.tsx
+│   └── __init__.py
+└── README.md
+```
+
+All of your backend code should be in the `src/my-app/api` directory, while the frontend code should be in the `src/my-app/ui` directory.
+
+The `__dist__` directory is the directory where the frontend bundle is stored, so it can be served by the backend.

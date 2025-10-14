@@ -28,7 +28,6 @@ export default defineConfig({
           input: OPENAPI_JSON_PATH,
           output: {
             target: `${APP_UI_PATH}/lib/api.ts`,
-            baseUrl: "/api",
             client: "react-query",
             httpClient: "fetch",
             prettier: true,

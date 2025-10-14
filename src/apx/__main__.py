@@ -1,16 +1,23 @@
-from importlib import resources
 import importlib
 import json
-from pathlib import Path
-import random
 import shutil
 import subprocess
+import time
+from importlib import resources
+from pathlib import Path
+import random
 from typing import Annotated
-from typer import Argument, Exit, Typer, Option
-from rich import print
-from apx._version import version as apx_version
+
 import jinja2
 from fastapi import FastAPI
+from rich import print
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from typer import Argument, Exit, Typer, Option
+
+from apx._version import version as apx_version
+
+console = Console()
 
 
 def version_callback(value: bool):
@@ -108,6 +115,42 @@ version_option = Option(
 )
 
 
+# Helper functions for init command
+def ensure_dir(path: Path) -> Path:
+    """Create directory if it doesn't exist and return the path."""
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def render_jinja_template(template_name: str, target_path: Path, **context):
+    """Render a Jinja2 template and write to target path."""
+    template = jinja2_env.get_template(template_name)
+    target_path.write_text(template.render(**context))
+
+
+def copy_template(template_name: str, target_path: Path):
+    """Copy a template file to target path."""
+    source = templates_dir.joinpath(template_name)
+    shutil.copy(source, target_path)
+
+
+def run_subprocess(cmd: list[str], cwd: Path, error_msg: str) -> None:
+    """Run a subprocess and handle errors gracefully."""
+    result = subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        console.print(f"[red]❌ {error_msg}[/red]")
+        if result.stderr:
+            console.print(f"[red]{result.stderr}[/red]")
+        if result.stdout:
+            console.print(f"[red]{result.stdout}[/red]")
+        raise Exit(code=1)
+
+
 @app.command(name="init", help="Initialize a new project")
 def init(
     app_name: Annotated[str | None, Argument(help="The name of the project")] = None,
@@ -119,20 +162,18 @@ def init(
     ] = None,
     version: bool | None = version_option,
 ):
-    # check if `uv` is installed
+    # Check prerequisites
     if not is_uv_installed():
         print("uv is not installed. Please install uv to continue.")
         return Exit(code=1)
-    # check if `bun` is installed
     if not is_bun_installed():
         print("bun is not installed. Please install bun to continue.")
         return Exit(code=1)
-
-    # if git is not installed, raise an error
     if shutil.which("git") is None:
         print("git is not installed. Please install git to continue.")
         return Exit(code=1)
 
+    # Normalize app name
     if app_name is None:
         app_name = random_name()
     else:
@@ -148,192 +189,253 @@ def init(
     if app_path is None:
         app_path = Path.cwd()
 
-    print(f"Initializing app {app_name} in {app_path}")
-
-    # create the project directory
-    app_path.mkdir(parents=True, exist_ok=True)
-
-    readme_template = jinja2_env.get_template("README.md.jinja2")
-    readme_file = app_path.joinpath("README.md")
-    readme_file.write_text(readme_template.render(app_name=app_name))
-
-    # create src/{{app_name}} directory
-    src_dir = app_path.joinpath("src", app_name)
-    src_dir.mkdir(parents=True, exist_ok=True)
-
-    init_template = templates_dir.joinpath("__init__.py")
-    shutil.copy(init_template, src_dir.joinpath("__init__.py"))
-
-    gitignore_template = jinja2_env.get_template(".gitignore.jinja2")
-    gitignore_file = app_path.joinpath(".gitignore")
-    gitignore_file.write_text(gitignore_template.render(app_name=app_name))
-
-    pyproject_toml_template = jinja2_env.get_template("pyproject.toml.jinja2")
-    pyproject_file = app_path.joinpath("pyproject.toml")
-    pyproject_file.write_text(pyproject_toml_template.render(app_name=app_name))
-
-    # add src/{{app_name}}/api directory
-    api_dir = src_dir.joinpath("api")
-    api_dir.mkdir(parents=True, exist_ok=True)
-
-    # add src/{{app_name}}/ui directory
-    ui_dir = src_dir.joinpath("ui")
-    ui_dir.mkdir(parents=True, exist_ok=True)
-
-    # add package.json in the ui directory
-    package_json_template = jinja2_env.get_template("package.json.jinja2")
-    package_json_file = app_path.joinpath("package.json")
-    package_json_file.write_text(package_json_template.render(app_name=app_name))
-
-    # add react and shadcn deps
-    subprocess.run(
-        [
-            "bun",
-            "add",
-            "react",
-            "react-dom",
-            "class-variance-authority",
-            "clsx",
-            "tailwind-merge",
-            "lucide-react",
-            "tw-animate-css",
-            "@tanstack/react-router",
-            "@tanstack/react-query",
-            "sonner",
-        ],
-        cwd=app_path,
+    console.print(f"[bold chartreuse1]Welcome to apx 🚀[/bold chartreuse1]")
+    console.print(
+        f"\n[bold cyan]Initializing app {app_name} in {app_path.resolve()}[/bold cyan]\n"
     )
 
-    # add necessary dev dependencies for the project
-    subprocess.run(
-        [
-            "bun",
-            "add",
-            "-D",
-            "github:renardeinside/apx",
-            "orval",
-            "vite",
-            "typescript",
-            "@types/node",
-            "@types/react",
-            "@types/react-dom",
-            "@vitejs/plugin-react",
-            "@tailwindcss/vite",
-            "@tanstack/router-plugin",
-            "@tanstack/react-router-devtools",
-        ],
-        cwd=app_path,
+    # === PHASE 1: Preparing project layout ===
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("📁 Preparing project layout...", total=None)
+
+        # Create directory structure
+        ensure_dir(app_path)
+        src_dir = ensure_dir(app_path / "src" / app_name)
+        api_dir = ensure_dir(src_dir / "api")
+        ui_dir = ensure_dir(src_dir / "ui")
+        ensure_dir(ui_dir / "lib")
+        ensure_dir(ui_dir / "styles")
+        ensure_dir(ui_dir / "routes")
+        ensure_dir(ui_dir / "components")
+        ensure_dir(ui_dir / "types")
+        ensure_dir(app_path / ".cursor" / "rules")
+        dist_dir = ensure_dir(src_dir / "__dist__")
+
+        # Render Jinja templates
+        render_jinja_template(
+            "base/README.md.jinja2", app_path / "README.md", app_name=app_name
+        )
+        render_jinja_template(
+            "base/.gitignore.jinja2", app_path / ".gitignore", app_name=app_name
+        )
+        render_jinja_template(
+            "base/pyproject.toml.jinja2", app_path / "pyproject.toml", app_name=app_name
+        )
+        render_jinja_template(
+            "base/package.json.jinja2", app_path / "package.json", app_name=app_name
+        )
+        render_jinja_template(
+            "base/components.json.jinja2",
+            app_path / "components.json",
+            app_name=app_name,
+        )
+        render_jinja_template(
+            "base/tsconfig.json.jinja2", app_path / "tsconfig.json", app_name=app_name
+        )
+        render_jinja_template(
+            "base/vite.config.ts.jinja2", app_path / "vite.config.ts", app_name=app_name
+        )
+        render_jinja_template(
+            "base/src/base/ui/index.html.jinja2",
+            ui_dir / "index.html",
+            app_name=app_name,
+        )
+        render_jinja_template(
+            "base/.cursor/rules/project.mdc.jinja2",
+            app_path / ".cursor" / "rules" / "project.mdc",
+            app_name=app_name,
+        )
+        render_jinja_template(
+            "base/src/base/api/app.py.jinja2", api_dir / "app.py", app_name=app_name
+        )
+
+        # Copy static files
+        copy_template("base/src/base/__init__.py", src_dir / "__init__.py")
+        copy_template("base/src/base/_version.pyi", src_dir / "_version.pyi")
+        copy_template("base/src/base/ui/lib/utils.ts", ui_dir / "lib" / "utils.ts")
+        copy_template(
+            "base/src/base/ui/styles/globals.css", ui_dir / "styles" / "globals.css"
+        )
+        copy_template("base/src/base/ui/main.tsx", ui_dir / "main.tsx")
+        render_jinja_template(
+            "base/src/base/ui/routes/index.tsx.jinja2",
+            ui_dir / "routes" / "index.tsx",
+            app_name=app_name,
+        )
+        copy_template(
+            "base/src/base/ui/routes/__root.tsx", ui_dir / "routes" / "__root.tsx"
+        )
+        copy_template(
+            "base/src/base/ui/components/mode-toggle.tsx",
+            ui_dir / "components" / "mode-toggle.tsx",
+        )
+        copy_template(
+            "base/src/base/ui/components/theme-provider.tsx",
+            ui_dir / "components" / "theme-provider.tsx",
+        )
+        copy_template(
+            "base/src/base/ui/types/vite-env.d.ts", ui_dir / "types" / "vite-env.d.ts"
+        )
+        copy_template(
+            "base/src/base/ui/lib/selector.ts", ui_dir / "lib" / "selector.ts"
+        )
+
+        # Create dist gitignore
+        (dist_dir / ".gitignore").write_text("*\n")
+
+        progress.update(task, description="✅ Project layout prepared", completed=True)
+
+    # === PHASE 2: Installing frontend dependencies ===
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("📦 Installing frontend dependencies...", total=None)
+
+        # Install bun main dependencies
+        run_subprocess(
+            [
+                "bun",
+                "add",
+                "react",
+                "react-dom",
+                "class-variance-authority",
+                "clsx",
+                "tailwind-merge",
+                "lucide-react",
+                "tw-animate-css",
+                "@tanstack/react-router",
+                "@tanstack/react-query",
+                "sonner",
+            ],
+            cwd=app_path,
+            error_msg="Failed to install main dependencies",
+        )
+
+        # Install bun dev dependencies
+        run_subprocess(
+            [
+                "bun",
+                "add",
+                "-D",
+                "github:renardeinside/apx",
+                "orval",
+                "vite",
+                "typescript",
+                "@types/node",
+                "@types/react",
+                "@types/react-dom",
+                "@vitejs/plugin-react",
+                "@tailwindcss/vite",
+                "@tanstack/router-plugin",
+                "@tanstack/react-router-devtools",
+            ],
+            cwd=app_path,
+            error_msg="Failed to install dev dependencies",
+        )
+
+        progress.update(
+            task, description="✅ Frontend dependencies installed", completed=True
+        )
+
+    # === PHASE 3: Bootstrapping shadcn ===
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("🎨 Bootstrapping shadcn components...", total=None)
+
+        # Add button component
+        run_subprocess(
+            ["bun", "x", "shadcn@latest", "add", "button", "--yes"],
+            cwd=app_path,
+            error_msg="Failed to add button component",
+        )
+
+        # Add card component
+        run_subprocess(
+            ["bun", "x", "shadcn@latest", "add", "card", "--yes"],
+            cwd=app_path,
+            error_msg="Failed to add card component",
+        )
+
+        progress.update(task, description="✅ Shadcn components added", completed=True)
+
+    # === PHASE 4: Initializing git ===
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("🔧 Initializing git repository...", total=None)
+
+        run_subprocess(
+            ["git", "init"],
+            cwd=app_path,
+            error_msg="Failed to initialize git repository",
+        )
+
+        progress.update(
+            task, description="✅ Git repository initialized", completed=True
+        )
+
+    # === PHASE 5: Syncing project with uv ===
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("🐍 Setting up project...", total=None)
+
+        # Start uv sync in background
+        proc = subprocess.Popen(
+            ["uv", "sync"],
+            cwd=app_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        # Monitor progress for up to 10 seconds
+        start_time = time.time()
+        warning_shown = False
+
+        while proc.poll() is None:
+            elapsed = time.time() - start_time
+            if elapsed >= 10 and not warning_shown:
+                progress.update(
+                    task,
+                    description="🐍 Setting up project (taking longer than expected)...",
+                )
+                warning_shown = True
+            time.sleep(0.1)
+
+        # Get the result
+        stdout, stderr = proc.communicate()
+
+        if proc.returncode != 0:
+            console.print("[red]❌ Failed to set up project[/red]")
+            if stderr:
+                console.print(f"[red]{stderr}[/red]")
+            if stdout:
+                console.print(f"[red]{stdout}[/red]")
+            raise Exit(code=1)
+
+        progress.update(task, description="✅ Project set up", completed=True)
+
+    console.print()
+    console.print(
+        f"[bold green]✨ Project {app_name} initialized successfully! [/bold green]"
     )
-
-    # copy utils.ts to the ui/lib directory
-    ui_dir.joinpath("lib").mkdir(parents=True, exist_ok=True)
-    utils_template = templates_dir.joinpath("utils.ts")
-    shutil.copy(utils_template, ui_dir.joinpath("lib", "utils.ts"))
-
-    # copy globals.css to the ui/styles directory
-    globals_css_template = templates_dir.joinpath("globals.css")
-    ui_dir.joinpath("styles").mkdir(parents=True, exist_ok=True)
-    shutil.copy(globals_css_template, ui_dir.joinpath("styles", "globals.css"))
-
-    # copy components.json to the  directory
-    components_json_template = jinja2_env.get_template("components.json.jinja2")
-    components_json_file = app_path.joinpath("components.json")
-    components_json_file.write_text(components_json_template.render(app_name=app_name))
-
-    # copy tsconfig.json to the ui directory
-    tsconfig_json_template = jinja2_env.get_template("tsconfig.json.jinja2")
-    tsconfig_json_file = app_path.joinpath("tsconfig.json")
-    tsconfig_json_file.write_text(tsconfig_json_template.render(app_name=app_name))
-
-    # copy vite.config.ts to the project directory
-    vite_config_ts_template = jinja2_env.get_template("vite.config.ts.jinja2")
-    vite_config_ts_file = app_path.joinpath("vite.config.ts")
-    vite_config_ts_file.write_text(vite_config_ts_template.render(app_name=app_name))
-
-    # copy index.html to the ui directory
-    index_html_template = jinja2_env.get_template("index.html.jinja2")
-    index_html_file = ui_dir.joinpath("index.html")
-    index_html_file.write_text(index_html_template.render(app_name=app_name))
-
-    # copy main.tsx to the ui directory
-    main_tsx_template = templates_dir.joinpath("main.tsx")
-    shutil.copy(main_tsx_template, ui_dir.joinpath("main.tsx"))
-
-    # add button component via shadcn cli
-    subprocess.run(
-        ["bun", "x", "shadcn@latest", "add", "button"],
-        cwd=app_path,
+    console.print(
+        f"[bold green]🚀 Run `cd {app_path.resolve()}` to get started![/bold green]"
     )
-
-    # add ui/routes directory
-    routes_dir = ui_dir.joinpath("routes")
-    routes_dir.mkdir(parents=True, exist_ok=True)
-
-    # add app_path/src/{{app_name}}/_version.pyi file
-    version_pyi_template = templates_dir.joinpath("_version.pyi")
-    shutil.copy(
-        version_pyi_template, app_path.joinpath("src", app_name, "_version.pyi")
-    )
-
-    # add app_path/src/{{app_name}}/__dist__ directory
-    dist_dir = app_path.joinpath("src", app_name, "__dist__")
-    dist_dir.mkdir(parents=True, exist_ok=True)
-
-    # add gitignore to the dist directory
-    dist_gitignore_file = dist_dir.joinpath(".gitignore")
-    dist_gitignore_file.write_text("*\n")
-
-    # add ui/routes/index.tsx
-    routes_index_tsx_template = templates_dir.joinpath("routes/index.tsx")
-    shutil.copy(routes_index_tsx_template, routes_dir.joinpath("index.tsx"))
-
-    # add ui/routes/__root.tsx
-    routes_root_tsx_template = templates_dir.joinpath("routes/__root.tsx")
-    shutil.copy(routes_root_tsx_template, routes_dir.joinpath("__root.tsx"))
-
-    # copy mode-toggle.tsx to the ui/components directory
-    mode_toggle_tsx_template = templates_dir.joinpath("components/mode-toggle.tsx")
-    shutil.copy(
-        mode_toggle_tsx_template, ui_dir.joinpath("components", "mode-toggle.tsx")
-    )
-
-    # copy theme-provider.tsx to the ui/components directory
-    theme_provider_tsx_template = templates_dir.joinpath(
-        "components/theme-provider.tsx"
-    )
-    shutil.copy(
-        theme_provider_tsx_template, ui_dir.joinpath("components", "theme-provider.tsx")
-    )
-
-    # add ui/types directory
-    ui_dir.joinpath("types").mkdir(parents=True, exist_ok=True)
-
-    # copy vite-env.d.ts to the ui/types directory
-    vite_env_d_ts_template = templates_dir.joinpath("vite-env.d.ts")
-    shutil.copy(vite_env_d_ts_template, ui_dir.joinpath("types", "vite-env.d.ts"))
-
-    # copy selector.ts to the ui/lib directory
-    selector_ts_template = templates_dir.joinpath("selector.ts")
-    shutil.copy(selector_ts_template, ui_dir.joinpath("lib", "selector.ts"))
-
-    # render and copy .cursor/rules/project.mdc to the project directory
-    # prepare .cursor/rules directory
-    app_path.joinpath(".cursor", "rules").mkdir(parents=True, exist_ok=True)
-    project_mdc_template = jinja2_env.get_template(".cursor/rules/project.mdc.jinja2")
-    project_mdc_file = app_path.joinpath(".cursor", "rules", "project.mdc")
-    project_mdc_file.write_text(project_mdc_template.render(app_name=app_name))
-
-    # copy app.py to the project directory
-    app_py_template = jinja2_env.get_template("app.py.jinja2")
-    (app_path.joinpath("src", app_name, "api", "app.py")).write_text(
-        app_py_template.render(app_name=app_name)
-    )
-
-    # initialize the project
-    subprocess.run(["git", "init"], cwd=app_path)
-
-    # run uv sync in the project directory
-    subprocess.run(["uv", "sync"], cwd=app_path)
 
 
 @app.command(name="openapi", help="Generate OpenAPI schema from FastAPI app")

@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, APIRouter
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from importlib import resources
@@ -10,21 +10,20 @@ app_name = "{{app_name}}"
 
 dist_path: Path = resources.files(app_name).joinpath("__dist__") # type: ignore
 
-app = FastAPI()
-api = FastAPI(title=f"{app_name} API", description=f"API for {app_name}")
+app = FastAPI(title=f"{app_name}")
+api = APIRouter(prefix="/api", tags=[f"{app_name} API"])
 
 ui = StaticFiles(directory=dist_path, html=True)
 
 class VersionInfo(BaseModel):
     version: str
 
-@app.get('/version', response_model=VersionInfo, operation_id="version")
+@api.get('/version', response_model=VersionInfo, operation_id="version")
 async def version():
     return VersionInfo(version=__version__)
 
 # note the order of mounts!
-
-api.mount("/api", ui)
+app.include_router(api)
 app.mount("/", ui)
 
 @app.exception_handler(404)
