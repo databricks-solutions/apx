@@ -1,131 +1,44 @@
-import tailwindcss from "@tailwindcss/vite";
-import react from "@vitejs/plugin-react";
-import { writeFileSync, existsSync, mkdirSync } from "fs";
-import { join, resolve } from "path";
-import { defineConfig, type Plugin } from "vite";
-import { tanstackRouter } from "@tanstack/router-plugin/vite";
-import { generate, type OptionsExport as OrvalConfig } from "orval";
-import { spawn } from "child_process";
-
-const APP_NAME = "{{app_name}}";
+const APP_NAME = "sample";
 const APP_UI_PATH = `./src/${APP_NAME}/ui`;
 const OUT_DIR = `../__dist__`; // relative to APP_UI_PATH!
 
-type StepAction = () => void | Promise<void>;
-type StepSpec = { name: string; action: StepAction };
-const Step = (s: StepSpec) => s;
+import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
+import { tanstackRouter } from "@tanstack/router-plugin/vite";
+import { defineConfig } from "vite";
+import { resolve } from "path";
+import { apx, OpenAPI, Orval } from "apx/vite-plugin";
 
-function runOnReload(steps: StepSpec[], ignore: string[] = []): Plugin {
-  let timer: NodeJS.Timeout | null = null;
-  let stopping = false;
-
-  async function runAll() {
-    for (const s of steps) {
-      if (stopping) break;
-      const start = Date.now();
-      try {
-        console.log(`[vite-plugin-run] ${s.name} ⏳`);
-        await s.action();
-        console.log(`[vite-plugin-run] ${s.name} ✓ (${Date.now() - start} ms)`);
-      } catch (err) {
-        console.error(`[vite-plugin-run] ${s.name} ✗`, err);
-        throw err;
-      }
-    }
-  }
-
-  function stop() {
-    if (stopping) return;
-    stopping = true;
-    if (timer) clearTimeout(timer);
-    console.log("[vite-plugin-run] stopping...");
-  }
-
-  return {
-    name: "vite-plugin-run",
-    apply: () => true,
-    configResolved() {
-      process.on("SIGINT", stop);
-      process.on("SIGTERM", stop);
-    },
-    configureServer(server) {
-      server.httpServer?.once("close", stop);
-    },
-    async buildStart() {
-      await runAll();
-    },
-    handleHotUpdate() {
-      if (ignore.some((i) => ctx.file.includes(i))) {
-        return;
-      }
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => (timer = null, void runAll()), 100);
-    },
-    closeBundle() {
-      stop();
-    },
-  };
-}
-
-const orvalConfig = {
-  input: "node_modules/.tmp/openapi.json",
-  output: {
-    target: `${APP_UI_PATH}/lib/api.ts`,
-    baseUrl: "/api",
-    client: "react-query",
-    httpClient: "fetch",
-    prettier: true,
-    override: {
-      query: {
-        useQuery: true,
-        useSuspenseQuery: true,
-      },
-    },
-  },
-} satisfies OrvalConfig;
-
-// https://vite.dev/config/
 export default defineConfig({
   root: APP_UI_PATH,
   plugins: [
-    {
-      name: "ensure-gitignore",
-      apply: "build",
-      buildStart: () => {
-        // create the out dir if it doesn't exist
-        const outDir = resolve(__dirname, APP_UI_PATH, OUT_DIR);
-        if (!existsSync(outDir)) {
-          mkdirSync(outDir, { recursive: true });
-        }
-        const ignored = join(outDir, ".gitignore");
-        writeFileSync(ignored, "*\n");
-        console.log(`[ensure-out-dir] ensured ${ignored}`);
-      },
-      closeBundle: () => {
-        const outDir = resolve(__dirname, APP_UI_PATH, OUT_DIR);
-        const gitignore = join(outDir, ".gitignore");
-        if (!existsSync(gitignore)) {
-          writeFileSync(gitignore, "*\n");
-        }
-      }
-    },
-    runOnReload([
-      Step({
-        name: "openapi",
-        action: () => {
-          spawn("uv", ["run", "apx", "openapi", `${APP_NAME}.api.app:app`, "node_modules/.tmp/openapi.json"], { stdio: "inherit" });
-        },
-      }),
-      Step({
-        name: "generate",
-        action: () => generate(orvalConfig),
-      }),
-    ], ignore: [`${APP_UI_PATH}/lib/api.ts`]),
     tanstackRouter({
       target: "react",
       autoCodeSplitting: true,
       routesDirectory: `${APP_UI_PATH}/routes`,
       generatedRouteTree: "./types/routeTree.gen.ts",
+    }),
+    apx({
+      steps: [
+        OpenAPI(`${APP_NAME}.api.app:app`, "node_modules/.tmp/openapi.json"),
+        Orval({
+          input: "node_modules/.tmp/openapi.json",
+          output: {
+            target: `${APP_UI_PATH}/lib/api.ts`,
+            baseUrl: "/api",
+            client: "react-query",
+            httpClient: "fetch",
+            prettier: true,
+            override: {
+              query: {
+                useQuery: true,
+                useSuspenseQuery: true,
+              },
+            },
+          },
+        }),
+      ],
+      ignore: ["node_modules", `${APP_UI_PATH}/lib/api.ts`],
     }),
     react(),
     tailwindcss(),
@@ -140,22 +53,13 @@ export default defineConfig({
       },
     },
   },
-  build: {
-    outDir: OUT_DIR,
-    emptyOutDir: true,
-    rollupOptions: {
-      output: {
-        manualChunks: (id) => {
-          if (id.includes("react")) {
-            return "react";
-          }
-        },
-      },
-    },
-  },
   resolve: {
     alias: {
       "@": resolve(__dirname, APP_UI_PATH),
     },
+  },
+  build: {
+    outDir: OUT_DIR,
+    emptyOutDir: true,
   },
 });
