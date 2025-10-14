@@ -103,7 +103,7 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
     apply: () => true,
 
     configResolved(config) {
-      outDir = config.build.outDir;
+      outDir = resolve(config.root, config.build.outDir);
       resolvedIgnores = ignore.map((pattern) =>
         resolve(process.cwd(), pattern),
       );
