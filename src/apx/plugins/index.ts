@@ -281,7 +281,6 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
   }
 
   function reset(): void {
-    console.log(`[apx] Resetting plugin state`);
     stopping = false;
     timer = null;
     isRunningSteps = false;

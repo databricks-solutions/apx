@@ -1,3 +1,4 @@
+import os
 from typing import Any
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from pathlib import Path
@@ -9,9 +10,19 @@ from hatchling.plugin import hookimpl
 class ApxHook(BuildHookInterface):
     PLUGIN_NAME = "apx"
 
+    @property
+    def skip_ui_build(self) -> bool:
+        return os.environ.get("APX_SKIP_UI_BUILD") is not None
+
     def initialize(self, version: str, build_data: dict[str, Any]) -> None:
-        self.app.display_info(
-            f"Running build hook for project {self.metadata.name} in directory {Path.cwd()}"
+        if self.skip_ui_build:
+            self.app.display_info(
+                f"Skipping ui build for {self.metadata.name} in directory {Path.cwd()}"
+            )
+            return
+
+        self.app.display_waiting(
+            f"Building ui for {self.metadata.name} in directory {Path.cwd()}"
         )
 
         process = subprocess.Popen(
@@ -30,6 +41,10 @@ class ApxHook(BuildHookInterface):
                 self.app.display_error(line, end="")
 
         process.wait()
+
+        self.app.display_success(
+            f"Building ui for {self.metadata.name} in directory {Path.cwd()} completed"
+        )
 
     def finalize(self, version, build_data, artifact_path):
         self.app.display_info(
