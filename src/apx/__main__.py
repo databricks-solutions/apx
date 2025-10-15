@@ -95,7 +95,6 @@ def random_name():
         "fish",
         "horse",
         "rabbit",
-        "snake",
         "turtle",
         "whale",
         "dolphin",
@@ -190,6 +189,7 @@ def init(
             help="The path to the app. If not provided, the app will be created in the current working directory",
         ),
     ] = None,
+    profile: Annotated[str | None, Option(help="The Databricks profile to use")] = None,
     version: bool | None = version_option,
 ):
     # Check prerequisites
@@ -243,6 +243,11 @@ def init(
         dist_dir = app_path / "src" / app_name / "__dist__"
         ensure_dir(dist_dir)
         (dist_dir / ".gitignore").write_text("*\n")
+
+        # append DATABRICKS_PROFILE to .env if profile is provided
+        if profile:
+            with open(app_path / ".env", "a") as f:
+                f.write(f"DATABRICKS_PROFILE={profile}\n")
 
         progress.update(task, description="✅ Project layout prepared", completed=True)
 
