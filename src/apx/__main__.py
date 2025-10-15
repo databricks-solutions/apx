@@ -182,7 +182,12 @@ def run_subprocess(cmd: list[str], cwd: Path, error_msg: str) -> None:
 
 @app.command(name="init", help="Initialize a new project")
 def init(
-    app_name: Annotated[str | None, Argument(help="The name of the project")] = None,
+    app_name: Annotated[
+        str | None,
+        Argument(
+            help="The name of the project. Optional, will be generated if not provided"
+        ),
+    ] = None,
     app_path: Annotated[
         Path | None,
         Argument(
