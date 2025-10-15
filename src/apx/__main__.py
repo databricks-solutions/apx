@@ -12,14 +12,14 @@ import random
 from typing import Annotated
 
 import jinja2
-from fastapi import FastAPI, Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi import FastAPI
 from rich import print
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from typer import Argument, Exit, Typer, Option
 
 from apx._version import version as apx_version
+from apx.dev import run_backend
 
 console = Console()
 
@@ -424,9 +424,7 @@ def build(
         Path,
         Option(help="Path to the build directory where artifacts will be placed"),
     ] = Path(".build"),
-    skip_ui_build: Annotated[
-        bool, Option(help="Skip the UI build step")
-    ] = False,
+    skip_ui_build: Annotated[bool, Option(help="Skip the UI build step")] = False,
     version: bool | None = version_option,
 ):
     """
@@ -436,7 +434,7 @@ def build(
     3. Preparing the .build folder with artifacts and requirements.txt
     """
     cwd = Path.cwd()
-    
+
     # === PHASE 1: Building UI ===
     if not skip_ui_build:
         with Progress(
@@ -444,15 +442,15 @@ def build(
             TextColumn("[progress.description]{task.description}"),
             console=console,
         ) as progress:
-            task = progress.add_task("🎨 Building UI...", total=None)
-            
+            task = progress.add_task(f"🎨 Building UI in {cwd.resolve()}...", total=None)
+
             result = subprocess.run(
                 ["bun", "run", "build"],
                 cwd=cwd,
                 capture_output=True,
                 text=True,
             )
-            
+
             if result.returncode != 0:
                 console.print("[red]❌ Failed to build UI[/red]")
                 if result.stderr:
@@ -460,11 +458,11 @@ def build(
                 if result.stdout:
                     console.print(f"[red]{result.stdout}[/red]")
                 raise Exit(code=1)
-            
+
             progress.update(task, description="✅ UI built", completed=True)
     else:
         console.print("[yellow]⏭️  Skipping UI build[/yellow]")
-    
+
     # === PHASE 2: Building Python wheel ===
     with Progress(
         SpinnerColumn(),
@@ -472,14 +470,14 @@ def build(
         console=console,
     ) as progress:
         task = progress.add_task("🐍 Building Python wheel...", total=None)
-        
+
         result = subprocess.run(
             ["uv", "build", "--wheel"],
             cwd=cwd,
             capture_output=True,
             text=True,
         )
-        
+
         if result.returncode != 0:
             console.print("[red]❌ Failed to build Python wheel[/red]")
             if result.stderr:
@@ -487,9 +485,9 @@ def build(
             if result.stdout:
                 console.print(f"[red]{result.stdout}[/red]")
             raise Exit(code=1)
-        
+
         progress.update(task, description="✅ Python wheel built", completed=True)
-    
+
     # === PHASE 3: Preparing build directory ===
     with Progress(
         SpinnerColumn(),
@@ -497,27 +495,27 @@ def build(
         console=console,
     ) as progress:
         task = progress.add_task("📦 Preparing build directory...", total=None)
-        
+
         build_dir = cwd / build_path
-        
+
         # Clean up the build directory if it exists
         if build_dir.exists():
             shutil.rmtree(build_dir)
-        
+
         # Find the built wheel file
         dist_dir = cwd / "dist"
         if not dist_dir.exists():
             console.print("[red]❌ dist/ directory not found[/red]")
             raise Exit(code=1)
-        
+
         wheel_files = list(dist_dir.glob("*.whl"))
         if not wheel_files:
             console.print("[red]❌ No wheel file found in dist/[/red]")
             raise Exit(code=1)
-        
+
         # Get the most recently created wheel file
         wheel_file = max(wheel_files, key=lambda p: p.stat().st_mtime)
-        
+
         # Copy app.yml or app.yaml if it exists
         for app_file_name in ["app.yml", "app.yaml"]:
             app_file = cwd / app_file_name
@@ -525,21 +523,21 @@ def build(
                 ensure_dir(build_dir)
                 shutil.copy(app_file, build_dir / app_file_name)
                 break
-        
+
         # Copy the dist directory contents to build directory
         shutil.copytree(dist_dir, build_dir, dirs_exist_ok=True)
-        
+
         # Write requirements.txt with the wheel file name
         reqs_file = build_dir / "requirements.txt"
         reqs_file.write_text(f"{wheel_file.name}\n")
-        
-        progress.update(
-            task, description="✅ Build directory prepared", completed=True
-        )
-    
+
+        progress.update(task, description="✅ Build directory prepared", completed=True)
+
     console.print()
     console.print(f"[bold green]✨ Build completed successfully![/bold green]")
-    console.print(f"[bold green]📦 Artifacts available in: {build_dir.resolve()}[/bold green]")
+    console.print(
+        f"[bold green]📦 Artifacts available in: {build_dir.resolve()}[/bold green]"
+    )
 
 
 @app.command(name="openapi", help="Generate OpenAPI schema from FastAPI app")
@@ -580,36 +578,28 @@ def openapi(
     output_path.write_text(json.dumps(spec, indent=2))
 
 
-class TwistMiddleware(BaseHTTPMiddleware):
-    """Middleware that adds X-Twist header to all responses."""
-    
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        response.headers["X-Twist"] = "True"
-        return response
-
-
 def get_app_name_from_pyproject() -> str:
     """Read the app name from pyproject.toml."""
     pyproject_path = Path.cwd() / "pyproject.toml"
     if not pyproject_path.exists():
         console.print("[red]❌ pyproject.toml not found in current directory[/red]")
         raise Exit(code=1)
-    
+
     with open(pyproject_path, "rb") as f:
         data = tomllib.load(f)
-    
+
     # Get the project name from pyproject.toml
     app_name = data.get("project", {}).get("name")
     if not app_name:
         console.print("[red]❌ Could not find project name in pyproject.toml[/red]")
         raise Exit(code=1)
-    
+
     return app_name
 
 
 async def stream_output(proc, prefix: str, color: str):
     """Stream output from a subprocess with a colored prefix."""
+
     async def read_stream(stream, is_stderr=False):
         while True:
             line = await stream.readline()
@@ -618,7 +608,7 @@ async def stream_output(proc, prefix: str, color: str):
             text = line.decode().rstrip()
             if text:
                 console.print(f"[{color}]{prefix}[/{color}] {text}")
-    
+
     # Read stdout and stderr concurrently
     await asyncio.gather(
         read_stream(proc.stdout, is_stderr=False),
@@ -629,70 +619,19 @@ async def stream_output(proc, prefix: str, color: str):
 async def run_frontend(frontend_port: int):
     """Run the frontend development server."""
     env = {**os.environ, "PORT": str(frontend_port)}
-    
+
     proc = await asyncio.create_subprocess_exec(
-        "bun", "run", "dev",
+        "bun",
+        "run",
+        "dev",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
         cwd=Path.cwd(),
     )
-    
+
     await stream_output(proc, "[ui]", "cyan")
     await proc.wait()
-
-
-async def run_backend(app_module_name: str, backend_host: str, backend_port: int):
-    """Run the backend server programmatically with uvicorn."""
-    try:
-        # Import uvicorn
-        import uvicorn
-    except ImportError:
-        console.print("[red]❌ uvicorn is not installed[/red]")
-        raise Exit(code=1)
-    
-    # Split the app_name into module path and attribute name
-    if ":" not in app_module_name:
-        console.print(f"[red]❌ Invalid app module format. Expected format: some.package.file:app[/red]")
-        raise Exit(code=1)
-    
-    module_path, attribute_name = app_module_name.split(":", 1)
-    
-    # Import the module
-    try:
-        module = importlib.import_module(module_path)
-    except ImportError as e:
-        console.print(f"[red]❌ Failed to import module {module_path}: {e}[/red]")
-        raise Exit(code=1)
-    
-    # Get the app attribute from the module
-    try:
-        app_instance = getattr(module, attribute_name)
-    except AttributeError:
-        console.print(f"[red]❌ Module {module_path} does not have attribute '{attribute_name}'[/red]")
-        raise Exit(code=1)
-    
-    if not isinstance(app_instance, FastAPI):
-        console.print(f"[red]❌ '{attribute_name}' is not a FastAPI app instance.[/red]")
-        raise Exit(code=1)
-    
-    # Add the twist middleware
-    app_instance.add_middleware(TwistMiddleware)
-    
-    # Create a custom log config that prefixes logs with [server]
-    config = uvicorn.Config(
-        app=app_instance,
-        host=backend_host,
-        port=backend_port,
-        log_level="info",
-        reload=True,
-    )
-    
-    server = uvicorn.Server(config)
-    
-    console.print(f"[green][server][/green] Starting server on {backend_host}:{backend_port}")
-    
-    await server.serve()
 
 
 @app.command(name="dev", help="Run development servers for frontend and backend")
@@ -700,9 +639,7 @@ def dev(
     frontend_port: Annotated[
         int, Option(help="Port for the frontend development server")
     ] = 5173,
-    backend_port: Annotated[
-        int, Option(help="Port for the backend server")
-    ] = 8000,
+    backend_port: Annotated[int, Option(help="Port for the backend server")] = 8000,
     backend_host: Annotated[
         str, Option(help="Host for the backend server")
     ] = "0.0.0.0",
@@ -714,27 +651,31 @@ def dev(
     """
     # Check prerequisites
     if not is_bun_installed():
-        console.print("[red]❌ bun is not installed. Please install bun to continue.[/red]")
+        console.print(
+            "[red]❌ bun is not installed. Please install bun to continue.[/red]"
+        )
         raise Exit(code=1)
-    
+
     # Get app name from pyproject.toml
     app_name = get_app_name_from_pyproject()
     app_module_name = f"{app_name}.backend.app:app"
-    
-    console.print(f"[bold chartreuse1]🚀 Starting development servers...[/bold chartreuse1]")
+
+    console.print(
+        f"[bold chartreuse1]🚀 Starting development servers...[/bold chartreuse1]"
+    )
     console.print(f"[cyan]Frontend:[/cyan] http://localhost:{frontend_port}")
     console.print(f"[green]Backend:[/green] http://{backend_host}:{backend_port}")
     console.print()
-    
+
     async def run_both():
         try:
             await asyncio.gather(
                 run_frontend(frontend_port),
-                run_backend(app_module_name, backend_host, backend_port),
+                run_backend(Path.cwd(), app_module_name, backend_host, backend_port),
             )
         except KeyboardInterrupt:
             console.print("\n[yellow]⚠️  Shutting down development servers...[/yellow]")
-    
+
     try:
         asyncio.run(run_both())
     except KeyboardInterrupt:
