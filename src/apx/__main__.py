@@ -450,7 +450,7 @@ def build(
             TextColumn("[progress.description]{task.description}"),
             console=console,
         ) as progress:
-            task = progress.add_task(f"🎨 Building UI in {app_path.resolve()}...", total=None)
+            task = progress.add_task(f"🎨 Building UI...", total=None)
 
             result = subprocess.run(
                 ["bun", "run", "build"],
