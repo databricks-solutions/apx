@@ -24,7 +24,7 @@ export default defineConfig({
     }),
     apx({
       steps: [
-        OpenAPI(`${APP_NAME}.api.app:app`, OPENAPI_JSON_PATH),
+        OpenAPI(`${APP_NAME}.backend.app:app`, OPENAPI_JSON_PATH),
         Orval({
           input: OPENAPI_JSON_PATH,
           output: {
