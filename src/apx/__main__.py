@@ -1,15 +1,19 @@
+import asyncio
 import importlib
 import json
+import os
 import shutil
 import subprocess
 import time
+import tomllib
 from importlib import resources
 from pathlib import Path
 import random
 from typing import Annotated
 
 import jinja2
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 from rich import print
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -515,13 +519,11 @@ def build(
         wheel_file = max(wheel_files, key=lambda p: p.stat().st_mtime)
         
         # Copy app.yml or app.yaml if it exists
-        app_file_copied = False
         for app_file_name in ["app.yml", "app.yaml"]:
             app_file = cwd / app_file_name
             if app_file.exists():
                 ensure_dir(build_dir)
                 shutil.copy(app_file, build_dir / app_file_name)
-                app_file_copied = True
                 break
         
         # Copy the dist directory contents to build directory
@@ -576,6 +578,167 @@ def openapi(
     spec = app_instance.openapi()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(spec, indent=2))
+
+
+class TwistMiddleware(BaseHTTPMiddleware):
+    """Middleware that adds X-Twist header to all responses."""
+    
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Twist"] = "True"
+        return response
+
+
+def get_app_name_from_pyproject() -> str:
+    """Read the app name from pyproject.toml."""
+    pyproject_path = Path.cwd() / "pyproject.toml"
+    if not pyproject_path.exists():
+        console.print("[red]❌ pyproject.toml not found in current directory[/red]")
+        raise Exit(code=1)
+    
+    with open(pyproject_path, "rb") as f:
+        data = tomllib.load(f)
+    
+    # Get the project name from pyproject.toml
+    app_name = data.get("project", {}).get("name")
+    if not app_name:
+        console.print("[red]❌ Could not find project name in pyproject.toml[/red]")
+        raise Exit(code=1)
+    
+    return app_name
+
+
+async def stream_output(proc, prefix: str, color: str):
+    """Stream output from a subprocess with a colored prefix."""
+    async def read_stream(stream, is_stderr=False):
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+            text = line.decode().rstrip()
+            if text:
+                console.print(f"[{color}]{prefix}[/{color}] {text}")
+    
+    # Read stdout and stderr concurrently
+    await asyncio.gather(
+        read_stream(proc.stdout, is_stderr=False),
+        read_stream(proc.stderr, is_stderr=True),
+    )
+
+
+async def run_frontend(frontend_port: int):
+    """Run the frontend development server."""
+    env = {**os.environ, "PORT": str(frontend_port)}
+    
+    proc = await asyncio.create_subprocess_exec(
+        "bun", "run", "dev",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+        cwd=Path.cwd(),
+    )
+    
+    await stream_output(proc, "[ui]", "cyan")
+    await proc.wait()
+
+
+async def run_backend(app_module_name: str, backend_host: str, backend_port: int):
+    """Run the backend server programmatically with uvicorn."""
+    try:
+        # Import uvicorn
+        import uvicorn
+    except ImportError:
+        console.print("[red]❌ uvicorn is not installed[/red]")
+        raise Exit(code=1)
+    
+    # Split the app_name into module path and attribute name
+    if ":" not in app_module_name:
+        console.print(f"[red]❌ Invalid app module format. Expected format: some.package.file:app[/red]")
+        raise Exit(code=1)
+    
+    module_path, attribute_name = app_module_name.split(":", 1)
+    
+    # Import the module
+    try:
+        module = importlib.import_module(module_path)
+    except ImportError as e:
+        console.print(f"[red]❌ Failed to import module {module_path}: {e}[/red]")
+        raise Exit(code=1)
+    
+    # Get the app attribute from the module
+    try:
+        app_instance = getattr(module, attribute_name)
+    except AttributeError:
+        console.print(f"[red]❌ Module {module_path} does not have attribute '{attribute_name}'[/red]")
+        raise Exit(code=1)
+    
+    if not isinstance(app_instance, FastAPI):
+        console.print(f"[red]❌ '{attribute_name}' is not a FastAPI app instance.[/red]")
+        raise Exit(code=1)
+    
+    # Add the twist middleware
+    app_instance.add_middleware(TwistMiddleware)
+    
+    # Create a custom log config that prefixes logs with [server]
+    config = uvicorn.Config(
+        app=app_instance,
+        host=backend_host,
+        port=backend_port,
+        log_level="info",
+        reload=True,
+    )
+    
+    server = uvicorn.Server(config)
+    
+    console.print(f"[green][server][/green] Starting server on {backend_host}:{backend_port}")
+    
+    await server.serve()
+
+
+@app.command(name="dev", help="Run development servers for frontend and backend")
+def dev(
+    frontend_port: Annotated[
+        int, Option(help="Port for the frontend development server")
+    ] = 5173,
+    backend_port: Annotated[
+        int, Option(help="Port for the backend server")
+    ] = 8000,
+    backend_host: Annotated[
+        str, Option(help="Host for the backend server")
+    ] = "0.0.0.0",
+    version: bool | None = version_option,
+):
+    """
+    Run development servers for both frontend and backend concurrently.
+    The backend will have a middleware that adds X-Twist: True header.
+    """
+    # Check prerequisites
+    if not is_bun_installed():
+        console.print("[red]❌ bun is not installed. Please install bun to continue.[/red]")
+        raise Exit(code=1)
+    
+    # Get app name from pyproject.toml
+    app_name = get_app_name_from_pyproject()
+    app_module_name = f"{app_name}.backend.app:app"
+    
+    console.print(f"[bold chartreuse1]🚀 Starting development servers...[/bold chartreuse1]")
+    console.print(f"[cyan]Frontend:[/cyan] http://localhost:{frontend_port}")
+    console.print(f"[green]Backend:[/green] http://{backend_host}:{backend_port}")
+    console.print()
+    
+    async def run_both():
+        try:
+            await asyncio.gather(
+                run_frontend(frontend_port),
+                run_backend(app_module_name, backend_host, backend_port),
+            )
+        except KeyboardInterrupt:
+            console.print("\n[yellow]⚠️  Shutting down development servers...[/yellow]")
+    
+    try:
+        asyncio.run(run_both())
+    except KeyboardInterrupt:
+        console.print("[yellow]✅ Development servers stopped[/yellow]")
 
 
 def entrypoint():
