@@ -2,6 +2,10 @@
 re-init:
     rm -rf sample/
     uv run apx init sample sample
+    # remove dist/.gitignore and dist/apx-*
+    # as they're automatically generated
+    rm -rf dist/.gitignore
+    rm -rf dist/apx-*
 
 [working-directory: 'sample']
 build-sample:
