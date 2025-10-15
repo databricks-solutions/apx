@@ -14,6 +14,7 @@ import { apx, OpenAPI, Orval } from "apx/vite-plugin";
 
 export default defineConfig({
   root: APP_UI_PATH,
+  publicDir: "./public", // relative to APP_UI_PATH!
   plugins: [
     tanstackRouter({
       target: "react",
@@ -29,7 +30,7 @@ export default defineConfig({
           output: {
             target: `${APP_UI_PATH}/lib/api.ts`,
             client: "react-query",
-            httpClient: "fetch",
+            httpClient: "axios",
             prettier: true,
             override: {
               query: {

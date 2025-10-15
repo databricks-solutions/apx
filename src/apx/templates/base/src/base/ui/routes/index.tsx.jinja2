@@ -1,6 +1,6 @@
 const APP_NAME = "{{app_name}}";
 
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { Suspense, useState } from "react";
 import { QueryErrorResetBoundary } from "@tanstack/react-query";
 import { ErrorBoundary } from "react-error-boundary";
@@ -9,8 +9,7 @@ import selector from "@/lib/selector";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ModeToggle } from "@/components/mode-toggle";
-import { Github, Loader2, Sparkles, AlertCircle, Plus, Minus, RotateCcw, Rocket, Braces, Cable } from "lucide-react";
-
+import { Github, Loader2, AlertCircle, Plus, Minus, RotateCcw, Rocket, Braces, Cable } from "lucide-react";
 
 
 export const Route = createFileRoute("/")({
@@ -178,10 +177,10 @@ function Index() {
       {/* Transparent top bar */}
       <header className="z-50 bg-background/80 backdrop-blur-sm border-b">
         <div className="container mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Sparkles className="h-6 w-6 text-primary" />
+          <Link to="/" className="flex items-center gap-2">
+            <img src="/logo.svg" alt="logo" className="h-6 w-6 text-primary border-1 border-primary rounded-sm" />
             <span className="font-semibold text-lg">{APP_NAME}</span>
-          </div>
+          </Link>
           <ModeToggle />
         </div>
       </header>

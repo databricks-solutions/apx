@@ -122,16 +122,46 @@ def ensure_dir(path: Path) -> Path:
     return path
 
 
-def render_jinja_template(template_name: str, target_path: Path, **context):
-    """Render a Jinja2 template and write to target path."""
-    template = jinja2_env.get_template(template_name)
-    target_path.write_text(template.render(**context))
+def process_template_directory(
+    source_dir: Path, target_dir: Path, app_name: str
+) -> None:
+    """
+    Recursively process template directory, copying files and rendering Jinja2 templates.
+    Replaces 'base' with app_name in paths.
+    """
+    for item in source_dir.rglob("*"):
+        if item.is_file():
+            # Calculate relative path from source_dir
+            rel_path = item.relative_to(source_dir)
 
+            # Replace 'base' with app_name in the path
+            path_str = str(rel_path)
+            if "/base/" in path_str or path_str.startswith("base/"):
+                path_str = path_str.replace("/base/", f"/{app_name}/").replace(
+                    "base/", f"{app_name}/"
+                )
 
-def copy_template(template_name: str, target_path: Path):
-    """Copy a template file to target path."""
-    source = templates_dir.joinpath(template_name)
-    shutil.copy(source, target_path)
+            # Determine target path
+            if item.suffix == ".jinja2":
+                # Remove .jinja2 extension for rendered files
+                target_path = target_dir / path_str.removesuffix(".jinja2")
+            else:
+                target_path = target_dir / path_str
+
+            # Ensure target directory exists
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Process file
+            if item.suffix == ".jinja2":
+                # Render Jinja2 template
+                template = jinja2_env.get_template(f"base/{rel_path}")
+                target_path.write_text(template.render(app_name=app_name))
+                if item.name == "logo.svg.jinja2":
+                    app_letter = app_name[0].upper()
+                    target_path.write_text(template.render(app_letter=app_letter))
+            else:
+                # Copy file as-is
+                shutil.copy(item, target_path)
 
 
 def run_subprocess(cmd: list[str], cwd: Path, error_msg: str) -> None:
@@ -202,89 +232,16 @@ def init(
     ) as progress:
         task = progress.add_task("📁 Preparing project layout...", total=None)
 
-        # Create directory structure
+        # Ensure app_path exists
         ensure_dir(app_path)
-        src_dir = ensure_dir(app_path / "src" / app_name)
-        api_dir = ensure_dir(src_dir / "api")
-        ui_dir = ensure_dir(src_dir / "ui")
-        ensure_dir(ui_dir / "lib")
-        ensure_dir(ui_dir / "styles")
-        ensure_dir(ui_dir / "routes")
-        ensure_dir(ui_dir / "components")
-        ensure_dir(ui_dir / "types")
-        ensure_dir(app_path / ".cursor" / "rules")
-        dist_dir = ensure_dir(src_dir / "__dist__")
 
-        # Render Jinja templates
-        render_jinja_template(
-            "base/README.md.jinja2", app_path / "README.md", app_name=app_name
-        )
-        render_jinja_template(
-            "base/.gitignore.jinja2", app_path / ".gitignore", app_name=app_name
-        )
-        render_jinja_template(
-            "base/pyproject.toml.jinja2", app_path / "pyproject.toml", app_name=app_name
-        )
-        render_jinja_template(
-            "base/package.json.jinja2", app_path / "package.json", app_name=app_name
-        )
-        render_jinja_template(
-            "base/components.json.jinja2",
-            app_path / "components.json",
-            app_name=app_name,
-        )
-        render_jinja_template(
-            "base/tsconfig.json.jinja2", app_path / "tsconfig.json", app_name=app_name
-        )
-        render_jinja_template(
-            "base/vite.config.ts.jinja2", app_path / "vite.config.ts", app_name=app_name
-        )
-        render_jinja_template(
-            "base/src/base/ui/index.html.jinja2",
-            ui_dir / "index.html",
-            app_name=app_name,
-        )
-        render_jinja_template(
-            "base/.cursor/rules/project.mdc.jinja2",
-            app_path / ".cursor" / "rules" / "project.mdc",
-            app_name=app_name,
-        )
-        render_jinja_template(
-            "base/src/base/api/app.py.jinja2", api_dir / "app.py", app_name=app_name
-        )
-
-        # Copy static files
-        copy_template("base/src/base/__init__.py", src_dir / "__init__.py")
-        copy_template("base/src/base/_version.pyi", src_dir / "_version.pyi")
-        copy_template("base/src/base/ui/lib/utils.ts", ui_dir / "lib" / "utils.ts")
-        copy_template(
-            "base/src/base/ui/styles/globals.css", ui_dir / "styles" / "globals.css"
-        )
-        copy_template("base/src/base/ui/main.tsx", ui_dir / "main.tsx")
-        render_jinja_template(
-            "base/src/base/ui/routes/index.tsx.jinja2",
-            ui_dir / "routes" / "index.tsx",
-            app_name=app_name,
-        )
-        copy_template(
-            "base/src/base/ui/routes/__root.tsx", ui_dir / "routes" / "__root.tsx"
-        )
-        copy_template(
-            "base/src/base/ui/components/mode-toggle.tsx",
-            ui_dir / "components" / "mode-toggle.tsx",
-        )
-        copy_template(
-            "base/src/base/ui/components/theme-provider.tsx",
-            ui_dir / "components" / "theme-provider.tsx",
-        )
-        copy_template(
-            "base/src/base/ui/types/vite-env.d.ts", ui_dir / "types" / "vite-env.d.ts"
-        )
-        copy_template(
-            "base/src/base/ui/lib/selector.ts", ui_dir / "lib" / "selector.ts"
-        )
+        # Process the entire base template directory
+        base_template_dir = templates_dir / "base"
+        process_template_directory(base_template_dir, app_path, app_name)
 
         # Create dist gitignore
+        dist_dir = app_path / "src" / app_name / "__dist__"
+        ensure_dir(dist_dir)
         (dist_dir / ".gitignore").write_text("*\n")
 
         progress.update(task, description="✅ Project layout prepared", completed=True)
@@ -302,6 +259,8 @@ def init(
             [
                 "bun",
                 "add",
+                "react-error-boundary",
+                "axios",
                 "react",
                 "react-dom",
                 "class-variance-authority",
