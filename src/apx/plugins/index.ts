@@ -105,12 +105,26 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
       const cmd = parts[0];
       const args = parts.slice(1);
 
+      // Check if we should pipe output (for use with apx dev)
+      // When APX_PIPE_OUTPUT is set, we pipe instead of inherit to allow parent to prefix output
+      const shouldPipe = process.env.APX_PIPE_OUTPUT === "1";
+
       // Spawn process with proper signal handling
       const child = spawn(cmd, args, {
-        stdio: "inherit", // Forward stdout/stderr to parent
+        stdio: shouldPipe ? "pipe" : "inherit", // Pipe when running under apx dev
         shell: true, // Use shell for proper command parsing
         detached: false, // Keep in same process group for signal propagation
       });
+
+      // If piping, forward output to console (it will be captured by parent)
+      if (shouldPipe && child.stdout && child.stderr) {
+        child.stdout.on("data", (data) => {
+          process.stdout.write(data);
+        });
+        child.stderr.on("data", (data) => {
+          process.stderr.write(data);
+        });
+      }
 
       // Track child process for cleanup
       childProcesses.push(child);
