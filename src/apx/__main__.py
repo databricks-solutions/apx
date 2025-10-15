@@ -404,6 +404,7 @@ def init(
 
     # === PHASE 6: Build using apx build ===
     build(
+        app_path=app_path,
         build_path=app_path / ".build",
         skip_ui_build=False,
         version=version,
@@ -420,6 +421,12 @@ def init(
 
 @app.command(name="build", help="Build the project (frontend + Python wheel)")
 def build(
+    app_path: Annotated[
+        Path | None,
+        Argument(
+            help="The path to the app. If not provided, current working directory will be used",
+        ),
+    ] = None,
     build_path: Annotated[
         Path,
         Option(help="Path to the build directory where artifacts will be placed"),
@@ -433,7 +440,8 @@ def build(
     2. Running uv build --wheel
     3. Preparing the .build folder with artifacts and requirements.txt
     """
-    cwd = Path.cwd()
+    if app_path is None:
+        app_path = Path.cwd()
 
     # === PHASE 1: Building UI ===
     if not skip_ui_build:
@@ -442,11 +450,11 @@ def build(
             TextColumn("[progress.description]{task.description}"),
             console=console,
         ) as progress:
-            task = progress.add_task(f"🎨 Building UI in {cwd.resolve()}...", total=None)
+            task = progress.add_task(f"🎨 Building UI in {app_path.resolve()}...", total=None)
 
             result = subprocess.run(
                 ["bun", "run", "build"],
-                cwd=cwd,
+                cwd=app_path,
                 capture_output=True,
                 text=True,
             )
@@ -474,7 +482,7 @@ def build(
 
         result = subprocess.run(
             ["uv", "build", "--wheel"],
-            cwd=cwd,
+            cwd=app_path,
             capture_output=True,
             text=True,
         )
@@ -497,14 +505,14 @@ def build(
     ) as progress:
         task = progress.add_task("📦 Preparing build directory...", total=None)
 
-        build_dir = cwd / build_path
+        build_dir = app_path / build_path
 
         # Clean up the build directory if it exists
         if build_dir.exists():
             shutil.rmtree(build_dir)
 
         # Find the built wheel file
-        dist_dir = cwd / "dist"
+        dist_dir = app_path / "dist"
         if not dist_dir.exists():
             console.print("[red]❌ dist/ directory not found[/red]")
             raise Exit(code=1)
@@ -519,7 +527,7 @@ def build(
 
         # Copy app.yml or app.yaml if it exists
         for app_file_name in ["app.yml", "app.yaml"]:
-            app_file = cwd / app_file_name
+            app_file = app_path / app_file_name
             if app_file.exists():
                 ensure_dir(build_dir)
                 shutil.copy(app_file, build_dir / app_file_name)
