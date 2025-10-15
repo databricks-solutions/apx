@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from .. import __version__
 
+
 class VersionOut(BaseModel):
     version: str
 

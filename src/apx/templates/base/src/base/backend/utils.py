@@ -3,8 +3,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from .config import conf
 
-def add_not_found_handler(app: FastAPI):
 
+def add_not_found_handler(app: FastAPI):
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
         if exc.status_code == 404:
             path = request.url.path
@@ -21,5 +21,5 @@ def add_not_found_handler(app: FastAPI):
                 return FileResponse(conf.static_assets_path / "index.html")
         # Default: return the original HTTP error (JSON 404 for API, etc.)
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
-    
+
     app.exception_handler(StarletteHTTPException)(http_exception_handler)
