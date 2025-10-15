@@ -20,9 +20,8 @@ class AppConfig(BaseSettings):
     app_name: str = Field(default=app_name)
     api_prefix: str = Field(default="/api")
 
-    static_assets_path: Path = Field(
-        default_factory=lambda: resources.files(app_name).joinpath("__dist__"), # type: ignore
-        description="Path to the static assets directory",
-    )
+    @property
+    def static_assets_path(self) -> Path:
+        return resources.files(self.app_name).joinpath("__dist__") # type: ignore
 
 conf = AppConfig()
