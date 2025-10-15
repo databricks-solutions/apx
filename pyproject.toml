@@ -49,6 +49,3 @@ path = "src/apx/_version.py"
 template = '''
 version = "{version}"
 '''
-
-[project.entry-points.hatch]
-apx = "apx.hooks"

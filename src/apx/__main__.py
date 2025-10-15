@@ -398,6 +398,13 @@ def init(
 
         progress.update(task, description="✅ Project set up", completed=True)
 
+    # === PHASE 6: Build using apx build ===
+    build(
+        build_path=app_path / ".build",
+        skip_ui_build=False,
+        version=version,
+    )
+
     console.print()
     console.print(
         f"[bold green]✨ Project {app_name} initialized successfully! [/bold green]"
@@ -405,6 +412,132 @@ def init(
     console.print(
         f"[bold green]🚀 Run `cd {app_path.resolve()}` to get started![/bold green]"
     )
+
+
+@app.command(name="build", help="Build the project (frontend + Python wheel)")
+def build(
+    build_path: Annotated[
+        Path,
+        Option(help="Path to the build directory where artifacts will be placed"),
+    ] = Path(".build"),
+    skip_ui_build: Annotated[
+        bool, Option(help="Skip the UI build step")
+    ] = False,
+    version: bool | None = version_option,
+):
+    """
+    Build the project by:
+    1. Running bun run build (unless skipped)
+    2. Running uv build --wheel
+    3. Preparing the .build folder with artifacts and requirements.txt
+    """
+    cwd = Path.cwd()
+    
+    # === PHASE 1: Building UI ===
+    if not skip_ui_build:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            task = progress.add_task("🎨 Building UI...", total=None)
+            
+            result = subprocess.run(
+                ["bun", "run", "build"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+            )
+            
+            if result.returncode != 0:
+                console.print("[red]❌ Failed to build UI[/red]")
+                if result.stderr:
+                    console.print(f"[red]{result.stderr}[/red]")
+                if result.stdout:
+                    console.print(f"[red]{result.stdout}[/red]")
+                raise Exit(code=1)
+            
+            progress.update(task, description="✅ UI built", completed=True)
+    else:
+        console.print("[yellow]⏭️  Skipping UI build[/yellow]")
+    
+    # === PHASE 2: Building Python wheel ===
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("🐍 Building Python wheel...", total=None)
+        
+        result = subprocess.run(
+            ["uv", "build", "--wheel"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        
+        if result.returncode != 0:
+            console.print("[red]❌ Failed to build Python wheel[/red]")
+            if result.stderr:
+                console.print(f"[red]{result.stderr}[/red]")
+            if result.stdout:
+                console.print(f"[red]{result.stdout}[/red]")
+            raise Exit(code=1)
+        
+        progress.update(task, description="✅ Python wheel built", completed=True)
+    
+    # === PHASE 3: Preparing build directory ===
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("📦 Preparing build directory...", total=None)
+        
+        build_dir = cwd / build_path
+        
+        # Clean up the build directory if it exists
+        if build_dir.exists():
+            shutil.rmtree(build_dir)
+        
+        # Find the built wheel file
+        dist_dir = cwd / "dist"
+        if not dist_dir.exists():
+            console.print("[red]❌ dist/ directory not found[/red]")
+            raise Exit(code=1)
+        
+        wheel_files = list(dist_dir.glob("*.whl"))
+        if not wheel_files:
+            console.print("[red]❌ No wheel file found in dist/[/red]")
+            raise Exit(code=1)
+        
+        # Get the most recently created wheel file
+        wheel_file = max(wheel_files, key=lambda p: p.stat().st_mtime)
+        
+        # Copy app.yml or app.yaml if it exists
+        app_file_copied = False
+        for app_file_name in ["app.yml", "app.yaml"]:
+            app_file = cwd / app_file_name
+            if app_file.exists():
+                ensure_dir(build_dir)
+                shutil.copy(app_file, build_dir / app_file_name)
+                app_file_copied = True
+                break
+        
+        # Copy the dist directory contents to build directory
+        shutil.copytree(dist_dir, build_dir, dirs_exist_ok=True)
+        
+        # Write requirements.txt with the wheel file name
+        reqs_file = build_dir / "requirements.txt"
+        reqs_file.write_text(f"{wheel_file.name}\n")
+        
+        progress.update(
+            task, description="✅ Build directory prepared", completed=True
+        )
+    
+    console.print()
+    console.print(f"[bold green]✨ Build completed successfully![/bold green]")
+    console.print(f"[bold green]📦 Artifacts available in: {build_dir.resolve()}[/bold green]")
 
 
 @app.command(name="openapi", help="Generate OpenAPI schema from FastAPI app")

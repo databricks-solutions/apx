@@ -19,7 +19,7 @@ dev = [
 apx = { git = "https://github.com/renardeinside/apx.git" }
 
 [build-system]
-requires = ["hatchling", "uv-dynamic-versioning>=0.7.0", "apx"]
+requires = ["hatchling", "uv-dynamic-versioning>=0.7.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
@@ -38,6 +38,3 @@ version = "{version}"
 [tool.hatch.build]
 artifacts = ["src/{{app_name}}/dist"]
 exclude = ["src/{{app_name}}/ui"]
-
-[tool.hatch.build.hooks.apx]
-build_path = ".build"
