@@ -16,6 +16,7 @@ from typer import Exit
 import watchfiles
 import uvicorn
 from apx.utils import console, PrefixedLogHandler
+from apx import __version__
 
 ACCESS_TOKEN_HEADER_NAME = "X-Forwarded-Access-Token"
 
@@ -119,7 +120,7 @@ def prepare_obo_token(
 
     # Initialize Databricks client
     try:
-        ws = WorkspaceClient()
+        ws = WorkspaceClient(product="apx/dev", product_version=__version__)
     except Exception as e:
         console.print(f"[red]❌ Failed to initialize Databricks client: {e}[/red]")
         console.print(
