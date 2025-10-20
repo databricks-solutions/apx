@@ -18,28 +18,12 @@ import uvicorn
 from apx.utils import console, PrefixedLogHandler
 from apx import __version__
 
-ACCESS_TOKEN_HEADER_NAME = "X-Forwarded-Access-Token"
+
+# note: header name must be lowercase and with - symbols
+ACCESS_TOKEN_HEADER_NAME = "x-forwarded-access-token"
 
 
-class DevAccessTokenMiddleware(BaseHTTPMiddleware):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if "token" in kwargs:
-            self.token = kwargs["token"]
-        else:
-            console.print(
-                "[yellow]No token provided for On-Behalf-Of middleware[/yellow]"
-            )
-
-    async def dispatch(self, request: Request, call_next):
-        request.scope["headers"].append(
-            (ACCESS_TOKEN_HEADER_NAME.encode(), self.token.encode())
-        )
-        response = await call_next(request)
-        return response
-
-
-def load_app(app_module_name: str) -> FastAPI:
+def load_app(app_module_name: str, reload_modules: bool = False) -> FastAPI:
     """Load and return the FastAPI app instance."""
     # Split the app_name into module path and attribute name
     if ":" not in app_module_name:
@@ -50,17 +34,24 @@ def load_app(app_module_name: str) -> FastAPI:
 
     module_path, attribute_name = app_module_name.split(":", 1)
 
-    # Reload the module if it's already loaded
-    if module_path in sys.modules:
-        importlib.reload(sys.modules[module_path])
-        module = sys.modules[module_path]
-    else:
-        # Import the module
-        try:
-            module = importlib.import_module(module_path)
-        except ImportError as e:
-            console.print(f"[red]❌ Failed to import module {module_path}: {e}[/red]")
-            raise Exit(code=1)
+    # If reloading, clear the module and all its submodules from cache
+    if reload_modules:
+        # Find all modules that start with the base module path
+        base_path = module_path.split(".")[0]
+        modules_to_delete = [
+            name
+            for name in sys.modules.keys()
+            if name.startswith(base_path + ".") or name == base_path
+        ]
+        for mod_name in modules_to_delete:
+            del sys.modules[mod_name]
+
+    # Import the module
+    try:
+        module = importlib.import_module(module_path)
+    except ImportError as e:
+        console.print(f"[red]❌ Failed to import module {module_path}: {e}[/red]")
+        raise Exit(code=1)
 
     # Get the app attribute from the module
     try:
@@ -80,9 +71,43 @@ def load_app(app_module_name: str) -> FastAPI:
     return app_instance
 
 
+def create_and_persist_obo_token(
+    ws: WorkspaceClient,
+    app_module_name: str,
+    token_lifetime_seconds: int,
+    env_file: Path,
+    verbose: bool = True,
+):
+    # Step 3.2: Create a new token
+    if verbose:
+        console.print("[green][obo][/green] Creating new OBO token")
+    new_token = ws.tokens.create(
+        comment=f"dev token for {app_module_name}, created by apx",
+        lifetime_seconds=token_lifetime_seconds,
+    )
+
+    assert new_token.token_info is not None
+    assert new_token.token_info.token_id is not None
+    assert new_token.token_value is not None
+
+    # Save token to .env file
+    set_key(env_file, "APX_TOKEN_ID", new_token.token_info.token_id)
+    set_key(env_file, "APX_TOKEN_SECRET", new_token.token_value)
+
+    if verbose:
+        console.print(
+            f"[green][obo][/green] Token created and saved to {env_file.resolve()}"
+        )
+
+    return new_token.token_value
+
+
 def prepare_obo_token(
-    cwd: Path, app_module_name: str, token_lifetime_seconds: int = 60 * 60 * 4
-) -> str | None:
+    cwd: Path,
+    app_module_name: str,
+    token_lifetime_seconds: int = 60 * 60 * 4,
+    verbose: bool = True,
+) -> str:
     """Prepare the On-Behalf-Of token for the backend server.
 
     1. Check if .env file exists, if not, create it
@@ -98,7 +123,8 @@ def prepare_obo_token(
 
     # Step 1: Check if .env exists, create if not
     if not env_file.exists():
-        console.print("[yellow][obo][/yellow] Creating .env file")
+        if verbose:
+            console.print("[yellow][obo][/yellow] Creating .env file")
         env_file.touch()
 
     # Step 2: Check if .env is gitignored
@@ -110,9 +136,10 @@ def prepare_obo_token(
             )
             raise Exit(code=1)
     else:
-        console.print(
-            "[yellow]⚠️  .gitignore not found. Please ensure .env is not committed.[/yellow]"
-        )
+        if verbose:
+            console.print(
+                "[yellow]⚠️  .gitignore not found. Please ensure .env is not committed.[/yellow]"
+            )
 
     # pick specific env variables
     token_id = get_key(env_file, "APX_TOKEN_ID")
@@ -135,46 +162,39 @@ def prepare_obo_token(
         user_token = next(
             (token for token in user_tokens if token.token_id == token_id), None
         )
-        if not user_token:
-            console.print("[yellow][obo][/yellow] Token not found, creating a new one")
-            return None
 
-        if user_token.expiry_time:
+        # Check if token exists and is still valid
+        if user_token and user_token.expiry_time:
             # expiry_time is in milliseconds since epoch
             expiry_timestamp = user_token.expiry_time / 1000
             current_time = time.time()
             time_remaining = expiry_timestamp - current_time
 
-            if time_remaining > token_lifetime_seconds:
-                console.print(
-                    f"[green][obo][/green] Using existing token (expires in {int(time_remaining / 3600)} hours)"
-                )
+            # Use existing token if it has at least 1 hour remaining
+            min_remaining_time = 60 * 60  # 1 hour in seconds
+            if time_remaining > min_remaining_time:
+                if verbose:
+                    console.print(
+                        f"[green][obo][/green] Using existing token (expires in {int(time_remaining / 3600)} hours)"
+                    )
                 return token_secret
-            else:
-                console.print(
-                    "[yellow][obo][/yellow] Token expires soon, creating a new one"
-                )
 
-    # Step 3.2: Create a new token
-    console.print("[green][obo][/green] Creating new OBO token")
-    new_token = ws.tokens.create(
-        comment=f"dev token for {app_module_name}, created by apx",
-        lifetime_seconds=token_lifetime_seconds,
+        # Token not found, expired, or no expiry time - create a new one
+        if verbose:
+            console.print(
+                "[yellow][obo][/yellow] Token not found or expired, creating a new one"
+            )
+    else:
+        # Step 3.2: Token credentials not set, create a new token
+        if verbose:
+            console.print(
+                "[yellow][obo][/yellow] Token credentials not found, creating a new one"
+            )
+
+    # Create and return new token (common path for all cases that need a new token)
+    return create_and_persist_obo_token(
+        ws, app_module_name, token_lifetime_seconds, env_file, verbose=verbose
     )
-
-    assert new_token.token_info is not None
-    assert new_token.token_info.token_id is not None
-    assert new_token.token_value is not None
-
-    # Save token to .env file
-    set_key(env_file, "APX_TOKEN_ID", new_token.token_info.token_id)
-    set_key(env_file, "APX_TOKEN_SECRET", new_token.token_value)
-
-    console.print(
-        f"[green][obo][/green] Token created and saved to {env_file.resolve()}"
-    )
-
-    return new_token.token_value
 
 
 def setup_uvicorn_logging():
@@ -219,35 +239,60 @@ async def run_backend(
     # Track if this is the first run
     first_run = True
 
+    # Store OBO token for reuse
+    obo_token = None
+
     while True:
         server = None
         server_task = None
         watch_task = None
 
         try:
-            # Load the app
+            # Reload message
             if not first_run:
                 console.print("[yellow][server][/yellow] Reloading...")
+                console.print()
 
-            app_instance = load_app(app_module_name)
-
-            # check if .env file exists, and if yes - load it
+            # Reload .env file on every iteration (including first run)
             dotenv_file = cwd / ".env"
             if dotenv_file.exists():
-                console.print(
-                    f"[green][server][/green] Loading .env file from {dotenv_file.resolve()}"
-                )
+                # Override=True ensures we reload env vars on hot reload
                 load_dotenv(dotenv_file)
+                if first_run:
+                    console.print(
+                        f"[green][server][/green] Loading .env file from {dotenv_file.resolve()}"
+                    )
 
+            # Prepare OBO token (will reuse if still valid)
             if obo:
-                console.print("[green][server][/green] Adding On-Behalf-Of middleware")
-                app_instance.add_middleware(
-                    DevAccessTokenMiddleware,
-                    token=prepare_obo_token(cwd, app_module_name),
-                )
-                console.print(
-                    f"[green][server][/green] On-Behalf-Of token was created and saved to .env"
-                )
+                if first_run:
+                    console.print(
+                        "[green][server][/green] Preparing On-Behalf-Of token"
+                    )
+                obo_token = prepare_obo_token(cwd, app_module_name, verbose=first_run)
+                if first_run:
+                    console.print(f"[green][server][/green] On-Behalf-Of token ready")
+
+            # Load/reload the app instance (fully reload modules on hot reload)
+            app_instance = load_app(app_module_name, reload_modules=not first_run)
+
+            # Add OBO middleware if enabled
+            if obo and obo_token:
+                assert obo_token is not None, "OBO token is not set"
+                encoded_token = obo_token.encode()
+
+                async def obo_middleware(request: Request, call_next):
+                    # Headers are immutable, so we need to append to the list
+                    token_header: tuple[bytes, bytes] = (
+                        ACCESS_TOKEN_HEADER_NAME.encode(),
+                        encoded_token,
+                    )
+                    request.headers.__dict__["_list"].append(token_header)
+                    return await call_next(request)
+
+                app_instance.add_middleware(BaseHTTPMiddleware, dispatch=obo_middleware)
+
+            if first_run:
                 console.print()
 
             config = uvicorn.Config(

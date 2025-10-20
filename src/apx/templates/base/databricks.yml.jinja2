@@ -19,10 +19,7 @@ resources:
       source_code_path: ./.build
       config:
         command: ["uvicorn", "{{app_name}}.backend.app:app", "--workers", "2"]
-  database_instances:
-    {{app_name}}-db:
-      name: {{app_name}}
-      capacity: CU_1
+
 targets:
   dev:
     mode: development

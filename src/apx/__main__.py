@@ -555,7 +555,9 @@ def build(
             raise Exit(code=1)
 
         # postfix the wheel file name with the current UTC timestamp
-        wheel_file_name = f"{wheel_file.name}_{time.strftime('%Y%m%d%H%M%S')}.whl"
+        # Use + separator for local version identifier (PEP 440 compliant)
+        timestamp = time.strftime("%Y%m%d%H%M%S")
+        wheel_file_name = f"{wheel_file.stem}+{timestamp}.whl"
         wheel_file.rename(build_dir / wheel_file_name)
 
         # write requirements.txt with the wheel file name
