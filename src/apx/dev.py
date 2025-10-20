@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.errors import ResourceDoesNotExist
 from dotenv import set_key, get_key
 from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -80,7 +79,9 @@ def load_app(app_module_name: str) -> FastAPI:
     return app_instance
 
 
-def prepare_obo_token(cwd: Path, app_module_name: str) -> str | None:
+def prepare_obo_token(
+    cwd: Path, app_module_name: str, token_lifetime_seconds: int = 60 * 60 * 4
+) -> str | None:
     """Prepare the On-Behalf-Of token for the backend server.
 
     1. Check if .env file exists, if not, create it
@@ -122,7 +123,7 @@ def prepare_obo_token(cwd: Path, app_module_name: str) -> str | None:
     except Exception as e:
         console.print(f"[red]❌ Failed to initialize Databricks client: {e}[/red]")
         console.print(
-            "[yellow]💡 Make sure you have valid Databricks credentials configured.[/yellow]"
+            "[yellow]💡 Make sure you have Databricks credentials configured.[/yellow]"
         )
         raise Exit(code=1)
 
@@ -143,7 +144,7 @@ def prepare_obo_token(cwd: Path, app_module_name: str) -> str | None:
             current_time = time.time()
             time_remaining = expiry_timestamp - current_time
 
-            if time_remaining > 3600:
+            if time_remaining > token_lifetime_seconds:
                 console.print(
                     f"[green][obo][/green] Using existing token (expires in {int(time_remaining / 3600)} hours)"
                 )
@@ -157,7 +158,7 @@ def prepare_obo_token(cwd: Path, app_module_name: str) -> str | None:
     console.print("[green][obo][/green] Creating new OBO token")
     new_token = ws.tokens.create(
         comment=f"dev token for {app_module_name}, created by apx",
-        lifetime_seconds=60 * 60 * 4,  # 4 hours
+        lifetime_seconds=token_lifetime_seconds,
     )
 
     assert new_token.token_info is not None
