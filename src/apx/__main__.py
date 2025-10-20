@@ -461,6 +461,18 @@ def build(
     if app_path is None:
         app_path = Path.cwd()
 
+    build_dir = app_path / build_path
+    # Clean up the build directory if it exists
+    if build_dir.exists():
+        console.print(
+            f"[yellow]🧹 Cleaning up build directory {build_dir.resolve()}[/yellow]"
+        )
+        shutil.rmtree(build_dir)
+        console.print(f"[green]✅ Build directory cleaned up[/green]")
+
+    # add a .build/.gitignore file
+    (build_dir / ".gitignore").write_text("*\n")
+
     # === PHASE 1: Building UI ===
     if not skip_ui_build:
         with Progress(
@@ -475,6 +487,7 @@ def build(
                 cwd=app_path,
                 capture_output=True,
                 text=True,
+                env=os.environ,
             )
 
             if result.returncode != 0:
@@ -501,10 +514,11 @@ def build(
         task = progress.add_task("🐍 Building Python wheel...", total=None)
 
         result = subprocess.run(
-            ["uv", "build", "--wheel"],
+            ["uv", "build", "--wheel", "--out-dir", str(build_path)],
             cwd=app_path,
             capture_output=True,
             text=True,
+            env=os.environ,
         )
 
         if result.returncode != 0:
@@ -525,26 +539,6 @@ def build(
     ) as progress:
         task = progress.add_task("📦 Preparing build directory...", total=None)
 
-        build_dir = app_path / build_path
-
-        # Clean up the build directory if it exists
-        if build_dir.exists():
-            shutil.rmtree(build_dir)
-
-        # Find the built wheel file
-        dist_dir = app_path / "dist"
-        if not dist_dir.exists():
-            console.print("[red]❌ dist/ directory not found[/red]")
-            raise Exit(code=1)
-
-        wheel_files = list(dist_dir.glob("*.whl"))
-        if not wheel_files:
-            console.print("[red]❌ No wheel file found in dist/[/red]")
-            raise Exit(code=1)
-
-        # Get the most recently created wheel file
-        wheel_file = max(wheel_files, key=lambda p: p.stat().st_mtime)
-
         # Copy app.yml or app.yaml if it exists
         for app_file_name in ["app.yml", "app.yaml"]:
             app_file = app_path / app_file_name
@@ -553,23 +547,21 @@ def build(
                 shutil.copy(app_file, build_dir / app_file_name)
                 break
 
-        # Copy the dist directory contents to build directory
-        shutil.copytree(dist_dir, build_dir, dirs_exist_ok=True)
+        wheel_file = list(build_dir.glob("*.whl"))[0]
 
-        # Write requirements.txt with the wheel file name
-        reqs_file = build_dir / "requirements.txt"
-        reqs_file.write_text(f"{wheel_file.name}\n")
+        if not wheel_file:
+            console.print("[red]❌ No wheel file found in build directory[/red]")
+            raise Exit(code=1)
 
-        # add a .build/.gitignore file
-        (build_dir / ".gitignore").write_text("*\n")
+        # postfix the wheel file name with the current UTC timestamp
+        wheel_file_name = f"{wheel_file.name}_{time.strftime('%Y%m%d%H%M%S')}.whl"
+        wheel_file.rename(build_dir / wheel_file_name)
+
+        # write requirements.txt with the wheel file name
+        requirements_file = build_dir / "requirements.txt"
+        requirements_file.write_text(f"{wheel_file_name}\n")
 
         progress.update(task, description="✅ Build directory prepared", completed=True)
-
-    console.print()
-    console.print(f"[bold green]✨ Build completed successfully![/bold green]")
-    console.print(
-        f"[bold green]📦 Artifacts available in: {build_dir.resolve()}[/bold green]"
-    )
 
 
 @app.command(name="openapi", help="Generate OpenAPI schema from FastAPI app")
