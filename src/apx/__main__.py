@@ -1,4 +1,5 @@
 import asyncio
+from enum import Enum
 import importlib
 import json
 import os
@@ -182,6 +183,11 @@ def run_subprocess(cmd: list[str], cwd: Path, error_msg: str) -> None:
         raise Exit(code=1)
 
 
+class RulesType(str, Enum):
+    cursor = "cursor"
+    github = "github"
+
+
 @app.command(name="init", help="Initialize a new project")
 def init(
     app_name: Annotated[
@@ -197,6 +203,9 @@ def init(
         ),
     ] = None,
     profile: Annotated[str | None, Option(help="The Databricks profile to use")] = None,
+    rules_type: Annotated[
+        RulesType, Option(help="The type of rules to use.", default=RulesType.cursor)
+    ] = RulesType.cursor,
     version: bool | None = version_option,
 ):
     # Check prerequisites
@@ -250,6 +259,17 @@ def init(
         dist_dir = app_path / "src" / app_name / "__dist__"
         ensure_dir(dist_dir)
         (dist_dir / ".gitignore").write_text("*\n")
+
+        # depending on the rules type, remove the .cursor or .github directory
+        if rules_type == RulesType.cursor:
+            shutil.rmtree(app_path / ".github/instructions", ignore_errors=True)
+        elif rules_type == RulesType.github:
+            shutil.rmtree(app_path / ".cursor/rules", ignore_errors=True)
+
+        # add a .build directory with .gitignore file
+        build_dir = app_path / ".build"
+        ensure_dir(build_dir)
+        (build_dir / ".gitignore").write_text("*\n")
 
         # append DATABRICKS_PROFILE to .env if profile is provided
         if profile:
@@ -539,6 +559,9 @@ def build(
         # Write requirements.txt with the wheel file name
         reqs_file = build_dir / "requirements.txt"
         reqs_file.write_text(f"{wheel_file.name}\n")
+
+        # add a .build/.gitignore file
+        (build_dir / ".gitignore").write_text("*\n")
 
         progress.update(task, description="✅ Build directory prepared", completed=True)
 
