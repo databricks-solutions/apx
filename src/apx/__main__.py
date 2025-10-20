@@ -14,6 +14,7 @@ from typing import Annotated
 import jinja2
 from fastapi import FastAPI
 from rich import print
+from rich.markup import escape
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from typer import Argument, Exit, Typer, Option
@@ -608,17 +609,18 @@ def get_app_name_from_pyproject() -> str:
     return app_name
 
 
-async def stream_output(proc, prefix: str, color: str):
+async def stream_output(proc: asyncio.subprocess.Process, prefix: str, color: str):
     """Stream output from a subprocess with a colored prefix."""
+    process_console = Console()
 
     async def read_stream(stream, is_stderr=False):
         while True:
             line = await stream.readline()
             if not line:
                 break
-            text = line.decode().rstrip()
+            text = escape(line.decode().rstrip())
             if text:
-                console.print(f"[{color}]{prefix}[/{color}] {text}")
+                process_console.print(f"{prefix} {text}")
 
     # Read stdout and stderr concurrently
     await asyncio.gather(
@@ -640,7 +642,7 @@ async def run_frontend(frontend_port: int):
         cwd=Path.cwd(),
     )
 
-    await stream_output(proc, "[ui]", "cyan")
+    await stream_output(proc, "\\[ui] |", "cyan")
     await proc.wait()
 
 
