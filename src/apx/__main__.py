@@ -466,11 +466,10 @@ def build(
     build_dir = app_path / build_path
     # Clean up the build directory if it exists
     if build_dir.exists():
-        console.print(
-            f"[yellow]🧹 Cleaning up build directory {build_dir.resolve()}[/yellow]"
-        )
         shutil.rmtree(build_dir)
-        console.print(f"[green]✅ Build directory cleaned up[/green]")
+
+    # ensure the build directory exists
+    ensure_dir(build_dir)
 
     # add a .build/.gitignore file
     (build_dir / ".gitignore").write_text("*\n")
