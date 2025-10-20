@@ -627,20 +627,14 @@ async def stream_output(proc, prefix: str, color: str):
 
 async def run_frontend(frontend_port: int):
     """Run the frontend development server."""
-    env = {
-        **os.environ,
-        "PORT": str(frontend_port),
-        "APX_PIPE_OUTPUT": "1",  # Tell apx plugin to pipe output instead of inherit
-        "FORCE_COLOR": "1",  # Preserve color output
-    }
-
     proc = await asyncio.create_subprocess_exec(
         "bun",
         "run",
+        "vite",
         "dev",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=env,
+        env=os.environ,
         cwd=Path.cwd(),
     )
 
