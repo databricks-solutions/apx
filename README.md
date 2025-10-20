@@ -10,7 +10,6 @@
 
 ---
 
-
 `apx` bundles together a set of tools and libraries to help you build your app, as well as comes with convenience utilities for building your app.
 
 The main idea of `apx` is to provide convenient, fast and AI-friendly development experience.

@@ -460,7 +460,9 @@ def build(
             )
 
             if result.returncode != 0:
-                progress.update(task, description="❌ Failed to build UI", completed=True)
+                progress.update(
+                    task, description="❌ Failed to build UI", completed=True
+                )
                 console.print("[red]❌ Failed to build UI[/red]")
                 if result.stderr:
                     console.print(f"[red]{result.stderr}[/red]")

@@ -15,9 +15,8 @@ import uvicorn
 console = Console()
 ACCESS_TOKEN_HEADER_NAME = "X-Forwarded-Access-Token"
 
+
 class DevAccessTokenMiddleware(BaseHTTPMiddleware):
-
-
     async def dispatch(self, request: Request, call_next):
         request.scope["headers"].append((ACCESS_TOKEN_HEADER_NAME.encode(), b"true"))
         response = await call_next(request)
