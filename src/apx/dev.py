@@ -3,9 +3,14 @@
 import asyncio
 import importlib
 import logging
+import os
 import sys
+import time
 from pathlib import Path
 
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import ResourceDoesNotExist
+from dotenv import set_key, get_key
 from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from typer import Exit
@@ -17,8 +22,19 @@ ACCESS_TOKEN_HEADER_NAME = "X-Forwarded-Access-Token"
 
 
 class DevAccessTokenMiddleware(BaseHTTPMiddleware):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if "token" in kwargs:
+            self.token = kwargs["token"]
+        else:
+            console.print(
+                "[yellow]No token provided for On-Behalf-Of middleware[/yellow]"
+            )
+
     async def dispatch(self, request: Request, call_next):
-        request.scope["headers"].append((ACCESS_TOKEN_HEADER_NAME.encode(), b"true"))
+        request.scope["headers"].append(
+            (ACCESS_TOKEN_HEADER_NAME.encode(), self.token.encode())
+        )
         response = await call_next(request)
         return response
 
@@ -61,10 +77,102 @@ def load_app(app_module_name: str) -> FastAPI:
         )
         raise Exit(code=1)
 
-    # Add the twist middleware
-    app_instance.add_middleware(DevAccessTokenMiddleware)
-
     return app_instance
+
+
+def prepare_obo_token(cwd: Path, app_module_name: str) -> str | None:
+    """Prepare the On-Behalf-Of token for the backend server.
+
+    1. Check if .env file exists, if not, create it
+    2. check if .env file is gitignored, if not, - raise an error
+    4. check if APX_TOKEN_ID and APX_TOKEN_SECRET are set in the .env file
+        4.1 If they're set, check if they're valid and lifetime is longer than 1 hour.
+            If all right, add the token value to the On-Behalf-Of header.
+        4.2 If they're not set, create a new token and add it to the .env file.
+        4.3 Return the token value.
+    """
+    env_file = cwd / ".env"
+    gitignore_file = cwd / ".gitignore"
+
+    # Step 1: Check if .env exists, create if not
+    if not env_file.exists():
+        console.print("[yellow][obo][/yellow] Creating .env file")
+        env_file.touch()
+
+    # Step 2: Check if .env is gitignored
+    if gitignore_file.exists():
+        gitignore_content = gitignore_file.read_text()
+        if ".env" not in gitignore_content:
+            console.print(
+                "[red]❌ .env file is not in .gitignore. Please add it to avoid committing secrets.[/red]"
+            )
+            raise Exit(code=1)
+    else:
+        console.print(
+            "[yellow]⚠️  .gitignore not found. Please ensure .env is not committed.[/yellow]"
+        )
+
+    # pick specific env variables
+    token_id = get_key(env_file, "APX_TOKEN_ID")
+    token_secret = get_key(env_file, "APX_TOKEN_SECRET")
+
+    # Initialize Databricks client
+    try:
+        ws = WorkspaceClient()
+    except Exception as e:
+        console.print(f"[red]❌ Failed to initialize Databricks client: {e}[/red]")
+        console.print(
+            "[yellow]💡 Make sure you have valid Databricks credentials configured.[/yellow]"
+        )
+        raise Exit(code=1)
+
+    # Step 3: Check if token ID and secret are set
+    if token_id and token_secret:
+        # Step 3.1: Validate the token
+        user_tokens = ws.tokens.list()
+        user_token = next(
+            (token for token in user_tokens if token.token_id == token_id), None
+        )
+        if not user_token:
+            console.print("[yellow][obo][/yellow] Token not found, creating a new one")
+            return None
+
+        if user_token.expiry_time:
+            # expiry_time is in milliseconds since epoch
+            expiry_timestamp = user_token.expiry_time / 1000
+            current_time = time.time()
+            time_remaining = expiry_timestamp - current_time
+
+            if time_remaining > 3600:
+                console.print(
+                    f"[green][obo][/green] Using existing token (expires in {int(time_remaining / 3600)} hours)"
+                )
+                return token_secret
+            else:
+                console.print(
+                    "[yellow][obo][/yellow] Token expires soon, creating a new one"
+                )
+
+    # Step 3.2: Create a new token
+    console.print("[green][obo][/green] Creating new OBO token")
+    new_token = ws.tokens.create(
+        comment=f"dev token for {app_module_name}, created by apx",
+        lifetime_seconds=60 * 60 * 4,  # 4 hours
+    )
+
+    assert new_token.token_info is not None
+    assert new_token.token_info.token_id is not None
+    assert new_token.token_value is not None
+
+    # Save token to .env file
+    set_key(env_file, "APX_TOKEN_ID", new_token.token_info.token_id)
+    set_key(env_file, "APX_TOKEN_SECRET", new_token.token_value)
+
+    console.print(
+        f"[green][obo][/green] Token created and saved to {env_file.resolve()}"
+    )
+
+    return new_token.token_value
 
 
 def setup_uvicorn_logging():
@@ -89,7 +197,11 @@ def setup_uvicorn_logging():
 
 
 async def run_backend(
-    cwd: Path, app_module_name: str, backend_host: str, backend_port: int
+    cwd: Path,
+    app_module_name: str,
+    backend_host: str,
+    backend_port: int,
+    obo: bool = False,
 ):
     """Run the backend server programmatically with uvicorn and hot-reload support."""
 
@@ -99,7 +211,7 @@ async def run_backend(
     console.print(
         f"[green][server][/]Starting server on {backend_host}:{backend_port} from app: {app_module_name}"
     )
-    console.print(f"[green][server][/green]Watching for changes in {cwd}/**/*.py")
+    console.print(f"[green][server][/]Watching for changes in {cwd}/**/*.py")
     console.print()
 
     # Track if this is the first run
@@ -116,6 +228,17 @@ async def run_backend(
                 console.print("[yellow][server][/yellow] Reloading...")
 
             app_instance = load_app(app_module_name)
+
+            if obo:
+                console.print("[green][server][/green] Adding On-Behalf-Of middleware")
+                app_instance.add_middleware(
+                    DevAccessTokenMiddleware,
+                    token=prepare_obo_token(cwd, app_module_name),
+                )
+                console.print(
+                    f"[green][server][/green] On-Behalf-Of token was created and saved to .env"
+                )
+                console.print()
 
             config = uvicorn.Config(
                 app=app_instance,

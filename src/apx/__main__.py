@@ -12,6 +12,7 @@ from pathlib import Path
 import random
 from typing import Annotated, Literal
 
+from dotenv import set_key
 import jinja2
 from fastapi import FastAPI
 from rich import print
@@ -271,8 +272,7 @@ def init(
 
         # append DATABRICKS_PROFILE to .env if profile is provided
         if profile:
-            with open(app_path / ".env", "a") as f:
-                f.write(f"DATABRICKS_PROFILE={profile}\n")
+            set_key(app_path / ".env", "DATABRICKS_CONFIG_PROFILE", profile)
 
         progress.update(task, description="✅ Project layout prepared", completed=True)
 
@@ -653,6 +653,9 @@ def dev(
     backend_host: Annotated[
         str, Option(help="Host for the backend server")
     ] = "0.0.0.0",
+    obo: Annotated[
+        bool, Option(help="Whether to add On-Behalf-Of header to the backend server")
+    ] = True,
     version: bool | None = version_option,
 ):
     """
@@ -681,7 +684,9 @@ def dev(
         try:
             await asyncio.gather(
                 run_frontend(frontend_port),
-                run_backend(Path.cwd(), app_module_name, backend_host, backend_port),
+                run_backend(
+                    Path.cwd(), app_module_name, backend_host, backend_port, obo=obo
+                ),
             )
         except KeyboardInterrupt:
             console.print("\n[yellow]⚠️  Shutting down development servers...[/yellow]")
