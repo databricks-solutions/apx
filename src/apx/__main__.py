@@ -10,7 +10,7 @@ import tomllib
 from importlib import resources
 from pathlib import Path
 import random
-from typing import Annotated
+from typing import Annotated, Literal
 
 import jinja2
 from fastapi import FastAPI
@@ -183,17 +183,14 @@ def run_subprocess(cmd: list[str], cwd: Path, error_msg: str) -> None:
         raise Exit(code=1)
 
 
-class RulesType(str, Enum):
-    cursor = "cursor"
-    github = "github"
-
-
 @app.command(name="init", help="Initialize a new project")
 def init(
     app_name: Annotated[
         str | None,
-        Argument(
-            help="The name of the project. Optional, will be generated if not provided"
+        Option(
+            "--name",
+            "-n",
+            help="The name of the project. Optional, will be generated if not provided",
         ),
     ] = None,
     app_path: Annotated[
@@ -204,8 +201,9 @@ def init(
     ] = None,
     profile: Annotated[str | None, Option(help="The Databricks profile to use")] = None,
     rules_type: Annotated[
-        RulesType, Option(help="The type of rules to use.", default=RulesType.cursor)
-    ] = RulesType.cursor,
+        Literal["cursor", "github"],
+        Option(help="The type of rules to use."),
+    ] = "cursor",
     version: bool | None = version_option,
 ):
     # Check prerequisites
@@ -261,9 +259,9 @@ def init(
         (dist_dir / ".gitignore").write_text("*\n")
 
         # depending on the rules type, remove the .cursor or .github directory
-        if rules_type == RulesType.cursor:
+        if rules_type == "cursor":
             shutil.rmtree(app_path / ".github/instructions", ignore_errors=True)
-        elif rules_type == RulesType.github:
+        elif rules_type == "github":
             shutil.rmtree(app_path / ".cursor/rules", ignore_errors=True)
 
         # add a .build directory with .gitignore file

@@ -42,7 +42,7 @@ This will create a new app in the current working directory with random app name
 You can also specify the app name and path:
 
 ```bash
-uvx git+https://github.com/renardeinside/apx.git init my-app my-app
+uvx git+https://github.com/renardeinside/apx.git init --name my-app my-app
 ```
 
 This will create a new app in the `my-app` directory with the app name `my-app`.
@@ -52,7 +52,7 @@ This will create a new app in the `my-app` directory with the app name `my-app`.
 The project structure is as follows:
 
 ```
-app
+my-app
 ├── package.json
 ├── pyproject.toml
 ├── README.md
