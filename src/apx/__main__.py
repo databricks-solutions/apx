@@ -422,8 +422,8 @@ def init(
 
     # === PHASE 6: Build using apx build ===
     build(
-        app_path=app_path,
-        build_path=app_path / ".build",
+        app_path=app_path.resolve(),
+        build_path=Path(".build"),
         skip_ui_build=False,
         version=version,
     )
@@ -447,7 +447,9 @@ def build(
     ] = None,
     build_path: Annotated[
         Path,
-        Option(help="Path to the build directory where artifacts will be placed"),
+        Option(
+            help="Path to the build directory where artifacts will be placed, relative to the app path"
+        ),
     ] = Path(".build"),
     skip_ui_build: Annotated[bool, Option(help="Skip the UI build step")] = False,
     version: bool | None = version_option,
