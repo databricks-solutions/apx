@@ -200,7 +200,9 @@ def init(
             help="The path to the app. If not provided, the app will be created in the current working directory",
         ),
     ] = None,
-    profile: Annotated[str | None, Option(help="The Databricks profile to use")] = None,
+    profile: Annotated[
+        str | None, Option("--profile", "-p", help="The Databricks profile to use")
+    ] = None,
     rules_type: Annotated[
         Literal["cursor", "github"],
         Option(help="The type of rules to use."),
