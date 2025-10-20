@@ -20,7 +20,8 @@ resources:
       config:
         command: ["uvicorn", "{{app_name}}.backend.app:app", "--workers", "2"]
   database_instances:
-    - name: {{app_name}}
+    {{app_name}}-db:
+      name: {{app_name}}
       capacity: CU_1
 targets:
   dev:
