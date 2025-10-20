@@ -14,3 +14,6 @@ sample/
 .ruff_cache/
 
 node_modules/
+
+# mac
+.DS_Store
