@@ -2,17 +2,17 @@
 
 import asyncio
 import importlib
+import logging
 import sys
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
-from rich.console import Console
 from typer import Exit
 import watchfiles
 import uvicorn
+from apx.utils import console, PrefixedLogHandler
 
-console = Console()
 ACCESS_TOKEN_HEADER_NAME = "X-Forwarded-Access-Token"
 
 
@@ -67,15 +67,40 @@ def load_app(app_module_name: str) -> FastAPI:
     return app_instance
 
 
+def setup_uvicorn_logging():
+    """Configure uvicorn to use PrefixedLogHandler for all logs."""
+    # Create the handler
+    handler = PrefixedLogHandler(prefix="[backend]", color="aquamarine1")
+
+    # Set a simple formatter (no timestamp since we're adding prefix)
+    formatter = logging.Formatter("%(message)s")
+    handler.setFormatter(formatter)
+
+    # Configure uvicorn loggers
+    for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
+        logger = logging.getLogger(logger_name)
+        # Remove existing handlers
+        logger.handlers.clear()
+        # Add our custom handler
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        # Prevent propagation to root logger
+        logger.propagate = False
+
+
 async def run_backend(
     cwd: Path, app_module_name: str, backend_host: str, backend_port: int
 ):
     """Run the backend server programmatically with uvicorn and hot-reload support."""
 
+    # Setup logging once
+    setup_uvicorn_logging()
+
     console.print(
-        f"[green][server][/green] Starting server on {backend_host}:{backend_port}"
+        f"[green][server][/]Starting server on {backend_host}:{backend_port} from app: {app_module_name}"
     )
-    console.print(f"[green][server][/green] Watching for changes in {cwd}/**/*.py")
+    console.print(f"[green][server][/green]Watching for changes in {cwd}/**/*.py")
+    console.print()
 
     # Track if this is the first run
     first_run = True
@@ -97,6 +122,7 @@ async def run_backend(
                 host=backend_host,
                 port=backend_port,
                 log_level="info",
+                log_config=None,  # Disable uvicorn's default log config
             )
 
             server = uvicorn.Server(config)

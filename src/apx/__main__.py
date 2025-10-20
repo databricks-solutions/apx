@@ -14,15 +14,12 @@ from typing import Annotated
 import jinja2
 from fastapi import FastAPI
 from rich import print
-from rich.markup import escape
-from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from typer import Argument, Exit, Typer, Option
 
 from apx._version import version as apx_version
 from apx.dev import run_backend
-
-console = Console()
+from apx.utils import stream_output, console
 
 
 def version_callback(value: bool):
@@ -609,26 +606,6 @@ def get_app_name_from_pyproject() -> str:
     return app_name
 
 
-async def stream_output(proc: asyncio.subprocess.Process, prefix: str, color: str):
-    """Stream output from a subprocess with a colored prefix."""
-    process_console = Console()
-
-    async def read_stream(stream, is_stderr=False):
-        while True:
-            line = await stream.readline()
-            if not line:
-                break
-            text = escape(line.decode().rstrip())
-            if text:
-                process_console.print(f"[{color}]{prefix}[/] {text}")
-
-    # Read stdout and stderr concurrently
-    await asyncio.gather(
-        read_stream(proc.stdout, is_stderr=False),
-        read_stream(proc.stderr, is_stderr=True),
-    )
-
-
 async def run_frontend(frontend_port: int):
     """Run the frontend development server."""
     proc = await asyncio.create_subprocess_exec(
@@ -642,7 +619,7 @@ async def run_frontend(frontend_port: int):
         cwd=Path.cwd(),
     )
 
-    await stream_output(proc, escape("[ui] |"), "cyan")
+    await stream_output(proc, "[ui]", "cyan")
     await proc.wait()
 
 
