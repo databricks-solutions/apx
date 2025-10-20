@@ -1,0 +1,28 @@
+bundle:
+  name: {{app_name}}
+
+sync:
+  include:
+    - .build
+
+artifacts:
+  default:
+    type: whl
+    path: .
+    build: uv run apx build
+
+resources:
+  apps:
+    {{app_name}}:
+      name: "{{app_name}}"
+      description: "{{app_name}} created with apx"
+      source_code_path: ./.build
+      config:
+        command: ["uvicorn", "{{app_name}}.backend.app:app", "--workers", "2"]
+  database_instances:
+    - name: {{app_name}}
+      capacity: CU_1
+targets:
+  dev:
+    mode: development
+    default: true
