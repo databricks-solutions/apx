@@ -620,7 +620,7 @@ async def stream_output(proc: asyncio.subprocess.Process, prefix: str, color: st
                 break
             text = escape(line.decode().rstrip())
             if text:
-                process_console.print(f"{prefix} {text}")
+                process_console.print(f"[{color}]{prefix}[/] {text}")
 
     # Read stdout and stderr concurrently
     await asyncio.gather(
@@ -642,7 +642,7 @@ async def run_frontend(frontend_port: int):
         cwd=Path.cwd(),
     )
 
-    await stream_output(proc, "\\[ui] |", "cyan")
+    await stream_output(proc, escape("[ui] |"), "cyan")
     await proc.wait()
 
 
