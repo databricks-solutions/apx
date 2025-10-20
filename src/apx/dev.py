@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from databricks.sdk import WorkspaceClient
-from dotenv import set_key, get_key
+from dotenv import load_dotenv, set_key, get_key
 from fastapi import FastAPI, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from typer import Exit
@@ -229,6 +229,14 @@ async def run_backend(
                 console.print("[yellow][server][/yellow] Reloading...")
 
             app_instance = load_app(app_module_name)
+
+            # check if .env file exists, and if yes - load it
+            dotenv_file = cwd / ".env"
+            if dotenv_file.exists():
+                console.print(
+                    f"[green][server][/green] Loading .env file from {dotenv_file.resolve()}"
+                )
+                load_dotenv(dotenv_file)
 
             if obo:
                 console.print("[green][server][/green] Adding On-Behalf-Of middleware")
