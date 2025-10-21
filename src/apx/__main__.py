@@ -1,33 +1,35 @@
 import asyncio
-from enum import Enum
 import importlib
+from importlib import resources
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import time
-import tomllib
-from importlib import resources
-from pathlib import Path
-import random
 from typing import Annotated, Literal
 
 from dotenv import set_key
-import jinja2
 from fastapi import FastAPI
+import jinja2
 from rich import print
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from typer import Argument, Exit, Typer, Option
+from typer import Argument, Exit, Option, Typer
 
 from apx._version import version as apx_version
 from apx.dev import run_backend
-from apx.utils import stream_output, console
-
-
-def version_callback(value: bool):
-    if value:
-        print(f"apx version: {apx_version}")
-        raise Exit(code=0)
+from apx.utils import (
+    console,
+    ensure_dir,
+    get_app_name_from_pyproject,
+    is_bun_installed,
+    is_uv_installed,
+    process_template_directory,
+    random_name,
+    run_frontend,
+    run_subprocess,
+    version_callback,
+)
 
 
 app = Typer(
@@ -36,6 +38,15 @@ app = Typer(
 
 templates_dir: Path = resources.files("apx").joinpath("templates")  # type: ignore
 jinja2_env = jinja2.Environment(loader=jinja2.FileSystemLoader(templates_dir))
+
+
+version_option = Option(
+    None,
+    "--version",
+    help="Show the version of apx",
+    callback=version_callback,
+    is_eager=True,
+)
 
 
 @app.callback()
@@ -57,133 +68,6 @@ def version():
     print(f"apx version: {apx_version}")
 
 
-def is_uv_installed() -> bool:
-    """Check if uv is installed on the system."""
-    return shutil.which("uv") is not None
-
-
-def is_bun_installed() -> bool:
-    """Check if bun is installed on the system."""
-    return shutil.which("bun") is not None
-
-
-def random_name():
-    # docker-style random name
-    adjectives = [
-        "fast",
-        "simple",
-        "clean",
-        "elegant",
-        "modern",
-        "cool",
-        "awesome",
-        "brave",
-        "bold",
-        "creative",
-        "curious",
-        "dynamic",
-        "energetic",
-        "fantastic",
-        "giant",
-    ]
-
-    animals = [
-        "lion",
-        "tiger",
-        "bear",
-        "wolf",
-        "fox",
-        "dog",
-        "cat",
-        "bird",
-        "fish",
-        "horse",
-        "rabbit",
-        "turtle",
-        "whale",
-        "dolphin",
-        "shark",
-        "octopus",
-    ]
-
-    return f"{random.choice(adjectives)}_{random.choice(animals)}"
-
-
-version_option = Option(
-    None,
-    "--version",
-    help="Show the version of apx",
-    callback=version_callback,
-    is_eager=True,
-)
-
-
-# Helper functions for init command
-def ensure_dir(path: Path) -> Path:
-    """Create directory if it doesn't exist and return the path."""
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def process_template_directory(
-    source_dir: Path, target_dir: Path, app_name: str
-) -> None:
-    """
-    Recursively process template directory, copying files and rendering Jinja2 templates.
-    Replaces 'base' with app_name in paths.
-    """
-    for item in source_dir.rglob("*"):
-        if item.is_file():
-            # Calculate relative path from source_dir
-            rel_path = item.relative_to(source_dir)
-
-            # Replace 'base' with app_name in the path
-            path_str = str(rel_path)
-            if "/base/" in path_str or path_str.startswith("base/"):
-                path_str = path_str.replace("/base/", f"/{app_name}/").replace(
-                    "base/", f"{app_name}/"
-                )
-
-            # Determine target path
-            if item.suffix == ".jinja2":
-                # Remove .jinja2 extension for rendered files
-                target_path = target_dir / path_str.removesuffix(".jinja2")
-            else:
-                target_path = target_dir / path_str
-
-            # Ensure target directory exists
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Process file
-            if item.suffix == ".jinja2":
-                # Render Jinja2 template
-                template = jinja2_env.get_template(f"base/{rel_path}")
-                target_path.write_text(template.render(app_name=app_name))
-                if item.name == "logo.svg.jinja2":
-                    app_letter = app_name[0].upper()
-                    target_path.write_text(template.render(app_letter=app_letter))
-            else:
-                # Copy file as-is
-                shutil.copy(item, target_path)
-
-
-def run_subprocess(cmd: list[str], cwd: Path, error_msg: str) -> None:
-    """Run a subprocess and handle errors gracefully."""
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        console.print(f"[red]❌ {error_msg}[/red]")
-        if result.stderr:
-            console.print(f"[red]{result.stderr}[/red]")
-        if result.stdout:
-            console.print(f"[red]{result.stdout}[/red]")
-        raise Exit(code=1)
-
-
 @app.command(name="init", help="Initialize a new project")
 def init(
     app_name: Annotated[
@@ -203,12 +87,17 @@ def init(
     profile: Annotated[
         str | None, Option("--profile", "-p", help="The Databricks profile to use")
     ] = None,
-    assistant_type: Annotated[
+    assistant: Annotated[
         Literal["cursor", "vscode", "codex", "claude"] | None,
         Option(
-            help="The type of assistant to use. If not provided, the default is cursor."
+            "--assistant",
+            "-a",
+            help="The type of assistant to use. If not provided, no assistant rules will be setup.",
         ),
-    ] = "cursor",
+    ] = None,
+    db: Annotated[
+        bool, Option(help="Whether to add Lakebase support to the project")
+    ] = False,
     version: bool | None = version_option,
 ):
     # Check prerequisites
@@ -256,7 +145,7 @@ def init(
 
         # Process the entire base template directory
         base_template_dir = templates_dir / "base"
-        process_template_directory(base_template_dir, app_path, app_name)
+        process_template_directory(base_template_dir, app_path, app_name, jinja2_env)
 
         # Create dist gitignore
         dist_dir = app_path / "src" / app_name / "__dist__"
@@ -271,6 +160,11 @@ def init(
         # append DATABRICKS_PROFILE to .env if profile is provided
         if profile:
             set_key(app_path / ".env", "DATABRICKS_CONFIG_PROFILE", profile)
+
+        if db:
+            # replace databricks.yml.jinja2 with databricks.yml.jinja2 from addons/db
+            db_addon = templates_dir / "addons/db"
+            process_template_directory(db_addon, app_path, app_name, jinja2_env)
 
         progress.update(task, description="✅ Project layout prepared", completed=True)
 
@@ -425,7 +319,7 @@ def init(
     )
 
     # === PHASE 7: Setting up assistant rules ===
-    if assistant_type:
+    if assistant:
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -433,13 +327,13 @@ def init(
         ) as progress:
             task = progress.add_task("🤖 Setting up assistant rules...", total=None)
 
-            if assistant_type == "vscode":
+            if assistant == "vscode":
                 progress.update(task, description="🤖 Copying VSCode instructions...")
                 shutil.copytree(
                     templates_dir / "addons/rules/.github/instructions",
                     app_path / ".github/instructions",
                 )
-            elif assistant_type == "cursor":
+            elif assistant == "cursor":
                 progress.update(task, description="🤖 Copying Cursor rules...")
                 shutil.copytree(
                     templates_dir / "addons/rules/.cursor/rules",
@@ -448,11 +342,11 @@ def init(
             else:
                 progress.update(
                     task,
-                    description=f"⏭️  Skipping assistant rules setup for {assistant_type}",
+                    description=f"⏭️  Skipping assistant rules setup for {assistant}",
                     completed=True,
                 )
                 console.print(
-                    f"""[yellow]⏭️  Skipping assistant rules setup for {assistant_type}.
+                    f"""[yellow]⏭️  Skipping assistant rules setup for {assistant}.
                 Please add them manually to your editor of choice.[/yellow]"""
                 )
 
@@ -467,7 +361,7 @@ def init(
                     "mcp",
                     "init",
                     "--client",
-                    assistant_type,
+                    assistant,
                 ],
                 cwd=app_path,
                 error_msg="Failed to install shadcn mcp",
@@ -652,42 +546,6 @@ def openapi(
     spec = app_instance.openapi()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(spec, indent=2))
-
-
-def get_app_name_from_pyproject() -> str:
-    """Read the app name from pyproject.toml."""
-    pyproject_path = Path.cwd() / "pyproject.toml"
-    if not pyproject_path.exists():
-        console.print("[red]❌ pyproject.toml not found in current directory[/red]")
-        raise Exit(code=1)
-
-    with open(pyproject_path, "rb") as f:
-        data = tomllib.load(f)
-
-    # Get the project name from pyproject.toml
-    app_name = data.get("project", {}).get("name")
-    if not app_name:
-        console.print("[red]❌ Could not find project name in pyproject.toml[/red]")
-        raise Exit(code=1)
-
-    return app_name
-
-
-async def run_frontend(frontend_port: int):
-    """Run the frontend development server."""
-    proc = await asyncio.create_subprocess_exec(
-        "bun",
-        "run",
-        "vite",
-        "dev",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=os.environ,
-        cwd=Path.cwd(),
-    )
-
-    await stream_output(proc, "[ui]", "cyan")
-    await proc.wait()
 
 
 @app.command(name="dev", help="Run development servers for frontend and backend")
