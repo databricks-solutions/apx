@@ -2,14 +2,14 @@
 alwaysApply: true
 ---
 
-# Cursor Agent Rules
+# Copilot Rules
 
 ## Project Structure
 - This is a full-stack application with two main parts:
   - `src/{{app_name}}/ui/` - Frontend (React + Vite)
-  - `src/{{app_name}}/api/` - Backend (FastAPI + Uvicorn)
+  - `src/{{app_name}}/backend/` - Backend (FastAPI + Uvicorn)
 - Backend serves both frontend and API routes at `/` and `/api` respectively
-- Frontend client is auto-generated using `orval` at the vite reload and vite build steps.
+- Frontend API client code is auto-generated using `orval` at the vite reload and vite build steps.
 
 ## Package Management
 - **Always use `bun` for frontend package management** - never use `npm`
@@ -37,8 +37,8 @@ Each entity has two parts of state:
 
 ### Routing
 - Use `@tanstack/react-router` for all routing
-- Main entry point: `src/<project-name>/ui/src/main.tsx`
-- Frontend routes: `src/<project-name>/ui/src/routes/` directory
+- Main entry point: `src/<app-name>/ui/main.tsx`
+- Frontend routes: `src/<project-name>/ui/routes/` directory
 
 ### Component Architecture
 Follow this pattern for all pages/components:

@@ -203,9 +203,11 @@ def init(
     profile: Annotated[
         str | None, Option("--profile", "-p", help="The Databricks profile to use")
     ] = None,
-    rules_type: Annotated[
-        Literal["cursor", "github"],
-        Option(help="The type of rules to use."),
+    assistant_type: Annotated[
+        Literal["cursor", "vscode", "codex", "claude"] | None,
+        Option(
+            help="The type of assistant to use. If not provided, the default is cursor."
+        ),
     ] = "cursor",
     version: bool | None = version_option,
 ):
@@ -421,6 +423,59 @@ def init(
         skip_ui_build=False,
         version=version,
     )
+
+    # === PHASE 7: Setting up assistant rules ===
+    if assistant_type:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            task = progress.add_task("🤖 Setting up assistant rules...", total=None)
+
+            if assistant_type == "vscode":
+                progress.update(task, description="🤖 Copying VSCode instructions...")
+                shutil.copytree(
+                    templates_dir / "addons/rules/.github/instructions",
+                    app_path / ".github/instructions",
+                )
+            elif assistant_type == "cursor":
+                progress.update(task, description="🤖 Copying Cursor rules...")
+                shutil.copytree(
+                    templates_dir / "addons/rules/.cursor/rules",
+                    app_path / ".cursor/rules",
+                )
+            else:
+                progress.update(
+                    task,
+                    description=f"⏭️  Skipping assistant rules setup for {assistant_type}",
+                    completed=True,
+                )
+                console.print(
+                    f"""[yellow]⏭️  Skipping assistant rules setup for {assistant_type}.
+                Please add them manually to your editor of choice.[/yellow]"""
+                )
+
+            # install shadcn mcp via CLI
+            progress.update(task, description="🤖 Installing shadcn MCP...")
+            run_subprocess(
+                [
+                    "bun",
+                    "x",
+                    "--bun",
+                    "shadcn@latest",
+                    "mcp",
+                    "init",
+                    "--client",
+                    assistant_type,
+                ],
+                cwd=app_path,
+                error_msg="Failed to install shadcn mcp",
+            )
+
+            progress.update(
+                task, description="✅ Assistant rules configured", completed=True
+            )
 
     console.print()
     console.print(

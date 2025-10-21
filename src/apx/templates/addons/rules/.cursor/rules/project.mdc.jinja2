@@ -1,0 +1,76 @@
+---
+alwaysApply: true
+---
+
+# Cursor Agent Rules
+
+## Project Structure
+- This is a full-stack application with two main parts:
+  - `src/{{app_name}}/ui/` - Frontend (React + Vite)
+  - `src/{{app_name}}/backend/` - Backend (FastAPI + Uvicorn)
+- Backend serves both frontend and API routes at `/` and `/api` respectively
+- Frontend API client code is auto-generated using `orval` at the vite reload and vite build steps.
+
+## Package Management
+- **Always use `bun` for frontend package management** - never use `npm`
+- **Always use `uv` for Python project management** - never use `pip` or other Python package managers
+- UI code is located in the `/src/{{app_name}}/ui` folder of the project
+
+## Model Conventions
+Each entity follows a 3-model pattern:
+- `EntityName` (e.g., `Dataset`) - Database entity structure
+- `EntityNameIn` (e.g., `DatasetIn`) - Creation/form input structure
+- `EntityNameOut` (e.g., `DatasetOut`) - API response structure
+
+## API Requirements
+- All routes in the API app **must** have a `response_model` defined for proper client generation
+- All routes in the API app **must** have a `operation_id` defined for proper client generation. 
+  Operation ID usually should be the same as the route name or function name, e.g. `user` for `GET /user` route. or `CreateUser` for `POST /user` route.
+
+
+## Entity State Management
+Each entity has two parts of state:
+- Database storage (represented by `EntityName` model)
+- In/Out models (represented by `EntityNameIn` and `EntityNameOut` models)
+
+## Frontend Development Rules
+
+### Routing
+- Use `@tanstack/react-router` for all routing
+- Main entry point: `src/<app-name>/ui/main.tsx`
+- Frontend routes: `src/<project-name>/ui/routes/` directory
+
+### Component Architecture
+Follow this pattern for all pages/components:
+1. **Static elements** (forms, buttons, etc.) - render immediately
+2. **API data** - fetch using `useXSuspense` hooks
+3. **Loading states** - show `Skeleton` components via Suspense fallback
+4. **Data rendering** - render once data is fetched
+
+### Data Fetching Rules
+- **Always use `useXSuspense` hooks** for API data fetching
+- **Always use `Suspense` component** for loading states
+- **Always use `Skeleton` component** for loading UI elements
+
+## Component Creation Rules
+- Prefer using standard shadcn/ui components whenever possible. If ShadCN MCP server is available, use it to generate components.
+- Prefer adding new components in `src/<project-name>/ui/src/components/` directory
+
+Keep the loadable part of component minimal, and use `Suspense` component to handle the loading state. If parts of component can be displayed without API data, display them immediately.
+Don't create 2 separate components for skeleton and data - reuse the same component.
+
+### Code Organization
+- Keep code clean and maintainable by creating reusable components
+- Use the `selector` function with destructuring for clean data access:
+
+```tsx
+import {useProfileSuspense} from '@/lib/api';
+import {selector} from '@/lib/selector';
+
+const MyComponent = () => {
+  const {data: profile} = useProfileSuspense(selector());
+  // Use profile directly instead of .data.data
+};
+```
+
+`selector` is a generic, so it can be used with any `useX` and `useXSuspense` hooks.
