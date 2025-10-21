@@ -28,8 +28,8 @@ export interface ApxPluginOptions {
 }
 export declare function apx(options?: ApxPluginOptions): Plugin;
 export type ApxMetadata = {
-    app_name: string;
-    app_module: string;
+    appName: string;
+    appModule: string;
 };
 export declare function readMetadata(): ApxMetadata;
 export default apx;

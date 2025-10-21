@@ -246,3 +246,20 @@ async def run_frontend(frontend_port: int):
 
     await stream_output(proc, "[ui]", "cyan")
     await proc.wait()
+
+
+def generate_metadata_file(app_path: Path):
+
+    pyproject_path = app_path / "pyproject.toml"
+    pyproject = tomllib.loads(pyproject_path.read_text())
+    metadata = pyproject["tool"]["apx"]["metadata"]
+    metadata_path = app_path / metadata["metadata-path"]
+
+    metadata_path.write_text(
+        "\n".join(
+            [
+                f'app_name = "{metadata["app-name"]}"',
+                f'app_module = "{metadata["app-module"]}"',
+            ]
+        )
+    )

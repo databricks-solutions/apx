@@ -396,8 +396,8 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
 }
 
 export type ApxMetadata = {
-  app_name: string;
-  app_module: string;
+  appName: string;
+  appModule: string;
 };
 
 // read metadata from pyproject.toml using toml npm package
@@ -405,8 +405,8 @@ export function readMetadata(): ApxMetadata {
   const pyprojectPath = join(process.cwd(), "pyproject.toml");
   const pyproject = toml.parse(readFileSync(pyprojectPath, "utf-8"));
   return {
-    app_name: pyproject.tool.apx.metadata.app_name,
-    app_module: pyproject.tool.apx.metadata.app_module,
+    appName: pyproject.tool.apx.metadata["app-name"],
+    appModule: pyproject.tool.apx.metadata["app-module"],
   } as ApxMetadata;
 }
 
