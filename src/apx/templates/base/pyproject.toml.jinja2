@@ -16,8 +16,10 @@ dev = [
 ]
 
 [tool.apx.metadata]
-app_name = "{{app_name}}"
-app_module = "{{app_name}}.backend.app:app"
+app-name = "{{app_name}}"
+app-module = "{{app_name}}.backend.app:app"
+metadata-path = "src/{{app_name}}/_metadata.py"
+
 
 [tool.uv.sources]
 apx = { git = "https://github.com/renardeinside/apx.git" }

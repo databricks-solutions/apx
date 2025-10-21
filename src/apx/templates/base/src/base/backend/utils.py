@@ -3,8 +3,6 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from .config import conf
-from pathlib import Path
-import tomllib
 
 
 def add_not_found_handler(app: FastAPI):
@@ -26,14 +24,3 @@ def add_not_found_handler(app: FastAPI):
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
     app.exception_handler(StarletteHTTPException)(http_exception_handler)
-
-
-class Metadata(BaseModel):
-    app_name: str
-    app_module: str
-
-
-def read_metadata() -> Metadata:
-    pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
-    pyproject = tomllib.loads(pyproject_path.read_text())
-    return Metadata(**pyproject["tool"]["apx"]["metadata"])

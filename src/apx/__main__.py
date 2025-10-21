@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+import tomllib
 from typing import Annotated, Literal
 
 from dotenv import set_key
@@ -448,6 +449,21 @@ def build(
             progress.update(task, description="✅ UI built", completed=True)
     else:
         console.print("[yellow]⏭️  Skipping UI build[/yellow]")
+
+    # silently generate the _metadata.py file
+    pyproject_path = app_path / "pyproject.toml"
+    pyproject = tomllib.loads(pyproject_path.read_text())
+    metadata = pyproject["tool"]["apx"]["metadata"]
+    metadata_path = app_path / metadata["metadata-path"]
+
+    metadata_path.write_text(
+        "\n".join(
+            [
+                f'app_name = "{metadata["app-name"]}"',
+                f'app_module = "{metadata["app-module"]}"',
+            ]
+        )
+    )
 
     # === PHASE 2: Building Python wheel ===
     with Progress(
