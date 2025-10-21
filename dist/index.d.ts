@@ -27,5 +27,10 @@ export interface ApxPluginOptions {
     ignore?: string[];
 }
 export declare function apx(options?: ApxPluginOptions): Plugin;
+export type ApxMetadata = {
+    app_name: string;
+    app_module: string;
+};
+export declare function readMetadata(): ApxMetadata;
 export default apx;
 //# sourceMappingURL=index.d.ts.map

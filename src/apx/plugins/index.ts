@@ -4,6 +4,7 @@ import { type Plugin } from "vite";
 import { spawn, type ChildProcess } from "child_process";
 import { createHash } from "crypto";
 import { generate, type OutputOptions } from "orval";
+import toml from "toml";
 
 // Cache for OpenAPI spec hashes to detect changes
 const specHashCache = new Map<string, string>();
@@ -392,6 +393,21 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
       stop();
     },
   };
+}
+
+export type ApxMetadata = {
+  app_name: string;
+  app_module: string;
+};
+
+// read metadata from pyproject.toml using toml npm package
+export function readMetadata(): ApxMetadata {
+  const pyprojectPath = join(process.cwd(), "pyproject.toml");
+  const pyproject = toml.parse(readFileSync(pyprojectPath, "utf-8"));
+  return {
+    app_name: pyproject.tool.apx.metadata.app_name,
+    app_module: pyproject.tool.apx.metadata.app_module,
+  } as ApxMetadata;
 }
 
 // Default export for convenience: import apx from "apx"

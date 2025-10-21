@@ -9,7 +9,7 @@ class Runtime:
     @property
     def ws(self) -> WorkspaceClient:
         # note - this workspace client is usually an SP-based client
-        # in development it usually uses the DATABRICKS_PROFILE
+        # in development it usually uses the DATABRICKS_CONFIG_PROFILE
         return WorkspaceClient()
 
 

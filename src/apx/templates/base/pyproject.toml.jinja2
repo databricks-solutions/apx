@@ -15,6 +15,10 @@ dev = [
     "apx",
 ]
 
+[tool.apx.metadata]
+app_name = "{{app_name}}"
+app_module = "{{app_name}}.backend.app"
+
 [tool.uv.sources]
 apx = { git = "https://github.com/renardeinside/apx.git" }
 

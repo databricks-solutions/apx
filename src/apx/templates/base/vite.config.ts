@@ -1,17 +1,17 @@
-const APP_NAME = "{{app_name}}";
-
-const APP_UI_PATH = `./src/${APP_NAME}/ui`;
-const OUT_DIR = `../__dist__`; // relative to APP_UI_PATH!
-const OPENAPI_JSON_PATH = "node_modules/.tmp/openapi.json";
-
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import { defineConfig } from "vite";
 import { resolve } from "path";
 import { apx, OpenAPI, Orval } from "apx/vite-plugin";
+import { readMetadata, type ApxMetadata } from "apx/vite-plugin";
 
+const { app_name: APP_NAME, app_module: APP_MODULE } =
+  readMetadata() as ApxMetadata;
 
+const APP_UI_PATH = `./src/${APP_NAME}/ui`;
+const OUT_DIR = `../__dist__`; // relative to APP_UI_PATH!
+const OPENAPI_JSON_PATH = "node_modules/.tmp/openapi.json";
 
 export default defineConfig({
   root: APP_UI_PATH,
@@ -25,7 +25,7 @@ export default defineConfig({
     }),
     apx({
       steps: [
-        OpenAPI(`${APP_NAME}.backend.app:app`, OPENAPI_JSON_PATH),
+        OpenAPI(APP_MODULE, OPENAPI_JSON_PATH),
         Orval({
           input: OPENAPI_JSON_PATH,
           output: {
@@ -42,7 +42,7 @@ export default defineConfig({
           },
         }),
       ],
-      ignore: ["node_modules", `${APP_UI_PATH}/lib/api.ts`],
+      ignore: ["node_modules"],
     }),
     react(),
     tailwindcss(),

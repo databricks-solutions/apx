@@ -6,23 +6,22 @@
     "module": "ESNext",
     "moduleDetection": "force",
     "jsx": "react-jsx",
-
+    "paths": {
+      "apx/vite-plugin": ["./src/apx/plugins/index.ts"]
+    },
     // Bundler-friendly
     "moduleResolution": "Bundler",
     "verbatimModuleSyntax": true,
-
     // Emission (we'll call tsc with --emitDeclarationOnly)
     "declaration": true,
     "declarationMap": true,
     "emitDeclarationOnly": false,
     "outDir": "dist",
     "rootDir": "src/apx/plugins",
-
     // Best practices
     "strict": true,
     "skipLibCheck": true,
     "noFallthroughCasesInSwitch": true,
-
     // Optional stricter flags
     "noUnusedLocals": false,
     "noUnusedParameters": false,
