@@ -1,10 +1,10 @@
-from .config import conf
+from .config import conf, AppConfig
 from databricks.sdk import WorkspaceClient
 
 
 class Runtime:
     def __init__(self):
-        self.config = conf
+        self.config: AppConfig = conf
 
     @property
     def ws(self) -> WorkspaceClient:
