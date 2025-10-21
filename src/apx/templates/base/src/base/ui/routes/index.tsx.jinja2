@@ -1,5 +1,3 @@
-const APP_NAME = "{{app_name}}";
-
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Suspense, useState } from "react";
 import { QueryErrorResetBoundary } from "@tanstack/react-query";
@@ -179,7 +177,7 @@ function Index() {
         <div className="container mx-auto px-4 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
             <img src="/logo.svg" alt="logo" className="h-6 w-6 text-primary border-1 border-primary rounded-sm" />
-            <span className="font-semibold text-lg">{APP_NAME}</span>
+            <span className="font-semibold text-lg">__APP_NAME__</span>
           </Link>
           <ModeToggle />
         </div>
@@ -191,7 +189,7 @@ function Index() {
           {/* Hero section */}
           <div className="text-center space-y-4">
             <h1 className="text-6xl md:text-7xl lg:text-8xl font-bold bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent animate-in fade-in slide-in-from-bottom-4 duration-1000">
-              {APP_NAME}
+              __APP_NAME__
             </h1>
           </div>
 
@@ -207,7 +205,7 @@ function Index() {
             <p>
               Get started by editing{" "}
               <code className="px-2 py-1 rounded bg-muted font-mono text-xs">
-                src/{APP_NAME}/ui/routes/index.tsx
+                src/__APP_NAME__/ui/routes/index.tsx
               </code>
             </p>
           </div>
