@@ -6,7 +6,7 @@ import { resolve } from "path";
 import { apx, OpenAPI, Orval } from "apx/vite-plugin";
 import { readMetadata, type ApxMetadata } from "apx/vite-plugin";
 
-const { app_name: APP_NAME, app_module: APP_MODULE } =
+const { appName: APP_NAME, appModule: APP_MODULE } =
   readMetadata() as ApxMetadata;
 
 const APP_UI_PATH = `./src/${APP_NAME}/ui`;

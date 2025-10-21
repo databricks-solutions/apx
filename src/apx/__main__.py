@@ -22,6 +22,7 @@ from apx.dev import run_backend
 from apx.utils import (
     console,
     ensure_dir,
+    generate_metadata_file,
     get_app_name_from_pyproject,
     is_bun_installed,
     is_uv_installed,
@@ -275,6 +276,9 @@ def init(
     ) as progress:
         task = progress.add_task("🐍 Setting up project...", total=None)
 
+        # Generate the _metadata.py file
+        generate_metadata_file(app_path)
+
         # Start uv sync in background
         proc = subprocess.Popen(
             ["uv", "sync"],
@@ -417,6 +421,9 @@ def build(
 
     # add a .build/.gitignore file
     (build_dir / ".gitignore").write_text("*\n")
+
+    # Generate the _metadata.py file
+    generate_metadata_file(app_path)
 
     # === PHASE 1: Building UI ===
     if not skip_ui_build:
