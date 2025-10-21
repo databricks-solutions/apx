@@ -31,7 +31,7 @@ def version_callback(value: bool):
 
 
 app = Typer(
-    name="apx | project quickstarter",
+    name="apx | Databricks App Toolkit",
 )
 
 templates_dir: Path = resources.files("apx").joinpath("templates")  # type: ignore
@@ -260,12 +260,6 @@ def init(
         dist_dir = app_path / "src" / app_name / "__dist__"
         ensure_dir(dist_dir)
         (dist_dir / ".gitignore").write_text("*\n")
-
-        # depending on the rules type, remove the .cursor or .github directory
-        if rules_type == "cursor":
-            shutil.rmtree(app_path / ".github/instructions", ignore_errors=True)
-        elif rules_type == "github":
-            shutil.rmtree(app_path / ".cursor/rules", ignore_errors=True)
 
         # add a .build directory with .gitignore file
         build_dir = app_path / ".build"
