@@ -1,5 +1,5 @@
 bundle:
-  name: {{app_name}}
+  name: "{{app_name}}"
 
 sync:
   include:
@@ -7,25 +7,28 @@ sync:
 
 artifacts:
   default:
-    type: whl
-    path: .
     build: uv run apx build
 
 resources:
   apps:
-    {{app_name}}:
+    {{app_name}}-app:
       name: "{{app_name}}"
       description: "{{app_name}} created with apx"
       source_code_path: ./.build
       config:
         command: ["uvicorn", "{{app_name}}.backend.app:app", "--workers", "2"]
+      resources:
+        - name: "db"
+          database:
+            database_name: "databricks_postgres"
+            instance_name: "{{app_name}}"
+            permission: "CAN_CONNECT_AND_CREATE"
+
   database_instances:
     {{app_name}}-db:
       name: "{{app_name}}"
       capacity: "CU_1"
-      permissions:
-        - user_name: "${workspace.current_user.userName}"
-          level: "ADMIN"
+
 
 
 
