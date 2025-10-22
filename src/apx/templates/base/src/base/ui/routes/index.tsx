@@ -176,7 +176,7 @@ function Index() {
             <img
               src="/logo.svg"
               alt="logo"
-              className="h-6 w-6 text-primary border-1 border-primary rounded-sm"
+              className="h-6 w-6 text-primary border border-primary rounded-sm"
             />
             <span className="font-semibold text-lg">{__APP_NAME__}</span>
           </Link>
@@ -189,7 +189,7 @@ function Index() {
         <div className="max-w-3xl w-full space-y-8">
           {/* Hero section */}
           <div className="text-center space-y-4">
-            <h1 className="text-6xl md:text-7xl lg:text-8xl font-bold bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent animate-in fade-in slide-in-from-bottom-4 duration-1000">
+            <h1 className="text-6xl md:text-7xl lg:text-8xl font-bold bg-linear-to-r from-primary to-primary/60 bg-clip-text text-transparent animate-in fade-in slide-in-from-bottom-4 duration-1000">
               {__APP_NAME__.replace("-", " ")}
             </h1>
           </div>
