@@ -4,7 +4,7 @@ import { type Plugin } from "vite";
 import { spawn, type ChildProcess } from "child_process";
 import { createHash } from "crypto";
 import { generate, type OutputOptions } from "orval";
-import toml from "toml";
+import { parse } from "smol-toml";
 
 // Cache for OpenAPI spec hashes to detect changes
 const specHashCache = new Map<string, string>();
@@ -403,10 +403,29 @@ export type ApxMetadata = {
 // read metadata from pyproject.toml using toml npm package
 export function readMetadata(): ApxMetadata {
   const pyprojectPath = join(process.cwd(), "pyproject.toml");
-  const pyproject = toml.parse(readFileSync(pyprojectPath, "utf-8"));
+  const pyproject = parse(readFileSync(pyprojectPath, "utf-8"));
+
+  // Safely access deep properties, with type checks to satisfy TypeScript
+  const tool =
+    typeof pyproject === "object" && pyproject !== null && "tool" in pyproject
+      ? (pyproject as any).tool
+      : undefined;
+  const apx =
+    tool && typeof tool === "object" && tool !== null && "apx" in tool
+      ? tool.apx
+      : undefined;
+  const metadata =
+    apx && typeof apx === "object" && apx !== null && "metadata" in apx
+      ? apx.metadata
+      : undefined;
+
+  if (!metadata || typeof metadata !== "object") {
+    throw new Error("Could not find [tool.apx.metadata] in pyproject.toml");
+  }
+
   return {
-    appName: pyproject.tool.apx.metadata["app-name"],
-    appModule: pyproject.tool.apx.metadata["app-module"],
+    appName: metadata["app-name"],
+    appModule: metadata["app-module"],
   } as ApxMetadata;
 }
 
