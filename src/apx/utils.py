@@ -31,7 +31,7 @@ def print_with_prefix(prefix: str, text: str, color: str, width: int = 10):
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(current_time))
     milliseconds = int((current_time % 1) * 1000)
     timestamp_with_ms = f"{timestamp}.{milliseconds:03d}"
-    
+
     escaped_prefix = escape(prefix)
     # Pad the prefix to the specified width
     padded_prefix = escaped_prefix.ljust(width)
@@ -40,7 +40,9 @@ def print_with_prefix(prefix: str, text: str, color: str, width: int = 10):
     lines = text.split("\n")
     for line in lines:
         escaped_line = escape(line)
-        console.print(f"{timestamp_with_ms} | [{color}]{padded_prefix}[/] | {escaped_line}")
+        console.print(
+            f"{timestamp_with_ms} | [{color}]{padded_prefix}[/] | {escaped_line}"
+        )
 
 
 class PrefixedLogHandler(logging.Handler):
@@ -269,7 +271,7 @@ async def run_frontend(frontend_port: int):
             text = line.decode().rstrip()
             if text:
                 print_with_prefix("[ui]", text, "cyan", width=10)
-    
+
     await read_stdout()
     await proc.wait()
 

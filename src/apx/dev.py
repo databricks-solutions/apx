@@ -1,7 +1,9 @@
 """Development server utilities for apx."""
 
 import asyncio
+import contextlib
 import importlib
+import io
 import logging
 import sys
 import time
@@ -20,6 +22,45 @@ from apx import __version__
 
 # note: header name must be lowercase and with - symbols
 ACCESS_TOKEN_HEADER_NAME = "x-forwarded-access-token"
+
+
+@contextlib.contextmanager
+def suppress_output_and_logs():
+    """Suppress stdout, stderr and logging output temporarily."""
+    # Save original stdout/stderr
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+
+    # Save original log level for root logger and all existing loggers
+    root_logger = logging.getLogger()
+    original_root_level = root_logger.level
+    original_levels = {}
+
+    for name in logging.Logger.manager.loggerDict:
+        logger = logging.getLogger(name)
+        if hasattr(logger, "level"):
+            original_levels[name] = logger.level
+
+    try:
+        # Redirect stdout/stderr to devnull
+        sys.stdout = io.StringIO()
+        sys.stderr = io.StringIO()
+
+        # Set all loggers to CRITICAL to suppress INFO/WARNING logs
+        root_logger.setLevel(logging.CRITICAL)
+        for name in original_levels:
+            logging.getLogger(name).setLevel(logging.CRITICAL)
+
+        yield
+    finally:
+        # Restore stdout/stderr
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+
+        # Restore log levels
+        root_logger.setLevel(original_root_level)
+        for name, level in original_levels.items():
+            logging.getLogger(name).setLevel(level)
 
 
 def load_app(app_module_name: str, reload_modules: bool = False) -> FastAPI:
@@ -80,18 +121,22 @@ def create_and_persist_obo_token(
     # Step 3.2: Create a new token
     if status_context:
         status_context.update("🔐 Creating new OBO token")
-    new_token = ws.tokens.create(
-        comment=f"dev token for {app_module_name}, created by apx",
-        lifetime_seconds=token_lifetime_seconds,
-    )
+
+    # Suppress any logging during token creation
+    with suppress_output_and_logs():
+        new_token = ws.tokens.create(
+            comment=f"dev token for {app_module_name}, created by apx",
+            lifetime_seconds=token_lifetime_seconds,
+        )
 
     assert new_token.token_info is not None
     assert new_token.token_info.token_id is not None
     assert new_token.token_value is not None
 
     # Save token to .env file
-    set_key(env_file, "APX_TOKEN_ID", new_token.token_info.token_id)
-    set_key(env_file, "APX_TOKEN_SECRET", new_token.token_value)
+    with suppress_output_and_logs():
+        set_key(env_file, "APX_TOKEN_ID", new_token.token_info.token_id)
+        set_key(env_file, "APX_TOKEN_SECRET", new_token.token_value)
 
     if status_context:
         status_context.update(f"💾 Token saved to {env_file.name}")
@@ -140,12 +185,14 @@ def prepare_obo_token(
     # pick specific env variables
     if status_context:
         status_context.update("🔍 Checking existing token")
-    token_id = get_key(env_file, "APX_TOKEN_ID")
-    token_secret = get_key(env_file, "APX_TOKEN_SECRET")
 
-    # Initialize Databricks client
+    # Suppress output from get_key (which prints warnings) and any logging
     try:
-        ws = WorkspaceClient(product="apx/dev", product_version=__version__)
+        with suppress_output_and_logs():
+            token_id = get_key(env_file, "APX_TOKEN_ID")
+            token_secret = get_key(env_file, "APX_TOKEN_SECRET")
+            # Initialize Databricks client
+            ws = WorkspaceClient(product="apx/dev", product_version=__version__)
     except Exception as e:
         console.print(f"[red]❌ Failed to initialize Databricks client: {e}[/red]")
         console.print(
@@ -158,10 +205,13 @@ def prepare_obo_token(
         # Step 3.1: Validate the token
         if status_context:
             status_context.update("🔐 Validating existing token")
-        user_tokens = ws.tokens.list()
-        user_token = next(
-            (token for token in user_tokens if token.token_id == token_id), None
-        )
+
+        # Suppress any logging during token validation
+        with suppress_output_and_logs():
+            user_tokens = ws.tokens.list()
+            user_token = next(
+                (token for token in user_tokens if token.token_id == token_id), None
+            )
 
         # Check if token exists and is still valid
         if user_token and user_token.expiry_time:
@@ -185,7 +235,11 @@ def prepare_obo_token(
 
     # Create and return new token (common path for all cases that need a new token)
     return create_and_persist_obo_token(
-        ws, app_module_name, token_lifetime_seconds, env_file, status_context=status_context
+        ws,
+        app_module_name,
+        token_lifetime_seconds,
+        env_file,
+        status_context=status_context,
     )
 
 
@@ -253,9 +307,13 @@ async def run_backend(
 
             # Prepare OBO token (will reuse if still valid)
             if obo and first_run:
-                with console.status("[bold cyan]Preparing On-Behalf-Of token...") as status:
+                with console.status(
+                    "[bold cyan]Preparing On-Behalf-Of token..."
+                ) as status:
                     status.update(f"📂 Loading .env file from {dotenv_file.resolve()}")
-                    obo_token = prepare_obo_token(cwd, app_module_name, status_context=status)
+                    obo_token = prepare_obo_token(
+                        cwd, app_module_name, status_context=status
+                    )
                     # Give user a moment to see the final status
                     time.sleep(0.3)
                 console.print("[green]✓[/green] On-Behalf-Of token ready")

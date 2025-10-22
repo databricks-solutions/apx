@@ -310,8 +310,8 @@ function Profile() {
                   Failed to Load Profile
                 </CardTitle>
                 <CardDescription>
-                  There was an error loading your profile information.
-                  Make sure the backend is running and you're authenticated.
+                  There was an error loading your profile information. Make sure
+                  the backend is running and you're authenticated.
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex gap-2">

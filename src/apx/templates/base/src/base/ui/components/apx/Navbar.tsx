@@ -20,4 +20,3 @@ function Navbar({ leftContent, rightContent }: NavbarProps) {
 }
 
 export default Navbar;
-

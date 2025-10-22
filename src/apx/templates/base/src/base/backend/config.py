@@ -4,14 +4,12 @@ from pathlib import Path
 from pydantic import Field
 from dotenv import load_dotenv
 from .._metadata import app_name
-from .logger import logger
 
 # project root is the parent of the src folder
 project_root = Path(__file__).parent.parent.parent.parent
 env_file = project_root / ".env"
 
 if env_file.exists():
-    logger.info(f"Loading environment variables from {env_file.resolve()}")
     load_dotenv(dotenv_path=env_file)
 
 

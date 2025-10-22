@@ -1,9 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import Navbar from "@/components/apx/Navbar";
-import {
-  User,
-} from "lucide-react";
+import { User } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   component: () => <Index />,
@@ -29,14 +27,13 @@ function Index() {
             <h1 className="text-5xl md:text-6xl lg:text-7xl font-bold">
               Welcome to {__APP_NAME__}
             </h1>
-            
+
             <Button size="lg" asChild>
               <Link to="/profile" className="flex items-center gap-2">
                 <User className="h-5 w-5" />
                 View <code>/profile</code>
               </Link>
             </Button>
-
           </div>
 
           {/* APX Card Button - Bottom Right */}

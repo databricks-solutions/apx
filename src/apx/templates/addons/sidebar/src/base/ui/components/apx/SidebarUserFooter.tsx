@@ -28,22 +28,20 @@ function SidebarUserFooterContent() {
   }, [user.user_name]);
 
   return (
-      <SidebarMenuButton
-        size="lg"
-        className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
-      >
-        <Avatar className="h-8 w-8 rounded-lg grayscale">
-          <AvatarFallback className="rounded-lg">{firstLetters}</AvatarFallback>
-        </Avatar>
-        <div className="grid flex-1 text-left text-sm leading-tight">
-          <span className="truncate font-medium">
-            {user.display_name}
-          </span>
-          <span className="text-muted-foreground truncate text-xs">
-            {user.user_name}
-          </span>
-        </div>
-      </SidebarMenuButton>
+    <SidebarMenuButton
+      size="lg"
+      className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+    >
+      <Avatar className="h-8 w-8 rounded-lg grayscale">
+        <AvatarFallback className="rounded-lg">{firstLetters}</AvatarFallback>
+      </Avatar>
+      <div className="grid flex-1 text-left text-sm leading-tight">
+        <span className="truncate font-medium">{user.display_name}</span>
+        <span className="text-muted-foreground truncate text-xs">
+          {user.user_name}
+        </span>
+      </div>
+    </SidebarMenuButton>
   );
 }
 

@@ -32,4 +32,3 @@ function Logo({ to = "/", className = "", showText = true }: LogoProps) {
 }
 
 export default Logo;
-
