@@ -249,7 +249,6 @@ async def run_frontend(frontend_port: int):
 
 
 def generate_metadata_file(app_path: Path):
-
     pyproject_path = app_path / "pyproject.toml"
     pyproject = tomllib.loads(pyproject_path.read_text())
     metadata = pyproject["tool"]["apx"]["metadata"]

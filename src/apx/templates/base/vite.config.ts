@@ -67,6 +67,6 @@ export default defineConfig({
     emptyOutDir: true,
   },
   define: {
-    "__APP_NAME__": JSON.stringify(APP_NAME),
+    __APP_NAME__: JSON.stringify(APP_NAME),
   },
 });
