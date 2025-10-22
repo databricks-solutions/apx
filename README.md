@@ -39,7 +39,6 @@ uvx git+https://github.com/renardeinside/apx.git init
 
 This will launch an interactive prompt that will guide you through:
 
-- Choosing a template (currently only "essential" is available)
 - Naming your app (or using a randomly generated name)
 - Selecting a Databricks profile (if you have any configured)
 - Setting up AI assistant rules (cursor/vscode/codex/claude)
