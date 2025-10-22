@@ -16,19 +16,17 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
-import { ModeToggle } from "@/components/apx/mode-toggle";
 import {
   User,
   Mail,
   Shield,
   Users,
   AlertCircle,
-  ArrowLeft,
   CheckCircle,
   XCircle,
 } from "lucide-react";
 
-export const Route = createFileRoute("/profile")({
+export const Route = createFileRoute("/_sidebar/profile")({
   component: () => <Profile />,
 });
 
@@ -52,12 +50,8 @@ function ProfileContent() {
     return "U";
   };
 
-  const primaryEmail = user.emails?.find((e) => e.primary)?.value ||
-                       user.emails?.[0]?.value ||
-                       "No email available";
-
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="space-y-6">
       {/* Header Card */}
       <Card className="border-primary/20">
         <CardContent className="pt-6">
@@ -240,7 +234,7 @@ function ProfileContent() {
 
         {/* Entitlements */}
         {user.entitlements && user.entitlements.length > 0 && (
-          <Card className="border-primary/20 md:col-span-2">
+          <Card className="border-primary/20">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Shield className="h-5 w-5" />
@@ -268,7 +262,7 @@ function ProfileContent() {
 
 function ProfileSkeleton() {
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="space-y-6">
       {/* Header Card Skeleton */}
       <Card className="border-primary/20">
         <CardContent className="pt-6">
@@ -304,79 +298,38 @@ function ProfileSkeleton() {
 
 function Profile() {
   return (
-    <div className="relative min-h-screen w-screen overflow-hidden flex flex-col">
-      {/* Top bar */}
-      <header className="z-50 bg-background/80 backdrop-blur-sm border-b">
-        <div className="container mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Button variant="ghost" size="icon" asChild>
-              <Link to="/">
-                <ArrowLeft className="h-5 w-5" />
-              </Link>
-            </Button>
-            <div className="flex items-center gap-2">
-              <img
-                src="/logo.svg"
-                alt="logo"
-                className="h-6 w-6 text-primary border border-primary rounded-sm"
-              />
-              <span className="font-semibold text-lg">{__APP_NAME__}</span>
-            </div>
-          </div>
-          <ModeToggle />
-        </div>
-      </header>
-
-      {/* Main content */}
-      <main className="flex-1 container mx-auto px-4 py-8">
-        <QueryErrorResetBoundary>
-          {({ reset }) => (
-            <ErrorBoundary
-              onReset={reset}
-              fallbackRender={({ resetErrorBoundary }) => (
-                <div className="max-w-4xl mx-auto">
-                  <Card className="border-destructive/50">
-                    <CardHeader>
-                      <CardTitle className="flex items-center gap-2 text-destructive">
-                        <AlertCircle className="h-5 w-5" />
-                        Failed to Load Profile
-                      </CardTitle>
-                      <CardDescription>
-                        There was an error loading your profile information.
-                        Make sure the backend is running and you're authenticated.
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent className="flex gap-2">
-                      <Button variant="outline" onClick={resetErrorBoundary}>
-                        Try Again
-                      </Button>
-                      <Button variant="outline" asChild>
-                        <Link to="/">Go Home</Link>
-                      </Button>
-                    </CardContent>
-                  </Card>
-                </div>
-              )}
-            >
-              <Suspense fallback={<ProfileSkeleton />}>
-                <ProfileContent />
-              </Suspense>
-            </ErrorBoundary>
+    <QueryErrorResetBoundary>
+      {({ reset }) => (
+        <ErrorBoundary
+          onReset={reset}
+          fallbackRender={({ resetErrorBoundary }) => (
+            <Card className="border-destructive/50">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-destructive">
+                  <AlertCircle className="h-5 w-5" />
+                  Failed to Load Profile
+                </CardTitle>
+                <CardDescription>
+                  There was an error loading your profile information.
+                  Make sure the backend is running and you're authenticated.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex gap-2">
+                <Button variant="outline" onClick={resetErrorBoundary}>
+                  Try Again
+                </Button>
+                <Button variant="outline" asChild>
+                  <Link to="/">Go Home</Link>
+                </Button>
+              </CardContent>
+            </Card>
           )}
-        </QueryErrorResetBoundary>
-      </main>
-
-      {/* Footer */}
-      <footer className="pb-8 px-4">
-        <div className="text-center text-sm text-muted-foreground">
-          <p className="text-xs">Built with ❤️ using apx</p>
-        </div>
-      </footer>
-
-      {/* Background gradient effect */}
-      <div className="absolute inset-0 -z-10 h-full w-full bg-background">
-        <div className="absolute h-full w-full bg-[radial-gradient(circle_at_50%_120%,rgba(120,119,198,0.1),rgba(255,255,255,0))]" />
-      </div>
-    </div>
+        >
+          <Suspense fallback={<ProfileSkeleton />}>
+            <ProfileContent />
+          </Suspense>
+        </ErrorBoundary>
+      )}
+    </QueryErrorResetBoundary>
   );
 }

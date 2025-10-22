@@ -29,6 +29,13 @@ function Index() {
             <h1 className="text-5xl md:text-6xl lg:text-7xl font-bold">
               Welcome to {__APP_NAME__}
             </h1>
+            
+            <Button size="lg" asChild>
+              <Link to="/profile" className="flex items-center gap-2">
+                <User className="h-5 w-5" />
+                View <code>/profile</code>
+              </Link>
+            </Button>
 
           </div>
 
