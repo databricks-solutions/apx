@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import contextmanager
 import logging
 import os
 import random
@@ -25,11 +26,15 @@ def print_with_prefix(prefix: str, text: str, color: str, width: int = 10):
         color: The color for the prefix
         width: The width to pad the prefix to (default: 10)
     """
-    escaped_text = escape(text)
     escaped_prefix = escape(prefix)
     # Pad the prefix to the specified width
     padded_prefix = escaped_prefix.ljust(width)
-    console.print(f"[{color}]{padded_prefix}[/] | {escaped_text}")
+
+    # Handle multi-line text by adding prefix to each line
+    lines = text.split("\n")
+    for line in lines:
+        escaped_line = escape(line)
+        console.print(f"[{color}]{padded_prefix}[/] | {escaped_line}")
 
 
 class PrefixedLogHandler(logging.Handler):
@@ -276,3 +281,14 @@ def list_profiles() -> list[str]:
     parser = configparser.ConfigParser()
     parser.read(cfg_path)
     return list(parser.sections()) + ["DEFAULT"]
+
+
+@contextmanager
+def in_path(path: Path):
+    """Context manager to change the current working directory to the given path."""
+    current_dir = os.getcwd()
+    os.chdir(str(path))
+    try:
+        yield
+    finally:
+        os.chdir(current_dir)

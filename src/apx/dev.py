@@ -197,7 +197,7 @@ def prepare_obo_token(
 
 
 def setup_uvicorn_logging():
-    """Configure uvicorn and application loggers to use PrefixedLogHandler."""
+    """Configure uvicorn loggers to use PrefixedLogHandler."""
     # Create the handler
     handler = PrefixedLogHandler(prefix="[backend]", color="aquamarine1")
 
@@ -205,7 +205,7 @@ def setup_uvicorn_logging():
     formatter = logging.Formatter("%(message)s")
     handler.setFormatter(formatter)
 
-    # Configure uvicorn loggers
+    # Configure ONLY uvicorn loggers (not the root logger or app loggers)
     for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
         logger = logging.getLogger(logger_name)
         # Remove existing handlers
@@ -215,13 +215,6 @@ def setup_uvicorn_logging():
         logger.setLevel(logging.INFO)
         # Prevent propagation to root logger
         logger.propagate = False
-    
-    # Configure root logger to also use the prefixed handler
-    # This will catch any application loggers that don't have their own handlers
-    root_logger = logging.getLogger()
-    root_logger.handlers.clear()
-    root_logger.addHandler(handler)
-    root_logger.setLevel(logging.INFO)
 
 
 async def run_backend(
@@ -233,7 +226,7 @@ async def run_backend(
 ):
     """Run the backend server programmatically with uvicorn and hot-reload support."""
 
-    # Setup logging once
+    # Setup uvicorn logging once at the start
     setup_uvicorn_logging()
 
     console.print(

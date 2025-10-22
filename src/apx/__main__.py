@@ -25,6 +25,7 @@ from apx.utils import (
     ensure_dir,
     generate_metadata_file,
     get_app_name_from_pyproject,
+    in_path,
     is_bun_installed,
     is_uv_installed,
     list_profiles,
@@ -616,6 +617,12 @@ def openapi(
 
 @app.command(name="dev", help="Run development servers for frontend and backend")
 def dev(
+    app_dir: Annotated[
+        Path | None,
+        Argument(
+            help="The path to the app. If not provided, current working directory will be used"
+        ),
+    ] = None,
     frontend_port: Annotated[
         int, Option(help="Port for the frontend development server")
     ] = 5173,
@@ -630,7 +637,7 @@ def dev(
 ):
     """
     Run development servers for both frontend and backend concurrently.
-    The backend will have a middleware that adds X-Twist: True header.
+    The backend will have a middleware that adds X-Forwarded-Access-Token header.
     """
     # Check prerequisites
     if not is_bun_installed():
@@ -639,32 +646,38 @@ def dev(
         )
         raise Exit(code=1)
 
-    # Get app name from pyproject.toml
-    app_name = get_app_name_from_pyproject()
-    app_module_name = f"{app_name}.backend.app:app"
+    if app_dir is None:
+        app_dir = Path.cwd()
 
-    console.print(
-        f"[bold chartreuse1]🚀 Starting development servers...[/bold chartreuse1]"
-    )
-    console.print(f"[cyan]Frontend:[/cyan] http://localhost:{frontend_port}")
-    console.print(f"[green]Backend:[/green] http://{backend_host}:{backend_port}")
-    console.print()
+    with in_path(app_dir):
+        # Get app name from pyproject.toml
+        app_name = get_app_name_from_pyproject()
+        app_module_name = f"{app_name}.backend.app:app"
 
-    async def run_both():
+        console.print(
+            f"[bold chartreuse1]🚀 Starting development servers...[/bold chartreuse1]"
+        )
+        console.print(f"[cyan]Frontend:[/cyan] http://localhost:{frontend_port}")
+        console.print(f"[green]Backend:[/green] http://{backend_host}:{backend_port}")
+        console.print()
+
+        async def run_both():
+            try:
+                await asyncio.gather(
+                    run_frontend(frontend_port),
+                    run_backend(
+                        Path.cwd(), app_module_name, backend_host, backend_port, obo=obo
+                    ),
+                )
+            except KeyboardInterrupt:
+                console.print(
+                    "\n[yellow]⚠️  Shutting down development servers...[/yellow]"
+                )
+
         try:
-            await asyncio.gather(
-                run_frontend(frontend_port),
-                run_backend(
-                    Path.cwd(), app_module_name, backend_host, backend_port, obo=obo
-                ),
-            )
+            asyncio.run(run_both())
         except KeyboardInterrupt:
-            console.print("\n[yellow]⚠️  Shutting down development servers...[/yellow]")
-
-    try:
-        asyncio.run(run_both())
-    except KeyboardInterrupt:
-        console.print("[yellow]✅ Development servers stopped[/yellow]")
+            console.print("[yellow]✅ Development servers stopped[/yellow]")
 
 
 def entrypoint():
