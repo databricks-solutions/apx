@@ -4,6 +4,7 @@ from .config import conf, AppConfig
 from databricks.sdk import WorkspaceClient
 from sqlmodel import SQLModel, Session, text
 from sqlalchemy import create_engine, event
+from .logger import logger
 
 
 class Runtime:
@@ -43,6 +44,9 @@ class Runtime:
         return Session(self.engine)
 
     def validate_db(self) -> None:
+        logger.info(
+            f"Validating database connection to instance {self.config.db.instance_name}"
+        )
         # check if the database instance exists
         try:
             self.ws.database.get_database_instance(self.config.db.instance_name)
@@ -60,8 +64,14 @@ class Runtime:
         except Exception:
             raise ConnectionError("Failed to connect to the database")
 
+        logger.info(
+            f"Database connection to instance {self.config.db.instance_name} validated successfully"
+        )
+
     def initialize_models(self) -> None:
+        logger.info(f"Initializing database models")
         SQLModel.metadata.create_all(self.engine)
+        logger.info(f"Database models initialized successfully")
 
 
 rt = Runtime()
