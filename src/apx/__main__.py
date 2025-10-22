@@ -89,19 +89,21 @@ def init(
         ),
     ] = None,
     template: Annotated[
-        str | None,
+        Literal["essential", "stateful"],
         Option(
             "--template",
             "-t",
-            help="The template to use. Will prompt if not provided",
+            help="The template to use. Will default to 'essential' if not provided",
+            prompt=True,
         ),
-    ] = None,
+    ] = "essential",
     profile: Annotated[
         str | None,
         Option(
             "--profile",
             "-p",
             help="The Databricks profile to use. Will prompt if not provided",
+            prompt=True,
         ),
     ] = None,
     assistant: Annotated[
@@ -130,15 +132,6 @@ def init(
         app_path = Path.cwd()
 
     console.print(f"[bold chartreuse1]Welcome to apx 🚀[/bold chartreuse1]\n")
-
-    # Prompt for template if not provided
-    if template is None:
-        available_templates = ["essential"]
-        template = Prompt.ask(
-            "[cyan]Choose a template[/cyan]",
-            choices=available_templates,
-            default="essential",
-        )
 
     # Prompt for app name if not provided
     if app_name is None:
@@ -220,14 +213,14 @@ def init(
         ensure_dir(build_dir)
         (build_dir / ".gitignore").write_text("*\n")
 
-        # append DATABRICKS_PROFILE to .env if profile is provided
+        if template == "stateful":
+            # replace databricks.yml.jinja2 with databricks.yml.jinja2 from addons/stateful
+            stateful_addon = templates_dir / "addons/stateful"
+            process_template_directory(stateful_addon, app_path, app_name, jinja2_env)
+
+        # append DATABRICKS_CONFIG_PROFILE to .env if profile is provided
         if profile:
             set_key(app_path / ".env", "DATABRICKS_CONFIG_PROFILE", profile)
-
-        # if db:
-        #     # replace databricks.yml.jinja2 with databricks.yml.jinja2 from addons/db
-        #     db_addon = templates_dir / "addons/db"
-        #     process_template_directory(db_addon, app_path, app_name, jinja2_env)
 
         progress.update(task, description="✅ Project layout prepared", completed=True)
 
@@ -398,12 +391,14 @@ def init(
                 shutil.copytree(
                     templates_dir / "addons/rules/.github/instructions",
                     app_path / ".github/instructions",
+                    dirs_exist_ok=True,
                 )
             elif assistant == "cursor":
                 progress.update(task, description="🤖 Copying Cursor rules...")
                 shutil.copytree(
                     templates_dir / "addons/rules/.cursor/rules",
                     app_path / ".cursor/rules",
+                    dirs_exist_ok=True,
                 )
             else:
                 progress.update(

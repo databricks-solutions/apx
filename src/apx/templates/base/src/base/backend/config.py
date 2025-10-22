@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from .._metadata import app_name
 
 # project root is the parent of the src folder
-project_root = Path(__file__).parent.parent.parent
+project_root = Path(__file__).parent.parent.parent.parent
 env_file = project_root / ".env"
 
 if env_file.exists():

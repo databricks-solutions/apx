@@ -272,4 +272,4 @@ def list_profiles() -> list[str]:
         return []
     parser = configparser.ConfigParser()
     parser.read(cfg_path)
-    return list(parser.sections())
+    return list(parser.sections()) + ["DEFAULT"]

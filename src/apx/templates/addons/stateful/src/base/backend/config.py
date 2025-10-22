@@ -1,19 +1,20 @@
 from importlib import resources
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
-from pydantic import Field
+from pydantic import Field, BaseModel
 from dotenv import load_dotenv
 from .._metadata import app_name
+from pydantic.fields import _Unset
 
 # project root is the parent of the src folder
-project_root = Path(__file__).parent.parent.parent
+project_root = Path(__file__).parent.parent.parent.parent
 env_file = project_root / ".env"
 
 if env_file.exists():
     load_dotenv(dotenv_path=env_file)
 
 
-class DatabaseConfig(BaseSettings):
+class DatabaseConfig(BaseModel):
     port: int = Field(description="The port of the database", default=5432)
     database_name: str = Field(
         description="The name of the database", default="databricks_postgres"
@@ -30,7 +31,7 @@ class AppConfig(BaseSettings):
     )
     app_name: str = Field(default=app_name)
     api_prefix: str = Field(default="/api")
-    db: DatabaseConfig = Field(description="The database configuration")
+    db: DatabaseConfig = _Unset
 
     @property
     def static_assets_path(self) -> Path:

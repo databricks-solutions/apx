@@ -1,24 +1,14 @@
+from databricks.sdk.errors import NotFound
 from sqlalchemy import Engine
 from .config import conf, AppConfig
 from databricks.sdk import WorkspaceClient
-from sqlmodel import Session
+from sqlmodel import SQLModel, Session, text
 from sqlalchemy import create_engine, event
 
 
 class Runtime:
     def __init__(self):
         self.config: AppConfig = conf
-        # check if the database instance exists
-        if not self.ws.database.get_database_instance(self.config.db.instance_name):
-            raise ValueError(
-                f"Database instance {self.config.db.instance_name} does not exist"
-            )
-
-        # check if a connection to the database can be established
-        try:
-            self.engine.connect()
-        except Exception as e:
-            raise ConnectionError(f"Failed to connect to the database: {e}")
 
     @property
     def ws(self) -> WorkspaceClient:
@@ -29,7 +19,6 @@ class Runtime:
     @property
     def engine_url(self) -> str:
         instance = self.ws.database.get_database_instance(self.config.db.instance_name)
-        # f"postgresql+psycopg://{postgres_username}:@{postgres_host}:{postgres_port}/{postgres_database}"
         prefix = "postgresql+psycopg"
         host = instance.read_write_dns
         port = self.config.db.port
@@ -52,6 +41,27 @@ class Runtime:
 
     def get_session(self) -> Session:
         return Session(self.engine)
+
+    def validate_db(self) -> None:
+        # check if the database instance exists
+        try:
+            self.ws.database.get_database_instance(self.config.db.instance_name)
+        except NotFound:
+            raise ValueError(
+                f"Database instance {self.config.db.instance_name} does not exist"
+            )
+
+        # check if a connection to the database can be established
+        try:
+            with self.get_session() as session:
+                session.connection().execute(text("SELECT 1"))
+                session.close()
+
+        except Exception:
+            raise ConnectionError("Failed to connect to the database")
+
+    def initialize_models(self) -> None:
+        SQLModel.metadata.create_all(self.engine)
 
 
 rt = Runtime()
