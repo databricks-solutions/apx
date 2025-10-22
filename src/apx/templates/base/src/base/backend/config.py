@@ -17,7 +17,7 @@ if env_file.exists():
 
 class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=env_file, env_prefix=f"{app_name.upper()}_", extra="allow"
+        env_file=env_file, env_prefix=f"{app_name.upper()}_", extra="ignore"
     )
     app_name: str = Field(default=app_name)
     api_prefix: str = Field(default="/api")
@@ -28,4 +28,4 @@ class AppConfig(BaseSettings):
 
 
 conf = AppConfig()
-logger.info(f"Application configuration: {conf.model_dump_json(indent=2)}")
+logger.info(f"Application configuration: \n \t{conf.model_dump_json(indent=2)}")

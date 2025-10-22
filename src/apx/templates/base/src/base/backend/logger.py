@@ -78,23 +78,34 @@ def setup_logger(
     logger = logging.getLogger(name)
     logger.setLevel(level)
 
-    # Remove existing handlers to avoid duplicates
-    if logger.handlers:
-        logger.handlers.clear()
+    # Check if root logger already has handlers (e.g., set up by dev server)
+    root_logger = logging.getLogger()
+    if root_logger.handlers:
+        # Use root logger's handlers (dev mode with apx)
+        # Remove any existing handlers from this logger
+        if logger.handlers:
+            logger.handlers.clear()
+        # Enable propagation to root logger
+        logger.propagate = True
+    else:
+        # Set up our own handler (production mode or standalone)
+        # Remove existing handlers to avoid duplicates
+        if logger.handlers:
+            logger.handlers.clear()
 
-    # Create console handler
-    console_handler = logging.StreamHandler(sys.stderr)
-    console_handler.setLevel(level)
+        # Create console handler
+        console_handler = logging.StreamHandler(sys.stderr)
+        console_handler.setLevel(level)
 
-    # Set custom formatter
-    formatter = CustomFormatter(use_colors=use_colors)
-    console_handler.setFormatter(formatter)
+        # Set custom formatter
+        formatter = CustomFormatter(use_colors=use_colors)
+        console_handler.setFormatter(formatter)
 
-    # Add handler to logger
-    logger.addHandler(console_handler)
+        # Add handler to logger
+        logger.addHandler(console_handler)
 
-    # Prevent propagation to avoid duplicate logs
-    logger.propagate = False
+        # Prevent propagation to avoid duplicate logs
+        logger.propagate = False
 
     return logger
 
