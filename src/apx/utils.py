@@ -159,7 +159,10 @@ def process_template_directory(
     # Calculate the relative path from templates root to source_dir
     source_rel_to_templates = source_dir.relative_to(templates_root)
 
-    for item in source_dir.rglob("*"):
+    # Process both regular files and hidden files (starting with .)
+    # Use set to avoid potential duplicates
+    all_items = set(source_dir.rglob("*")) | set(source_dir.rglob(".*"))
+    for item in all_items:
         if item.is_file():
             # Calculate relative path from source_dir
             rel_path = item.relative_to(source_dir)
