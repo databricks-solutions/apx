@@ -26,6 +26,12 @@ def print_with_prefix(prefix: str, text: str, color: str, width: int = 10):
         color: The color for the prefix
         width: The width to pad the prefix to (default: 10)
     """
+    # Get current timestamp with milliseconds
+    current_time = time.time()
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(current_time))
+    milliseconds = int((current_time % 1) * 1000)
+    timestamp_with_ms = f"{timestamp}.{milliseconds:03d}"
+    
     escaped_prefix = escape(prefix)
     # Pad the prefix to the specified width
     padded_prefix = escaped_prefix.ljust(width)
@@ -34,7 +40,7 @@ def print_with_prefix(prefix: str, text: str, color: str, width: int = 10):
     lines = text.split("\n")
     for line in lines:
         escaped_line = escape(line)
-        console.print(f"[{color}]{padded_prefix}[/] | {escaped_line}")
+        console.print(f"{timestamp_with_ms} | [{color}]{padded_prefix}[/] | {escaped_line}")
 
 
 class PrefixedLogHandler(logging.Handler):
@@ -247,12 +253,24 @@ async def run_frontend(frontend_port: int):
         "vite",
         "dev",
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stderr=None,  # Let stderr pass through directly - don't capture it
         env=os.environ,
         cwd=Path.cwd(),
     )
 
-    await stream_output(proc, "[ui]", "cyan")
+    # Only capture stdout
+    async def read_stdout():
+        if proc.stdout is None:
+            return
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode().rstrip()
+            if text:
+                print_with_prefix("[ui]", text, "cyan", width=10)
+    
+    await read_stdout()
     await proc.wait()
 
 

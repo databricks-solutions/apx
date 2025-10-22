@@ -5,10 +5,14 @@ from .config import conf
 from .router import api
 from .utils import add_not_found_handler
 from .runtime import rt
+from .logger import logger
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info(
+        f"Starting app with configuration:\n{conf.model_dump_json(indent=2)}"
+    )
     rt.validate_db()
     rt.initialize_models()
     yield

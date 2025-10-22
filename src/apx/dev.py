@@ -14,7 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from typer import Exit
 import watchfiles
 import uvicorn
-from apx.utils import console, PrefixedLogHandler
+from apx.utils import console, PrefixedLogHandler, print_with_prefix
 from apx import __version__
 
 
@@ -75,11 +75,11 @@ def create_and_persist_obo_token(
     app_module_name: str,
     token_lifetime_seconds: int,
     env_file: Path,
-    verbose: bool = True,
+    status_context=None,
 ):
     # Step 3.2: Create a new token
-    if verbose:
-        console.print("[green][obo][/green] Creating new OBO token")
+    if status_context:
+        status_context.update("🔐 Creating new OBO token")
     new_token = ws.tokens.create(
         comment=f"dev token for {app_module_name}, created by apx",
         lifetime_seconds=token_lifetime_seconds,
@@ -93,10 +93,8 @@ def create_and_persist_obo_token(
     set_key(env_file, "APX_TOKEN_ID", new_token.token_info.token_id)
     set_key(env_file, "APX_TOKEN_SECRET", new_token.token_value)
 
-    if verbose:
-        console.print(
-            f"[green][obo][/green] Token created and saved to {env_file.resolve()}"
-        )
+    if status_context:
+        status_context.update(f"💾 Token saved to {env_file.name}")
 
     return new_token.token_value
 
@@ -105,7 +103,7 @@ def prepare_obo_token(
     cwd: Path,
     app_module_name: str,
     token_lifetime_seconds: int = 60 * 60 * 4,
-    verbose: bool = True,
+    status_context=None,
 ) -> str:
     """Prepare the On-Behalf-Of token for the backend server.
 
@@ -122,8 +120,8 @@ def prepare_obo_token(
 
     # Step 1: Check if .env exists, create if not
     if not env_file.exists():
-        if verbose:
-            console.print("[yellow][obo][/yellow] Creating .env file")
+        if status_context:
+            status_context.update("📝 Creating .env file")
         env_file.touch()
 
     # Step 2: Check if .env is gitignored
@@ -135,12 +133,13 @@ def prepare_obo_token(
             )
             raise Exit(code=1)
     else:
-        if verbose:
-            console.print(
-                "[yellow]⚠️  .gitignore not found. Please ensure .env is not committed.[/yellow]"
-            )
+        console.print(
+            "[yellow]⚠️  .gitignore not found. Please ensure .env is not committed.[/yellow]"
+        )
 
     # pick specific env variables
+    if status_context:
+        status_context.update("🔍 Checking existing token")
     token_id = get_key(env_file, "APX_TOKEN_ID")
     token_secret = get_key(env_file, "APX_TOKEN_SECRET")
 
@@ -157,6 +156,8 @@ def prepare_obo_token(
     # Step 3: Check if token ID and secret are set
     if token_id and token_secret:
         # Step 3.1: Validate the token
+        if status_context:
+            status_context.update("🔐 Validating existing token")
         user_tokens = ws.tokens.list()
         user_token = next(
             (token for token in user_tokens if token.token_id == token_id), None
@@ -172,27 +173,19 @@ def prepare_obo_token(
             # Use existing token if it has at least 1 hour remaining
             min_remaining_time = 60 * 60  # 1 hour in seconds
             if time_remaining > min_remaining_time:
-                if verbose:
-                    console.print(
-                        f"[green][obo][/green] Using existing token (expires in {int(time_remaining / 3600)} hours)"
+                if status_context:
+                    status_context.update(
+                        f"✅ Using existing token (expires in {int(time_remaining / 3600)} hours)"
                     )
                 return token_secret
 
         # Token not found, expired, or no expiry time - create a new one
-        if verbose:
-            console.print(
-                "[yellow][obo][/yellow] Token not found or expired, creating a new one"
-            )
-    else:
-        # Step 3.2: Token credentials not set, create a new token
-        if verbose:
-            console.print(
-                "[yellow][obo][/yellow] Token credentials not found, creating a new one"
-            )
+        if status_context:
+            status_context.update("⚠️  Token expired, creating new one")
 
     # Create and return new token (common path for all cases that need a new token)
     return create_and_persist_obo_token(
-        ws, app_module_name, token_lifetime_seconds, env_file, verbose=verbose
+        ws, app_module_name, token_lifetime_seconds, env_file, status_context=status_context
     )
 
 
@@ -257,20 +250,18 @@ async def run_backend(
             if dotenv_file.exists():
                 # Override=True ensures we reload env vars on hot reload
                 load_dotenv(dotenv_file)
-                if first_run:
-                    console.print(
-                        f"[green][server][/green] Loading .env file from {dotenv_file.resolve()}"
-                    )
 
             # Prepare OBO token (will reuse if still valid)
-            if obo:
-                if first_run:
-                    console.print(
-                        "[green][server][/green] Preparing On-Behalf-Of token"
-                    )
-                obo_token = prepare_obo_token(cwd, app_module_name, verbose=first_run)
-                if first_run:
-                    console.print(f"[green][server][/green] On-Behalf-Of token ready")
+            if obo and first_run:
+                with console.status("[bold cyan]Preparing On-Behalf-Of token...") as status:
+                    status.update(f"📂 Loading .env file from {dotenv_file.resolve()}")
+                    obo_token = prepare_obo_token(cwd, app_module_name, status_context=status)
+                    # Give user a moment to see the final status
+                    time.sleep(0.3)
+                console.print("[green]✓[/green] On-Behalf-Of token ready")
+            elif obo:
+                # On hot reload, prepare token without spinner
+                obo_token = prepare_obo_token(cwd, app_module_name, status_context=None)
 
             # Load/reload the app instance (fully reload modules on hot reload)
             app_instance = load_app(app_module_name, reload_modules=not first_run)
