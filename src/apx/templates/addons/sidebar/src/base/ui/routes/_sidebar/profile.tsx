@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { Suspense } from "react";
 import { QueryErrorResetBoundary } from "@tanstack/react-query";
 import { ErrorBoundary } from "react-error-boundary";
-import { useMeSuspense } from "@/lib/api";
+import { useCurrentUserSuspense } from "@/lib/api";
 import selector from "@/lib/selector";
 import {
   Card,
@@ -33,7 +33,7 @@ export const Route = createFileRoute("/profile")({
 });
 
 function ProfileContent() {
-  const { data: user } = useMeSuspense(selector());
+  const { data: user } = useCurrentUserSuspense(selector());
 
   const getInitials = () => {
     if (user.name?.given_name && user.name?.family_name) {

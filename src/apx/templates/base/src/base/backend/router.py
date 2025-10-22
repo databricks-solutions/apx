@@ -14,6 +14,6 @@ async def version():
     return VersionOut.from_metadata()
 
 
-@api.get("/me", response_model=UserOut, operation_id="me")
+@api.get("/current-user", response_model=UserOut, operation_id="currentUser")
 def me(obo_ws: Annotated[WorkspaceClient, Depends(get_obo_ws)]):
     return obo_ws.current_user.me()
