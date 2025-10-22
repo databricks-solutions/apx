@@ -37,12 +37,26 @@ Then you can use the following command:
 uvx git+https://github.com/renardeinside/apx.git init
 ```
 
-This will create a new app in the current working directory with random app name.
+This will launch an interactive prompt that will guide you through:
 
-You can also specify the app name and path:
+- Choosing a template (currently only "essential" is available)
+- Naming your app (or using a randomly generated name)
+- Selecting a Databricks profile (if you have any configured)
+- Setting up AI assistant rules (cursor/vscode/codex/claude)
+
+The app will be created in the current working directory by default.
+
+### Non-Interactive Mode
+
+You can also specify all options via command-line flags to skip the prompts:
 
 ```bash
-uvx git+https://github.com/renardeinside/apx.git init --name my-app my-app
+uvx git+https://github.com/renardeinside/apx.git init \
+  --name my-app \
+  --template essential \
+  --profile my-profile \
+  --assistant cursor \
+  my-app
 ```
 
 This will create a new app in the `my-app` directory with the app name `my-app`.
@@ -78,8 +92,19 @@ The `__dist__` directory is the directory where the frontend bundle is stored, s
 
 ## Commands
 
-```
-init -> initializes the app project
-dev -> launches back/frontend dev servers
-build -> prepares the app for deployment
-```
+### `init`
+
+Initializes a new app project with interactive prompts for configuration. Supports optional flags to skip prompts:
+
+- `--name, -n`: Specify the app name
+- `--template, -t`: Choose a template (currently only "essential")
+- `--profile, -p`: Specify a Databricks profile
+- `--assistant, -a`: Choose AI assistant rules (cursor/vscode/codex/claude)
+
+### `dev`
+
+Launches both backend and frontend development servers with hot reload.
+
+### `build`
+
+Prepares the app for deployment by building both frontend assets and Python wheel.

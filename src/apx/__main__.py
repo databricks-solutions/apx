@@ -15,6 +15,7 @@ from fastapi import FastAPI
 import jinja2
 from rich import print
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.prompt import Confirm, Prompt
 from typer import Argument, Exit, Option, Typer
 
 from apx._version import version as apx_version
@@ -26,6 +27,7 @@ from apx.utils import (
     get_app_name_from_pyproject,
     is_bun_installed,
     is_uv_installed,
+    list_profiles,
     process_template_directory,
     random_name,
     run_frontend,
@@ -72,34 +74,44 @@ def version():
 
 @app.command(name="init", help="Initialize a new project")
 def init(
+    app_path: Annotated[
+        Path | None,
+        Argument(
+            help="The path to the app. Defaults to current working directory",
+        ),
+    ] = None,
     app_name: Annotated[
         str | None,
         Option(
             "--name",
             "-n",
-            help="The name of the project. Optional, will be generated if not provided",
+            help="The name of the project. Will prompt if not provided",
         ),
     ] = None,
-    app_path: Annotated[
-        Path | None,
-        Argument(
-            help="The path to the app. If not provided, the app will be created in the current working directory",
+    template: Annotated[
+        str | None,
+        Option(
+            "--template",
+            "-t",
+            help="The template to use. Will prompt if not provided",
         ),
     ] = None,
     profile: Annotated[
-        str | None, Option("--profile", "-p", help="The Databricks profile to use")
+        str | None,
+        Option(
+            "--profile",
+            "-p",
+            help="The Databricks profile to use. Will prompt if not provided",
+        ),
     ] = None,
     assistant: Annotated[
-        Literal["cursor", "vscode", "codex", "claude"] | None,
+        str | None,
         Option(
             "--assistant",
             "-a",
-            help="The type of assistant to use. If not provided, no assistant rules will be setup.",
+            help="The type of assistant to use (cursor/vscode/codex/claude). Will prompt if not provided",
         ),
     ] = None,
-    db: Annotated[
-        bool, Option(help="Whether to add Lakebase support to the project")
-    ] = False,
     version: bool | None = version_option,
 ):
     # Check prerequisites
@@ -113,23 +125,70 @@ def init(
         print("git is not installed. Please install git to continue.")
         return Exit(code=1)
 
-    # Normalize app name
-    if app_name is None:
-        app_name = random_name()
-    else:
-        app_name = (
-            app_name.lower().replace(" ", "_").replace("-", "_").replace(".", "_")
-        )
-        if not app_name.isalnum():
-            print(
-                "Invalid app name. Please use only alphanumeric characters and underscores."
-            )
-            return Exit(code=1)
-
+    # Set default app_path
     if app_path is None:
         app_path = Path.cwd()
 
-    console.print(f"[bold chartreuse1]Welcome to apx 🚀[/bold chartreuse1]")
+    console.print(f"[bold chartreuse1]Welcome to apx 🚀[/bold chartreuse1]\n")
+
+    # Prompt for template if not provided
+    if template is None:
+        available_templates = ["essential"]
+        template = Prompt.ask(
+            "[cyan]Choose a template[/cyan]",
+            choices=available_templates,
+            default="essential",
+        )
+
+    # Prompt for app name if not provided
+    if app_name is None:
+        default_name = random_name()
+        app_name = Prompt.ask(
+            "[cyan]What's the name of your app?[/cyan]",
+            default=default_name,
+        )
+
+    # Normalize app name
+    app_name = app_name.lower().replace(" ", "_").replace("-", "_").replace(".", "_")
+    if not app_name.replace("_", "").isalnum():
+        print(
+            "[red]Invalid app name. Please use only alphanumeric characters and underscores.[/red]"
+        )
+        return Exit(code=1)
+
+    # Prompt for profile if not provided
+    if profile is None:
+        available_profiles = list_profiles()
+        if available_profiles:
+            console.print(
+                f"[dim]Available Databricks profiles: {', '.join(available_profiles)}[/dim]"
+            )
+            profile = Prompt.ask(
+                "[cyan]Which Databricks profile would you like to use?[/cyan]",
+                default=available_profiles[0] if available_profiles else "",
+                show_default=bool(available_profiles),
+            )
+            if profile == "":
+                profile = None
+        else:
+            console.print("[dim]No Databricks profiles found in ~/.databrickscfg[/dim]")
+            if Confirm.ask(
+                "[cyan]Would you like to specify a profile name?[/cyan]", default=False
+            ):
+                profile = Prompt.ask("[cyan]Enter profile name[/cyan]")
+
+    # Prompt for assistant if not provided
+    if assistant is None:
+        if Confirm.ask(
+            "[cyan]Would you like to set up AI assistant rules?[/cyan]", default=True
+        ):
+            available_assistants = ["cursor", "vscode", "codex", "claude"]
+            assistant = Prompt.ask(
+                "[cyan]Which assistant would you like to use?[/cyan]",
+                choices=available_assistants,
+                default="cursor",
+            )
+
     console.print(
         f"\n[bold cyan]Initializing app {app_name} in {app_path.resolve()}[/bold cyan]\n"
     )
@@ -163,10 +222,10 @@ def init(
         if profile:
             set_key(app_path / ".env", "DATABRICKS_CONFIG_PROFILE", profile)
 
-        if db:
-            # replace databricks.yml.jinja2 with databricks.yml.jinja2 from addons/db
-            db_addon = templates_dir / "addons/db"
-            process_template_directory(db_addon, app_path, app_name, jinja2_env)
+        # if db:
+        #     # replace databricks.yml.jinja2 with databricks.yml.jinja2 from addons/db
+        #     db_addon = templates_dir / "addons/db"
+        #     process_template_directory(db_addon, app_path, app_name, jinja2_env)
 
         progress.update(task, description="✅ Project layout prepared", completed=True)
 
@@ -381,7 +440,7 @@ def init(
         f"[bold green]✨ Project {app_name} initialized successfully! [/bold green]"
     )
     console.print(
-        f"[bold green]🚀 Run `cd {app_path.resolve()}` to get started![/bold green]"
+        f"[bold green]🚀 Run `cd {app_path.resolve()} && uv run apx dev` to get started![/bold green]"
     )
 
 

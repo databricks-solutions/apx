@@ -262,3 +262,14 @@ def generate_metadata_file(app_path: Path):
             ]
         )
     )
+
+
+def list_profiles() -> list[str]:
+    import configparser
+
+    cfg_path = os.path.expanduser("~/.databrickscfg")
+    if not os.path.exists(cfg_path):
+        return []
+    parser = configparser.ConfigParser()
+    parser.read(cfg_path)
+    return list(parser.sections())
