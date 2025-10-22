@@ -115,6 +115,14 @@ def init(
             help="The type of assistant to use (cursor/vscode/codex/claude). Will prompt if not provided",
         ),
     ] = None,
+    layout: Annotated[
+        Literal["basic", "sidebar"],
+        Option(
+            "--layout",
+            "-l",
+            help="The layout to use. Will default to 'basic' if not provided",
+        ),
+    ] = "basic",
     version: bool | None = version_option,
 ):
     # Check prerequisites
@@ -222,6 +230,11 @@ def init(
         # append DATABRICKS_CONFIG_PROFILE to .env if profile is provided
         if profile:
             set_key(app_path / ".env", "DATABRICKS_CONFIG_PROFILE", profile)
+        
+        if layout == "sidebar":
+            # replace src/base/ui/routes/__root.tsx with src/base/ui/routes/__root.tsx from addons/sidebar
+            sidebar_addon = templates_dir / "addons/sidebar"
+            process_template_directory(sidebar_addon, app_path, app_name, jinja2_env)
 
         progress.update(task, description="✅ Project layout prepared", completed=True)
 

@@ -13,7 +13,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title=f"{conf.app_name}")
+app = FastAPI(title=f"{conf.app_name}", lifespan=lifespan)
 ui = StaticFiles(directory=conf.static_assets_path, html=True)
 
 # note the order of includes and mounts!

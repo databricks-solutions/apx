@@ -1,3 +1,28 @@
 # {{app_name}}
 
-Sample Databricks App with Python and React.
+A sample application built with `apx`.
+
+## Stack
+
+- Python + FastAPI in the backend
+- React + shadcn/ui in the frontend
+
+To connect the frontend and the backend, `apx` uses `orval` to generate the client code from the OpenAPI schema.
+
+## Running the application in development mode
+
+```bash
+uv run apx dev
+```
+
+## Building the application
+
+```bash
+uv run apx build
+```
+
+## Deploying the application
+
+```bash
+databricks bundle deploy -p <your-profile>
+```

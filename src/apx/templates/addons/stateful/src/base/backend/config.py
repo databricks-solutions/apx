@@ -41,4 +41,3 @@ class AppConfig(BaseSettings):
 
 
 conf = AppConfig()
-logger.info(f"Application configuration: {conf.model_dump_json(indent=2)}")
