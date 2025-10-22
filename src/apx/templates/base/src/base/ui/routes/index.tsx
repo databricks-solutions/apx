@@ -12,7 +12,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ModeToggle } from "@/components/mode-toggle";
+import { ModeToggle } from "@/components/apx/mode-toggle";
 import {
   Github,
   Loader2,
@@ -20,7 +20,6 @@ import {
   Plus,
   Minus,
   RotateCcw,
-  Rocket,
   Braces,
   Cable,
 } from "lucide-react";

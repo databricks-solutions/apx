@@ -259,6 +259,7 @@ async def run_backend(
                     # Give user a moment to see the final status
                     time.sleep(0.3)
                 console.print("[green]✓[/green] On-Behalf-Of token ready")
+                console.print()
             elif obo:
                 # On hot reload, prepare token without spinner
                 obo_token = prepare_obo_token(cwd, app_module_name, status_context=None)

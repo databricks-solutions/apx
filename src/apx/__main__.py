@@ -230,7 +230,7 @@ def init(
         # append DATABRICKS_CONFIG_PROFILE to .env if profile is provided
         if profile:
             set_key(app_path / ".env", "DATABRICKS_CONFIG_PROFILE", profile)
-        
+
         if layout == "sidebar":
             # replace src/base/ui/routes/__root.tsx with src/base/ui/routes/__root.tsx from addons/sidebar
             sidebar_addon = templates_dir / "addons/sidebar"
@@ -304,17 +304,30 @@ def init(
 
         # Add button component
         run_subprocess(
-            ["bun", "x", "shadcn@latest", "add", "button", "--yes"],
+            ["bun", "x", "--bun", "shadcn@latest", "add", "button", "card", "--yes"],
             cwd=app_path,
             error_msg="Failed to add button component",
         )
 
-        # Add card component
-        run_subprocess(
-            ["bun", "x", "shadcn@latest", "add", "card", "--yes"],
-            cwd=app_path,
-            error_msg="Failed to add card component",
-        )
+        if layout == "sidebar":
+            # install necessary components for sidebar layout
+            run_subprocess(
+                [
+                    "bun",
+                    "x",
+                    "--bun",
+                    "shadcn@latest",
+                    "add",
+                    "avatar",
+                    "sidebar",
+                    "separator",
+                    "skeleton",
+                    "badge",
+                    "--yes",
+                ],
+                cwd=app_path,
+                error_msg="Failed to add avatar and sidebar components",
+            )
 
         progress.update(task, description="✅ Shadcn components added", completed=True)
 
