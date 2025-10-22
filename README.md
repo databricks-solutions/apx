@@ -96,9 +96,12 @@ The `__dist__` directory is the directory where the frontend bundle is stored, s
 Initializes a new app project with interactive prompts for configuration. Supports optional flags to skip prompts:
 
 - `--name, -n`: Specify the app name
-- `--template, -t`: Choose a template (currently only "essential")
+- `--template, -t`: Choose a template (essential/stateful)
+  Essential template is a basic template with UI and API.
+  Stateful template also includes Lakebase integration via `sqlmodel`.
 - `--profile, -p`: Specify a Databricks profile
 - `--assistant, -a`: Choose AI assistant rules (cursor/vscode/codex/claude)
+- `--layout, -l`: Choose the layout (basic/sidebar)
 
 ### `dev`
 
