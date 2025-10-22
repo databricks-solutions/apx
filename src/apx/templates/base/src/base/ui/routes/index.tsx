@@ -4,11 +4,26 @@ import { QueryErrorResetBoundary } from "@tanstack/react-query";
 import { ErrorBoundary } from "react-error-boundary";
 import { useVersionSuspense } from "@/lib/api";
 import selector from "@/lib/selector";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ModeToggle } from "@/components/mode-toggle";
-import { Github, Loader2, AlertCircle, Plus, Minus, RotateCcw, Rocket, Braces, Cable } from "lucide-react";
-
+import {
+  Github,
+  Loader2,
+  AlertCircle,
+  Plus,
+  Minus,
+  RotateCcw,
+  Rocket,
+  Braces,
+  Cable,
+} from "lucide-react";
 
 export const Route = createFileRoute("/")({
   component: () => <Index />,
@@ -20,7 +35,8 @@ function VersionDisplay() {
   return (
     <div className="flex items-center gap-2">
       <span className="text-sm font-medium">
-        Version: <code className="px-2 py-1 rounded bg-muted">{data.version}</code>
+        Version:{" "}
+        <code className="px-2 py-1 rounded bg-muted">{data.version}</code>
       </span>
     </div>
   );
@@ -32,31 +48,17 @@ function Counter() {
   return (
     <div className="space-y-4">
       <div className="text-center">
-        <div className="text-4xl font-bold text-primary">
-          {count}
-        </div>
+        <div className="text-4xl font-bold text-primary">{count}</div>
         <p className="text-xs text-muted-foreground mt-1">Current count</p>
       </div>
       <div className="flex gap-2 justify-center">
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => setCount(count - 1)}
-        >
+        <Button size="sm" variant="outline" onClick={() => setCount(count - 1)}>
           <Minus className="h-4 w-4" />
         </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => setCount(0)}
-        >
+        <Button size="sm" variant="outline" onClick={() => setCount(0)}>
           <RotateCcw className="h-4 w-4" />
         </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => setCount(count + 1)}
-        >
+        <Button size="sm" variant="outline" onClick={() => setCount(count + 1)}>
           <Plus className="h-4 w-4" />
         </Button>
       </div>
@@ -72,9 +74,7 @@ function ApiExampleCard() {
           <Cable className="h-5 w-5" />
           API Example
         </CardTitle>
-        <CardDescription>
-          Live data from the backend
-        </CardDescription>
+        <CardDescription>Live data from the backend</CardDescription>
       </CardHeader>
       <CardContent>
         <QueryErrorResetBoundary>
@@ -85,7 +85,9 @@ function ApiExampleCard() {
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 text-destructive">
                     <AlertCircle className="h-4 w-4" />
-                    <span className="text-sm">Failed to load version. Make sure the backend is running.</span>
+                    <span className="text-sm">
+                      Failed to load version. Make sure the backend is running.
+                    </span>
                   </div>
                   <div className="flex justify-end">
                     <Button
@@ -122,19 +124,16 @@ function ApxToolkitCard() {
     <Card className="border-primary/20 hover:border-primary/40 transition-colors">
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <img src="https://raw.githubusercontent.com/renardeinside/apx/refs/heads/main/assets/logo.svg" className="h-5 w-5" />
+          <img
+            src="https://raw.githubusercontent.com/renardeinside/apx/refs/heads/main/assets/logo.svg"
+            className="h-5 w-5"
+          />
           apx toolkit
         </CardTitle>
-        <CardDescription>
-          Check out the docs
-        </CardDescription>
+        <CardDescription>Check out the docs</CardDescription>
       </CardHeader>
       <CardContent>
-        <Button
-          variant="outline"
-          className="w-full"
-          asChild
-        >
+        <Button variant="outline" className="w-full" asChild>
           <a
             href="https://github.com/renardeinside/apx"
             target="_blank"
@@ -158,9 +157,7 @@ function CounterCard() {
           <Braces className="h-5 w-5" />
           React example
         </CardTitle>
-        <CardDescription>
-          Interactive counter
-        </CardDescription>
+        <CardDescription>Interactive counter</CardDescription>
       </CardHeader>
       <CardContent>
         <Counter />
@@ -176,8 +173,12 @@ function Index() {
       <header className="z-50 bg-background/80 backdrop-blur-sm border-b">
         <div className="container mx-auto px-4 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
-            <img src="/logo.svg" alt="logo" className="h-6 w-6 text-primary border-1 border-primary rounded-sm" />
-            <span className="font-semibold text-lg">__APP_NAME__</span>
+            <img
+              src="/logo.svg"
+              alt="logo"
+              className="h-6 w-6 text-primary border-1 border-primary rounded-sm"
+            />
+            <span className="font-semibold text-lg">{__APP_NAME__}</span>
           </Link>
           <ModeToggle />
         </div>
@@ -215,9 +216,7 @@ function Index() {
       {/* Footer text */}
       <footer className="pb-8 px-4">
         <div className="text-center text-sm text-muted-foreground">
-          <p className="text-xs">
-            Built with ❤️ using apx
-          </p>
+          <p className="text-xs">Built with ❤️ using apx</p>
         </div>
       </footer>
 

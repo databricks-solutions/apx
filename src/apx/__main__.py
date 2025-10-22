@@ -164,9 +164,9 @@ def init(
                 f"[dim]Available Databricks profiles: {', '.join(available_profiles)}[/dim]"
             )
             profile = Prompt.ask(
-                "[cyan]Which Databricks profile would you like to use?[/cyan]",
-                default=available_profiles[0] if available_profiles else "",
-                show_default=bool(available_profiles),
+                "[cyan]Which Databricks profile would you like to use? (leave empty to skip)[/cyan]",
+                default="",
+                show_default=False,
             )
             if profile == "":
                 profile = None
@@ -176,6 +176,8 @@ def init(
                 "[cyan]Would you like to specify a profile name?[/cyan]", default=False
             ):
                 profile = Prompt.ask("[cyan]Enter profile name[/cyan]")
+            else:
+                profile = None
 
     # Prompt for assistant if not provided
     if assistant is None:
