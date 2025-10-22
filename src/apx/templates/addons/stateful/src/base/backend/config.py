@@ -28,7 +28,7 @@ class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=env_file,
         env_prefix=f"{app_name.upper()}_",
-        extra="allow",
+        extra="ignore",
         env_nested_delimiter="__",
     )
     app_name: str = Field(default=app_name)
