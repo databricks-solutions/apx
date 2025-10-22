@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import Navbar from "@/components/apx/Navbar";
 import { User } from "lucide-react";
+import { BubbleBackground } from "@/components/backgrounds/bubble";
 
 export const Route = createFileRoute("/")({
   component: () => <Index />,
@@ -16,10 +17,7 @@ function Index() {
       {/* Main content - 2 columns */}
       <main className="flex-1 grid md:grid-cols-2">
         {/* Left column - Gradient only */}
-        <div className="relative bg-linear-to-br from-primary/20 via-primary/5 to-background">
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_40%,rgba(120,119,198,0.3),transparent_50%)]" />
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_70%_70%,rgba(180,119,198,0.2),transparent_60%)]" />
-        </div>
+        <BubbleBackground interactive />
 
         {/* Right column - Content */}
         <div className="relative flex flex-col items-center justify-center p-8 md:p-12 border-l">

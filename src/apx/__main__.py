@@ -309,6 +309,23 @@ def init(
             error_msg="Failed to add button component",
         )
 
+        # add bubble background component
+        run_subprocess(
+            [
+                "bun",
+                "x",
+                "--bun",
+                "shadcn@latest",
+                "add",
+                "@animate-ui/components-backgrounds-bubble",
+                "-p",
+                f"src/{app_name}/ui/components/backgrounds/bubble.tsx",
+                "--yes",
+            ],
+            cwd=app_path,
+            error_msg="Failed to add bubble background component",
+        )
+
         if layout == "sidebar":
             # install necessary components for sidebar layout
             run_subprocess(
