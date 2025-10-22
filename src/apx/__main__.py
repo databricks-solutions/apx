@@ -415,11 +415,11 @@ def init(
 
             if assistant == "vscode":
                 progress.update(task, description="🤖 Copying VSCode instructions...")
-                rules_addon = templates_dir / "addons/rules/.github"
+                rules_addon = templates_dir / "addons/vscode"
                 process_template_directory(rules_addon, app_path, app_name, jinja2_env)
             elif assistant == "cursor":
                 progress.update(task, description="🤖 Copying Cursor rules...")
-                rules_addon = templates_dir / "addons/rules/.cursor"
+                rules_addon = templates_dir / "addons/cursor"
                 process_template_directory(rules_addon, app_path, app_name, jinja2_env)
             else:
                 progress.update(
