@@ -24,7 +24,7 @@ from apx.utils import (
     ensure_dir,
     format_elapsed_ms,
     generate_metadata_file,
-    get_app_name_from_pyproject,
+    get_project_metadata,
     in_path,
     is_bun_installed,
     is_uv_installed,
@@ -150,13 +150,17 @@ def init(
             default=default_name,
         )
 
-    # Normalize app name
-    app_name = app_name.lower().replace(" ", "_").replace("-", "_").replace(".", "_")
-    if not app_name.replace("_", "").isalnum():
+    # Normalize app name: convert to lowercase and replace spaces with dashes
+    app_name = app_name.lower().replace(" ", "-").replace("_", "-")
+    # Validate that app_name only contains alphanumeric characters and dashes
+    if not app_name.replace("-", "").isalnum():
         print(
-            "[red]Invalid app name. Please use only alphanumeric characters and underscores.[/red]"
+            "[red]Invalid app name. Please use only alphanumeric characters and dashes.[/red]"
         )
         return Exit(code=1)
+
+    # Create app_slug: internal version with underscores for module names and paths
+    app_slug = app_name.replace("-", "_")
 
     # Prompt for profile if not provided
     if profile is None:
@@ -219,10 +223,12 @@ def init(
 
         # Process the entire base template directory
         base_template_dir = templates_dir / "base"
-        process_template_directory(base_template_dir, app_path, app_name, jinja2_env)
+        process_template_directory(
+            base_template_dir, app_path, app_name, app_slug, jinja2_env
+        )
 
         # Create dist gitignore
-        dist_dir = app_path / "src" / app_name / "__dist__"
+        dist_dir = app_path / "src" / app_slug / "__dist__"
         ensure_dir(dist_dir)
         (dist_dir / ".gitignore").write_text("*\n")
 
@@ -234,7 +240,9 @@ def init(
         if template == "stateful":
             # replace databricks.yml.jinja2 with databricks.yml.jinja2 from addons/stateful
             stateful_addon = templates_dir / "addons/stateful"
-            process_template_directory(stateful_addon, app_path, app_name, jinja2_env)
+            process_template_directory(
+                stateful_addon, app_path, app_name, app_slug, jinja2_env
+            )
 
         # append DATABRICKS_CONFIG_PROFILE to .env if profile is provided
         if profile:
@@ -243,7 +251,9 @@ def init(
         if layout == "sidebar":
             # replace src/base/ui/routes/__root.tsx with src/base/ui/routes/__root.tsx from addons/sidebar
             sidebar_addon = templates_dir / "addons/sidebar"
-            process_template_directory(sidebar_addon, app_path, app_name, jinja2_env)
+            process_template_directory(
+                sidebar_addon, app_path, app_name, app_slug, jinja2_env
+            )
 
     # === PHASE 2: Installing frontend dependencies ===
     with progress_spinner(
@@ -327,7 +337,7 @@ def init(
                 "add",
                 "@animate-ui/components-backgrounds-bubble",
                 "-p",
-                f"src/{app_name}/ui/components/backgrounds/bubble.tsx",
+                f"src/{app_slug}/ui/components/backgrounds/bubble.tsx",
                 "--yes",
             ],
             cwd=app_path,
@@ -435,11 +445,15 @@ def init(
             if assistant == "vscode":
                 progress.update(task, description="🤖 Copying VSCode instructions...")
                 rules_addon = templates_dir / "addons/vscode"
-                process_template_directory(rules_addon, app_path, app_name, jinja2_env)
+                process_template_directory(
+                    rules_addon, app_path, app_name, app_slug, jinja2_env
+                )
             elif assistant == "cursor":
                 progress.update(task, description="🤖 Copying Cursor rules...")
                 rules_addon = templates_dir / "addons/cursor"
-                process_template_directory(rules_addon, app_path, app_name, jinja2_env)
+                process_template_directory(
+                    rules_addon, app_path, app_name, app_slug, jinja2_env
+                )
             else:
                 console.print(
                     f"""[yellow]⏭️  Skipping assistant rules setup for {assistant}.
@@ -665,9 +679,8 @@ def dev(
         app_dir = Path.cwd()
 
     with in_path(app_dir):
-        # Get app name from pyproject.toml
-        app_name = get_app_name_from_pyproject()
-        app_module_name = f"{app_name}.backend.app:app"
+        # Get app module name from pyproject.toml
+        app_module_name = get_project_metadata()["app-module"]
 
         console.print(
             f"[bold chartreuse1]🚀 Starting development servers...[/bold chartreuse1]"

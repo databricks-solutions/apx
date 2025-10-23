@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from pydantic import Field, BaseModel
 from dotenv import load_dotenv
-from .._metadata import app_name
+from .._metadata import app_name, app_slug
 from pydantic.fields import _Unset
 
 # project root is the parent of the src folder
@@ -35,7 +35,7 @@ class AppConfig(BaseSettings):
 
     @property
     def static_assets_path(self) -> Path:
-        return resources.files(self.app_name).joinpath("__dist__")  # type: ignore
+        return resources.files(app_slug).joinpath("__dist__")  # type: ignore
 
 
 conf = AppConfig()

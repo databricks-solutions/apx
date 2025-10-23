@@ -6,10 +6,13 @@ import { resolve } from "path";
 import { apx, OpenAPI, Orval } from "apx/vite-plugin";
 import { readMetadata, type ApxMetadata } from "apx/vite-plugin";
 
-const { appName: APP_NAME, appModule: APP_MODULE } =
-  readMetadata() as ApxMetadata;
+const {
+  appName: APP_NAME,
+  appSlug: APP_SLUG,
+  appModule: APP_MODULE,
+} = readMetadata() as ApxMetadata;
 
-const APP_UI_PATH = `./src/${APP_NAME}/ui`;
+const APP_UI_PATH = `./src/${APP_SLUG}/ui`;
 const OUT_DIR = `../__dist__`; // relative to APP_UI_PATH!
 const OPENAPI_JSON_PATH = "node_modules/.tmp/openapi.json";
 

@@ -397,6 +397,7 @@ export function apx(options: ApxPluginOptions = {}): Plugin {
 
 export type ApxMetadata = {
   appName: string;
+  appSlug: string;
   appModule: string;
 };
 
@@ -425,6 +426,7 @@ export function readMetadata(): ApxMetadata {
 
   return {
     appName: metadata["app-name"],
+    appSlug: metadata["app-slug"],
     appModule: metadata["app-module"],
   } as ApxMetadata;
 }

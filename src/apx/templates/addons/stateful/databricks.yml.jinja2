@@ -16,7 +16,7 @@ resources:
       description: "{{app_name}} created with apx"
       source_code_path: ./.build
       config:
-        command: ["uvicorn", "{{app_name}}.backend.app:app", "--workers", "2"]
+        command: ["uvicorn", "{{app_slug}}.backend.app:app", "--workers", "2"]
       resources:
         - name: "db"
           database:

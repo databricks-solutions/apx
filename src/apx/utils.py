@@ -156,7 +156,7 @@ def is_bun_installed() -> bool:
 
 
 def random_name():
-    """Generate a random docker-style name."""
+    """Generate a random docker-style name with dashes."""
     adjectives = [
         "fast",
         "simple",
@@ -194,7 +194,7 @@ def random_name():
         "octopus",
     ]
 
-    return f"{random.choice(adjectives)}_{random.choice(animals)}"
+    return f"{random.choice(adjectives)}-{random.choice(animals)}"
 
 
 def ensure_dir(path: Path) -> Path:
@@ -204,11 +204,22 @@ def ensure_dir(path: Path) -> Path:
 
 
 def process_template_directory(
-    source_dir: Path, target_dir: Path, app_name: str, jinja2_env: jinja2.Environment
+    source_dir: Path,
+    target_dir: Path,
+    app_name: str,
+    app_slug: str,
+    jinja2_env: jinja2.Environment,
 ) -> None:
     """
     Recursively process template directory, copying files and rendering Jinja2 templates.
-    Replaces 'base' with app_name in paths.
+    Replaces 'base' with app_slug in paths (for module names and directory structures).
+
+    Args:
+        source_dir: Source template directory
+        target_dir: Target output directory
+        app_name: User-facing app name (can contain dashes, e.g., 'my-app')
+        app_slug: Internal app slug (with underscores, e.g., 'my_app') for module names and paths
+        jinja2_env: Jinja2 environment for template rendering
     """
     # Get the templates root directory (parent of 'base' or 'addons')
     templates_root = jinja2_env.loader.searchpath[0]  # type: ignore
@@ -224,11 +235,11 @@ def process_template_directory(
             # Calculate relative path from source_dir
             rel_path = item.relative_to(source_dir)
 
-            # Replace 'base' with app_name in the path
+            # Replace 'base' with app_slug in the path (for module names and paths)
             path_str = str(rel_path)
             if "/base/" in path_str or path_str.startswith("base/"):
-                path_str = path_str.replace("/base/", f"/{app_name}/").replace(
-                    "base/", f"{app_name}/"
+                path_str = path_str.replace("/base/", f"/{app_slug}/").replace(
+                    "base/", f"{app_slug}/"
                 )
 
             # Determine target path
@@ -246,10 +257,17 @@ def process_template_directory(
                 # Render Jinja2 template using the correct path relative to templates root
                 template_path = str(source_rel_to_templates / rel_path)
                 template = jinja2_env.get_template(template_path)
-                target_path.write_text(template.render(app_name=app_name))
+                # Pass both app_name (for display) and app_slug (for module names/paths) to templates
+                target_path.write_text(
+                    template.render(app_name=app_name, app_slug=app_slug)
+                )
                 if item.name == "logo.svg.jinja2":
                     app_letter = app_name[0].upper()
-                    target_path.write_text(template.render(app_letter=app_letter))
+                    target_path.write_text(
+                        template.render(
+                            app_name=app_name, app_slug=app_slug, app_letter=app_letter
+                        )
+                    )
             else:
                 # Copy file as-is
                 shutil.copy(item, target_path)
@@ -272,23 +290,15 @@ def run_subprocess(cmd: list[str], cwd: Path, error_msg: str) -> None:
         raise Exit(code=1)
 
 
-def get_app_name_from_pyproject() -> str:
-    """Read the app name from pyproject.toml."""
+def get_project_metadata() -> dict[str, str]:
+    """Read the project metadata from pyproject.toml."""
     pyproject_path = Path.cwd() / "pyproject.toml"
     if not pyproject_path.exists():
         console.print("[red]❌ pyproject.toml not found in current directory[/red]")
         raise Exit(code=1)
-
     with open(pyproject_path, "rb") as f:
         data = tomllib.load(f)
-
-    # Get the project name from pyproject.toml
-    app_name = data.get("project", {}).get("name")
-    if not app_name:
-        console.print("[red]❌ Could not find project name in pyproject.toml[/red]")
-        raise Exit(code=1)
-
-    return app_name
+    return data["tool"]["apx"]["metadata"]
 
 
 async def run_frontend(frontend_port: int):
@@ -331,6 +341,7 @@ def generate_metadata_file(app_path: Path):
             [
                 f'app_name = "{metadata["app-name"]}"',
                 f'app_module = "{metadata["app-module"]}"',
+                f'app_slug = "{metadata["app-slug"]}"',
             ]
         )
     )

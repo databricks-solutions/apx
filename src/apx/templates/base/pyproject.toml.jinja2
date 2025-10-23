@@ -18,8 +18,9 @@ dev = [
 
 [tool.apx.metadata]
 app-name = "{{app_name}}"
-app-module = "{{app_name}}.backend.app:app"
-metadata-path = "src/{{app_name}}/_metadata.py"
+app-slug = "{{app_slug}}"
+app-module = "{{app_slug}}.backend.app:app"
+metadata-path = "src/{{app_slug}}/_metadata.py"
 
 
 [tool.uv.sources]
@@ -37,11 +38,11 @@ vcs = "git"
 format-jinja = "{% raw %}{{version}}{% endraw %}"
 
 [tool.hatch.build.hooks.version]
-path = "src/{{app_name}}/_version.py"
+path = "src/{{app_slug}}/_version.py"
 template = '''
 version = "{version}"
 '''
 
 [tool.hatch.build]
-artifacts = ["src/{{app_name}}/__dist__"]
-exclude = ["src/{{app_name}}/ui"]
+artifacts = ["src/{{app_slug}}/__dist__"]
+exclude = ["src/{{app_slug}}/ui"]
