@@ -2,20 +2,38 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import { defineConfig } from "vite";
-import { resolve } from "path";
-import { apx, OpenAPI, Orval } from "apx/vite-plugin";
-import { readMetadata, type ApxMetadata } from "apx/vite-plugin";
+import { readFileSync } from "fs";
+import { join, resolve } from "path";
+import { parse } from "smol-toml";
 
-const {
-  appName: APP_NAME,
-  appSlug: APP_SLUG,
-  appModule: APP_MODULE,
-} = readMetadata() as ApxMetadata;
+type ApxMetadata = {
+  appName: string;
+  appSlug: string;
+  appModule: string;
+};
+
+// read metadata from pyproject.toml using toml npm package
+export function readMetadata(): ApxMetadata {
+  const pyprojectPath = join(process.cwd(), "pyproject.toml");
+  const pyproject = parse(readFileSync(pyprojectPath, "utf-8")) as any;
+
+  const metadata = pyproject?.tool?.apx?.metadata;
+
+  if (!metadata || typeof metadata !== "object") {
+    throw new Error("Could not find [tool.apx.metadata] in pyproject.toml");
+  }
+
+  return {
+    appName: metadata["app-name"],
+    appSlug: metadata["app-slug"],
+    appModule: metadata["app-module"],
+  };
+}
+
+const { appName: APP_NAME, appSlug: APP_SLUG } = readMetadata() as ApxMetadata;
 
 const APP_UI_PATH = `./src/${APP_SLUG}/ui`;
 const OUT_DIR = `../__dist__`; // relative to APP_UI_PATH!
-const OPENAPI_JSON_PATH = "node_modules/.tmp/openapi.json";
-
 export default defineConfig({
   root: APP_UI_PATH,
   publicDir: "./public", // relative to APP_UI_PATH!
@@ -25,27 +43,6 @@ export default defineConfig({
       autoCodeSplitting: true,
       routesDirectory: `${APP_UI_PATH}/routes`,
       generatedRouteTree: "./types/routeTree.gen.ts",
-    }),
-    apx({
-      steps: [
-        OpenAPI(APP_MODULE, OPENAPI_JSON_PATH),
-        Orval({
-          input: OPENAPI_JSON_PATH,
-          output: {
-            target: `${APP_UI_PATH}/lib/api.ts`,
-            client: "react-query",
-            httpClient: "axios",
-            prettier: true,
-            override: {
-              query: {
-                useQuery: true,
-                useSuspenseQuery: true,
-              },
-            },
-          },
-        }),
-      ],
-      ignore: ["node_modules"],
     }),
     react(),
     tailwindcss(),

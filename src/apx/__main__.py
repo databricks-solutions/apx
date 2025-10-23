@@ -1,7 +1,5 @@
 import asyncio
-import importlib
 from importlib import resources
-import json
 import os
 from pathlib import Path
 import shutil
@@ -10,7 +8,6 @@ import time
 from typing import Annotated, Literal
 
 from dotenv import set_key
-from fastapi import FastAPI
 import jinja2
 from rich import print
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -18,21 +15,19 @@ from rich.prompt import Confirm, Prompt
 from typer import Argument, Exit, Option, Typer
 
 from apx._version import version as apx_version
-from apx.dev import run_backend
+from apx.dev import DevManager, run_backend
+from apx.openapi import run_openapi
 from apx.utils import (
     console,
     ensure_dir,
     format_elapsed_ms,
     generate_metadata_file,
-    get_project_metadata,
-    in_path,
     is_bun_installed,
     is_uv_installed,
     list_profiles,
     process_template_directory,
     progress_spinner,
     random_name,
-    run_frontend,
     run_subprocess,
     version_callback,
 )
@@ -75,7 +70,6 @@ app = Typer(
 )
 
 templates_dir: Path = resources.files("apx").joinpath("templates")  # type: ignore
-apx_dist_dir: Path = resources.files("apx").joinpath("__dist__")  # type: ignore
 jinja2_env = jinja2.Environment(loader=jinja2.FileSystemLoader(templates_dir))
 
 
@@ -330,21 +324,6 @@ def init(
             error_msg="Failed to install dev dependencies",
         )
 
-        # install apx plugin
-        apx_dist_file = next(apx_dist_dir.glob("apx-*"), None)
-        if apx_dist_file is None:
-            console.print(
-                f"[red]❌ Failed to find apx plugin in dist directory {apx_dist_dir.resolve()}[/red]"
-            )
-            raise Exit(code=1)
-
-        bun_add(
-            [str(apx_dist_file.resolve())],
-            cwd=app_path,
-            dev=True,
-            error_msg="Failed to install apx plugin",
-        )
-
     # === PHASE 3: Bootstrapping shadcn ===
     with progress_spinner(
         "🎨 Bootstrapping shadcn components...", "✅ Shadcn components added"
@@ -559,6 +538,13 @@ def build(
         app_path = Path.cwd()
 
     build_dir = app_path / build_path
+
+    console.print(f"🔧 Building project in {app_path.resolve()}")
+
+    # ensure .apx directory exists
+    apx_dir = app_path / ".apx"
+    ensure_dir(apx_dir)
+
     start_time_perf = time.perf_counter()
     # Clean up the build directory if it exists
     if build_dir.exists():
@@ -572,6 +558,9 @@ def build(
 
     # Generate the _metadata.py file
     generate_metadata_file(app_path)
+
+    # Generate the openapi schema and orval client
+    run_openapi(app_path, watch=False)
 
     # === PHASE 1: Building UI ===
     if not skip_ui_build:
@@ -640,51 +629,100 @@ def build(
     requirements_file = build_dir / "requirements.txt"
     requirements_file.write_text(f"{wheel_file_name}\n")
 
-    console.print(
-        f"✅ Full build [UI + Python wheel] completed in ({format_elapsed_ms(start_time_perf)})"
+    console.print(f"✅ Full build completed in ({format_elapsed_ms(start_time_perf)})")
+
+
+@app.command(name="openapi", help="Generate OpenAPI schema and orval client")
+def openapi(
+    app_dir: Annotated[
+        Path | None,
+        Argument(
+            help="The path to the app. If not provided, current working directory will be used"
+        ),
+    ] = None,
+    watch: Annotated[
+        bool,
+        Option("--watch", "-w", help="Watch for changes and regenerate"),
+    ] = False,
+    version: bool | None = version_option,
+):
+    """Generate OpenAPI schema from FastAPI app and run orval to generate client."""
+    if app_dir is None:
+        app_dir = Path.cwd()
+
+    run_openapi(app_dir, watch=watch)
+
+
+# === Dev Command Group ===
+
+dev_app = Typer(name="dev", help="Manage development servers")
+app.add_typer(dev_app, name="dev")
+
+
+@app.command(
+    name="_run-frontend-detached",
+    hidden=True,
+    help="Internal: Run frontend in detached mode",
+)
+def _run_frontend_detached(
+    app_dir: Path = Argument(..., help="App directory"),
+    app_id: str = Argument(..., help="Application ID"),
+    frontend_port: int = Argument(..., help="Frontend port"),
+):
+    """Internal command to run frontend server with file logging. Not meant for direct use."""
+    from apx.dev import run_frontend_with_logging
+
+    asyncio.run(run_frontend_with_logging(app_dir, app_id, frontend_port))
+
+
+@app.command(
+    name="_run-backend-detached",
+    hidden=True,
+    help="Internal: Run backend in detached mode",
+)
+def _run_backend_detached(
+    app_dir: Path = Argument(..., help="App directory"),
+    app_id: str = Argument(..., help="Application ID"),
+    app_module_name: str = Argument(..., help="App module name"),
+    backend_host: str = Argument(..., help="Backend host"),
+    backend_port: int = Argument(..., help="Backend port"),
+    obo: bool = Argument(..., help="Enable OBO"),
+):
+    """Internal command to run backend server with file logging. Not meant for direct use."""
+    from apx.dev import get_log_dir
+
+    log_dir = get_log_dir(app_id)
+    log_file = log_dir / "backend.log"
+
+    asyncio.run(
+        run_backend(
+            app_dir,
+            app_module_name,
+            backend_host,
+            backend_port,
+            obo=obo,
+            log_file=log_file,
+        )
     )
 
 
-@app.command(name="openapi", help="Generate OpenAPI schema from FastAPI app")
-def openapi(
-    app_name: str = Argument(
-        ..., help="App module name in form of some.package.file:app"
-    ),
-    output_path: Path = Argument(..., help="The path to the output file"),
-    version: bool | None = version_option,
+@app.command(
+    name="_run-openapi-detached",
+    hidden=True,
+    help="Internal: Run OpenAPI watcher in detached mode",
+)
+def _run_openapi_detached(
+    app_dir: Path = Argument(..., help="App directory"),
+    app_id: str = Argument(..., help="Application ID"),
 ):
-    # Split the app_name into module path and attribute name (like uvicorn does)
-    if ":" not in app_name:
-        print(f"Invalid app name format. Expected format: some.package.file:app")
-        return Exit(code=1)
+    """Internal command to run OpenAPI watcher with file logging. Not meant for direct use."""
+    from apx.dev import run_openapi_with_logging
 
-    module_path, attribute_name = app_name.split(":", 1)
-
-    # Import the module
-    try:
-        module = importlib.import_module(module_path)
-    except ImportError as e:
-        print(f"Failed to import module {module_path}: {e}")
-        return Exit(code=1)
-
-    # Get the app attribute from the module
-    try:
-        app_instance = getattr(module, attribute_name)
-    except AttributeError:
-        print(f"Module {module_path} does not have attribute '{attribute_name}'")
-        return Exit(code=1)
-
-    if not isinstance(app_instance, FastAPI):
-        print(f"'{attribute_name}' is not a FastAPI app instance.")
-        return Exit(code=1)
-
-    spec = app_instance.openapi()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(spec, indent=2))
+    asyncio.run(run_openapi_with_logging(app_dir, app_id))
 
 
-@app.command(name="dev", help="Run development servers for frontend and backend")
-def dev(
+@dev_app.command(name="start", help="Start development servers in detached mode")
+def dev_start(
     app_dir: Annotated[
         Path | None,
         Argument(
@@ -701,12 +739,11 @@ def dev(
     obo: Annotated[
         bool, Option(help="Whether to add On-Behalf-Of header to the backend server")
     ] = True,
-    version: bool | None = version_option,
+    openapi: Annotated[
+        bool, Option(help="Whether to start OpenAPI watcher process")
+    ] = True,
 ):
-    """
-    Run development servers for both frontend and backend concurrently.
-    The backend will have a middleware that adds X-Forwarded-Access-Token header.
-    """
+    """Start development servers in detached mode."""
     # Check prerequisites
     if not is_bun_installed():
         console.print(
@@ -717,34 +754,150 @@ def dev(
     if app_dir is None:
         app_dir = Path.cwd()
 
-    with in_path(app_dir):
-        # Get app module name from pyproject.toml
-        app_module_name = get_project_metadata()["app-module"]
+    # Use DevManager to start servers
+    manager = DevManager(app_dir)
+    manager.start(
+        frontend_port=frontend_port,
+        backend_port=backend_port,
+        backend_host=backend_host,
+        obo=obo,
+        openapi=openapi,
+    )
 
-        console.print(
-            f"[bold chartreuse1]🚀 Starting development servers...[/bold chartreuse1]"
-        )
-        console.print(f"[cyan]Frontend:[/cyan] http://localhost:{frontend_port}")
-        console.print(f"[green]Backend:[/green] http://{backend_host}:{backend_port}")
-        console.print()
 
-        async def run_both():
-            try:
-                await asyncio.gather(
-                    run_frontend(frontend_port),
-                    run_backend(
-                        Path.cwd(), app_module_name, backend_host, backend_port, obo=obo
-                    ),
-                )
-            except KeyboardInterrupt:
-                console.print(
-                    "\n[yellow]⚠️  Shutting down development servers...[/yellow]"
-                )
+@dev_app.command(name="status", help="Check the status of development servers")
+def dev_status(
+    app_dir: Annotated[
+        Path | None,
+        Argument(
+            help="The path to the app. If not provided, current working directory will be used"
+        ),
+    ] = None,
+):
+    """Check the status of development servers."""
+    if app_dir is None:
+        app_dir = Path.cwd()
 
-        try:
-            asyncio.run(run_both())
-        except KeyboardInterrupt:
-            console.print("[yellow]✅ Development servers stopped[/yellow]")
+    # Use DevManager to check status
+    manager = DevManager(app_dir)
+    manager.status()
+
+
+@dev_app.command(name="stop", help="Stop development servers")
+def dev_stop(
+    app_dir: Annotated[
+        Path | None,
+        Argument(
+            help="The path to the app. If not provided, current working directory will be used"
+        ),
+    ] = None,
+):
+    """Stop development servers."""
+    if app_dir is None:
+        app_dir = Path.cwd()
+
+    # Use DevManager to stop servers
+    manager = DevManager(app_dir)
+    manager.stop()
+
+
+@dev_app.command(name="logs", help="Retrieve and display logs from the database")
+def dev_logs(
+    app_dir: Annotated[
+        Path | None,
+        Argument(
+            help="The path to the app. If not provided, current working directory will be used"
+        ),
+    ] = None,
+    duration: Annotated[
+        int | None,
+        Option(
+            "--duration",
+            "-d",
+            help="Show logs from the last N seconds (None = all logs)",
+        ),
+    ] = None,
+    ui: Annotated[
+        bool,
+        Option("--ui", help="Show only frontend/UI logs"),
+    ] = False,
+    backend: Annotated[
+        bool,
+        Option("--backend", help="Show only backend logs"),
+    ] = False,
+    openapi: Annotated[
+        bool,
+        Option("--openapi", help="Show only OpenAPI logs"),
+    ] = False,
+):
+    """Retrieve and display logs from the log files."""
+    if app_dir is None:
+        app_dir = Path.cwd()
+
+    # Use DevManager to retrieve logs
+    manager = DevManager(app_dir)
+    logs = manager.get_logs(
+        duration_seconds=duration,
+        ui_only=ui,
+        backend_only=backend,
+        openapi_only=openapi,
+    )
+
+    if not logs:
+        console.print("[yellow]No logs found.[/yellow]")
+        return
+
+    # Display all logs
+    for log in logs:
+        manager._print_log_entry(log)
+
+    console.print(f"\n[dim]Showing {len(logs)} log entries[/dim]")
+
+
+@dev_app.command(name="tail", help="Tail logs continuously from log files")
+def dev_tail(
+    app_dir: Annotated[
+        Path | None,
+        Argument(
+            help="The path to the app. If not provided, current working directory will be used"
+        ),
+    ] = None,
+    duration: Annotated[
+        int | None,
+        Option("--duration", "-d", help="Initially show logs from the last N seconds"),
+    ] = None,
+    timeout: Annotated[
+        int | None,
+        Option(
+            "--timeout", "-t", help="Stop tailing after N seconds (None = indefinite)"
+        ),
+    ] = None,
+    ui: Annotated[
+        bool,
+        Option("--ui", help="Show only frontend/UI logs"),
+    ] = False,
+    backend: Annotated[
+        bool,
+        Option("--backend", help="Show only backend logs"),
+    ] = False,
+    openapi: Annotated[
+        bool,
+        Option("--openapi", help="Show only OpenAPI logs"),
+    ] = False,
+):
+    """Tail logs continuously from log files."""
+    if app_dir is None:
+        app_dir = Path.cwd()
+
+    # Use DevManager to tail logs
+    manager = DevManager(app_dir)
+    manager.tail_logs(
+        duration_seconds=duration,
+        ui_only=ui,
+        backend_only=backend,
+        openapi_only=openapi,
+        timeout_seconds=timeout,
+    )
 
 
 def entrypoint():
