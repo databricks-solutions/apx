@@ -38,6 +38,38 @@ from apx.utils import (
 )
 
 
+def bun_add(
+    packages: list[str],
+    cwd: Path,
+    dev: bool = False,
+    error_msg: str = "Failed to install packages",
+) -> None:
+    """
+    Run bun add command with optional cache directory support.
+
+    Args:
+        packages: List of package names to install
+        cwd: Current working directory for the command
+        dev: Whether to install as dev dependencies (-D flag)
+        error_msg: Error message to display if command fails
+    """
+    cmd = ["bun", "add"]
+
+    # Check if BUN_CACHE_DIR is set and add cache directory flag
+    bun_cache_dir = os.environ.get("BUN_CACHE_DIR")
+    if bun_cache_dir:
+        cache_path = Path(bun_cache_dir).resolve()
+        cmd.extend(["--cache-dir", str(cache_path)])
+
+    # Add dev flag if needed
+    if dev:
+        cmd.append("-D")
+
+    # Add packages
+    cmd.extend(packages)
+    run_subprocess(cmd, cwd=cwd, error_msg=error_msg)
+
+
 app = Typer(
     name="apx | Databricks App Toolkit",
 )
@@ -260,10 +292,8 @@ def init(
         "📦 Installing frontend dependencies...", "✅ Frontend dependencies installed"
     ):
         # Install bun main dependencies
-        run_subprocess(
+        bun_add(
             [
-                "bun",
-                "add",
                 "react-error-boundary",
                 "axios",
                 "react",
@@ -282,11 +312,8 @@ def init(
         )
 
         # Install bun dev dependencies
-        run_subprocess(
+        bun_add(
             [
-                "bun",
-                "add",
-                "-D",
                 "orval",
                 "vite",
                 "typescript",
@@ -299,6 +326,7 @@ def init(
                 "@tanstack/react-router-devtools",
             ],
             cwd=app_path,
+            dev=True,
             error_msg="Failed to install dev dependencies",
         )
 
@@ -310,9 +338,10 @@ def init(
             )
             raise Exit(code=1)
 
-        run_subprocess(
-            ["bun", "add", "--dev", str(apx_dist_file.resolve())],
+        bun_add(
+            [str(apx_dist_file.resolve())],
             cwd=app_path,
+            dev=True,
             error_msg="Failed to install apx plugin",
         )
 
