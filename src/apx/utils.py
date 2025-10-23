@@ -12,9 +12,53 @@ from pathlib import Path
 import jinja2
 from rich.console import Console
 from rich.markup import escape
+from rich.progress import Progress, SpinnerColumn, TextColumn
 from typer import Exit
 
 console = Console()
+
+
+def format_elapsed_ms(start_time_perf: float) -> str:
+    """Format elapsed time since start_time_perf.
+
+    If under 1 second, return milliseconds. Otherwise, return seconds and remaining milliseconds.
+    """
+    elapsed_seconds = time.perf_counter() - start_time_perf
+    if elapsed_seconds < 1:
+        return f"{int(elapsed_seconds * 1000)}ms"
+    seconds = int(elapsed_seconds)
+    remaining_ms = int((elapsed_seconds - seconds) * 1000)
+    return f"{seconds}s {remaining_ms}ms"
+
+
+@contextmanager
+def progress_spinner(description: str, success_message: str):
+    """Context manager for a transient progress spinner with completion message.
+
+    Args:
+        description: The description to show while the task is running
+        success_message: The message to show after completion (without timing - will be added automatically)
+
+    Yields:
+        The start time (perf_counter) for the operation
+
+    Example:
+        with progress_spinner("📦 Installing dependencies...", "✅ Dependencies installed"):
+            # do work
+            pass
+    """
+    phase_start = time.perf_counter()
+
+    with Progress(
+        SpinnerColumn(finished_text=""),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        progress.add_task(description, total=None)
+        yield phase_start
+
+    console.print(f"{success_message} ({format_elapsed_ms(phase_start)})")
 
 
 def print_with_prefix(prefix: str, text: str, color: str, width: int = 10):

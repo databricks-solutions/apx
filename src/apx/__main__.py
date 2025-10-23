@@ -22,6 +22,7 @@ from apx.dev import run_backend
 from apx.utils import (
     console,
     ensure_dir,
+    format_elapsed_ms,
     generate_metadata_file,
     get_app_name_from_pyproject,
     in_path,
@@ -29,6 +30,7 @@ from apx.utils import (
     is_uv_installed,
     list_profiles,
     process_template_directory,
+    progress_spinner,
     random_name,
     run_frontend,
     run_subprocess,
@@ -209,13 +211,9 @@ def init(
     )
 
     # === PHASE 1: Preparing project layout ===
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("📁 Preparing project layout...", total=None)
-
+    with progress_spinner(
+        "📁 Preparing project layout...", "✅ Project layout prepared"
+    ):
         # Ensure app_path exists
         ensure_dir(app_path)
 
@@ -247,16 +245,10 @@ def init(
             sidebar_addon = templates_dir / "addons/sidebar"
             process_template_directory(sidebar_addon, app_path, app_name, jinja2_env)
 
-        progress.update(task, description="✅ Project layout prepared", completed=True)
-
     # === PHASE 2: Installing frontend dependencies ===
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("📦 Installing frontend dependencies...", total=None)
-
+    with progress_spinner(
+        "📦 Installing frontend dependencies...", "✅ Frontend dependencies installed"
+    ):
         # Install bun main dependencies
         run_subprocess(
             [
@@ -308,26 +300,16 @@ def init(
             )
             raise Exit(code=1)
 
-        progress.update(task, description=f"🔍 Installing apx plugin...")
-
         run_subprocess(
             ["bun", "add", "--dev", str(apx_dist_file.resolve())],
             cwd=app_path,
             error_msg="Failed to install apx plugin",
         )
 
-        progress.update(
-            task, description="✅ Frontend dependencies installed", completed=True
-        )
-
     # === PHASE 3: Bootstrapping shadcn ===
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("🎨 Bootstrapping shadcn components...", total=None)
-
+    with progress_spinner(
+        "🎨 Bootstrapping shadcn components...", "✅ Shadcn components added"
+    ):
         # Add button component
         run_subprocess(
             ["bun", "x", "--bun", "shadcn@latest", "add", "button", "card", "--yes"],
@@ -372,31 +354,23 @@ def init(
                 error_msg="Failed to add avatar and sidebar components",
             )
 
-        progress.update(task, description="✅ Shadcn components added", completed=True)
-
     # === PHASE 4: Initializing git ===
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("🔧 Initializing git repository...", total=None)
-
+    with progress_spinner(
+        "🔧 Initializing git repository...", "✅ Git repository initialized"
+    ):
         run_subprocess(
             ["git", "init"],
             cwd=app_path,
             error_msg="Failed to initialize git repository",
         )
 
-        progress.update(
-            task, description="✅ Git repository initialized", completed=True
-        )
-
     # === PHASE 5: Syncing project with uv ===
+    phase_start = time.perf_counter()
     with Progress(
-        SpinnerColumn(),
+        SpinnerColumn(finished_text=""),
         TextColumn("[progress.description]{task.description}"),
         console=console,
+        transient=True,
     ) as progress:
         task = progress.add_task("🐍 Setting up project...", total=None)
 
@@ -437,7 +411,7 @@ def init(
                 console.print(f"[red]{stdout}[/red]")
             raise Exit(code=1)
 
-        progress.update(task, description="✅ Project set up", completed=True)
+    console.print(f"✅ Project set up ({format_elapsed_ms(phase_start)})")
 
     # === PHASE 6: Build using apx build ===
     build(
@@ -449,10 +423,12 @@ def init(
 
     # === PHASE 7: Setting up assistant rules ===
     if assistant:
+        phase_start = time.perf_counter()
         with Progress(
-            SpinnerColumn(),
+            SpinnerColumn(finished_text=""),
             TextColumn("[progress.description]{task.description}"),
             console=console,
+            transient=True,
         ) as progress:
             task = progress.add_task("🤖 Setting up assistant rules...", total=None)
 
@@ -465,14 +441,12 @@ def init(
                 rules_addon = templates_dir / "addons/cursor"
                 process_template_directory(rules_addon, app_path, app_name, jinja2_env)
             else:
-                progress.update(
-                    task,
-                    description=f"⏭️  Skipping assistant rules setup for {assistant}",
-                    completed=True,
-                )
                 console.print(
                     f"""[yellow]⏭️  Skipping assistant rules setup for {assistant}.
                 Please add them manually to your editor of choice.[/yellow]"""
+                )
+                console.print(
+                    f"⏭️  Skipping assistant rules setup for {assistant} ({format_elapsed_ms(phase_start)})"
                 )
 
             # install shadcn mcp via CLI
@@ -492,9 +466,9 @@ def init(
                 error_msg="Failed to install shadcn mcp",
             )
 
-            progress.update(
-                task, description="✅ Assistant rules configured", completed=True
-            )
+        console.print(
+            f"✅ MCP installed and assistant rules configured ({format_elapsed_ms(phase_start)})"
+        )
 
     console.print()
     console.print(
@@ -532,6 +506,7 @@ def build(
         app_path = Path.cwd()
 
     build_dir = app_path / build_path
+    start_time_perf = time.perf_counter()
     # Clean up the build directory if it exists
     if build_dir.exists():
         shutil.rmtree(build_dir)
@@ -547,13 +522,7 @@ def build(
 
     # === PHASE 1: Building UI ===
     if not skip_ui_build:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task(f"🎨 Building UI...", total=None)
-
+        with progress_spinner("🎨 Building UI...", "✅ UI built"):
             result = subprocess.run(
                 ["bun", "run", "build"],
                 cwd=app_path,
@@ -563,28 +532,17 @@ def build(
             )
 
             if result.returncode != 0:
-                progress.update(
-                    task, description="❌ Failed to build UI", completed=True
-                )
                 console.print("[red]❌ Failed to build UI[/red]")
                 if result.stderr:
                     console.print(f"[red]{result.stderr}[/red]")
                 if result.stdout:
                     console.print(f"[red]{result.stdout}[/red]")
                 raise Exit(code=1)
-
-            progress.update(task, description="✅ UI built", completed=True)
     else:
         console.print("[yellow]⏭️  Skipping UI build[/yellow]")
 
     # === PHASE 2: Building Python wheel ===
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("🐍 Building Python wheel...", total=None)
-
+    with progress_spinner("🐍 Building Python wheel...", "✅ Python wheel built"):
         result = subprocess.run(
             ["uv", "build", "--wheel", "--out-dir", str(build_path)],
             cwd=app_path,
@@ -601,43 +559,37 @@ def build(
                 console.print(f"[red]{result.stdout}[/red]")
             raise Exit(code=1)
 
-        progress.update(task, description="✅ Python wheel built", completed=True)
-
     # === PHASE 3: Preparing build directory ===
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("📦 Preparing build directory...", total=None)
 
-        # Copy app.yml or app.yaml if it exists
-        for app_file_name in ["app.yml", "app.yaml"]:
-            app_file = app_path / app_file_name
-            if app_file.exists():
-                ensure_dir(build_dir)
-                shutil.copy(app_file, build_dir / app_file_name)
-                break
+    # Copy app.yml or app.yaml if it exists
+    for app_file_name in ["app.yml", "app.yaml"]:
+        app_file = app_path / app_file_name
+        if app_file.exists():
+            ensure_dir(build_dir)
+            shutil.copy(app_file, build_dir / app_file_name)
+            break
 
-        wheel_file = list(build_dir.glob("*.whl"))[0]
+    wheel_file = list(build_dir.glob("*.whl"))[0]
 
-        if not wheel_file:
-            console.print("[red]❌ No wheel file found in build directory[/red]")
-            raise Exit(code=1)
+    if not wheel_file:
+        console.print("[red]❌ No wheel file found in build directory[/red]")
+        raise Exit(code=1)
 
-        # postfix the wheel file name with the current UTC timestamp
-        # Use + separator for local version identifier (PEP 440 compliant)
-        timestamp = time.strftime("%Y%m%d%H%M%S")
-        # add ".post{timestamp}" before -py3
-        stemmed = wheel_file.stem.replace("-py3", f".post{timestamp}-py3")
-        wheel_file_name = f"{stemmed}.whl"
-        wheel_file.rename(build_dir / wheel_file_name)
+    # postfix the wheel file name with the current UTC timestamp
+    # Use + separator for local version identifier (PEP 440 compliant)
+    timestamp = time.strftime("%Y%m%d%H%M%S")
+    # add ".post{timestamp}" before -py3
+    stemmed = wheel_file.stem.replace("-py3", f".post{timestamp}-py3")
+    wheel_file_name = f"{stemmed}.whl"
+    wheel_file.rename(build_dir / wheel_file_name)
 
-        # write requirements.txt with the wheel file name
-        requirements_file = build_dir / "requirements.txt"
-        requirements_file.write_text(f"{wheel_file_name}\n")
+    # write requirements.txt with the wheel file name
+    requirements_file = build_dir / "requirements.txt"
+    requirements_file.write_text(f"{wheel_file_name}\n")
 
-        progress.update(task, description="✅ Build directory prepared", completed=True)
+    console.print(
+        f"✅ Full build [UI + Python wheel] completed in ({format_elapsed_ms(start_time_perf)})"
+    )
 
 
 @app.command(name="openapi", help="Generate OpenAPI schema from FastAPI app")
