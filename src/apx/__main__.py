@@ -7,7 +7,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
-import tomllib
 from typing import Annotated, Literal
 
 from dotenv import set_key
@@ -42,6 +41,7 @@ app = Typer(
 )
 
 templates_dir: Path = resources.files("apx").joinpath("templates")  # type: ignore
+apx_dist_dir: Path = resources.files("apx").joinpath("dist")  # type: ignore
 jinja2_env = jinja2.Environment(loader=jinja2.FileSystemLoader(templates_dir))
 
 
@@ -279,13 +279,31 @@ def init(
             error_msg="Failed to install main dependencies",
         )
 
+        # install apx plugin
+        apx_dist_file = next(apx_dist_dir.glob("apx-*"), None)
+        if apx_dist_file is None:
+            console.print(
+                f"[red]❌ Failed to find apx plugin in dist directory {apx_dist_dir.resolve()}[/red]"
+            )
+            raise Exit(code=1)
+
+        progress.update(
+            task,
+            description=f"🔍 Installing apx plugin from {apx_dist_file.resolve()}...",
+        )
+
+        run_subprocess(
+            ["bun", "add", "--dev", f"apx@{apx_dist_file.resolve()}"],
+            cwd=app_path,
+            error_msg="Failed to install apx plugin",
+        )
+
         # Install bun dev dependencies
         run_subprocess(
             [
                 "bun",
                 "add",
                 "-D",
-                "github:renardeinside/apx",
                 "orval",
                 "vite",
                 "typescript",

@@ -55,3 +55,6 @@ path = "src/apx/_version.py"
 template = '''
 version = "{version}"
 '''
+
+[tool.hatch.build.hooks.custom]
+path = "hooks/pack.py"
