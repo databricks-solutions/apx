@@ -21,3 +21,11 @@ node_modules/
 dist/
 
 .mypy_cache/
+
+# coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# pytest
+.pytest_cache/
