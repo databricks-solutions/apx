@@ -402,6 +402,16 @@ def init(
             cwd=app_path,
             error_msg="Failed to initialize git repository",
         )
+        run_subprocess(
+            ["git", "add", "."],
+            cwd=app_path,
+            error_msg="Failed to add files to git repository",
+        )
+        run_subprocess(
+            ["git", "commit", "-m", "init"],
+            cwd=app_path,
+            error_msg="Failed to commit files to git repository",
+        )
 
     # === PHASE 5: Syncing project with uv ===
     phase_start = time.perf_counter()

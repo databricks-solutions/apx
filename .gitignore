@@ -29,3 +29,4 @@ htmlcov/
 
 # pytest
 .pytest_cache/
+.apx/
