@@ -293,7 +293,7 @@ def init(
         )
 
         run_subprocess(
-            ["bun", "add", "--dev", f"apx@{apx_dist_file.resolve()}"],
+            ["bun", "add", "--dev", str(apx_dist_file.resolve())],
             cwd=app_path,
             error_msg="Failed to install apx plugin",
         )
