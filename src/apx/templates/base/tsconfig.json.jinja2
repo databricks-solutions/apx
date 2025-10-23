@@ -10,7 +10,9 @@
       /* Bundler mode */
       "moduleResolution": "bundler",
       "allowImportingTsExtensions": true,
-      "verbatimModuleSyntax": true,
+      // a lot of components use type imports without using the `verbatimModuleSyntax` flag,
+      // so we need to disable it to allow for type imports
+      "verbatimModuleSyntax": false,
       "moduleDetection": "force",
       "noEmit": true,
       "jsx": "react-jsx",
