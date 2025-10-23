@@ -15,14 +15,6 @@ fmt:
     uv run ruff format .
     bun x prettier --write .
 
-release:
-    rm -rf dist/.gitignore
-    rm -rf dist/apx-*
-    bun run build
-    git add .
-    git commit -m "release"
-    git push
-
 [working-directory: 'sample']
 reinstall:
     bun remove apx
