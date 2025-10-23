@@ -129,6 +129,7 @@ uv run apx dev start
 Starts backend, frontend, and OpenAPI watcher in detached mode. All servers run in the background with logs written to `~/.apx/{app_id}/logs/`.
 
 Options:
+
 - `--frontend-port`: Frontend port (default: 5173)
 - `--backend-port`: Backend port (default: 8000)
 - `--backend-host`: Backend host (default: 0.0.0.0)
@@ -152,6 +153,7 @@ uv run apx dev logs
 Displays historical logs from development servers.
 
 Options:
+
 - `--duration, -d`: Show logs from last N seconds
 - `--ui`: Show only frontend logs
 - `--backend`: Show only backend logs
@@ -166,6 +168,7 @@ uv run apx dev tail
 Continuously streams logs from development servers (like `tail -f`).
 
 Options:
+
 - `--duration, -d`: Initially show logs from last N seconds
 - `--timeout, -t`: Stop tailing after N seconds
 - `--ui`: Show only frontend logs

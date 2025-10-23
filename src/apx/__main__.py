@@ -444,6 +444,9 @@ def init(
 
     # === PHASE 6: Build using apx build ===
 
+    # we're using the uv command because it needs to run the build command
+    # in the virtual environment of the project, not the global one
+
     with progress_spinner("🔧 Building project...", "✅ Project built"):
         subprocess.run(
             ["uv", "run", "apx", "build"],
