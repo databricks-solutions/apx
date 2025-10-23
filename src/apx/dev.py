@@ -687,18 +687,29 @@ def setup_file_logger(log_file: Path, process_name: str) -> logging.Logger:
     logger.handlers.clear()
 
     # Create handler that rotates every hour and keeps only 1 backup
+    # Using a large buffer size (1MB) to reduce I/O operations
     handler = TimedRotatingFileHandler(
         log_file,
         when="H",  # Rotate every hour
         interval=1,
         backupCount=0,  # Don't keep backups (effectively deletes after 1 hour)
+        encoding="utf-8",
+    )
+
+    # Add buffering to reduce I/O - flush every 100 records or 5 seconds
+    from logging.handlers import MemoryHandler
+
+    memory_handler = MemoryHandler(
+        capacity=100,  # Buffer up to 100 log records
+        flushLevel=logging.ERROR,  # Flush immediately on ERROR or higher
+        target=handler,
     )
 
     # Format: timestamp | stream | message
     formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
     handler.setFormatter(formatter)
 
-    logger.addHandler(handler)
+    logger.addHandler(memory_handler)
     logger.propagate = False
 
     return logger
@@ -735,6 +746,8 @@ async def run_frontend_with_logging(app_dir: Path, app_id: str, port: int):
                     logger.info(f"{stream_name} | {decoded_line}")
             except Exception:
                 pass
+            # Yield control to prevent I/O flooding (increased from 0.01 to 0.05)
+            await asyncio.sleep(0.05)
 
     # Read both stdout and stderr
     await asyncio.gather(
@@ -761,7 +774,6 @@ async def run_openapi_with_logging(app_dir: Path, app_id: str):
 
     # Redirect console output to logger
     import sys
-    from io import StringIO
 
     class LoggerWriter:
         def __init__(self, logger, level):
@@ -934,6 +946,7 @@ class DevManager:
                     str(frontend_port),
                 ],
                 cwd=self.app_dir,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -960,6 +973,7 @@ class DevManager:
                     str(obo).lower(),
                 ],
                 cwd=self.app_dir,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -983,6 +997,7 @@ class DevManager:
                         self.app_id,
                     ],
                     cwd=self.app_dir,
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,

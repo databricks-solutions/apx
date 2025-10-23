@@ -308,6 +308,7 @@ def init(
         # Install bun dev dependencies
         bun_add(
             [
+                "smol-toml",
                 "orval",
                 "vite",
                 "typescript",
