@@ -1,6 +1,7 @@
 pack-plugin:
-    rm -rf src/apx/dist/*
-    uv build --wheel
+    rm -rf ./dist
+    bun run build
+    bun pm pack --filename ./src/apx/dist/apx-plugin.tgz
 
 
 fmt:

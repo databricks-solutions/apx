@@ -2,26 +2,26 @@
   "name": "apx",
   "version": "0.1.1",
   "type": "module",
-  "main": "./plugin-dist/index.js",
-  "module": "./plugin-dist/index.js",
-  "types": "./plugin-dist/index.d.ts",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     "./vite-plugin": {
-      "types": "./plugin-dist/index.d.ts",
-      "import": "./plugin-dist/index.js",
-      "default": "./plugin-dist/index.js"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     }
   },
   "engines": {
     "node": ">=18"
   },
   "files": [
-    "./plugin-dist",
+    "./dist",
     "README.md"
   ],
   "scripts": {
-    "build:types": "tsc --emitDeclarationOnly --outDir ./plugin-dist",
-    "build:js": "bun build src/apx/plugins/index.ts --format esm --minify --target node --outdir ./plugin-dist --sourcemap --external orval --external vite",
+    "build:types": "tsc --emitDeclarationOnly --outDir ./dist",
+    "build:js": "bun build src/apx/plugins/index.ts --format esm --minify --target node --outdir ./dist --sourcemap --external orval --external vite",
     "build": "bun run build:js && bun run build:types",
     "prepublishOnly": "bun run build"
   },
