@@ -94,8 +94,7 @@ def init(
         Option(
             "--template",
             "-t",
-            help="The template to use. Will default to 'essential' if not provided",
-            prompt=True,
+            help="The template to use. Will prompt if not provided",
         ),
     ] = "essential",
     profile: Annotated[
@@ -104,7 +103,6 @@ def init(
             "--profile",
             "-p",
             help="The Databricks profile to use. Will prompt if not provided",
-            prompt=True,
         ),
     ] = None,
     assistant: Annotated[
@@ -116,13 +114,13 @@ def init(
         ),
     ] = None,
     layout: Annotated[
-        Literal["basic", "sidebar"],
+        Literal["basic", "sidebar"] | None,
         Option(
             "--layout",
             "-l",
-            help="The layout to use. Will default to 'basic' if not provided",
+            help="The layout to use. Will prompt if not provided",
         ),
-    ] = "basic",
+    ] = None,
     version: bool | None = version_option,
 ):
     # Check prerequisites
@@ -192,6 +190,19 @@ def init(
                 choices=available_assistants,
                 default="cursor",
             )
+
+    # Prompt for layout if not provided
+    if layout is None:
+        available_layouts = ["basic", "sidebar"]
+        prompt_layout = Prompt.ask(
+            "[cyan]Which layout would you like to use?[/cyan]",
+            choices=available_layouts,
+            default="sidebar",
+        )
+        if prompt_layout.lower() not in ["basic", "sidebar"]:
+            print("[red]Invalid layout. Please choose from: basic, sidebar.[/red]")
+            return Exit(code=1)
+        layout = prompt_layout.lower()  # type: ignore
 
     console.print(
         f"\n[bold cyan]Initializing app {app_name} in {app_path.resolve()}[/bold cyan]\n"
