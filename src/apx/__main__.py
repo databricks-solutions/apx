@@ -279,25 +279,6 @@ def init(
             error_msg="Failed to install main dependencies",
         )
 
-        # install apx plugin
-        apx_dist_file = next(apx_dist_dir.glob("apx-*"), None)
-        if apx_dist_file is None:
-            console.print(
-                f"[red]❌ Failed to find apx plugin in dist directory {apx_dist_dir.resolve()}[/red]"
-            )
-            raise Exit(code=1)
-
-        progress.update(
-            task,
-            description=f"🔍 Installing apx plugin from {apx_dist_file.resolve()}...",
-        )
-
-        run_subprocess(
-            ["bun", "add", "--dev", str(apx_dist_file.resolve())],
-            cwd=app_path,
-            error_msg="Failed to install apx plugin",
-        )
-
         # Install bun dev dependencies
         run_subprocess(
             [
@@ -317,6 +298,22 @@ def init(
             ],
             cwd=app_path,
             error_msg="Failed to install dev dependencies",
+        )
+
+        # install apx plugin
+        apx_dist_file = next(apx_dist_dir.glob("apx-*"), None)
+        if apx_dist_file is None:
+            console.print(
+                f"[red]❌ Failed to find apx plugin in dist directory {apx_dist_dir.resolve()}[/red]"
+            )
+            raise Exit(code=1)
+
+        progress.update(task, description=f"🔍 Installing apx plugin...")
+
+        run_subprocess(
+            ["bun", "add", "--dev", str(apx_dist_file.resolve())],
+            cwd=app_path,
+            error_msg="Failed to install apx plugin",
         )
 
         progress.update(
