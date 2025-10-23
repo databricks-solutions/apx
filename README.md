@@ -116,13 +116,69 @@ Initializes a new app project with interactive prompts for configuration. Suppor
 - `--assistant, -a`: Choose AI assistant rules (cursor/vscode/codex/claude)
 - `--layout, -l`: Choose the layout (basic/sidebar)
 
-### 🔥 `dev`
+### 🔥 `dev` - Development Server Management
+
+The `dev` command group manages development servers in detached mode:
+
+#### Start Development Servers
 
 ```bash
-uv run apx dev
+uv run apx dev start
 ```
 
-Launches both backend and frontend development servers with hot reload.
+Starts backend, frontend, and OpenAPI watcher in detached mode. All servers run in the background with logs written to `~/.apx/{app_id}/logs/`.
+
+Options:
+- `--frontend-port`: Frontend port (default: 5173)
+- `--backend-port`: Backend port (default: 8000)
+- `--backend-host`: Backend host (default: 0.0.0.0)
+- `--obo/--no-obo`: Enable/disable On-Behalf-Of header (default: enabled)
+- `--openapi/--no-openapi`: Enable/disable OpenAPI watcher (default: enabled)
+
+#### Check Server Status
+
+```bash
+uv run apx dev status
+```
+
+Shows status of all running development servers (backend, frontend, OpenAPI watcher).
+
+#### View Logs
+
+```bash
+uv run apx dev logs
+```
+
+Displays historical logs from development servers.
+
+Options:
+- `--duration, -d`: Show logs from last N seconds
+- `--ui`: Show only frontend logs
+- `--backend`: Show only backend logs
+- `--openapi`: Show only OpenAPI logs
+
+#### Tail Logs
+
+```bash
+uv run apx dev tail
+```
+
+Continuously streams logs from development servers (like `tail -f`).
+
+Options:
+- `--duration, -d`: Initially show logs from last N seconds
+- `--timeout, -t`: Stop tailing after N seconds
+- `--ui`: Show only frontend logs
+- `--backend`: Show only backend logs
+- `--openapi`: Show only OpenAPI logs
+
+#### Stop Development Servers
+
+```bash
+uv run apx dev stop
+```
+
+Stops all running development servers.
 
 ### 📦 `build`
 
@@ -131,6 +187,14 @@ uv run apx build
 ```
 
 Prepares the app for deployment by building both frontend assets and Python wheel.
+
+### 🔧 `openapi`
+
+```bash
+uv run apx openapi
+```
+
+Manually generates OpenAPI schema and orval client. Use `--watch` to enable automatic regeneration on changes.
 
 License
 © 2025 Databricks, Inc. All rights reserved. The source in this project is provided subject to the [Databricks License](LICENSE.md).

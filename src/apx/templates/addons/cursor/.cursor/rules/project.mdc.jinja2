@@ -75,20 +75,44 @@ const MyComponent = () => {
 
 `selector` is a generic, so it can be used with any `useX` and `useXSuspense` hooks.
 
-## Development process
+## Development Commands
 
-To run the application in development mode, use the following command:
-
+### Starting Development
 ```bash
-uv run apx dev
+uv run apx dev start
+```
+Starts all servers (backend, frontend, OpenAPI watcher) in detached mode. Logs written to `~/.apx/{app_id}/logs/`.
+
+### Checking Status
+```bash
+uv run apx dev status
+```
+Shows which servers are running and their ports.
+
+### Viewing Logs
+```bash
+uv run apx dev logs        # Show all logs
+uv run apx dev logs --ui   # Frontend only
+uv run apx dev logs --backend  # Backend only
+uv run apx dev tail        # Live streaming logs
 ```
 
-Before running it, make sure that there is no other uv run apx dev command running.
+### Stopping Servers
+```bash
+uv run apx dev stop
+```
+Stops all running development servers.
 
-To check if application can be built, use the following command:
-
+### Building for Production
 ```bash
 uv run apx build
 ```
+Builds frontend assets and Python wheel for deployment.
 
-Before running it, make sure that there is no other uv run apx build command running.
+### Manual OpenAPI Generation
+```bash
+uv run apx openapi         # Generate once
+uv run apx openapi --watch # Auto-regenerate on changes
+```
+
+**Note:** The OpenAPI watcher runs automatically with `dev start`. Manual generation is rarely needed.
