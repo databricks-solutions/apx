@@ -443,12 +443,15 @@ def init(
     console.print(f"✅ Project set up ({format_elapsed_ms(phase_start)})")
 
     # === PHASE 6: Build using apx build ===
-    build(
-        app_path=app_path.resolve(),
-        build_path=Path(".build"),
-        skip_ui_build=False,
-        version=version,
-    )
+
+    with progress_spinner("🔧 Building project...", "✅ Project built"):
+        subprocess.run(
+            ["uv", "run", "apx", "build"],
+            cwd=app_path,
+            capture_output=True,
+            text=True,
+            env=os.environ,
+        )
 
     # === PHASE 7: Setting up assistant rules ===
     if assistant:
