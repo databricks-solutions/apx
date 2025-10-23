@@ -1,6 +1,6 @@
 {
   "name": "apx",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "./.plugin/dist/index.js",
   "module": "./.plugin/dist/index.js",
