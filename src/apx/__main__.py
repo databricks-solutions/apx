@@ -41,7 +41,7 @@ app = Typer(
 )
 
 templates_dir: Path = resources.files("apx").joinpath("templates")  # type: ignore
-apx_dist_dir: Path = resources.files("apx").joinpath("dist")  # type: ignore
+apx_dist_dir: Path = resources.files("apx").joinpath("__dist__")  # type: ignore
 jinja2_env = jinja2.Environment(loader=jinja2.FileSystemLoader(templates_dir))
 
 

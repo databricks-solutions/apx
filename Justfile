@@ -1,7 +1,7 @@
 pack-plugin:
     rm -rf ./dist
     bun run build
-    bun pm pack --filename ./src/apx/dist/apx-plugin.tgz
+    bun pm pack --filename ./src/apx/__dist__/apx-plugin.tgz
 
 
 fmt:
