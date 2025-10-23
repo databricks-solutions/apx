@@ -16,7 +16,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from typer import Exit
 import watchfiles
 import uvicorn
-from apx.utils import console, PrefixedLogHandler, print_with_prefix
+from apx.utils import console, PrefixedLogHandler
 from apx import __version__
 
 

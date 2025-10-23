@@ -45,6 +45,7 @@ dev = [
     "pydantic-settings>=2.11.0",
     "ruff>=0.14.0",
     "sqlmodel>=0.0.27",
+    "types-jinja2>=2.11.9",
 ]
 
 [project.scripts]
