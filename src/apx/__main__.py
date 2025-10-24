@@ -74,6 +74,7 @@ jinja2_env = jinja2.Environment(loader=jinja2.FileSystemLoader(templates_dir))
 
 
 version_option = Option(
+    None,
     "--version",
     callback=version_callback,
     is_eager=True,
@@ -1003,7 +1004,7 @@ def dev_check(
 
     # run tsc to check for errors
     result = subprocess.run(
-        ["bun", "run", "tsc"],
+        ["bun", "run", "tsc", "-b"],
         cwd=app_dir,
         capture_output=True,
         text=True,
