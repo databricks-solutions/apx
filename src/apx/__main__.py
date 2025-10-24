@@ -150,6 +150,24 @@ def init(
         ),
     ] = None,
     version: bool | None = version_option,
+    apx_package: Annotated[
+        str | None,
+        Option(
+            "--apx-package",
+            "-apx",
+            hidden=True,
+            help="The apx package to install. Used for internal testing and development.",
+        ),
+    ] = "git+https://github.com/renardeinside/apx.git",
+    apx_editable: Annotated[
+        bool,
+        Option(
+            "--apx-editable",
+            "-apx-e",
+            hidden=True,
+            help="Whether to install apx as editable package.",
+        ),
+    ] = False,
 ):
     # Check prerequisites
     if not is_uv_installed():
@@ -405,6 +423,27 @@ def init(
 
         # Generate the _metadata.py file
         generate_metadata_file(app_path)
+        # add apx package:
+        if apx_package:
+            base_cmd = ["uv", "add", "--dev"]
+            if apx_editable:
+                base_cmd.append("--editable")
+            final_cmd = base_cmd + [apx_package]
+            result = subprocess.run(
+                final_cmd,
+                cwd=app_path,
+                capture_output=True,
+                text=True,
+                env=os.environ,
+            )
+
+            if result.returncode != 0:
+                console.print("[red]❌ Failed to add apx package[/red]")
+                if result.stderr:
+                    console.print(f"[red]{result.stderr}[/red]")
+                if result.stdout:
+                    console.print(f"[red]{result.stdout}[/red]")
+                raise Exit(code=1)
 
         # Start uv sync in background
         proc = subprocess.Popen(

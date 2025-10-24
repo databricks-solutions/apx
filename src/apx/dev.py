@@ -316,7 +316,7 @@ def setup_uvicorn_logging(log_file: Path | None = None):
     Args:
         log_file: Optional log file path for file-based logging
     """
-    from logging.handlers import TimedRotatingFileHandler
+    from logging.handlers import TimedRotatingFileHandler, MemoryHandler
 
     # Configure ONLY uvicorn loggers
     for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
@@ -325,19 +325,27 @@ def setup_uvicorn_logging(log_file: Path | None = None):
 
         if log_file:
             # File logging with rotation
-            handler = TimedRotatingFileHandler(
+            base_handler = TimedRotatingFileHandler(
                 log_file,
                 when="H",
                 interval=1,
                 backupCount=0,
             )
             formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+            base_handler.setFormatter(formatter)
+
+            # Add buffering to reduce I/O while maintaining low latency
+            handler = MemoryHandler(
+                capacity=10,  # Buffer up to 10 log records
+                flushLevel=logging.ERROR,  # Flush immediately on ERROR or higher
+                target=base_handler,
+            )
         else:
-            # Console logging
+            # Console logging (no buffering needed)
             handler = PrefixedLogHandler(prefix="[backend]", color="aquamarine1")
             formatter = logging.Formatter("%(message)s")
+            handler.setFormatter(formatter)
 
-        handler.setFormatter(formatter)
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
         logger.propagate = False
@@ -378,172 +386,205 @@ async def run_backend(
     # Store OBO token for reuse
     obo_token = None
 
-    while True:
-        server = None
-        server_task = None
-        watch_task = None
+    # Start periodic flush task if logging to file
+    flush_task = None
+    if log_file:
 
-        try:
-            # Reload message
-            if not first_run and not log_file:
-                console.print("[yellow][server][/yellow] Reloading...")
-                console.print()
+        async def periodic_flush():
+            """Periodically flush logger buffers to ensure ~100ms latency."""
+            while True:
+                await asyncio.sleep(0.1)  # Flush every 100ms
+                for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
+                    logger = logging.getLogger(logger_name)
+                    for handler in logger.handlers:
+                        handler.flush()
 
-            # Reload .env file on every iteration (including first run)
-            dotenv_file = cwd / ".env"
-            if dotenv_file.exists():
-                # Override=True ensures we reload env vars on hot reload
-                load_dotenv(dotenv_file)
+        flush_task = asyncio.create_task(periodic_flush())
 
-            # Prepare OBO token (will reuse if still valid)
-            if obo and first_run:
-                if log_file:
+    try:
+        while True:
+            server = None
+            server_task = None
+            watch_task = None
+
+            try:
+                # Reload message
+                if not first_run and not log_file:
+                    console.print("[yellow][server][/yellow] Reloading...")
+                    console.print()
+
+                # Reload .env file on every iteration (including first run)
+                dotenv_file = cwd / ".env"
+                if dotenv_file.exists():
+                    # Override=True ensures we reload env vars on hot reload
+                    load_dotenv(dotenv_file)
+
+                # Prepare OBO token (will reuse if still valid)
+                if obo and first_run:
+                    if log_file:
+                        obo_token = prepare_obo_token(
+                            cwd, app_module_name, status_context=None
+                        )
+                    else:
+                        with console.status(
+                            "[bold cyan]Preparing On-Behalf-Of token..."
+                        ) as status:
+                            status.update(
+                                f"📂 Loading .env file from {dotenv_file.resolve()}"
+                            )
+                            obo_token = prepare_obo_token(
+                                cwd, app_module_name, status_context=status
+                            )
+                            # Give user a moment to see the final status
+                            time.sleep(0.3)
+                        console.print("[green]✓[/green] On-Behalf-Of token ready")
+                        console.print()
+                elif obo:
+                    # On hot reload, prepare token without spinner
                     obo_token = prepare_obo_token(
                         cwd, app_module_name, status_context=None
                     )
-                else:
-                    with console.status(
-                        "[bold cyan]Preparing On-Behalf-Of token..."
-                    ) as status:
-                        status.update(
-                            f"📂 Loading .env file from {dotenv_file.resolve()}"
+
+                # Load/reload the app instance (fully reload modules on hot reload)
+                app_instance = load_app(app_module_name, reload_modules=not first_run)
+
+                # Add OBO middleware if enabled
+                if obo and obo_token:
+                    assert obo_token is not None, "OBO token is not set"
+                    encoded_token = obo_token.encode()
+
+                    async def obo_middleware(request: Request, call_next):
+                        # Headers are immutable, so we need to append to the list
+                        token_header: tuple[bytes, bytes] = (
+                            ACCESS_TOKEN_HEADER_NAME.encode(),
+                            encoded_token,
                         )
-                        obo_token = prepare_obo_token(
-                            cwd, app_module_name, status_context=status
-                        )
-                        # Give user a moment to see the final status
-                        time.sleep(0.3)
-                    console.print("[green]✓[/green] On-Behalf-Of token ready")
-                    console.print()
-            elif obo:
-                # On hot reload, prepare token without spinner
-                obo_token = prepare_obo_token(cwd, app_module_name, status_context=None)
+                        request.headers.__dict__["_list"].append(token_header)
+                        return await call_next(request)
 
-            # Load/reload the app instance (fully reload modules on hot reload)
-            app_instance = load_app(app_module_name, reload_modules=not first_run)
-
-            # Add OBO middleware if enabled
-            if obo and obo_token:
-                assert obo_token is not None, "OBO token is not set"
-                encoded_token = obo_token.encode()
-
-                async def obo_middleware(request: Request, call_next):
-                    # Headers are immutable, so we need to append to the list
-                    token_header: tuple[bytes, bytes] = (
-                        ACCESS_TOKEN_HEADER_NAME.encode(),
-                        encoded_token,
+                    app_instance.add_middleware(
+                        BaseHTTPMiddleware, dispatch=obo_middleware
                     )
-                    request.headers.__dict__["_list"].append(token_header)
-                    return await call_next(request)
 
-                app_instance.add_middleware(BaseHTTPMiddleware, dispatch=obo_middleware)
+                if first_run:
+                    console.print()
 
-            if first_run:
-                console.print()
+                config = uvicorn.Config(
+                    app=app_instance,
+                    host=backend_host,
+                    port=backend_port,
+                    log_level="info",
+                    log_config=None,  # Disable uvicorn's default log config
+                )
 
-            config = uvicorn.Config(
-                app=app_instance,
-                host=backend_host,
-                port=backend_port,
-                log_level="info",
-                log_config=None,  # Disable uvicorn's default log config
-            )
+                server = uvicorn.Server(config)
+                first_run = False
 
-            server = uvicorn.Server(config)
-            first_run = False
+                # Start server in a background task
+                async def serve(server_instance: uvicorn.Server):
+                    try:
+                        await server_instance.serve()
+                    except asyncio.CancelledError:
+                        pass
 
-            # Start server in a background task
-            async def serve(server_instance: uvicorn.Server):
-                try:
-                    await server_instance.serve()
-                except asyncio.CancelledError:
-                    pass
+                server_task = asyncio.create_task(serve(server))
 
-            server_task = asyncio.create_task(serve(server))
+                # Watch for file changes
+                async def watch_files():
+                    async for changes in watchfiles.awatch(
+                        cwd,
+                        watch_filter=watchfiles.PythonFilter(),
+                    ):
+                        if not log_file:
+                            console.print(
+                                f"[yellow][server][/yellow] Detected changes in {len(changes)} file(s)"
+                            )
+                        return
 
-            # Watch for file changes
-            async def watch_files():
-                async for changes in watchfiles.awatch(
-                    cwd,
-                    watch_filter=watchfiles.PythonFilter(),
-                ):
-                    if not log_file:
-                        console.print(
-                            f"[yellow][server][/yellow] Detected changes in {len(changes)} file(s)"
-                        )
-                    return
+                watch_task = asyncio.create_task(watch_files())
 
-            watch_task = asyncio.create_task(watch_files())
+                # Wait for either server to crash or files to change
+                done, pending = await asyncio.wait(
+                    [server_task, watch_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
 
-            # Wait for either server to crash or files to change
-            done, pending = await asyncio.wait(
-                [server_task, watch_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+                # Shutdown server gracefully
+                if server:
+                    server.should_exit = True
+                    # Give it a moment to shut down
+                    await asyncio.sleep(0.5)
 
-            # Shutdown server gracefully
-            if server:
-                server.should_exit = True
-                # Give it a moment to shut down
-                await asyncio.sleep(0.5)
+                # Cancel remaining tasks
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
-            # Cancel remaining tasks
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+                # If server task completed (crashed), re-raise the exception
+                if server_task in done:
+                    exc = server_task.exception()
+                    if exc:
+                        raise exc
 
-            # If server task completed (crashed), re-raise the exception
-            if server_task in done:
-                exc = server_task.exception()
-                if exc:
-                    raise exc
+            except KeyboardInterrupt:
+                # Clean shutdown on Ctrl+C
+                if server:
+                    server.should_exit = True
 
-        except KeyboardInterrupt:
-            # Clean shutdown on Ctrl+C
-            if server:
-                server.should_exit = True
+                if server_task and not server_task.done():
+                    server_task.cancel()
+                    try:
+                        await server_task
+                    except asyncio.CancelledError:
+                        pass
 
-            if server_task and not server_task.done():
-                server_task.cancel()
-                try:
-                    await server_task
-                except asyncio.CancelledError:
-                    pass
+                if watch_task and not watch_task.done():
+                    watch_task.cancel()
+                    try:
+                        await watch_task
+                    except asyncio.CancelledError:
+                        pass
 
-            if watch_task and not watch_task.done():
-                watch_task.cancel()
-                try:
-                    await watch_task
-                except asyncio.CancelledError:
-                    pass
+                raise
+            except Exception as e:
+                console.print(f"[red][server][/red] Error: {e}")
 
-            raise
-        except Exception as e:
-            console.print(f"[red][server][/red] Error: {e}")
+                # Clean up tasks
+                if server:
+                    server.should_exit = True
 
-            # Clean up tasks
-            if server:
-                server.should_exit = True
+                if server_task and not server_task.done():
+                    server_task.cancel()
+                    try:
+                        await server_task
+                    except asyncio.CancelledError:
+                        pass
 
-            if server_task and not server_task.done():
-                server_task.cancel()
-                try:
-                    await server_task
-                except asyncio.CancelledError:
-                    pass
+                if watch_task and not watch_task.done():
+                    watch_task.cancel()
+                    try:
+                        await watch_task
+                    except asyncio.CancelledError:
+                        pass
 
-            if watch_task and not watch_task.done():
-                watch_task.cancel()
-                try:
-                    await watch_task
-                except asyncio.CancelledError:
-                    pass
-
-            # Wait a bit before retrying
-            await asyncio.sleep(1)
+                # Wait a bit before retrying
+                await asyncio.sleep(1)
+    finally:
+        # Clean up flush task if it exists
+        if flush_task:
+            flush_task.cancel()
+            try:
+                await flush_task
+            except asyncio.CancelledError:
+                pass
+            # Final flush
+            for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
+                logger = logging.getLogger(logger_name)
+                for handler in logger.handlers:
+                    handler.flush()
 
 
 # === File-based Logging Utilities ===
@@ -686,7 +727,6 @@ def setup_file_logger(log_file: Path, process_name: str) -> logging.Logger:
     logger.handlers.clear()
 
     # Create handler that rotates every hour and keeps only 1 backup
-    # Using a large buffer size (1MB) to reduce I/O operations
     handler = TimedRotatingFileHandler(
         log_file,
         when="H",  # Rotate every hour
@@ -695,11 +735,12 @@ def setup_file_logger(log_file: Path, process_name: str) -> logging.Logger:
         encoding="utf-8",
     )
 
-    # Add buffering to reduce I/O - flush every 100 records or 5 seconds
+    # Add buffering to reduce I/O while maintaining low latency
+    # Flush every 10 records to provide ~100ms latency without overloading I/O
     from logging.handlers import MemoryHandler
 
     memory_handler = MemoryHandler(
-        capacity=100,  # Buffer up to 100 log records
+        capacity=10,  # Buffer up to 10 log records for balanced latency/performance
         flushLevel=logging.ERROR,  # Flush immediately on ERROR or higher
         target=handler,
     )
@@ -745,16 +786,37 @@ async def run_frontend_with_logging(app_dir: Path, app_id: str, port: int):
                     logger.info(f"{stream_name} | {decoded_line}")
             except Exception:
                 pass
-            # Yield control to prevent I/O flooding (increased from 0.01 to 0.05)
-            await asyncio.sleep(0.05)
+            # Small delay to prevent excessive I/O
+            await asyncio.sleep(0.01)
 
-    # Read both stdout and stderr
-    await asyncio.gather(
-        read_stream(process.stdout, "stdout"),
-        read_stream(process.stderr, "stderr"),
-    )
+    async def periodic_flush():
+        """Periodically flush logger buffers to ensure ~100ms latency."""
+        while True:
+            await asyncio.sleep(0.1)  # Flush every 100ms
+            for handler in logger.handlers:
+                handler.flush()
 
-    await process.wait()
+    # Start periodic flush task
+    flush_task = asyncio.create_task(periodic_flush())
+
+    try:
+        # Read both stdout and stderr
+        await asyncio.gather(
+            read_stream(process.stdout, "stdout"),
+            read_stream(process.stderr, "stderr"),
+        )
+
+        await process.wait()
+    finally:
+        # Clean up flush task
+        flush_task.cancel()
+        try:
+            await flush_task
+        except asyncio.CancelledError:
+            pass
+        # Final flush
+        for handler in logger.handlers:
+            handler.flush()
 
 
 async def run_openapi_with_logging(app_dir: Path, app_id: str):
@@ -785,11 +847,23 @@ async def run_openapi_with_logging(app_dir: Path, app_id: str):
                 self.logger.log(self.level, f"stdout | {message.strip()}")
 
         def flush(self):
-            pass
+            # Flush the logger handlers
+            for handler in self.logger.handlers:
+                handler.flush()
+
+    async def periodic_flush():
+        """Periodically flush logger buffers to ensure ~100ms latency."""
+        while True:
+            await asyncio.sleep(0.1)  # Flush every 100ms
+            for handler in logger.handlers:
+                handler.flush()
 
     # Capture stdout/stderr
     old_stdout = sys.stdout
     old_stderr = sys.stderr
+
+    # Start periodic flush task
+    flush_task = asyncio.create_task(periodic_flush())
 
     try:
         sys.stdout = LoggerWriter(logger, logging.INFO)
@@ -800,6 +874,15 @@ async def run_openapi_with_logging(app_dir: Path, app_id: str):
     finally:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
+        # Clean up flush task
+        flush_task.cancel()
+        try:
+            await flush_task
+        except asyncio.CancelledError:
+            pass
+        # Final flush
+        for handler in logger.handlers:
+            handler.flush()
 
 
 # === DevManager Class ===

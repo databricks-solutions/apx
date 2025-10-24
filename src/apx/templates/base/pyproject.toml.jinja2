@@ -11,20 +11,11 @@ dependencies = [
     "databricks-sdk>=0.68.0",
 ]
 
-[dependency-groups]
-dev = [
-    "apx",
-]
-
 [tool.apx.metadata]
 app-name = "{{app_name}}"
 app-slug = "{{app_slug}}"
 app-module = "{{app_slug}}.backend.app:app"
 metadata-path = "src/{{app_slug}}/_metadata.py"
-
-
-[tool.uv.sources]
-apx = { git = "https://github.com/renardeinside/apx.git" }
 
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning>=0.7.0"]
