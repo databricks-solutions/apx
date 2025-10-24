@@ -154,8 +154,13 @@ def _run_orval(app_dir: Path, openapi_path: Path, orval_config_path: Path):
         raise Exit(code=1)
 
 
-def _generate_openapi_and_client(app_dir: Path):
-    """Generate OpenAPI schema and run orval to generate client."""
+def _generate_openapi_and_client(app_dir: Path, force: bool = False):
+    """Generate OpenAPI schema and run orval to generate client.
+
+    Args:
+        app_dir: The path to the app directory
+        force: If True, always regenerate client even if schema hasn't changed
+    """
     # Get project metadata
     try:
         with in_path(app_dir):
@@ -179,14 +184,19 @@ def _generate_openapi_and_client(app_dir: Path):
     # Ensure orval config exists
     orval_config_path = _ensure_orval_config(app_dir, app_slug)
 
-    if schema_changed:
+    if schema_changed or force:
         with progress_spinner(
             "🔧 Generating API client with orval...", "✅ API client generated"
         ):
             _run_orval(app_dir, openapi_path, orval_config_path)
-        console.print(
-            f"[bold green]✨ OpenAPI schema and client generated successfully![/bold green]"
-        )
+        if force and not schema_changed:
+            console.print(
+                f"[bold green]✨ OpenAPI client forcefully regenerated![/bold green]"
+            )
+        else:
+            console.print(
+                f"[bold green]✨ OpenAPI schema and client generated successfully![/bold green]"
+            )
     else:
         console.print("[dim]⏭️  Schema unchanged, skipping orval generation[/dim]")
         console.print(f"[bold green]✨ OpenAPI schema is up to date![/bold green]")
@@ -256,15 +266,23 @@ async def _openapi_watch(app_dir: Path):
         console.print("\n[dim]Stopped watching for changes.[/dim]")
 
 
-def run_openapi(app_dir: Path, watch: bool = False):
+def run_openapi(app_dir: Path, watch: bool = False, force: bool = False):
     """
     Generate OpenAPI schema and orval client.
 
     Args:
         app_dir: The path to the app directory
         watch: Whether to watch for changes and regenerate
+        force: If True, always regenerate client even if schema hasn't changed
+
+    Raises:
+        ValueError: If both watch and force are True
     """
+    if watch and force:
+        console.print("[red]❌ Cannot use --force with --watch[/red]")
+        raise ValueError("Cannot use --force with --watch")
+
     if watch:
         asyncio.run(_openapi_watch(app_dir))
     else:
-        _generate_openapi_and_client(app_dir)
+        _generate_openapi_and_client(app_dir, force=force)

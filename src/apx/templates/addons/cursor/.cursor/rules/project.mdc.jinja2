@@ -5,114 +5,57 @@ alwaysApply: true
 # Cursor Agent Rules
 
 ## Project Structure
-- This is a full-stack application with two main parts:
-  - `src/{{app_name}}/ui/` - Frontend (React + Vite)
-  - `src/{{app_name}}/backend/` - Backend (FastAPI + Uvicorn)
-- Backend serves both frontend and API routes at `/` and `/api` respectively
-- Frontend API client code is auto-generated using `orval` at the vite reload and vite build steps.
+Full-stack app: `src/{{app_name}}/ui/` (React + Vite) and `src/{{app_name}}/backend/` (FastAPI). Backend serves frontend at `/` and API at `/api`. API client auto-generated via `orval`.
 
 ## Package Management
-- **Always use `bun` for frontend package management** - never use `npm`
-- **Always use `uv` for Python project management** - never use `pip` or other Python package managers
-- UI code is located in the `/src/{{app_name}}/ui` folder of the project
+- **Frontend:** Always use `bun` (never `npm`)
+- **Python:** Always use `uv` (never `pip`)
 
-## Model Conventions
-Each entity follows a 3-model pattern:
-- `EntityName` (e.g., `Dataset`) - Database entity structure
-- `EntityNameIn` (e.g., `DatasetIn`) - Creation/form input structure
-- `EntityNameOut` (e.g., `DatasetOut`) - API response structure
+## Models & API
+- **3-model pattern:** `Entity` (DB), `EntityIn` (input), `EntityOut` (output)
+- **API routes must have:** `response_model` and `operation_id` for client generation
 
-## API Requirements
-- All routes in the API app **must** have a `response_model` defined for proper client generation
-- All routes in the API app **must** have a `operation_id` defined for proper client generation. 
-  Operation ID usually should be the same as the route name or function name, e.g. `user` for `GET /user` route. or `CreateUser` for `POST /user` route.
-
-
-## Entity State Management
-Each entity has two parts of state:
-- Database storage (represented by `EntityName` model)
-- In/Out models (represented by `EntityNameIn` and `EntityNameOut` models)
-
-## Frontend Development Rules
-
-### Routing
-- Use `@tanstack/react-router` for all routing
-- Main entry point: `src/<app-name>/ui/main.tsx`
-- Frontend routes: `src/<project-name>/ui/routes/` directory
-
-### Component Architecture
-Follow this pattern for all pages/components:
-1. **Static elements** (forms, buttons, etc.) - render immediately
-2. **API data** - fetch using `useXSuspense` hooks
-3. **Loading states** - show `Skeleton` components via Suspense fallback
-4. **Data rendering** - render once data is fetched
-
-### Data Fetching Rules
-- **Always use `useXSuspense` hooks** for API data fetching
-- **Always use `Suspense` component** for loading states
-- **Always use `Skeleton` component** for loading UI elements
-
-## Component Creation Rules
-- Prefer using standard shadcn/ui components whenever possible. If ShadCN MCP server is available, use it to generate components.
-- Prefer adding new components in `src/<project-name>/ui/src/components/` directory
-
-Keep the loadable part of component minimal, and use `Suspense` component to handle the loading state. If parts of component can be displayed without API data, display them immediately.
-Don't create 2 separate components for skeleton and data - reuse the same component.
-
-### Code Organization
-- Keep code clean and maintainable by creating reusable components
-- Use the `selector` function with destructuring for clean data access:
-
-```tsx
-import {useProfileSuspense} from '@/lib/api';
-import {selector} from '@/lib/selector';
-
-const MyComponent = () => {
-  const {data: profile} = useProfileSuspense(selector());
-  // Use profile directly instead of .data.data
-};
-```
-
-`selector` is a generic, so it can be used with any `useX` and `useXSuspense` hooks.
+## Frontend Rules
+- **Routing:** `@tanstack/react-router` (routes in `src/{{app_name}}/ui/routes/`)
+- **Data fetching:** Always use `useXSuspense` hooks with `Suspense` and `Skeleton` components
+- **Pattern:** Render static elements immediately, fetch API data with suspense
+- **Components:** Use shadcn/ui, add to `src/{{app_name}}/ui/components/`
+- **Data access:** Use `selector()` function for clean destructuring (e.g., `const {data: profile} = useProfileSuspense(selector())`)
 
 ## Development Commands
 
-### Starting Development
+**Start dev servers** (backend, frontend, OpenAPI watcher):
 ```bash
 uv run apx dev start
 ```
-Starts all servers (backend, frontend, OpenAPI watcher) in detached mode. Logs written to `~/.apx/{app_id}/logs/`.
 
-### Checking Status
+**Check status** (shows running servers and ports):
 ```bash
 uv run apx dev status
 ```
-Shows which servers are running and their ports.
 
-### Viewing Logs
+**View logs** (stored in `~/.apx/{app_id}/logs/`):
 ```bash
-uv run apx dev logs        # Show all logs
-uv run apx dev logs --ui   # Frontend only
-uv run apx dev logs --backend  # Backend only
-uv run apx dev tail        # Live streaming logs
+uv run apx dev logs              # All logs
+uv run apx dev logs --ui         # Frontend only
+uv run apx dev logs --backend    # Backend only
+uv run apx dev tail              # Live stream
 ```
 
-### Stopping Servers
+**Stop servers:**
 ```bash
 uv run apx dev stop
 ```
-Stops all running development servers.
 
-### Building for Production
+**Build for production:**
 ```bash
 uv run apx build
 ```
-Builds frontend assets and Python wheel for deployment.
 
-### Manual OpenAPI Generation
+**OpenAPI generation** (auto-runs with `dev start`):
 ```bash
-uv run apx openapi         # Generate once
-uv run apx openapi --watch # Auto-regenerate on changes
+uv run apx openapi               # Generate once
+uv run apx openapi --watch       # Watch mode
 ```
 
 **Note:** The OpenAPI watcher runs automatically with `dev start`. Manual generation is rarely needed.

@@ -1,28 +1,67 @@
-# {{app_name}}
+# {{app_name}} ✨
 
-A sample application built with `apx`.
+> A modern full-stack application built with [`apx`](https://github.com/renardeinside/apx) 🚀
 
-## Stack
+## 🛠️ Tech Stack
 
-- Python + FastAPI in the backend
-- React + shadcn/ui in the frontend
+This application leverages a powerful, modern tech stack:
 
-To connect the frontend and the backend, `apx` uses `orval` to generate the client code from the OpenAPI schema.
+- **Backend** 🐍 Python + [FastAPI](https://fastapi.tiangolo.com/)
+- **Frontend** ⚛️ React + [shadcn/ui](https://ui.shadcn.com/)
+- **API Client** 🔄 Auto-generated with [orval](https://orval.dev/) from OpenAPI schema
 
-## Running the application in development mode
+## 🚀 Quick Start
+
+### Development Mode
+
+Start all development servers (backend, frontend, and OpenAPI watcher) in detached mode:
 
 ```bash
-uv run apx dev
+uv run apx dev start
 ```
 
-## Building the application
+All servers run in the background with logs written to `~/.apx/{app_id}/logs/`.
+
+### 📊 Monitoring & Logs
+
+```bash
+# View all logs
+uv run apx dev logs
+
+# Stream logs in real-time
+uv run apx dev tail
+
+# Check server status
+uv run apx dev status
+
+# Stop all servers
+uv run apx dev stop
+```
+
+## ✅ Code Quality
+
+Run type checking and linting for both TypeScript and Python:
+
+```bash
+uv run apx dev check
+```
+
+## 📦 Build
+
+Create a production-ready build:
 
 ```bash
 uv run apx build
 ```
 
-## Deploying the application
+## 🚢 Deployment
+
+Deploy to Databricks:
 
 ```bash
 databricks bundle deploy -p <your-profile>
 ```
+
+---
+
+<p align="center">Built with ❤️ using <a href="https://github.com/renardeinside/apx">apx</a></p>

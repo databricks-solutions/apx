@@ -690,13 +690,19 @@ def openapi(
         bool,
         Option("--watch", "-w", help="Watch for changes and regenerate"),
     ] = False,
+    force: Annotated[
+        bool,
+        Option(
+            "--force", "-f", help="Force regeneration even if schema hasn't changed"
+        ),
+    ] = False,
     version: bool | None = version_option,
 ):
     """Generate OpenAPI schema from FastAPI app and run orval to generate client."""
     if app_dir is None:
         app_dir = Path.cwd()
 
-    run_openapi(app_dir, watch=watch)
+    run_openapi(app_dir, watch=watch, force=force)
 
 
 # === Dev Command Group ===
@@ -944,6 +950,53 @@ def dev_tail(
         openapi_only=openapi,
         timeout_seconds=timeout,
     )
+
+
+@dev_app.command(name="check", help="Check the project code for errors")
+def dev_check(
+    app_dir: Annotated[
+        Path | None,
+        Argument(
+            help="The path to the app. If not provided, current working directory will be used"
+        ),
+    ] = None,
+    version: bool | None = version_option,
+):
+    """Check the project code for errors."""
+    if app_dir is None:
+        app_dir = Path.cwd()
+
+    # run tsc to check for errors
+    result = subprocess.run(
+        ["bun", "run", "tsc"],
+        cwd=app_dir,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        console.print(
+            f"[red]❌ TypeScript compilation failed, errors provided below[/]"
+        )
+        for line in result.stderr.split("\n"):
+            console.print(f"[red]{line}[/red]")
+        raise Exit(code=1)
+
+    console.print(f"[green]✅ TypeScript compilation succeeded[/green]")
+
+    # run pyright to check for errors
+    result = subprocess.run(
+        ["uv", "run", "pyright"],
+        cwd=app_dir,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        console.print(f"[red]❌ Pyright found errors, errors provided below[/]")
+        for line in result.stderr.split("\n"):
+            console.print(f"[red]{line}[/red]")
+        raise Exit(code=1)
+    else:
+        console.print(f"[green]✅ Pyright found no errors[/green]")
 
 
 def entrypoint():
