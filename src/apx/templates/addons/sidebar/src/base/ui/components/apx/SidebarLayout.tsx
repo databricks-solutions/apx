@@ -33,13 +33,13 @@ function SidebarLayout({ children }: SidebarLayoutProps) {
         </SidebarFooter>
         <SidebarRail />
       </Sidebar>
-      <SidebarInset className="flex flex-col">
-        <header className="z-50 bg-background/80 backdrop-blur-sm border-b flex h-16 shrink-0 items-center gap-2 px-4">
+      <SidebarInset className="flex flex-col h-screen">
+        <header className="sticky top-0 z-50 bg-background/80 backdrop-blur-sm border-b flex h-16 shrink-0 items-center gap-2 px-4">
           <SidebarTrigger className="-ml-1 cursor-pointer" />
           <div className="flex-1" />
           <ModeToggle />
         </header>
-        <div className="flex flex-1 justify-center">
+        <div className="flex flex-1 justify-center overflow-auto">
           <div className="flex flex-1 flex-col gap-4 p-6 max-w-7xl">
             <Outlet />
           </div>
