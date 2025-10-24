@@ -66,7 +66,7 @@ def _generate_openapi_schema(app_dir: Path, app_module_name: str) -> tuple[Path,
     # Split the app_name into module path and attribute name (like uvicorn does)
     if ":" not in app_module_name:
         console.print(
-            f"[red]❌ Invalid app module format. Expected format: some.package.file:app[/red]"
+            "[red]❌ Invalid app module format. Expected format: some.package.file:app[/red]"
         )
         raise Exit(code=1)
 
@@ -191,15 +191,15 @@ def _generate_openapi_and_client(app_dir: Path, force: bool = False):
             _run_orval(app_dir, openapi_path, orval_config_path)
         if force and not schema_changed:
             console.print(
-                f"[bold green]✨ OpenAPI client forcefully regenerated![/bold green]"
+                "[bold green]✨ OpenAPI client forcefully regenerated![/bold green]"
             )
         else:
             console.print(
-                f"[bold green]✨ OpenAPI schema and client generated successfully![/bold green]"
+                "[bold green]✨ OpenAPI schema and client generated successfully![/bold green]"
             )
     else:
         console.print("[dim]⏭️  Schema unchanged, skipping orval generation[/dim]")
-        console.print(f"[bold green]✨ OpenAPI schema is up to date![/bold green]")
+        console.print("[bold green]✨ OpenAPI schema is up to date![/bold green]")
 
 
 async def _openapi_watch(app_dir: Path):

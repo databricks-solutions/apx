@@ -20,6 +20,11 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
 from rich.table import Table
 from starlette.middleware.base import BaseHTTPMiddleware
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+)
 from typer import Exit
 import watchfiles
 import uvicorn
@@ -35,6 +40,24 @@ from apx import __version__
 
 # note: header name must be lowercase and with - symbols
 ACCESS_TOKEN_HEADER_NAME = "x-forwarded-access-token"
+
+
+# === Retry Helpers ===
+
+
+def log_retry_attempt(retry_state):
+    """Log retry attempts to the appropriate logger.
+
+    Args:
+        retry_state: Tenacity retry state
+    """
+    attempt_number = retry_state.attempt_number
+    if retry_state.outcome and retry_state.outcome.failed:
+        exception = retry_state.outcome.exception()
+        logger = logging.getLogger("apx.retry")
+        logger.error(
+            f"Attempt {attempt_number} failed with error: {exception}. Retrying..."
+        )
 
 
 # === Pydantic Models for Project Configuration ===
@@ -133,7 +156,7 @@ def load_app(app_module_name: str, reload_modules: bool = False) -> FastAPI:
     # Split the app_name into module path and attribute name
     if ":" not in app_module_name:
         console.print(
-            f"[red]❌ Invalid app module format. Expected format: some.package.file:app[/red]"
+            "[red]❌ Invalid app module format. Expected format: some.package.file:app[/red]"
         )
         raise Exit(code=1)
 
@@ -331,7 +354,10 @@ def setup_uvicorn_logging(log_file: Path | None = None):
                 interval=1,
                 backupCount=0,
             )
-            formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+            # Add BE prefix to distinguish from APP logs
+            formatter = logging.Formatter(
+                "%(asctime)s | %(levelname)s | BE | %(message)s"
+            )
             base_handler.setFormatter(formatter)
 
             # Add buffering to reduce I/O while maintaining low latency
@@ -351,6 +377,73 @@ def setup_uvicorn_logging(log_file: Path | None = None):
         logger.propagate = False
 
 
+def setup_app_output_capture(log_file: Path):
+    """Capture application stdout/stderr to log file with APP prefix.
+
+    Args:
+        log_file: Path to log file (same as backend log file)
+
+    Returns:
+        Tuple of (original_stdout, original_stderr, app_logger)
+    """
+    from logging.handlers import TimedRotatingFileHandler, MemoryHandler
+
+    # Save original stdout/stderr
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+
+    # Create logger for app output
+    app_logger = logging.getLogger("apx.app_output")
+    app_logger.setLevel(logging.INFO)
+    app_logger.handlers.clear()
+
+    # File logging with rotation (same file as uvicorn)
+    base_handler = TimedRotatingFileHandler(
+        log_file,
+        when="H",
+        interval=1,
+        backupCount=0,
+    )
+    # Add APP prefix to distinguish from BE logs
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | APP | %(message)s")
+    base_handler.setFormatter(formatter)
+
+    # Add buffering
+    handler = MemoryHandler(
+        capacity=10,
+        flushLevel=logging.ERROR,
+        target=base_handler,
+    )
+
+    app_logger.addHandler(handler)
+    app_logger.propagate = False
+
+    # Create stream redirectors
+    class LoggerWriter:
+        def __init__(self, logger, level, stream_name):
+            self.logger = logger
+            self.level = level
+            self.stream_name = stream_name
+            self.buffer = []
+
+        def write(self, message):
+            if message and message.strip():
+                self.logger.log(self.level, message.rstrip())
+
+        def flush(self):
+            for handler in self.logger.handlers:
+                handler.flush()
+
+        def isatty(self):
+            return False
+
+    # Redirect stdout and stderr
+    sys.stdout = LoggerWriter(app_logger, logging.INFO, "stdout")
+    sys.stderr = LoggerWriter(app_logger, logging.ERROR, "stderr")
+
+    return original_stdout, original_stderr, app_logger
+
+
 async def run_backend(
     cwd: Path,
     app_module_name: str,
@@ -358,6 +451,7 @@ async def run_backend(
     backend_port: int,
     obo: bool = False,
     log_file: Path | None = None,
+    max_retries: int = 10,
 ):
     """Run the backend server programmatically with uvicorn and hot-reload support.
 
@@ -368,223 +462,287 @@ async def run_backend(
         backend_port: Port to bind to
         obo: Whether to enable On-Behalf-Of token middleware
         log_file: Optional log file path for file-based logging
+        max_retries: Maximum number of retry attempts
     """
 
     # Setup uvicorn logging once at the start
     setup_uvicorn_logging(log_file)
 
-    if not log_file:
-        console.print(
-            f"[green][server][/]Starting server on {backend_host}:{backend_port} from app: {app_module_name}"
-        )
-        console.print(f"[green][server][/]Watching for changes in {cwd}/**/*.py")
-        console.print()
-
-    # Track if this is the first run
-    first_run = True
-
-    # Store OBO token for reuse
-    obo_token = None
-
-    # Start periodic flush task if logging to file
-    flush_task = None
+    # Setup app output capture if logging to file
+    original_stdout = None
+    original_stderr = None
+    app_logger = None
     if log_file:
+        original_stdout, original_stderr, app_logger = setup_app_output_capture(
+            log_file
+        )
 
-        async def periodic_flush():
-            """Periodically flush logger buffers to ensure ~100ms latency."""
+        # Setup retry logger to use same log file
+        retry_logger = logging.getLogger("apx.retry")
+        retry_logger.setLevel(logging.INFO)
+        retry_logger.handlers.clear()
+        # Get the base handler from uvicorn logger
+        uvicorn_logger = logging.getLogger("uvicorn")
+        if uvicorn_logger.handlers:
+            handler = uvicorn_logger.handlers[0]
+            # If it's a MemoryHandler, get the target handler
+            if hasattr(handler, "target"):
+                from logging.handlers import MemoryHandler
+
+                if isinstance(handler, MemoryHandler) and handler.target is not None:
+                    retry_logger.addHandler(handler.target)
+                else:
+                    retry_logger.addHandler(handler)
+            else:
+                retry_logger.addHandler(handler)
+        retry_logger.propagate = False
+
+    @retry(
+        stop=stop_after_attempt(max_retries),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        before_sleep=log_retry_attempt,
+        reraise=True,
+    )
+    async def run_backend_with_retry():
+        """Backend runner with retry logic."""
+        if log_file:
+            backend_logger = logging.getLogger("uvicorn")
+            backend_logger.info(
+                f"Starting backend server on {backend_host}:{backend_port}"
+            )
+
+        if not log_file:
+            console.print(
+                f"[green][server][/]Starting server on {backend_host}:{backend_port} from app: {app_module_name}"
+            )
+            console.print(f"[green][server][/]Watching for changes in {cwd}/**/*.py")
+            console.print()
+
+        # Track if this is the first run
+        first_run = True
+
+        # Store OBO token for reuse
+        obo_token = None
+
+        # Start periodic flush task if logging to file
+        flush_task = None
+        if log_file:
+
+            async def periodic_flush():
+                """Periodically flush logger buffers to ensure ~100ms latency."""
+                while True:
+                    await asyncio.sleep(0.1)  # Flush every 100ms
+                    for logger_name in [
+                        "uvicorn",
+                        "uvicorn.access",
+                        "uvicorn.error",
+                        "apx.app_output",
+                    ]:
+                        logger = logging.getLogger(logger_name)
+                        for handler in logger.handlers:
+                            handler.flush()
+
+            flush_task = asyncio.create_task(periodic_flush())
+
+        try:
             while True:
-                await asyncio.sleep(0.1)  # Flush every 100ms
-                for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
+                server = None
+                server_task = None
+                watch_task = None
+
+                try:
+                    # Reload message
+                    if not first_run and not log_file:
+                        console.print("[yellow][server][/yellow] Reloading...")
+                        console.print()
+
+                    # Reload .env file on every iteration (including first run)
+                    dotenv_file = cwd / ".env"
+                    if dotenv_file.exists():
+                        # Override=True ensures we reload env vars on hot reload
+                        load_dotenv(dotenv_file)
+
+                    # Prepare OBO token (will reuse if still valid)
+                    if obo and first_run:
+                        if log_file:
+                            obo_token = prepare_obo_token(
+                                cwd, app_module_name, status_context=None
+                            )
+                        else:
+                            with console.status(
+                                "[bold cyan]Preparing On-Behalf-Of token..."
+                            ) as status:
+                                status.update(
+                                    f"📂 Loading .env file from {dotenv_file.resolve()}"
+                                )
+                                obo_token = prepare_obo_token(
+                                    cwd, app_module_name, status_context=status
+                                )
+                                # Give user a moment to see the final status
+                                time.sleep(0.3)
+                            console.print("[green]✓[/green] On-Behalf-Of token ready")
+                            console.print()
+                    elif obo:
+                        # On hot reload, prepare token without spinner
+                        obo_token = prepare_obo_token(
+                            cwd, app_module_name, status_context=None
+                        )
+
+                    # Load/reload the app instance (fully reload modules on hot reload)
+                    app_instance = load_app(
+                        app_module_name, reload_modules=not first_run
+                    )
+
+                    # Add OBO middleware if enabled
+                    if obo and obo_token:
+                        assert obo_token is not None, "OBO token is not set"
+                        encoded_token = obo_token.encode()
+
+                        async def obo_middleware(request: Request, call_next):
+                            # Headers are immutable, so we need to append to the list
+                            token_header: tuple[bytes, bytes] = (
+                                ACCESS_TOKEN_HEADER_NAME.encode(),
+                                encoded_token,
+                            )
+                            request.headers.__dict__["_list"].append(token_header)
+                            return await call_next(request)
+
+                        app_instance.add_middleware(
+                            BaseHTTPMiddleware, dispatch=obo_middleware
+                        )
+
+                    if first_run:
+                        console.print()
+
+                    config = uvicorn.Config(
+                        app=app_instance,
+                        host=backend_host,
+                        port=backend_port,
+                        log_level="info",
+                        log_config=None,  # Disable uvicorn's default log config
+                    )
+
+                    server = uvicorn.Server(config)
+                    first_run = False
+
+                    # Start server in a background task
+                    async def serve(server_instance: uvicorn.Server):
+                        try:
+                            await server_instance.serve()
+                        except asyncio.CancelledError:
+                            pass
+
+                    server_task = asyncio.create_task(serve(server))
+
+                    # Watch for file changes
+                    async def watch_files():
+                        async for changes in watchfiles.awatch(
+                            cwd,
+                            watch_filter=watchfiles.PythonFilter(),
+                        ):
+                            if not log_file:
+                                console.print(
+                                    f"[yellow][server][/yellow] Detected changes in {len(changes)} file(s)"
+                                )
+                            return
+
+                    watch_task = asyncio.create_task(watch_files())
+
+                    # Wait for either server to crash or files to change
+                    done, pending = await asyncio.wait(
+                        [server_task, watch_task],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+
+                    # Shutdown server gracefully
+                    if server:
+                        server.should_exit = True
+                        # Give it a moment to shut down
+                        await asyncio.sleep(0.5)
+
+                    # Cancel remaining tasks
+                    for task in pending:
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+
+                    # If server task completed (crashed), re-raise the exception
+                    if server_task in done:
+                        exc = server_task.exception()
+                        if exc:
+                            raise exc
+
+                except KeyboardInterrupt:
+                    # Clean shutdown on Ctrl+C
+                    if server:
+                        server.should_exit = True
+
+                    if server_task and not server_task.done():
+                        server_task.cancel()
+                        try:
+                            await server_task
+                        except asyncio.CancelledError:
+                            pass
+
+                    if watch_task and not watch_task.done():
+                        watch_task.cancel()
+                        try:
+                            await watch_task
+                        except asyncio.CancelledError:
+                            pass
+
+                    raise
+                except Exception as e:
+                    console.print(f"[red][server][/red] Error: {e}")
+
+                    # Clean up tasks
+                    if server:
+                        server.should_exit = True
+
+                    if server_task and not server_task.done():
+                        server_task.cancel()
+                        try:
+                            await server_task
+                        except asyncio.CancelledError:
+                            pass
+
+                    if watch_task and not watch_task.done():
+                        watch_task.cancel()
+                        try:
+                            await watch_task
+                        except asyncio.CancelledError:
+                            pass
+
+                    # Wait a bit before retrying
+                    await asyncio.sleep(1)
+        finally:
+            # Restore stdout/stderr if we captured them
+            if original_stdout and original_stderr:
+                sys.stdout = original_stdout
+                sys.stderr = original_stderr
+
+            # Clean up flush task if it exists
+            if flush_task:
+                flush_task.cancel()
+                try:
+                    await flush_task
+                except asyncio.CancelledError:
+                    pass
+                # Final flush
+                for logger_name in [
+                    "uvicorn",
+                    "uvicorn.access",
+                    "uvicorn.error",
+                    "apx.app_output",
+                ]:
                     logger = logging.getLogger(logger_name)
                     for handler in logger.handlers:
                         handler.flush()
 
-        flush_task = asyncio.create_task(periodic_flush())
-
-    try:
-        while True:
-            server = None
-            server_task = None
-            watch_task = None
-
-            try:
-                # Reload message
-                if not first_run and not log_file:
-                    console.print("[yellow][server][/yellow] Reloading...")
-                    console.print()
-
-                # Reload .env file on every iteration (including first run)
-                dotenv_file = cwd / ".env"
-                if dotenv_file.exists():
-                    # Override=True ensures we reload env vars on hot reload
-                    load_dotenv(dotenv_file)
-
-                # Prepare OBO token (will reuse if still valid)
-                if obo and first_run:
-                    if log_file:
-                        obo_token = prepare_obo_token(
-                            cwd, app_module_name, status_context=None
-                        )
-                    else:
-                        with console.status(
-                            "[bold cyan]Preparing On-Behalf-Of token..."
-                        ) as status:
-                            status.update(
-                                f"📂 Loading .env file from {dotenv_file.resolve()}"
-                            )
-                            obo_token = prepare_obo_token(
-                                cwd, app_module_name, status_context=status
-                            )
-                            # Give user a moment to see the final status
-                            time.sleep(0.3)
-                        console.print("[green]✓[/green] On-Behalf-Of token ready")
-                        console.print()
-                elif obo:
-                    # On hot reload, prepare token without spinner
-                    obo_token = prepare_obo_token(
-                        cwd, app_module_name, status_context=None
-                    )
-
-                # Load/reload the app instance (fully reload modules on hot reload)
-                app_instance = load_app(app_module_name, reload_modules=not first_run)
-
-                # Add OBO middleware if enabled
-                if obo and obo_token:
-                    assert obo_token is not None, "OBO token is not set"
-                    encoded_token = obo_token.encode()
-
-                    async def obo_middleware(request: Request, call_next):
-                        # Headers are immutable, so we need to append to the list
-                        token_header: tuple[bytes, bytes] = (
-                            ACCESS_TOKEN_HEADER_NAME.encode(),
-                            encoded_token,
-                        )
-                        request.headers.__dict__["_list"].append(token_header)
-                        return await call_next(request)
-
-                    app_instance.add_middleware(
-                        BaseHTTPMiddleware, dispatch=obo_middleware
-                    )
-
-                if first_run:
-                    console.print()
-
-                config = uvicorn.Config(
-                    app=app_instance,
-                    host=backend_host,
-                    port=backend_port,
-                    log_level="info",
-                    log_config=None,  # Disable uvicorn's default log config
-                )
-
-                server = uvicorn.Server(config)
-                first_run = False
-
-                # Start server in a background task
-                async def serve(server_instance: uvicorn.Server):
-                    try:
-                        await server_instance.serve()
-                    except asyncio.CancelledError:
-                        pass
-
-                server_task = asyncio.create_task(serve(server))
-
-                # Watch for file changes
-                async def watch_files():
-                    async for changes in watchfiles.awatch(
-                        cwd,
-                        watch_filter=watchfiles.PythonFilter(),
-                    ):
-                        if not log_file:
-                            console.print(
-                                f"[yellow][server][/yellow] Detected changes in {len(changes)} file(s)"
-                            )
-                        return
-
-                watch_task = asyncio.create_task(watch_files())
-
-                # Wait for either server to crash or files to change
-                done, pending = await asyncio.wait(
-                    [server_task, watch_task],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-
-                # Shutdown server gracefully
-                if server:
-                    server.should_exit = True
-                    # Give it a moment to shut down
-                    await asyncio.sleep(0.5)
-
-                # Cancel remaining tasks
-                for task in pending:
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-
-                # If server task completed (crashed), re-raise the exception
-                if server_task in done:
-                    exc = server_task.exception()
-                    if exc:
-                        raise exc
-
-            except KeyboardInterrupt:
-                # Clean shutdown on Ctrl+C
-                if server:
-                    server.should_exit = True
-
-                if server_task and not server_task.done():
-                    server_task.cancel()
-                    try:
-                        await server_task
-                    except asyncio.CancelledError:
-                        pass
-
-                if watch_task and not watch_task.done():
-                    watch_task.cancel()
-                    try:
-                        await watch_task
-                    except asyncio.CancelledError:
-                        pass
-
-                raise
-            except Exception as e:
-                console.print(f"[red][server][/red] Error: {e}")
-
-                # Clean up tasks
-                if server:
-                    server.should_exit = True
-
-                if server_task and not server_task.done():
-                    server_task.cancel()
-                    try:
-                        await server_task
-                    except asyncio.CancelledError:
-                        pass
-
-                if watch_task and not watch_task.done():
-                    watch_task.cancel()
-                    try:
-                        await watch_task
-                    except asyncio.CancelledError:
-                        pass
-
-                # Wait a bit before retrying
-                await asyncio.sleep(1)
-    finally:
-        # Clean up flush task if it exists
-        if flush_task:
-            flush_task.cancel()
-            try:
-                await flush_task
-            except asyncio.CancelledError:
-                pass
-            # Final flush
-            for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
-                logger = logging.getLogger(logger_name)
-                for handler in logger.handlers:
-                    handler.flush()
+    # Run backend with retry logic
+    await run_backend_with_retry()
 
 
 # === File-based Logging Utilities ===
@@ -755,76 +913,107 @@ def setup_file_logger(log_file: Path, process_name: str) -> logging.Logger:
     return logger
 
 
-async def run_frontend_with_logging(app_dir: Path, app_id: str, port: int):
+async def run_frontend_with_logging(
+    app_dir: Path, app_id: str, port: int, max_retries: int = 10
+):
     """Run frontend dev server and capture output to log file.
 
     Args:
         app_dir: Application directory
         app_id: Application ID
         port: Frontend port
+        max_retries: Maximum number of retry attempts
     """
     log_dir = get_log_dir(app_id)
     log_file = log_dir / "frontend.log"
 
     logger = setup_file_logger(log_file, "frontend")
 
-    process = await asyncio.create_subprocess_exec(
-        "bun",
-        "run",
-        "dev",
-        cwd=app_dir,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    # Setup retry logger to use same log file
+    retry_logger = logging.getLogger("apx.retry")
+    retry_logger.setLevel(logging.INFO)
+    retry_logger.handlers.clear()
+    retry_logger.addHandler(logger.handlers[0])
+    retry_logger.propagate = False
+
+    @retry(
+        stop=stop_after_attempt(max_retries),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        before_sleep=log_retry_attempt,
+        reraise=True,
     )
+    async def run_with_retry():
+        """Frontend runner with retry logic."""
+        logger.info(f"Starting frontend server on port {port}")
 
-    async def read_stream(stream, stream_name):
-        """Read from stream and log each line."""
-        async for line in stream:
+        process = await asyncio.create_subprocess_exec(
+            "bun",
+            "run",
+            "dev",
+            cwd=app_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        async def read_stream(stream, stream_name):
+            """Read from stream and log each line."""
+            async for line in stream:
+                try:
+                    decoded_line = line.decode("utf-8", errors="replace").strip()
+                    if decoded_line:
+                        logger.info(f"{stream_name} | {decoded_line}")
+                except Exception:
+                    pass
+                # Small delay to prevent excessive I/O
+                await asyncio.sleep(0.01)
+
+        async def periodic_flush():
+            """Periodically flush logger buffers to ensure ~100ms latency."""
+            while True:
+                await asyncio.sleep(0.1)  # Flush every 100ms
+                for handler in logger.handlers:
+                    handler.flush()
+
+        # Start periodic flush task
+        flush_task = asyncio.create_task(periodic_flush())
+
+        try:
+            # Read both stdout and stderr
+            await asyncio.gather(
+                read_stream(process.stdout, "stdout"),
+                read_stream(process.stderr, "stderr"),
+            )
+
+            await process.wait()
+
+            # Check exit code
+            if process.returncode != 0:
+                logger.error(f"Frontend process exited with code {process.returncode}")
+                raise RuntimeError(
+                    f"Frontend process failed with exit code {process.returncode}"
+                )
+        finally:
+            # Clean up flush task
+            flush_task.cancel()
             try:
-                decoded_line = line.decode("utf-8", errors="replace").strip()
-                if decoded_line:
-                    logger.info(f"{stream_name} | {decoded_line}")
-            except Exception:
+                await flush_task
+            except asyncio.CancelledError:
                 pass
-            # Small delay to prevent excessive I/O
-            await asyncio.sleep(0.01)
-
-    async def periodic_flush():
-        """Periodically flush logger buffers to ensure ~100ms latency."""
-        while True:
-            await asyncio.sleep(0.1)  # Flush every 100ms
+            # Final flush
             for handler in logger.handlers:
                 handler.flush()
 
-    # Start periodic flush task
-    flush_task = asyncio.create_task(periodic_flush())
-
-    try:
-        # Read both stdout and stderr
-        await asyncio.gather(
-            read_stream(process.stdout, "stdout"),
-            read_stream(process.stderr, "stderr"),
-        )
-
-        await process.wait()
-    finally:
-        # Clean up flush task
-        flush_task.cancel()
-        try:
-            await flush_task
-        except asyncio.CancelledError:
-            pass
-        # Final flush
-        for handler in logger.handlers:
-            handler.flush()
+    # Run with retry
+    await run_with_retry()
 
 
-async def run_openapi_with_logging(app_dir: Path, app_id: str):
+async def run_openapi_with_logging(app_dir: Path, app_id: str, max_retries: int = 10):
     """Run OpenAPI watcher and capture output to log file.
 
     Args:
         app_dir: Application directory
         app_id: Application ID
+        max_retries: Maximum number of retry attempts
     """
     from apx.openapi import _openapi_watch
 
@@ -832,6 +1021,13 @@ async def run_openapi_with_logging(app_dir: Path, app_id: str):
     log_file = log_dir / "openapi.log"
 
     logger = setup_file_logger(log_file, "openapi")
+
+    # Setup retry logger to use same log file
+    retry_logger = logging.getLogger("apx.retry")
+    retry_logger.setLevel(logging.INFO)
+    retry_logger.handlers.clear()
+    retry_logger.addHandler(logger.handlers[0])
+    retry_logger.propagate = False
 
     # Redirect console output to logger
     import sys
@@ -851,38 +1047,54 @@ async def run_openapi_with_logging(app_dir: Path, app_id: str):
             for handler in self.logger.handlers:
                 handler.flush()
 
-    async def periodic_flush():
-        """Periodically flush logger buffers to ensure ~100ms latency."""
-        while True:
-            await asyncio.sleep(0.1)  # Flush every 100ms
+    @retry(
+        stop=stop_after_attempt(max_retries),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        before_sleep=log_retry_attempt,
+        reraise=True,
+    )
+    async def run_with_retry():
+        """OpenAPI watcher with retry logic."""
+        logger.info("Starting OpenAPI watcher")
+
+        async def periodic_flush():
+            """Periodically flush logger buffers to ensure ~100ms latency."""
+            while True:
+                await asyncio.sleep(0.1)  # Flush every 100ms
+                for handler in logger.handlers:
+                    handler.flush()
+
+        # Capture stdout/stderr
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+
+        # Start periodic flush task
+        flush_task = asyncio.create_task(periodic_flush())
+
+        try:
+            sys.stdout = LoggerWriter(logger, logging.INFO)
+            sys.stderr = LoggerWriter(logger, logging.ERROR)
+
+            # Run the OpenAPI watcher
+            await _openapi_watch(app_dir)
+        except Exception as e:
+            logger.error(f"OpenAPI watcher failed: {e}")
+            raise
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+            # Clean up flush task
+            flush_task.cancel()
+            try:
+                await flush_task
+            except asyncio.CancelledError:
+                pass
+            # Final flush
             for handler in logger.handlers:
                 handler.flush()
 
-    # Capture stdout/stderr
-    old_stdout = sys.stdout
-    old_stderr = sys.stderr
-
-    # Start periodic flush task
-    flush_task = asyncio.create_task(periodic_flush())
-
-    try:
-        sys.stdout = LoggerWriter(logger, logging.INFO)
-        sys.stderr = LoggerWriter(logger, logging.ERROR)
-
-        # Run the OpenAPI watcher
-        await _openapi_watch(app_dir)
-    finally:
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
-        # Clean up flush task
-        flush_task.cancel()
-        try:
-            await flush_task
-        except asyncio.CancelledError:
-            pass
-        # Final flush
-        for handler in logger.handlers:
-            handler.flush()
+    # Run with retry
+    await run_with_retry()
 
 
 # === DevManager Class ===
@@ -981,6 +1193,7 @@ class DevManager:
         backend_host: str = "0.0.0.0",
         obo: bool = True,
         openapi: bool = True,
+        max_retries: int = 10,
     ):
         """Start development servers in detached mode.
 
@@ -990,6 +1203,7 @@ class DevManager:
             backend_host: Host for the backend server
             obo: Whether to add On-Behalf-Of header to the backend server
             openapi: Whether to start OpenAPI watcher process
+            max_retries: Maximum number of retry attempts for processes
         """
         # Check if servers are already running
         existing_processes = self._get_all_processes()
@@ -1008,7 +1222,7 @@ class DevManager:
             app_module_name = get_project_metadata()["app-module"]
 
             console.print(
-                f"[bold chartreuse1]🚀 Starting development servers in detached mode...[/bold chartreuse1]"
+                "[bold chartreuse1]🚀 Starting development servers in detached mode...[/bold chartreuse1]"
             )
             console.print(f"[cyan]Frontend:[/cyan] http://localhost:{frontend_port}")
             console.print(
@@ -1026,6 +1240,7 @@ class DevManager:
                     str(self.app_dir),
                     self.app_id,
                     str(frontend_port),
+                    str(max_retries),
                 ],
                 cwd=self.app_dir,
                 stdin=subprocess.DEVNULL,
@@ -1053,6 +1268,7 @@ class DevManager:
                     backend_host,
                     str(backend_port),
                     str(obo).lower(),
+                    str(max_retries),
                 ],
                 cwd=self.app_dir,
                 stdin=subprocess.DEVNULL,
@@ -1077,6 +1293,7 @@ class DevManager:
                         "_run-openapi-detached",
                         str(self.app_dir),
                         self.app_id,
+                        str(max_retries),
                     ],
                     cwd=self.app_dir,
                     stdin=subprocess.DEVNULL,
@@ -1234,7 +1451,6 @@ class DevManager:
 
         # Determine which log files to read
         log_files = []
-        filters_active = ui_only or backend_only or openapi_only
 
         if ui_only and not backend_only and not openapi_only:
             log_files = [("frontend", self.log_dir / "frontend.log")]
@@ -1390,16 +1606,39 @@ class DevManager:
         Args:
             log: Log entry dict with keys: id, process_name, content, created_at
         """
-        # Color code by process
-        if log["process_name"] == "frontend":
+        content = log["content"]
+
+        # For backend logs, parse the stream prefix (BE or APP)
+        if log["process_name"] == "backend":
+            # Content format is "BE | message" or "APP | message"
+            if " | " in content:
+                stream_prefix, message = content.split(" | ", 1)
+                if stream_prefix == "BE":
+                    prefix_color = "green"
+                    prefix = "[BE]"
+                    content = message
+                elif stream_prefix == "APP":
+                    prefix_color = "yellow"
+                    prefix = "[APP]"
+                    content = message
+                else:
+                    # Fallback if unknown stream
+                    prefix_color = "green"
+                    prefix = "[BE]"
+            else:
+                # No stream prefix found, default to BE
+                prefix_color = "green"
+                prefix = "[BE]"
+        elif log["process_name"] == "frontend":
             prefix_color = "cyan"
             prefix = "[UI]"
         elif log["process_name"] == "openapi":
             prefix_color = "magenta"
-            prefix = "[API]"
+            prefix = "[GEN]"
         else:
-            prefix_color = "green"
-            prefix = "[BE]"
+            # Default fallback
+            prefix_color = "white"
+            prefix = f"[{log['process_name'].upper()}]"
 
         # Format timestamp (show only time part for brevity)
         timestamp = (
@@ -1409,5 +1648,5 @@ class DevManager:
         )
 
         console.print(
-            f"[dim]{timestamp}[/dim] [{prefix_color}]{prefix}[/{prefix_color}] {log['content']}"
+            f"[dim]{timestamp}[/dim] [{prefix_color}]{prefix}[/{prefix_color}] {content}"
         )

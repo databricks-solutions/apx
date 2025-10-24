@@ -184,7 +184,7 @@ def init(
     if app_path is None:
         app_path = Path.cwd()
 
-    console.print(f"[bold chartreuse1]Welcome to apx 🚀[/bold chartreuse1]\n")
+    console.print("[bold chartreuse1]Welcome to apx 🚀[/bold chartreuse1]\n")
 
     # Prompt for app name if not provided
     if app_name is None:
@@ -720,11 +720,12 @@ def _run_frontend_detached(
     app_dir: Path = Argument(..., help="App directory"),
     app_id: str = Argument(..., help="Application ID"),
     frontend_port: int = Argument(..., help="Frontend port"),
+    max_retries: int = Argument(10, help="Maximum retry attempts"),
 ):
     """Internal command to run frontend server with file logging. Not meant for direct use."""
     from apx.dev import run_frontend_with_logging
 
-    asyncio.run(run_frontend_with_logging(app_dir, app_id, frontend_port))
+    asyncio.run(run_frontend_with_logging(app_dir, app_id, frontend_port, max_retries))
 
 
 @app.command(
@@ -739,6 +740,7 @@ def _run_backend_detached(
     backend_host: str = Argument(..., help="Backend host"),
     backend_port: int = Argument(..., help="Backend port"),
     obo: bool = Argument(..., help="Enable OBO"),
+    max_retries: int = Argument(10, help="Maximum retry attempts"),
 ):
     """Internal command to run backend server with file logging. Not meant for direct use."""
     from apx.dev import get_log_dir
@@ -754,6 +756,7 @@ def _run_backend_detached(
             backend_port,
             obo=obo,
             log_file=log_file,
+            max_retries=max_retries,
         )
     )
 
@@ -766,11 +769,12 @@ def _run_backend_detached(
 def _run_openapi_detached(
     app_dir: Path = Argument(..., help="App directory"),
     app_id: str = Argument(..., help="Application ID"),
+    max_retries: int = Argument(10, help="Maximum retry attempts"),
 ):
     """Internal command to run OpenAPI watcher with file logging. Not meant for direct use."""
     from apx.dev import run_openapi_with_logging
 
-    asyncio.run(run_openapi_with_logging(app_dir, app_id))
+    asyncio.run(run_openapi_with_logging(app_dir, app_id, max_retries))
 
 
 @dev_app.command(name="start", help="Start development servers in detached mode")
@@ -794,6 +798,9 @@ def dev_start(
     openapi: Annotated[
         bool, Option(help="Whether to start OpenAPI watcher process")
     ] = True,
+    max_retries: Annotated[
+        int, Option(help="Maximum number of retry attempts for processes")
+    ] = 10,
 ):
     """Start development servers in detached mode."""
     # Check prerequisites
@@ -814,6 +821,7 @@ def dev_start(
         backend_host=backend_host,
         obo=obo,
         openapi=openapi,
+        max_retries=max_retries,
     )
 
 
@@ -974,14 +982,12 @@ def dev_check(
         text=True,
     )
     if result.returncode != 0:
-        console.print(
-            f"[red]❌ TypeScript compilation failed, errors provided below[/]"
-        )
+        console.print("[red]❌ TypeScript compilation failed, errors provided below[/]")
         for line in result.stderr.split("\n"):
             console.print(f"[red]{line}[/red]")
         raise Exit(code=1)
 
-    console.print(f"[green]✅ TypeScript compilation succeeded[/green]")
+    console.print("[green]✅ TypeScript compilation succeeded[/green]")
 
     # run pyright to check for errors
     result = subprocess.run(
@@ -991,12 +997,12 @@ def dev_check(
         text=True,
     )
     if result.returncode != 0:
-        console.print(f"[red]❌ Pyright found errors, errors provided below[/]")
+        console.print("[red]❌ Pyright found errors, errors provided below[/]")
         for line in result.stderr.split("\n"):
             console.print(f"[red]{line}[/red]")
         raise Exit(code=1)
     else:
-        console.print(f"[green]✅ Pyright found no errors[/green]")
+        console.print("[green]✅ Pyright found no errors[/green]")
 
 
 def entrypoint():

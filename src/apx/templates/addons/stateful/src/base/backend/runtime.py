@@ -69,9 +69,9 @@ class Runtime:
         )
 
     def initialize_models(self) -> None:
-        logger.info(f"Initializing database models")
+        logger.info("Initializing database models")
         SQLModel.metadata.create_all(self.engine)
-        logger.info(f"Database models initialized successfully")
+        logger.info("Database models initialized successfully")
 
 
 rt = Runtime()
