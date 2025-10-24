@@ -204,25 +204,34 @@ License
 
 All included or referenced third party libraries are subject to the licenses set forth below.
 
-| library                   | description                                                     | license      | source                                                      |
-| ------------------------- | --------------------------------------------------------------- | ------------ | ----------------------------------------------------------- |
-| FastAPI                   | High-performance API framework based on Starlette               | MIT          | [GitHub](https://github.com/tiangolo/fastapi)               |
-| Pydantic                  | Data validation and settings management using Python type hints | MIT          | [GitHub](https://github.com/pydantic/pydantic)              |
-| SQLModel                  | SQLAlchemy-like ORM for Python                                  | MIT          | [GitHub](https://github.com/fastapi/sqlmodel)               |
-| Databricks SDK for Python | Official Databricks SDK for Python                              | Apache-2.0   | [GitHub](https://github.com/databricks/databricks-sdk-py)   |
-| orval                     | OpenAPI client generator                                        | MIT          | [GitHub](https://github.com/orval-labs/orval)               |
-| shadcn/ui                 | UI library for React                                            | MIT          | [GitHub](https://github.com/shadcn/ui)                      |
-| React                     | Library for building user interfaces                            | MIT          | [GitHub](https://github.com/facebook/react)                 |
-| TypeScript                | Programming language for web development                        | Apache-2.0   | [GitHub](https://github.com/microsoft/TypeScript)           |
-| Bun                       | JavaScript runtime                                              | MIT          | [GitHub](https://github.com/oven-sh/bun)                    |
-| uv                        | Fast, modern Python package manager                             | MIT          | [GitHub](https://github.com/astral-sh/uv)                   |
-| jinja2                    | Template engine for Python                                      | MIT          | [GitHub](https://github.com/pallets/jinja)                  |
-| rich                      | Rich library for Python                                         | MIT          | [GitHub](https://github.com/Textualize/rich)                |
-| typer                     | Typer is a library for building CLI applications                | MIT          | [GitHub](https://github.com/fastapi/typer)                  |
-| uvicorn                   | ASGI server for Python                                          | BSD-3-Clause | [GitHub](https://github.com/encode/uvicorn)                 |
-| watchfiles                | File change monitoring for Python                               | MIT          | [GitHub](https://github.com/samuelcolvin/watchfiles)        |
-| hatchling                 | Build backend for Python                                        | MIT          | [GitHub](https://github.com/pypa/hatch)                     |
-| uv-dynamic-versioning     | Dynamic versioning for Python packages                          | MIT          | [GitHub](https://github.com/ninoseki/uv-dynamic-versioning) |
-| vite                      | Frontend build tool for JavaScript                              | MIT          | [GitHub](https://github.com/vitejs/vite)                    |
-| tailwindcss               | Utility-first CSS framework for rapid UI development            | MIT          | [GitHub](https://github.com/tailwindlabs/tailwindcss)       |
-| smol-toml                 | Tom's Obvious, Minimal Language for JS                          | MIT          | [GitHub](https://github.com/squirrelchat/smol-toml)         |
+| library                   | description                                                                                                                            | license      | source                                                      |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------- |
+| FastAPI                   | High-performance API framework based on Starlette                                                                                      | MIT          | [GitHub](https://github.com/tiangolo/fastapi)               |
+| Pydantic                  | Data validation and settings management using Python type hints                                                                        | MIT          | [GitHub](https://github.com/pydantic/pydantic)              |
+| SQLModel                  | SQLAlchemy-like ORM for Python                                                                                                         | MIT          | [GitHub](https://github.com/fastapi/sqlmodel)               |
+| Databricks SDK for Python | Official Databricks SDK for Python                                                                                                     | Apache-2.0   | [GitHub](https://github.com/databricks/databricks-sdk-py)   |
+| orval                     | OpenAPI client generator                                                                                                               | MIT          | [GitHub](https://github.com/orval-labs/orval)               |
+| shadcn/ui                 | UI library for React                                                                                                                   | MIT          | [GitHub](https://github.com/shadcn/ui)                      |
+| React                     | Library for building user interfaces                                                                                                   | MIT          | [GitHub](https://github.com/facebook/react)                 |
+| TypeScript                | Programming language for web development                                                                                               | Apache-2.0   | [GitHub](https://github.com/microsoft/TypeScript)           |
+| Bun                       | JavaScript runtime                                                                                                                     | MIT          | [GitHub](https://github.com/oven-sh/bun)                    |
+| uv                        | Fast, modern Python package manager                                                                                                    | MIT          | [GitHub](https://github.com/astral-sh/uv)                   |
+| jinja2                    | Template engine for Python                                                                                                             | MIT          | [GitHub](https://github.com/pallets/jinja)                  |
+| rich                      | Rich library for Python                                                                                                                | MIT          | [GitHub](https://github.com/Textualize/rich)                |
+| typer                     | Typer is a library for building CLI applications                                                                                       | MIT          | [GitHub](https://github.com/fastapi/typer)                  |
+| uvicorn                   | ASGI server for Python                                                                                                                 | BSD-3-Clause | [GitHub](https://github.com/encode/uvicorn)                 |
+| watchfiles                | File change monitoring for Python                                                                                                      | MIT          | [GitHub](https://github.com/samuelcolvin/watchfiles)        |
+| hatchling                 | Build backend for Python                                                                                                               | MIT          | [GitHub](https://github.com/pypa/hatch)                     |
+| uv-dynamic-versioning     | Dynamic versioning for Python packages                                                                                                 | MIT          | [GitHub](https://github.com/ninoseki/uv-dynamic-versioning) |
+| vite                      | Frontend build tool for JavaScript                                                                                                     | MIT          | [GitHub](https://github.com/vitejs/vite)                    |
+| tailwindcss               | Utility-first CSS framework for rapid UI development                                                                                   | MIT          | [GitHub](https://github.com/tailwindlabs/tailwindcss)       |
+| smol-toml                 | Tom's Obvious, Minimal Language for JS                                                                                                 | MIT          | [GitHub](https://github.com/squirrelchat/smol-toml)         |
+| psutil                    | Cross-platform library for retrieving information on running processes and system utilization (CPU, memory, disks, network) in Python. | BSD-3-Clause | [GitHub](https://github.com/giampaolo/psutil)               |
+
+## 📜 Project todos
+
+- [ ] Add chat template
+- [ ] Add MCP template
+- [ ] Add chat template
+- [ ] MCP of apx commands
+- [ ] Add a way to add a custom template
