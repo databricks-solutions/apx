@@ -69,16 +69,15 @@ app = Typer(
     name="apx | Databricks App Toolkit",
 )
 
-templates_dir: Path = resources.files("apx").joinpath("templates")  # type: ignore
+templates_dir: Path = Path(str(resources.files("apx"))).joinpath("templates")
 jinja2_env = jinja2.Environment(loader=jinja2.FileSystemLoader(templates_dir))
 
 
 version_option = Option(
-    None,
     "--version",
-    help="Show the version of apx",
     callback=version_callback,
     is_eager=True,
+    help="Show the version and exit.",
 )
 
 
@@ -839,20 +838,18 @@ def dev_start(
             "[bold cyan]📡 Tailing logs... Press Ctrl+C to stop servers[/bold cyan]"
         )
         console.print()
-        try:
-            manager.tail_logs(
-                duration_seconds=None,
-                ui_only=False,
-                backend_only=False,
-                openapi_only=False,
-                timeout_seconds=None,
-            )
-        except KeyboardInterrupt:
-            console.print()
-            console.print(
-                "[bold yellow]🛑 Stopping development servers...[/bold yellow]"
-            )
-            manager.stop()
+        # tail_logs catches KeyboardInterrupt internally, so it returns normally
+        # After it returns (for any reason), we should stop the servers
+        manager.tail_logs(
+            duration_seconds=None,
+            ui_only=False,
+            backend_only=False,
+            openapi_only=False,
+            timeout_seconds=None,
+        )
+        console.print()
+        console.print("[bold yellow]🛑 Stopping development servers...[/bold yellow]")
+        manager.stop()
 
 
 @dev_app.command(name="status", help="Check the status of development servers")
@@ -1013,7 +1010,7 @@ def dev_check(
     )
     if result.returncode != 0:
         console.print("[red]❌ TypeScript compilation failed, errors provided below[/]")
-        for line in result.stderr.split("\n"):
+        for line in result.stdout.splitlines():
             console.print(f"[red]{line}[/red]")
         raise Exit(code=1)
 
@@ -1021,14 +1018,14 @@ def dev_check(
 
     # run pyright to check for errors
     result = subprocess.run(
-        ["uv", "run", "basedpyright"],
+        ["uv", "run", "basedpyright", "--level", "error"],
         cwd=app_dir,
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
         console.print("[red]❌ Pyright found errors, errors provided below[/]")
-        for line in result.stderr.split("\n"):
+        for line in result.stdout.splitlines():
             console.print(f"[red]{line}[/red]")
         raise Exit(code=1)
     else:

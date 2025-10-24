@@ -14,15 +14,15 @@ if env_file.exists():
 
 
 class AppConfig(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=env_file, env_prefix=f"{app_name.upper()}_", extra="ignore"
+    model_config: SettingsConfigDict = SettingsConfigDict(
+        env_file=env_file, env_prefix=f"{app_slug.upper()}_", extra="ignore"
     )
     app_name: str = Field(default=app_name)
     api_prefix: str = Field(default="/api")
 
     @property
     def static_assets_path(self) -> Path:
-        return resources.files(app_slug).joinpath("__dist__")  # type: ignore
+        return Path(str(resources.files(app_slug))).joinpath("__dist__")
 
 
 conf = AppConfig()

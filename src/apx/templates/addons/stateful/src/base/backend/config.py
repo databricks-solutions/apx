@@ -35,7 +35,7 @@ class AppConfig(BaseSettings):
 
     @property
     def static_assets_path(self) -> Path:
-        return resources.files(app_slug).joinpath("__dist__")  # type: ignore
+        return Path(str(resources.files(app_slug))).joinpath("__dist__")
 
 
 conf = AppConfig()
