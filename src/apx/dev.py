@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import keyring
 from databricks.sdk import WorkspaceClient
@@ -1426,7 +1426,7 @@ class DevManager:
         backend_only: bool = False,
         openapi_only: bool = False,
         limit: int = 1000,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any | str]]:
         """Retrieve logs from log files with filtering.
 
         Args:

@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "basedpyright>=1.32.1",
     "databricks-sdk>=0.68.0",
     "fastapi>=0.119.0",
     "hatchling>=1.27.0",
@@ -43,10 +44,10 @@ format-jinja = "{{version}}"
 
 [dependency-groups]
 dev = [
+    "basedpyright>=1.32.1",
     "databricks-sdk>=0.68.0",
     "fastapi>=0.119.0",
     "pydantic-settings>=2.11.0",
-    "pyright>=1.1.406",
     "pytest>=8.4.2",
     "pytest-cov>=7.0.0",
     "ruff>=0.14.0",
@@ -63,5 +64,5 @@ template = '''
 version = "{version}"
 '''
 
-[tool.pyright]
-exclude = ["src/apx/templates/**"]
+[tool.basedpyright]
+exclude = ["src/apx/templates", "**/node_modules", "**/__pycache__", "**/.*"]

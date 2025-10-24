@@ -801,6 +801,14 @@ def dev_start(
     max_retries: Annotated[
         int, Option(help="Maximum number of retry attempts for processes")
     ] = 10,
+    watch: Annotated[
+        bool,
+        Option(
+            "--watch",
+            "-w",
+            help="Start servers and tail logs until Ctrl+C, then stop all servers",
+        ),
+    ] = False,
 ):
     """Start development servers in detached mode."""
     # Check prerequisites
@@ -823,6 +831,28 @@ def dev_start(
         openapi=openapi,
         max_retries=max_retries,
     )
+
+    # If watch mode is enabled, tail logs until Ctrl+C
+    if watch:
+        console.print()
+        console.print(
+            "[bold cyan]📡 Tailing logs... Press Ctrl+C to stop servers[/bold cyan]"
+        )
+        console.print()
+        try:
+            manager.tail_logs(
+                duration_seconds=None,
+                ui_only=False,
+                backend_only=False,
+                openapi_only=False,
+                timeout_seconds=None,
+            )
+        except KeyboardInterrupt:
+            console.print()
+            console.print(
+                "[bold yellow]🛑 Stopping development servers...[/bold yellow]"
+            )
+            manager.stop()
 
 
 @dev_app.command(name="status", help="Check the status of development servers")
@@ -991,7 +1021,7 @@ def dev_check(
 
     # run pyright to check for errors
     result = subprocess.run(
-        ["uv", "run", "pyright"],
+        ["uv", "run", "basedpyright"],
         cwd=app_dir,
         capture_output=True,
         text=True,
