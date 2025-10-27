@@ -7,16 +7,28 @@ import subprocess
 import time
 from typing import Annotated, Any, Literal
 
-from dotenv import set_key
+from dotenv import load_dotenv, set_key
 import jinja2
 from rich import print
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.prompt import Confirm, Prompt
 from typer import Argument, Exit, Option, Typer
 
+from databricks.sdk import WorkspaceClient
+
 from apx._version import version as apx_version
-from apx.dev import DevManager, run_backend
+from apx.dev import (
+    DevManager,
+    create_obo_token,
+    run_backend,
+    validate_databricks_credentials,
+    delete_token_from_keyring,
+    save_token_id,
+    get_or_create_app_id,
+    suppress_output_and_logs,
+)
 from apx.openapi import run_openapi
+from apx import __version__ as apx_lib_version
 from apx.utils import (
     console,
     ensure_dir,
@@ -821,6 +833,39 @@ def dev_start(
     if app_dir is None:
         app_dir = Path.cwd()
 
+    # Validate Databricks credentials if OBO is enabled
+    if obo:
+        console.print("[cyan]🔐 Validating Databricks credentials...[/cyan]")
+
+        dotenv_path = app_dir / ".env"
+        if dotenv_path.exists():
+            console.print(f"🔍 Loading .env file from {dotenv_path.resolve()}")
+            load_dotenv(dotenv_path)
+
+        try:
+            with suppress_output_and_logs():
+                ws = WorkspaceClient(product="apx/dev", product_version=apx_lib_version)
+        except Exception as e:
+            console.print(
+                f"[red]❌ Failed to initialize Databricks client for OBO token generation: {e}[/red]"
+            )
+            console.print(
+                "[yellow]💡 Make sure you have Databricks credentials configured.[/yellow]"
+            )
+            raise Exit(code=1)
+
+        if not validate_databricks_credentials(ws):
+            # Clear any cached OBO tokens since they were created with invalid credentials
+            app_id = get_or_create_app_id(app_dir)
+            console.print(
+                "[yellow]⚠️  Invalid Databricks credentials detected. Clearing cached tokens...[/yellow]"
+            )
+            delete_token_from_keyring(app_id)
+            save_token_id(app_dir, token_id="")  # Clear the token_id
+
+        console.print("[green]✓[/green] Databricks credentials validated")
+        console.print()
+
     # Use DevManager to start servers
     manager = DevManager(app_dir)
     manager.start(
@@ -932,6 +977,41 @@ def dev_restart(
 
     if app_dir is None:
         app_dir = Path.cwd()
+
+    # Validate Databricks credentials if OBO is enabled
+    if obo:
+        console.print("[cyan]🔐 Validating Databricks credentials...[/cyan]")
+        try:
+            with suppress_output_and_logs():
+                ws = WorkspaceClient(product="apx/dev", product_version=apx_lib_version)
+        except Exception as e:
+            console.print(f"[red]❌ Failed to initialize Databricks client: {e}[/red]")
+            console.print(
+                "[yellow]💡 Make sure you have Databricks credentials configured.[/yellow]"
+            )
+            raise Exit(code=1)
+
+        if not validate_databricks_credentials(ws):
+            # Clear any cached OBO tokens since they were created with invalid credentials
+            app_id = get_or_create_app_id(app_dir)
+            console.print(
+                "[yellow]⚠️  Invalid Databricks credentials detected. Clearing cached tokens...[/yellow]"
+            )
+            delete_token_from_keyring(app_id)
+            save_token_id(app_dir, "")  # Clear the token_id
+
+            console.print()
+            console.print(
+                "[red]❌ Unable to authenticate with Databricks to generate a new OBO token.[/red]"
+            )
+            console.print(
+                "[yellow]💡 Make sure you have Databricks credentials configured.[/yellow]"
+            )
+            console.print()
+            raise Exit(code=1)
+
+        console.print("[green]✓[/green] Databricks credentials validated")
+        console.print()
 
     # Use DevManager to restart servers
     manager = DevManager(app_dir)

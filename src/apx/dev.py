@@ -236,6 +236,29 @@ def create_obo_token(
     return new_token.token_info.token_id, new_token.token_value
 
 
+def validate_databricks_credentials(ws: WorkspaceClient) -> bool:
+    """Validate that Databricks credentials are valid and not expired.
+    
+    Args:
+        ws: WorkspaceClient instance
+        
+    Returns:
+        True if credentials are valid, False otherwise
+    """
+    try:
+        with suppress_output_and_logs():
+            # Try to get current user info - simple API call to validate credentials
+            ws.current_user.me()
+        return True
+    except Exception as e:
+        error_str = str(e).lower()
+        # Check for common authentication errors
+        if "invalid" in error_str or "token" in error_str or "401" in error_str or "403" in error_str:
+            return False
+        # For other errors, assume credentials are valid but something else is wrong
+        raise
+
+
 def prepare_obo_token(
     cwd: Path,
     app_module_name: str,
@@ -248,7 +271,7 @@ def prepare_obo_token(
     Checks keyring and project.json for existing valid token, creates new one if needed.
     Only stores in keyring (secure) and token_id in project.json (not sensitive).
     """
-    # Initialize Databricks client
+    # Initialize Databricks client (credentials should already be validated by this point)
     try:
         with suppress_output_and_logs():
             ws = WorkspaceClient(product="apx/dev", product_version=__version__)
@@ -424,13 +447,33 @@ def setup_app_output_capture(log_file: Path):
             self.logger = logger
             self.level = level
             self.stream_name = stream_name
-            self.buffer = []
+            self.buffer = ""
 
         def write(self, message):
-            if message and message.strip():
-                self.logger.log(self.level, message.rstrip())
+            if not message:
+                return
+            
+            # Add to buffer
+            self.buffer += message
+            
+            # Split by newlines and log complete lines
+            lines = self.buffer.split('\n')
+            
+            # Keep the last incomplete line in the buffer
+            self.buffer = lines[-1]
+            
+            # Log all complete lines
+            for line in lines[:-1]:
+                if line:  # Only log non-empty lines
+                    self.logger.log(self.level, line)
 
         def flush(self):
+            # Log any remaining buffered content
+            if self.buffer:
+                self.logger.log(self.level, self.buffer)
+                self.buffer = ""
+            
+            # Flush the logger handlers
             for handler in self.logger.handlers:
                 handler.flush()
 
@@ -1036,13 +1079,32 @@ async def run_openapi_with_logging(app_dir: Path, app_id: str, max_retries: int 
         def __init__(self, logger, level):
             self.logger = logger
             self.level = level
-            self.buffer = []
+            self.buffer = ""
 
         def write(self, message):
-            if message and message.strip():
-                self.logger.log(self.level, f"stdout | {message.strip()}")
+            if not message:
+                return
+            
+            # Add to buffer
+            self.buffer += message
+            
+            # Split by newlines and log complete lines
+            lines = self.buffer.split('\n')
+            
+            # Keep the last incomplete line in the buffer
+            self.buffer = lines[-1]
+            
+            # Log all complete lines
+            for line in lines[:-1]:
+                if line:  # Only log non-empty lines
+                    self.logger.log(self.level, f"stdout | {line}")
 
         def flush(self):
+            # Log any remaining buffered content
+            if self.buffer:
+                self.logger.log(self.level, f"stdout | {self.buffer}")
+                self.buffer = ""
+            
             # Flush the logger handlers
             for handler in self.logger.handlers:
                 handler.flush()
