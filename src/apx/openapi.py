@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -57,8 +58,17 @@ export default defineConfig({{
     return orval_config_path
 
 
-def _generate_openapi_schema(app_dir: Path, app_module_name: str) -> tuple[Path, bool]:
+def _generate_openapi_schema(
+    app_dir: Path, 
+    app_module_name: str,
+    logger: logging.Logger | None = None
+) -> tuple[Path, bool]:
     """Generate OpenAPI schema JSON file.
+
+    Args:
+        app_dir: The path to the app directory
+        app_module_name: The app module name in format "module.path:app"
+        logger: Optional logger to capture stdout/stderr during app import
 
     Returns:
         Tuple of (output_path, schema_changed) where schema_changed indicates if the schema differs from previous
@@ -72,59 +82,99 @@ def _generate_openapi_schema(app_dir: Path, app_module_name: str) -> tuple[Path,
 
     module_path, attribute_name = app_module_name.split(":", 1)
 
-    # Import the module
+    # If logger is provided, redirect stdout/stderr during import to capture app initialization
+    original_stdout = None
+    original_stderr = None
+    
+    if logger:
+        class LoggerWriter:
+            def __init__(self, logger, level):
+                self.logger = logger
+                self.level = level
+                self.buffer = ""
+
+            def write(self, message):
+                if not message:
+                    return
+                self.buffer += message
+                lines = self.buffer.split('\n')
+                self.buffer = lines[-1]
+                for line in lines[:-1]:
+                    if line:
+                        self.logger.log(self.level, line)
+
+            def flush(self):
+                if self.buffer:
+                    self.logger.log(self.level, self.buffer)
+                    self.buffer = ""
+
+            def isatty(self):
+                return False
+
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        sys.stdout = LoggerWriter(logger, logging.INFO)
+        sys.stderr = LoggerWriter(logger, logging.ERROR)
+
     try:
-        # Reload modules to get fresh changes
-        base_path = module_path.split(".")[0]
-        modules_to_delete = [
-            name
-            for name in sys.modules.keys()
-            if name.startswith(base_path + ".") or name == base_path
-        ]
-        for mod_name in modules_to_delete:
-            del sys.modules[mod_name]
+        # Import the module
+        try:
+            # Reload modules to get fresh changes
+            base_path = module_path.split(".")[0]
+            modules_to_delete = [
+                name
+                for name in sys.modules.keys()
+                if name.startswith(base_path + ".") or name == base_path
+            ]
+            for mod_name in modules_to_delete:
+                del sys.modules[mod_name]
 
-        module = importlib.import_module(module_path)
-    except ImportError as e:
-        console.print(f"[red]❌ Failed to import module {module_path}: {e}[/red]")
-        raise Exit(code=1)
+            module = importlib.import_module(module_path)
+        except ImportError as e:
+            console.print(f"[red]❌ Failed to import module {module_path}: {e}[/red]")
+            raise Exit(code=1)
 
-    # Get the app attribute from the module
-    try:
-        app_instance = getattr(module, attribute_name)
-    except AttributeError:
-        console.print(
-            f"[red]❌ Module {module_path} does not have attribute '{attribute_name}'[/red]"
-        )
-        raise Exit(code=1)
+        # Get the app attribute from the module
+        try:
+            app_instance = getattr(module, attribute_name)
+        except AttributeError:
+            console.print(
+                f"[red]❌ Module {module_path} does not have attribute '{attribute_name}'[/red]"
+            )
+            raise Exit(code=1)
 
-    if not isinstance(app_instance, FastAPI):
-        console.print(
-            f"[red]❌ '{attribute_name}' is not a FastAPI app instance.[/red]"
-        )
-        raise Exit(code=1)
+        if not isinstance(app_instance, FastAPI):
+            console.print(
+                f"[red]❌ '{attribute_name}' is not a FastAPI app instance.[/red]"
+            )
+            raise Exit(code=1)
 
-    # Generate OpenAPI spec
-    spec = app_instance.openapi()
-    new_spec_json = json.dumps(spec, indent=2)
+        # Generate OpenAPI spec
+        spec = app_instance.openapi()
+        new_spec_json = json.dumps(spec, indent=2)
 
-    # Write to .apx/openapi.json
-    apx_dir = app_dir / ".apx"
-    ensure_dir(apx_dir)
-    output_path = apx_dir / "openapi.json"
+        # Write to .apx/openapi.json
+        apx_dir = app_dir / ".apx"
+        ensure_dir(apx_dir)
+        output_path = apx_dir / "openapi.json"
 
-    # Check if schema has changed
-    schema_changed = True
-    if output_path.exists():
-        existing_spec = output_path.read_text()
-        if existing_spec == new_spec_json:
-            schema_changed = False
+        # Check if schema has changed
+        schema_changed = True
+        if output_path.exists():
+            existing_spec = output_path.read_text()
+            if existing_spec == new_spec_json:
+                schema_changed = False
 
-    # Write the new schema if it changed
-    if schema_changed:
-        output_path.write_text(new_spec_json)
+        # Write the new schema if it changed
+        if schema_changed:
+            output_path.write_text(new_spec_json)
 
-    return output_path, schema_changed
+        return output_path, schema_changed
+    finally:
+        # Restore stdout/stderr if we redirected them
+        if original_stdout and original_stderr:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
 
 
 def _run_orval(app_dir: Path, openapi_path: Path, orval_config_path: Path):
@@ -202,8 +252,20 @@ def _generate_openapi_and_client(app_dir: Path, force: bool = False):
         console.print("[bold green]✨ OpenAPI schema is up to date![/bold green]")
 
 
-async def _openapi_watch(app_dir: Path):
-    """Watch for Python file changes and regenerate OpenAPI schema and client."""
+async def _openapi_watch(app_dir: Path, logger: logging.Logger | None = None):
+    """Watch for Python file changes and regenerate OpenAPI schema and client.
+    
+    Args:
+        app_dir: The path to the app directory
+        logger: Optional logger for outputting messages. If None, uses console.print()
+    """
+    # Use console.print if no logger provided (standalone mode)
+    def log_info(msg: str):
+        if logger:
+            logger.info(msg)
+        else:
+            console.print(msg)
+    
     # Get project metadata
     try:
         with in_path(app_dir):
@@ -211,16 +273,17 @@ async def _openapi_watch(app_dir: Path):
             app_module_name = metadata["app-module"]
             app_slug = metadata["app-slug"]
     except Exception as e:
-        console.print(f"[red]❌ Failed to read project metadata: {e}[/red]")
-        console.print(
-            "[yellow]💡 Make sure you're in a valid apx project directory[/yellow]"
-        )
+        if logger:
+            logger.error(f"Failed to read project metadata: {e}")
+            logger.info("Make sure you're in a valid apx project directory")
+        else:
+            console.print(f"[red]❌ Failed to read project metadata: {e}[/red]")
+            console.print(
+                "[yellow]💡 Make sure you're in a valid apx project directory[/yellow]"
+            )
         raise Exit(code=1)
 
-    console.print(
-        f"[bold cyan]👁️  Watching for changes in {app_dir}/**/*.py[/bold cyan]"
-    )
-    console.print()
+    log_info(f"Watching for changes in {app_dir}/**/*.py")
 
     # Ensure orval config exists (do this once before generating)
     orval_config_path = _ensure_orval_config(app_dir, app_slug)
@@ -228,16 +291,18 @@ async def _openapi_watch(app_dir: Path):
     # Generate once at startup
     try:
         openapi_path, schema_changed = _generate_openapi_schema(
-            app_dir, app_module_name
+            app_dir, app_module_name, logger=logger
         )
         if schema_changed:
             _run_orval(app_dir, openapi_path, orval_config_path)
-            console.print("[green]✓[/green] Initial generation complete")
+            log_info("Initial generation complete")
         else:
-            console.print("[dim]✓[/dim] Schema unchanged, skipping orval")
-        console.print()
+            log_info("Schema unchanged, skipping orval")
     except Exception as e:
-        console.print(f"[red]❌ Initial generation failed: {e}[/red]")
+        if logger:
+            logger.error(f"Initial generation failed: {e}")
+        else:
+            console.print(f"[red]❌ Initial generation failed: {e}[/red]")
 
     # Watch for changes
     try:
@@ -245,25 +310,24 @@ async def _openapi_watch(app_dir: Path):
             app_dir,
             watch_filter=watchfiles.PythonFilter(),
         ):
-            console.print(
-                f"[yellow]🔄 Detected changes in {len(changes)} file(s), regenerating...[/yellow]"
-            )
+            log_info(f"Detected changes in {len(changes)} file(s), regenerating...")
 
             try:
                 openapi_path, schema_changed = _generate_openapi_schema(
-                    app_dir, app_module_name
+                    app_dir, app_module_name, logger=logger
                 )
                 if schema_changed:
                     _run_orval(app_dir, openapi_path, orval_config_path)
-                    console.print("[green]✓[/green] Regeneration complete")
+                    log_info("Regeneration complete")
                 else:
-                    console.print("[dim]✓[/dim] Schema unchanged, skipping orval")
-                console.print()
+                    log_info("Schema unchanged, skipping orval")
             except Exception as e:
-                console.print(f"[red]❌ Regeneration failed: {e}[/red]")
-                console.print()
+                if logger:
+                    logger.error(f"Regeneration failed: {e}")
+                else:
+                    console.print(f"[red]❌ Regeneration failed: {e}[/red]")
     except KeyboardInterrupt:
-        console.print("\n[dim]Stopped watching for changes.[/dim]")
+        log_info("Stopped watching for changes.")
 
 
 def run_openapi(app_dir: Path, watch: bool = False, force: bool = False):

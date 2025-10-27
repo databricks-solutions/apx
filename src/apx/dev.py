@@ -868,47 +868,6 @@ async def run_openapi_with_logging(app_dir: Path, max_retries: int = 10):
         retry_logger.addHandler(logger.handlers[0])
     retry_logger.propagate = False
 
-    # Redirect console output to logger
-    import sys
-
-    class LoggerWriter:
-        def __init__(self, logger, level):
-            self.logger = logger
-            self.level = level
-            self.buffer = ""
-
-        def write(self, message):
-            if not message:
-                return
-            
-            # Add to buffer
-            self.buffer += message
-            
-            # Split by newlines and log complete lines
-            lines = self.buffer.split('\n')
-            
-            # Keep the last incomplete line in the buffer
-            self.buffer = lines[-1]
-            
-            # Log all complete lines
-            for line in lines[:-1]:
-                if line:  # Only log non-empty lines
-                    self.logger.log(self.level, f"stdout | {line}")
-
-        def flush(self):
-            # Log any remaining buffered content
-            if self.buffer:
-                self.logger.log(self.level, f"stdout | {self.buffer}")
-                self.buffer = ""
-            
-            # Flush the logger handlers
-            for handler in self.logger.handlers:
-                handler.flush()
-
-        def isatty(self):
-            """Return False to indicate this is not a TTY."""
-            return False
-
     @retry(
         stop=stop_after_attempt(max_retries),
         wait=wait_exponential(multiplier=1, min=2, max=60),
@@ -919,22 +878,14 @@ async def run_openapi_with_logging(app_dir: Path, max_retries: int = 10):
         """OpenAPI watcher with retry logic."""
         logger.info("Starting OpenAPI watcher")
 
-        # Capture stdout/stderr
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
-
+        # Note: We don't redirect stdout/stderr here because the backend process
+        # already handles that. The OpenAPI watcher uses the logger directly.
         try:
-            sys.stdout = LoggerWriter(logger, logging.INFO)
-            sys.stderr = LoggerWriter(logger, logging.ERROR)
-
-            # Run the OpenAPI watcher
-            await _openapi_watch(app_dir)
+            # Run the OpenAPI watcher with logger
+            await _openapi_watch(app_dir, logger=logger)
         except Exception as e:
             logger.error(f"OpenAPI watcher failed: {e}")
             raise
-        finally:
-            sys.stdout = old_stdout
-            sys.stderr = old_stderr
 
     # Run with retry
     await run_with_retry()
@@ -1449,6 +1400,7 @@ class DevManager:
             prefix_color = "cyan"
             prefix = "[UI] "
         elif log["process_name"] == "openapi":
+            # OpenAPI watcher logs come directly from the logger (no stream prefix)
             prefix_color = "magenta"
             prefix = "[GEN]"
         else:
