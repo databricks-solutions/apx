@@ -8,6 +8,8 @@ import subprocess
 import time
 import tomllib
 from pathlib import Path
+from typing import Any, Generator
+from typing_extensions import override
 
 import jinja2
 from rich.console import Console
@@ -94,11 +96,12 @@ class PrefixedLogHandler(logging.Handler):
 
     def __init__(self, prefix: str, color: str, width: int = 10):
         super().__init__()
-        self.prefix = prefix
-        self.color = color
-        self.width = width
+        self.prefix: str = prefix
+        self.color: str = color
+        self.width: int = width
 
-    def emit(self, record: logging.LogRecord):
+    @override
+    def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
             # Determine color based on log level
@@ -118,7 +121,9 @@ async def stream_output(
 ):
     """Stream output from a subprocess with a colored prefix."""
 
-    async def read_stream(stream, is_stderr=False):
+    async def read_stream(
+        stream: asyncio.StreamReader, is_stderr: bool = False
+    ) -> None:
         while True:
             line = await stream.readline()
             if not line:
@@ -128,6 +133,9 @@ async def stream_output(
             if text:
                 print_with_prefix(prefix, text, _color, width=width)
 
+    assert proc.stdout is not None and proc.stderr is not None, (
+        "stdout and stderr must not be None"
+    )
     # Read stdout and stderr concurrently
     await asyncio.gather(
         read_stream(proc.stdout, is_stderr=False),
@@ -197,10 +205,9 @@ def random_name():
     return f"{random.choice(adjectives)}-{random.choice(animals)}"
 
 
-def ensure_dir(path: Path) -> Path:
-    """Create directory if it doesn't exist and return the path."""
+def ensure_dir(path: Path) -> None:
+    """Create directory if it doesn't exist."""
     path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def process_template_directory(
@@ -256,7 +263,7 @@ def process_template_directory(
             if item.suffix == ".jinja2":
                 # Render Jinja2 template using the correct path relative to templates root
                 template_path = str(source_rel_to_templates / rel_path)
-                template = jinja2_env.get_template(template_path)
+                template: jinja2.Template = jinja2_env.get_template(template_path)
                 # Pass both app_name (for display) and app_slug (for module names/paths) to templates
                 target_path.write_text(
                     template.render(app_name=app_name, app_slug=app_slug)
@@ -332,8 +339,8 @@ async def run_frontend(frontend_port: int):
 
 def generate_metadata_file(app_path: Path):
     pyproject_path = app_path / "pyproject.toml"
-    pyproject = tomllib.loads(pyproject_path.read_text())
-    metadata = pyproject["tool"]["apx"]["metadata"]
+    pyproject: dict[str, Any] = tomllib.loads(pyproject_path.read_text())
+    metadata: dict[str, str] = pyproject["tool"]["apx"]["metadata"]
     metadata_path = app_path / metadata["metadata-path"]
 
     metadata_path.write_text(
@@ -359,7 +366,7 @@ def list_profiles() -> list[str]:
 
 
 @contextmanager
-def in_path(path: Path):
+def in_path(path: Path) -> Generator[None, None, None]:
     """Context manager to change the current working directory to the given path."""
     current_dir = os.getcwd()
     os.chdir(str(path))

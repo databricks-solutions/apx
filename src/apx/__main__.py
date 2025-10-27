@@ -5,7 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from dotenv import set_key
 import jinja2
@@ -73,7 +73,7 @@ templates_dir: Path = Path(str(resources.files("apx"))).joinpath("templates")
 jinja2_env = jinja2.Environment(loader=jinja2.FileSystemLoader(templates_dir))
 
 
-version_option = Option(
+version_option: Any = Option(
     None,
     "--version",
     callback=version_callback,
@@ -252,7 +252,7 @@ def init(
         if prompt_layout.lower() not in ["basic", "sidebar"]:
             print("[red]Invalid layout. Please choose from: basic, sidebar.[/red]")
             return Exit(code=1)
-        layout = prompt_layout.lower()  # type: ignore
+        layout = prompt_layout.lower()
 
     console.print(
         f"\n[bold cyan]Initializing app {app_name} in {app_path.resolve()}[/bold cyan]\n"
@@ -887,6 +887,88 @@ def dev_stop(
     # Use DevManager to stop servers
     manager = DevManager(app_dir)
     manager.stop()
+
+
+@dev_app.command(name="restart", help="Restart development servers (stop then start)")
+def dev_restart(
+    app_dir: Annotated[
+        Path | None,
+        Argument(
+            help="The path to the app. If not provided, current working directory will be used"
+        ),
+    ] = None,
+    frontend_port: Annotated[
+        int, Option(help="Port for the frontend development server")
+    ] = 5173,
+    backend_port: Annotated[int, Option(help="Port for the backend server")] = 8000,
+    backend_host: Annotated[
+        str, Option(help="Host for the backend server")
+    ] = "0.0.0.0",
+    obo: Annotated[
+        bool, Option(help="Whether to add On-Behalf-Of header to the backend server")
+    ] = True,
+    openapi: Annotated[
+        bool, Option(help="Whether to start OpenAPI watcher process")
+    ] = True,
+    max_retries: Annotated[
+        int, Option(help="Maximum number of retry attempts for processes")
+    ] = 10,
+    watch: Annotated[
+        bool,
+        Option(
+            "--watch",
+            "-w",
+            help="Start servers and tail logs until Ctrl+C, then stop all servers",
+        ),
+    ] = False,
+):
+    """Restart development servers by stopping and then starting them."""
+    # Check prerequisites
+    if not is_bun_installed():
+        console.print(
+            "[red]❌ bun is not installed. Please install bun to continue.[/red]"
+        )
+        raise Exit(code=1)
+
+    if app_dir is None:
+        app_dir = Path.cwd()
+
+    # Use DevManager to restart servers
+    manager = DevManager(app_dir)
+
+    console.print("[bold yellow]🔄 Restarting development servers...[/bold yellow]")
+    console.print("[bold yellow]🛑 Stopping servers...[/bold yellow]")
+    manager.stop()
+
+    console.print("[bold green]🚀 Starting servers...[/bold green]")
+    manager.start(
+        frontend_port=frontend_port,
+        backend_port=backend_port,
+        backend_host=backend_host,
+        obo=obo,
+        openapi=openapi,
+        max_retries=max_retries,
+    )
+
+    # If watch mode is enabled, tail logs until Ctrl+C
+    if watch:
+        console.print()
+        console.print(
+            "[bold cyan]📡 Tailing logs... Press Ctrl+C to stop servers[/bold cyan]"
+        )
+        console.print()
+        # tail_logs catches KeyboardInterrupt internally, so it returns normally
+        # After it returns (for any reason), we should stop the servers
+        manager.tail_logs(
+            duration_seconds=None,
+            ui_only=False,
+            backend_only=False,
+            openapi_only=False,
+            timeout_seconds=None,
+        )
+        console.print()
+        console.print("[bold yellow]🛑 Stopping development servers...[/bold yellow]")
+        manager.stop()
 
 
 @dev_app.command(name="logs", help="Retrieve and display logs from the database")
