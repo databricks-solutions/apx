@@ -74,8 +74,9 @@ class ProcessInfo(BaseModel):
 class ProjectConfig(BaseModel):
     """Configuration stored in .apx/project.json."""
 
-    application_id: str
     token_id: Optional[str] = None
+    dev_server_pid: Optional[int] = None
+    dev_server_port: Optional[int] = None
     processes: dict[str, ProcessInfo] = Field(default_factory=dict)
 
     @classmethod
@@ -264,7 +265,6 @@ def prepare_obo_token(
     app_module_name: str,
     token_lifetime_seconds: int = 60 * 60 * 4,
     status_context=None,
-    dev_manager: "DevManager | None" = None,
 ) -> str:
     """Prepare the On-Behalf-Of token for the backend server.
 
@@ -282,58 +282,60 @@ def prepare_obo_token(
         )
         raise Exit(code=1)
 
+    # Use project directory path as keyring identifier
+    keyring_id = str(cwd.resolve())
+
     # Step 1: Check keyring for token
-    if dev_manager:
+    if status_context:
+        status_context.update("🔍 Checking keyring for existing token")
+
+    keyring_token = get_token_from_keyring(keyring_id)
+    stored_token_id = get_token_id(cwd)
+
+    # If we have both token and token_id, validate the token
+    if keyring_token and stored_token_id:
         if status_context:
-            status_context.update("🔍 Checking keyring for existing token")
+            status_context.update("🔐 Validating existing token")
 
-        keyring_token = get_token_from_keyring(dev_manager.app_id)
-        stored_token_id = get_token_id(cwd)
+        # Suppress any logging during token validation
+        with suppress_output_and_logs():
+            user_tokens = ws.tokens.list()
+            user_token = next(
+                (
+                    token
+                    for token in user_tokens
+                    if token.token_id == stored_token_id
+                ),
+                None,
+            )
 
-        # If we have both token and token_id, validate the token
-        if keyring_token and stored_token_id:
-            if status_context:
-                status_context.update("🔐 Validating existing token")
+        # Check if token exists and is still valid
+        if user_token and user_token.expiry_time:
+            expiry_timestamp = user_token.expiry_time / 1000
+            current_time = time.time()
+            time_remaining = expiry_timestamp - current_time
 
-            # Suppress any logging during token validation
-            with suppress_output_and_logs():
-                user_tokens = ws.tokens.list()
-                user_token = next(
-                    (
-                        token
-                        for token in user_tokens
-                        if token.token_id == stored_token_id
-                    ),
-                    None,
-                )
-
-            # Check if token exists and is still valid
-            if user_token and user_token.expiry_time:
-                expiry_timestamp = user_token.expiry_time / 1000
-                current_time = time.time()
-                time_remaining = expiry_timestamp - current_time
-
-                # Use existing token if it has at least 1 hour remaining
-                min_remaining_time = 60 * 60
-                if time_remaining > min_remaining_time:
-                    if status_context:
-                        status_context.update(
-                            f"✅ Using existing token (expires in {int(time_remaining / 3600)} hours)"
-                        )
-                    return keyring_token
-                else:
-                    if status_context:
-                        status_context.update("⚠️  Token expiring soon, rotating...")
+            # Use existing token if it has at least 1 hour remaining
+            min_remaining_time = 60 * 60
+            if time_remaining > min_remaining_time:
+                if status_context:
+                    status_context.update(
+                        f"✅ Using existing token (expires in {int(time_remaining / 3600)} hours)"
+                    )
+                return keyring_token
             else:
                 if status_context:
-                    status_context.update("⚠️  Token invalid, creating new one...")
-        elif keyring_token:
-            # Have token but no token_id - clean up and recreate
+                    status_context.update("⚠️  Token expiring soon, rotating...")
+        else:
             if status_context:
-                status_context.update(
-                    "⚠️  Token found but missing metadata, recreating..."
-                )
-            delete_token_from_keyring(dev_manager.app_id)
+                status_context.update("⚠️  Token invalid, creating new one...")
+    elif keyring_token:
+        # Have token but no token_id - clean up and recreate
+        if status_context:
+            status_context.update(
+                "⚠️  Token found but missing metadata, recreating..."
+            )
+        delete_token_from_keyring(keyring_id)
 
     # Step 2: Create new token
     if status_context:
@@ -347,144 +349,52 @@ def prepare_obo_token(
     )
 
     # Step 3: Store in keyring and project.json
-    if dev_manager:
-        save_token_to_keyring(dev_manager.app_id, new_token)
-        save_token_id(cwd, token_id)
-        if status_context:
-            status_context.update("💾 Token stored securely in keyring")
+    save_token_to_keyring(keyring_id, new_token)
+    save_token_id(cwd, token_id)
+    if status_context:
+        status_context.update("💾 Token stored securely in keyring")
 
     return new_token
 
 
-def setup_uvicorn_logging(log_file: Path | None = None):
-    """Configure uvicorn loggers to use file logging or console.
+def setup_uvicorn_logging(use_memory: bool = False):
+    """Configure uvicorn loggers to use in-memory buffer or console.
 
     Args:
-        log_file: Optional log file path for file-based logging
+        use_memory: If True, use the in-memory logger (set up by dev_server)
+                    If False, use console logging (for standalone mode)
     """
-    from logging.handlers import TimedRotatingFileHandler, MemoryHandler
-
     # Configure ONLY uvicorn loggers
     for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
         logger = logging.getLogger(logger_name)
         logger.handlers.clear()
 
-        if log_file:
-            # File logging with rotation
-            base_handler = TimedRotatingFileHandler(
-                log_file,
-                when="H",
-                interval=1,
-                backupCount=0,
-            )
-            # Add BE prefix to distinguish from APP logs
-            formatter = logging.Formatter(
-                "%(asctime)s | %(levelname)s | BE | %(message)s"
-            )
-            base_handler.setFormatter(formatter)
-
-            # Add buffering to reduce I/O while maintaining low latency
-            handler = MemoryHandler(
-                capacity=10,  # Buffer up to 10 log records
-                flushLevel=logging.ERROR,  # Flush immediately on ERROR or higher
-                target=base_handler,
-            )
+        if use_memory:
+            # Use the backend logger that's already configured by dev_server
+            backend_logger = logging.getLogger("apx.backend")
+            if backend_logger.handlers:
+                # Copy handler from backend logger and add BE prefix
+                for handler in backend_logger.handlers:
+                    logger.addHandler(handler)
+                # Add BE prefix to distinguish from APP logs
+                formatter = logging.Formatter("BE | %(message)s")
+                for handler in logger.handlers:
+                    handler.setFormatter(formatter)
+            else:
+                # Fallback to console if no handlers found
+                handler = PrefixedLogHandler(prefix="[backend]", color="aquamarine1")
+                formatter = logging.Formatter("%(message)s")
+                handler.setFormatter(formatter)
+                logger.addHandler(handler)
         else:
             # Console logging (no buffering needed)
             handler = PrefixedLogHandler(prefix="[backend]", color="aquamarine1")
             formatter = logging.Formatter("%(message)s")
             handler.setFormatter(formatter)
+            logger.addHandler(handler)
 
-        logger.addHandler(handler)
         logger.setLevel(logging.INFO)
         logger.propagate = False
-
-
-def setup_app_output_capture(log_file: Path):
-    """Capture application stdout/stderr to log file with APP prefix.
-
-    Args:
-        log_file: Path to log file (same as backend log file)
-
-    Returns:
-        Tuple of (original_stdout, original_stderr, app_logger)
-    """
-    from logging.handlers import TimedRotatingFileHandler, MemoryHandler
-
-    # Save original stdout/stderr
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
-
-    # Create logger for app output
-    app_logger = logging.getLogger("apx.app_output")
-    app_logger.setLevel(logging.INFO)
-    app_logger.handlers.clear()
-
-    # File logging with rotation (same file as uvicorn)
-    base_handler = TimedRotatingFileHandler(
-        log_file,
-        when="H",
-        interval=1,
-        backupCount=0,
-    )
-    # Add APP prefix to distinguish from BE logs
-    formatter = logging.Formatter("%(asctime)s | %(levelname)s | APP | %(message)s")
-    base_handler.setFormatter(formatter)
-
-    # Add buffering
-    handler = MemoryHandler(
-        capacity=10,
-        flushLevel=logging.ERROR,
-        target=base_handler,
-    )
-
-    app_logger.addHandler(handler)
-    app_logger.propagate = False
-
-    # Create stream redirectors
-    class LoggerWriter:
-        def __init__(self, logger, level, stream_name):
-            self.logger = logger
-            self.level = level
-            self.stream_name = stream_name
-            self.buffer = ""
-
-        def write(self, message):
-            if not message:
-                return
-            
-            # Add to buffer
-            self.buffer += message
-            
-            # Split by newlines and log complete lines
-            lines = self.buffer.split('\n')
-            
-            # Keep the last incomplete line in the buffer
-            self.buffer = lines[-1]
-            
-            # Log all complete lines
-            for line in lines[:-1]:
-                if line:  # Only log non-empty lines
-                    self.logger.log(self.level, line)
-
-        def flush(self):
-            # Log any remaining buffered content
-            if self.buffer:
-                self.logger.log(self.level, self.buffer)
-                self.buffer = ""
-            
-            # Flush the logger handlers
-            for handler in self.logger.handlers:
-                handler.flush()
-
-        def isatty(self):
-            return False
-
-    # Redirect stdout and stderr
-    sys.stdout = LoggerWriter(app_logger, logging.INFO, "stdout")
-    sys.stderr = LoggerWriter(app_logger, logging.ERROR, "stderr")
-
-    return original_stdout, original_stderr, app_logger
 
 
 async def run_backend(
@@ -504,41 +414,79 @@ async def run_backend(
         backend_host: Host to bind to
         backend_port: Port to bind to
         obo: Whether to enable On-Behalf-Of token middleware
-        log_file: Optional log file path for file-based logging
+        log_file: Deprecated, kept for compatibility (use None)
         max_retries: Maximum number of retry attempts
     """
 
     # Setup uvicorn logging once at the start
-    setup_uvicorn_logging(log_file)
+    # If log_file is None, we're in dev_server mode and use memory logging
+    use_memory = log_file is None
+    setup_uvicorn_logging(use_memory=use_memory)
 
-    # Setup app output capture if logging to file
-    original_stdout = None
-    original_stderr = None
-    app_logger = None
-    if log_file:
-        original_stdout, original_stderr, app_logger = setup_app_output_capture(
-            log_file
-        )
-
-        # Setup retry logger to use same log file
-        retry_logger = logging.getLogger("apx.retry")
-        retry_logger.setLevel(logging.INFO)
-        retry_logger.handlers.clear()
-        # Get the base handler from uvicorn logger
+    # Setup retry logger
+    retry_logger = logging.getLogger("apx.retry")
+    retry_logger.setLevel(logging.INFO)
+    retry_logger.handlers.clear()
+    
+    if use_memory:
+        # Use the backend logger that's already configured
+        backend_logger = logging.getLogger("apx.backend")
+        if backend_logger.handlers:
+            retry_logger.addHandler(backend_logger.handlers[0])
+    else:
+        # Console mode - use uvicorn handler
         uvicorn_logger = logging.getLogger("uvicorn")
         if uvicorn_logger.handlers:
-            handler = uvicorn_logger.handlers[0]
-            # If it's a MemoryHandler, get the target handler
-            if hasattr(handler, "target"):
-                from logging.handlers import MemoryHandler
+            retry_logger.addHandler(uvicorn_logger.handlers[0])
+    
+    retry_logger.propagate = False
 
-                if isinstance(handler, MemoryHandler) and handler.target is not None:
-                    retry_logger.addHandler(handler.target)
-                else:
-                    retry_logger.addHandler(handler)
-            else:
-                retry_logger.addHandler(handler)
-        retry_logger.propagate = False
+    # Redirect stdout/stderr if in memory mode to capture app logs
+    original_stdout = None
+    original_stderr = None
+    if use_memory:
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        
+        backend_logger = logging.getLogger("apx.backend")
+        
+        class LoggerWriter:
+            def __init__(self, logger, level, prefix):
+                self.logger = logger
+                self.level = level
+                self.prefix = prefix
+                self.buffer = ""
+
+            def write(self, message):
+                if not message:
+                    return
+                
+                # Add to buffer
+                self.buffer += message
+                
+                # Split by newlines and log complete lines
+                lines = self.buffer.split('\n')
+                
+                # Keep the last incomplete line in the buffer
+                self.buffer = lines[-1]
+                
+                # Log all complete lines with APP prefix
+                for line in lines[:-1]:
+                    if line:  # Only log non-empty lines
+                        self.logger.log(self.level, f"{self.prefix} | {line}")
+
+            def flush(self):
+                # Log any remaining buffered content
+                if self.buffer:
+                    self.logger.log(self.level, f"{self.prefix} | {self.buffer}")
+                    self.buffer = ""
+
+            def isatty(self):
+                """Return False to indicate this is not a TTY."""
+                return False
+
+        sys.stdout = LoggerWriter(backend_logger, logging.INFO, "APP")
+        sys.stderr = LoggerWriter(backend_logger, logging.ERROR, "APP")
 
     @retry(
         stop=stop_after_attempt(max_retries),
@@ -548,13 +496,13 @@ async def run_backend(
     )
     async def run_backend_with_retry():
         """Backend runner with retry logic."""
-        if log_file:
-            backend_logger = logging.getLogger("uvicorn")
+        backend_logger = logging.getLogger("uvicorn")
+        
+        if use_memory:
             backend_logger.info(
                 f"Starting backend server on {backend_host}:{backend_port}"
             )
-
-        if not log_file:
+        else:
             console.print(
                 f"[green][server][/]Starting server on {backend_host}:{backend_port} from app: {app_module_name}"
             )
@@ -567,256 +515,190 @@ async def run_backend(
         # Store OBO token for reuse
         obo_token = None
 
-        # Start periodic flush task if logging to file
-        flush_task = None
-        if log_file:
+        while True:
+            server = None
+            server_task = None
+            watch_task = None
 
-            async def periodic_flush():
-                """Periodically flush logger buffers to ensure ~100ms latency."""
-                while True:
-                    await asyncio.sleep(0.1)  # Flush every 100ms
-                    for logger_name in [
-                        "uvicorn",
-                        "uvicorn.access",
-                        "uvicorn.error",
-                        "apx.app_output",
-                    ]:
-                        logger = logging.getLogger(logger_name)
-                        for handler in logger.handlers:
-                            handler.flush()
+            try:
+                # Reload message
+                if not first_run and not use_memory:
+                    console.print("[yellow][server][/yellow] Reloading...")
+                    console.print()
 
-            flush_task = asyncio.create_task(periodic_flush())
+                # Reload .env file on every iteration (including first run)
+                dotenv_file = cwd / ".env"
+                if dotenv_file.exists():
+                    # Override=True ensures we reload env vars on hot reload
+                    load_dotenv(dotenv_file)
 
-        try:
-            while True:
-                server = None
-                server_task = None
-                watch_task = None
-
-                try:
-                    # Reload message
-                    if not first_run and not log_file:
-                        console.print("[yellow][server][/yellow] Reloading...")
-                        console.print()
-
-                    # Reload .env file on every iteration (including first run)
-                    dotenv_file = cwd / ".env"
-                    if dotenv_file.exists():
-                        # Override=True ensures we reload env vars on hot reload
-                        load_dotenv(dotenv_file)
-
-                    # Prepare OBO token (will reuse if still valid)
-                    if obo and first_run:
-                        if log_file:
-                            obo_token = prepare_obo_token(
-                                cwd, app_module_name, status_context=None
-                            )
-                        else:
-                            with console.status(
-                                "[bold cyan]Preparing On-Behalf-Of token..."
-                            ) as status:
-                                status.update(
-                                    f"📂 Loading .env file from {dotenv_file.resolve()}"
-                                )
-                                obo_token = prepare_obo_token(
-                                    cwd, app_module_name, status_context=status
-                                )
-                                # Give user a moment to see the final status
-                                time.sleep(0.3)
-                            console.print("[green]✓[/green] On-Behalf-Of token ready")
-                            console.print()
-                    elif obo:
-                        # On hot reload, prepare token without spinner
+                # Prepare OBO token (will reuse if still valid)
+                if obo and first_run:
+                    if use_memory:
                         obo_token = prepare_obo_token(
                             cwd, app_module_name, status_context=None
                         )
-
-                    # Load/reload the app instance (fully reload modules on hot reload)
-                    app_instance = load_app(
-                        app_module_name, reload_modules=not first_run
-                    )
-
-                    # Add OBO middleware if enabled
-                    if obo and obo_token:
-                        assert obo_token is not None, "OBO token is not set"
-                        encoded_token = obo_token.encode()
-
-                        async def obo_middleware(request: Request, call_next):
-                            # Headers are immutable, so we need to append to the list
-                            token_header: tuple[bytes, bytes] = (
-                                ACCESS_TOKEN_HEADER_NAME.encode(),
-                                encoded_token,
+                    else:
+                        with console.status(
+                            "[bold cyan]Preparing On-Behalf-Of token..."
+                        ) as status:
+                            status.update(
+                                f"📂 Loading .env file from {dotenv_file.resolve()}"
                             )
-                            request.headers.__dict__["_list"].append(token_header)
-                            return await call_next(request)
-
-                        app_instance.add_middleware(
-                            BaseHTTPMiddleware, dispatch=obo_middleware
-                        )
-
-                    if first_run:
+                            obo_token = prepare_obo_token(
+                                cwd, app_module_name, status_context=status
+                            )
+                            # Give user a moment to see the final status
+                            time.sleep(0.3)
+                        console.print("[green]✓[/green] On-Behalf-Of token ready")
                         console.print()
-
-                    config = uvicorn.Config(
-                        app=app_instance,
-                        host=backend_host,
-                        port=backend_port,
-                        log_level="info",
-                        log_config=None,  # Disable uvicorn's default log config
+                elif obo:
+                    # On hot reload, prepare token without spinner
+                    obo_token = prepare_obo_token(
+                        cwd, app_module_name, status_context=None
                     )
 
-                    server = uvicorn.Server(config)
-                    first_run = False
+                # Load/reload the app instance (fully reload modules on hot reload)
+                app_instance = load_app(
+                    app_module_name, reload_modules=not first_run
+                )
 
-                    # Start server in a background task
-                    async def serve(server_instance: uvicorn.Server):
-                        try:
-                            await server_instance.serve()
-                        except asyncio.CancelledError:
-                            pass
+                # Add OBO middleware if enabled
+                if obo and obo_token:
+                    assert obo_token is not None, "OBO token is not set"
+                    encoded_token = obo_token.encode()
 
-                    server_task = asyncio.create_task(serve(server))
+                    async def obo_middleware(request: Request, call_next):
+                        # Headers are immutable, so we need to append to the list
+                        token_header: tuple[bytes, bytes] = (
+                            ACCESS_TOKEN_HEADER_NAME.encode(),
+                            encoded_token,
+                        )
+                        request.headers.__dict__["_list"].append(token_header)
+                        return await call_next(request)
 
-                    # Watch for file changes
-                    async def watch_files():
-                        async for changes in watchfiles.awatch(
-                            cwd,
-                            watch_filter=watchfiles.PythonFilter(),
-                        ):
-                            if not log_file:
-                                console.print(
-                                    f"[yellow][server][/yellow] Detected changes in {len(changes)} file(s)"
-                                )
-                            return
-
-                    watch_task = asyncio.create_task(watch_files())
-
-                    # Wait for either server to crash or files to change
-                    done, pending = await asyncio.wait(
-                        [server_task, watch_task],
-                        return_when=asyncio.FIRST_COMPLETED,
+                    app_instance.add_middleware(
+                        BaseHTTPMiddleware, dispatch=obo_middleware
                     )
 
-                    # Shutdown server gracefully
-                    if server:
-                        server.should_exit = True
-                        # Give it a moment to shut down
-                        await asyncio.sleep(0.5)
+                if first_run:
+                    console.print()
 
-                    # Cancel remaining tasks
-                    for task in pending:
-                        task.cancel()
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
+                config = uvicorn.Config(
+                    app=app_instance,
+                    host=backend_host,
+                    port=backend_port,
+                    log_level="info",
+                    log_config=None,  # Disable uvicorn's default log config
+                )
 
-                    # If server task completed (crashed), re-raise the exception
-                    if server_task in done:
-                        exc = server_task.exception()
-                        if exc:
-                            raise exc
+                server = uvicorn.Server(config)
+                first_run = False
 
-                except KeyboardInterrupt:
-                    # Clean shutdown on Ctrl+C
-                    if server:
-                        server.should_exit = True
+                # Start server in a background task
+                async def serve(server_instance: uvicorn.Server):
+                    try:
+                        await server_instance.serve()
+                    except asyncio.CancelledError:
+                        pass
 
-                    if server_task and not server_task.done():
-                        server_task.cancel()
-                        try:
-                            await server_task
-                        except asyncio.CancelledError:
-                            pass
+                server_task = asyncio.create_task(serve(server))
 
-                    if watch_task and not watch_task.done():
-                        watch_task.cancel()
-                        try:
-                            await watch_task
-                        except asyncio.CancelledError:
-                            pass
+                # Watch for file changes
+                async def watch_files():
+                    async for changes in watchfiles.awatch(
+                        cwd,
+                        watch_filter=watchfiles.PythonFilter(),
+                    ):
+                        if not use_memory:
+                            console.print(
+                                f"[yellow][server][/yellow] Detected changes in {len(changes)} file(s)"
+                            )
+                        return
 
-                    raise
-                except Exception as e:
-                    console.print(f"[red][server][/red] Error: {e}")
+                watch_task = asyncio.create_task(watch_files())
 
-                    # Clean up tasks
-                    if server:
-                        server.should_exit = True
+                # Wait for either server to crash or files to change
+                done, pending = await asyncio.wait(
+                    [server_task, watch_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
 
-                    if server_task and not server_task.done():
-                        server_task.cancel()
-                        try:
-                            await server_task
-                        except asyncio.CancelledError:
-                            pass
+                # Shutdown server gracefully
+                if server:
+                    server.should_exit = True
+                    # Give it a moment to shut down
+                    await asyncio.sleep(0.5)
 
-                    if watch_task and not watch_task.done():
-                        watch_task.cancel()
-                        try:
-                            await watch_task
-                        except asyncio.CancelledError:
-                            pass
+                # Cancel remaining tasks
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
-                    # Wait a bit before retrying
-                    await asyncio.sleep(1)
-        finally:
-            # Restore stdout/stderr if we captured them
-            if original_stdout and original_stderr:
-                sys.stdout = original_stdout
-                sys.stderr = original_stderr
+                # If server task completed (crashed), re-raise the exception
+                if server_task in done:
+                    exc = server_task.exception()
+                    if exc:
+                        raise exc
 
-            # Clean up flush task if it exists
-            if flush_task:
-                flush_task.cancel()
-                try:
-                    await flush_task
-                except asyncio.CancelledError:
-                    pass
-                # Final flush
-                for logger_name in [
-                    "uvicorn",
-                    "uvicorn.access",
-                    "uvicorn.error",
-                    "apx.app_output",
-                ]:
-                    logger = logging.getLogger(logger_name)
-                    for handler in logger.handlers:
-                        handler.flush()
+            except KeyboardInterrupt:
+                # Clean shutdown on Ctrl+C
+                if server:
+                    server.should_exit = True
+
+                if server_task and not server_task.done():
+                    server_task.cancel()
+                    try:
+                        await server_task
+                    except asyncio.CancelledError:
+                        pass
+
+                if watch_task and not watch_task.done():
+                    watch_task.cancel()
+                    try:
+                        await watch_task
+                    except asyncio.CancelledError:
+                        pass
+
+                raise
+            except Exception as e:
+                console.print(f"[red][server][/red] Error: {e}")
+
+                # Clean up tasks
+                if server:
+                    server.should_exit = True
+
+                if server_task and not server_task.done():
+                    server_task.cancel()
+                    try:
+                        await server_task
+                    except asyncio.CancelledError:
+                        pass
+
+                if watch_task and not watch_task.done():
+                    watch_task.cancel()
+                    try:
+                        await watch_task
+                    except asyncio.CancelledError:
+                        pass
+
+                # Wait a bit before retrying
+                await asyncio.sleep(1)
 
     # Run backend with retry logic
-    await run_backend_with_retry()
+    try:
+        await run_backend_with_retry()
+    finally:
+        # Restore stdout/stderr if we redirected them
+        if original_stdout and original_stderr:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
 
 
-# === File-based Logging Utilities ===
-
-
-def get_or_create_app_id(app_dir: Path) -> str:
-    """Get or create application ID for this project.
-
-    Args:
-        app_dir: Application directory
-
-    Returns:
-        Application ID (UUID string)
-    """
-    import uuid
-
-    project_json_path = app_dir / ".apx" / "project.json"
-    ensure_dir(app_dir / ".apx")
-
-    if project_json_path.exists():
-        try:
-            config = ProjectConfig.read_from_file(project_json_path)
-            return config.application_id
-        except Exception:
-            pass
-
-    # Generate new ID and create new config
-    app_id = str(uuid.uuid4())
-    config = ProjectConfig(application_id=app_id)
-    config.write_to_file(project_json_path)
-    return app_id
+# === Token Management Utilities ===
 
 
 def save_token_id(app_dir: Path, token_id: str):
@@ -833,9 +715,7 @@ def save_token_id(app_dir: Path, token_id: str):
         config = ProjectConfig.read_from_file(project_json_path)
     except (FileNotFoundError, Exception):
         # If file doesn't exist or is corrupted, create new config
-        import uuid
-
-        config = ProjectConfig(application_id=str(uuid.uuid4()))
+        config = ProjectConfig()
 
     config.token_id = token_id
     config.write_to_file(project_json_path)
@@ -862,121 +742,60 @@ def get_token_id(app_dir: Path) -> str | None:
     return None
 
 
-def save_token_to_keyring(app_id: str, token_value: str):
+def save_token_to_keyring(keyring_id: str, token_value: str):
     """Save token to system keyring.
 
     Args:
-        app_id: Application ID (used as keyring key)
+        keyring_id: Keyring identifier (project path)
         token_value: Token value to store
     """
-    keyring.set_password("apx-dev", app_id, token_value)
+    keyring.set_password("apx-dev", keyring_id, token_value)
 
 
-def get_token_from_keyring(app_id: str) -> str | None:
+def get_token_from_keyring(keyring_id: str) -> str | None:
     """Get token from system keyring.
 
     Args:
-        app_id: Application ID (used as keyring key)
+        keyring_id: Keyring identifier (project path)
 
     Returns:
         Token value or None if not found
     """
-    return keyring.get_password("apx-dev", app_id)
+    return keyring.get_password("apx-dev", keyring_id)
 
 
-def delete_token_from_keyring(app_id: str):
+def delete_token_from_keyring(keyring_id: str):
     """Delete token from system keyring.
 
     Args:
-        app_id: Application ID (used as keyring key)
+        keyring_id: Keyring identifier (project path)
     """
     try:
-        keyring.delete_password("apx-dev", app_id)
+        keyring.delete_password("apx-dev", keyring_id)
     except Exception:
         # Password might not exist, that's fine
         pass
 
 
-def get_log_dir(app_id: str) -> Path:
-    """Get the log directory for an application.
-
-    Args:
-        app_id: Application ID
-
-    Returns:
-        Path to log directory (~/.apx/{app_id}/)
-    """
-    log_dir = Path.home() / ".apx" / app_id
-    ensure_dir(log_dir)
-    return log_dir
-
-
-def setup_file_logger(log_file: Path, process_name: str) -> logging.Logger:
-    """Setup a rotating file logger that deletes logs after 1 hour.
-
-    Args:
-        log_file: Path to log file
-        process_name: Name of the process (for logger name)
-
-    Returns:
-        Configured logger instance
-    """
-    from logging.handlers import TimedRotatingFileHandler
-
-    logger = logging.getLogger(f"apx.{process_name}")
-    logger.setLevel(logging.INFO)
-    logger.handlers.clear()
-
-    # Create handler that rotates every hour and keeps only 1 backup
-    handler = TimedRotatingFileHandler(
-        log_file,
-        when="H",  # Rotate every hour
-        interval=1,
-        backupCount=0,  # Don't keep backups (effectively deletes after 1 hour)
-        encoding="utf-8",
-    )
-
-    # Add buffering to reduce I/O while maintaining low latency
-    # Flush every 10 records to provide ~100ms latency without overloading I/O
-    from logging.handlers import MemoryHandler
-
-    memory_handler = MemoryHandler(
-        capacity=10,  # Buffer up to 10 log records for balanced latency/performance
-        flushLevel=logging.ERROR,  # Flush immediately on ERROR or higher
-        target=handler,
-    )
-
-    # Format: timestamp | stream | message
-    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-    handler.setFormatter(formatter)
-
-    logger.addHandler(memory_handler)
-    logger.propagate = False
-
-    return logger
-
-
 async def run_frontend_with_logging(
-    app_dir: Path, app_id: str, port: int, max_retries: int = 10
+    app_dir: Path, port: int, max_retries: int = 10
 ):
-    """Run frontend dev server and capture output to log file.
+    """Run frontend dev server and capture output to in-memory buffer.
 
     Args:
         app_dir: Application directory
-        app_id: Application ID
         port: Frontend port
         max_retries: Maximum number of retry attempts
     """
-    log_dir = get_log_dir(app_id)
-    log_file = log_dir / "frontend.log"
+    # Use the already-configured logger (set up by dev_server)
+    logger = logging.getLogger("apx.frontend")
 
-    logger = setup_file_logger(log_file, "frontend")
-
-    # Setup retry logger to use same log file
+    # Setup retry logger to use same handler
     retry_logger = logging.getLogger("apx.retry")
     retry_logger.setLevel(logging.INFO)
     retry_logger.handlers.clear()
-    retry_logger.addHandler(logger.handlers[0])
+    if logger.handlers:
+        retry_logger.addHandler(logger.handlers[0])
     retry_logger.propagate = False
 
     @retry(
@@ -1010,66 +829,43 @@ async def run_frontend_with_logging(
                 # Small delay to prevent excessive I/O
                 await asyncio.sleep(0.01)
 
-        async def periodic_flush():
-            """Periodically flush logger buffers to ensure ~100ms latency."""
-            while True:
-                await asyncio.sleep(0.1)  # Flush every 100ms
-                for handler in logger.handlers:
-                    handler.flush()
+        # Read both stdout and stderr
+        await asyncio.gather(
+            read_stream(process.stdout, "stdout"),
+            read_stream(process.stderr, "stderr"),
+        )
 
-        # Start periodic flush task
-        flush_task = asyncio.create_task(periodic_flush())
+        await process.wait()
 
-        try:
-            # Read both stdout and stderr
-            await asyncio.gather(
-                read_stream(process.stdout, "stdout"),
-                read_stream(process.stderr, "stderr"),
+        # Check exit code
+        if process.returncode != 0:
+            logger.error(f"Frontend process exited with code {process.returncode}")
+            raise RuntimeError(
+                f"Frontend process failed with exit code {process.returncode}"
             )
-
-            await process.wait()
-
-            # Check exit code
-            if process.returncode != 0:
-                logger.error(f"Frontend process exited with code {process.returncode}")
-                raise RuntimeError(
-                    f"Frontend process failed with exit code {process.returncode}"
-                )
-        finally:
-            # Clean up flush task
-            flush_task.cancel()
-            try:
-                await flush_task
-            except asyncio.CancelledError:
-                pass
-            # Final flush
-            for handler in logger.handlers:
-                handler.flush()
 
     # Run with retry
     await run_with_retry()
 
 
-async def run_openapi_with_logging(app_dir: Path, app_id: str, max_retries: int = 10):
-    """Run OpenAPI watcher and capture output to log file.
+async def run_openapi_with_logging(app_dir: Path, max_retries: int = 10):
+    """Run OpenAPI watcher and capture output to in-memory buffer.
 
     Args:
         app_dir: Application directory
-        app_id: Application ID
         max_retries: Maximum number of retry attempts
     """
     from apx.openapi import _openapi_watch
 
-    log_dir = get_log_dir(app_id)
-    log_file = log_dir / "openapi.log"
+    # Use the already-configured logger (set up by dev_server)
+    logger = logging.getLogger("apx.openapi")
 
-    logger = setup_file_logger(log_file, "openapi")
-
-    # Setup retry logger to use same log file
+    # Setup retry logger to use same handler
     retry_logger = logging.getLogger("apx.retry")
     retry_logger.setLevel(logging.INFO)
     retry_logger.handlers.clear()
-    retry_logger.addHandler(logger.handlers[0])
+    if logger.handlers:
+        retry_logger.addHandler(logger.handlers[0])
     retry_logger.propagate = False
 
     # Redirect console output to logger
@@ -1109,6 +905,10 @@ async def run_openapi_with_logging(app_dir: Path, app_id: str, max_retries: int 
             for handler in self.logger.handlers:
                 handler.flush()
 
+        def isatty(self):
+            """Return False to indicate this is not a TTY."""
+            return False
+
     @retry(
         stop=stop_after_attempt(max_retries),
         wait=wait_exponential(multiplier=1, min=2, max=60),
@@ -1119,19 +919,9 @@ async def run_openapi_with_logging(app_dir: Path, app_id: str, max_retries: int 
         """OpenAPI watcher with retry logic."""
         logger.info("Starting OpenAPI watcher")
 
-        async def periodic_flush():
-            """Periodically flush logger buffers to ensure ~100ms latency."""
-            while True:
-                await asyncio.sleep(0.1)  # Flush every 100ms
-                for handler in logger.handlers:
-                    handler.flush()
-
         # Capture stdout/stderr
         old_stdout = sys.stdout
         old_stderr = sys.stderr
-
-        # Start periodic flush task
-        flush_task = asyncio.create_task(periodic_flush())
 
         try:
             sys.stdout = LoggerWriter(logger, logging.INFO)
@@ -1145,15 +935,6 @@ async def run_openapi_with_logging(app_dir: Path, app_id: str, max_retries: int 
         finally:
             sys.stdout = old_stdout
             sys.stderr = old_stderr
-            # Clean up flush task
-            flush_task.cancel()
-            try:
-                await flush_task
-            except asyncio.CancelledError:
-                pass
-            # Final flush
-            for handler in logger.handlers:
-                handler.flush()
 
     # Run with retry
     await run_with_retry()
@@ -1163,7 +944,7 @@ async def run_openapi_with_logging(app_dir: Path, app_id: str, max_retries: int 
 
 
 class DevManager:
-    """Manages development server processes with file-based logging."""
+    """Manages development server processes."""
 
     def __init__(self, app_dir: Path):
         """Initialize the DevManager with an app directory.
@@ -1174,8 +955,6 @@ class DevManager:
         self.app_dir = app_dir
         self.apx_dir = app_dir / ".apx"
         self.project_json_path = self.apx_dir / "project.json"
-        self.app_id = get_or_create_app_id(app_dir)
-        self.log_dir = get_log_dir(self.app_id)
 
     def _get_or_create_config(self) -> ProjectConfig:
         """Get or create project configuration."""
@@ -1188,7 +967,7 @@ class DevManager:
                 pass
 
         # Create new config
-        config = ProjectConfig(application_id=self.app_id)
+        config = ProjectConfig()
         config.write_to_file(self.project_json_path)
         return config
 
@@ -1256,8 +1035,9 @@ class DevManager:
         obo: bool = True,
         openapi: bool = True,
         max_retries: int = 10,
+        dev_server_port: int = 8040,
     ):
-        """Start development servers in detached mode.
+        """Start development server in detached mode.
 
         Args:
             frontend_port: Port for the frontend development server
@@ -1266,117 +1046,95 @@ class DevManager:
             obo: Whether to add On-Behalf-Of header to the backend server
             openapi: Whether to start OpenAPI watcher process
             max_retries: Maximum number of retry attempts for processes
+            dev_server_port: Port for the dev server
         """
-        # Check if servers are already running
-        existing_processes = self._get_all_processes()
-        for name, pid, _ in existing_processes:
-            if self._is_process_running(pid):
+        # Check if dev server is already running
+        config = self._get_or_create_config()
+        if config.dev_server_pid and self._is_process_running(config.dev_server_pid):
+            console.print(
+                f"[yellow]⚠️  Dev server is already running (PID: {config.dev_server_pid}). Run 'apx dev stop' first.[/yellow]"
+            )
+            raise Exit(code=1)
+
+        console.print(
+            "[bold chartreuse1]🚀 Starting development server in detached mode...[/bold chartreuse1]"
+        )
+        console.print(f"[cyan]Dev Server:[/cyan] http://localhost:{dev_server_port}")
+        console.print(f"[cyan]Frontend:[/cyan] http://localhost:{frontend_port}")
+        console.print(
+            f"[green]Backend:[/green] http://{backend_host}:{backend_port}"
+        )
+        console.print()
+
+        # Start the dev server process
+        dev_server_proc = subprocess.Popen(
+            [
+                "uv",
+                "run",
+                "apx",
+                "_run-dev-server",
+                str(self.app_dir),
+                str(dev_server_port),
+                str(frontend_port),
+                str(backend_port),
+                backend_host,
+                str(obo).lower(),
+                str(openapi).lower(),
+                str(max_retries),
+            ],
+            cwd=self.app_dir,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        # Save dev server info
+        config.dev_server_pid = dev_server_proc.pid
+        config.dev_server_port = dev_server_port
+        config.write_to_file(self.project_json_path)
+
+        console.print(
+            f"[cyan]✓[/cyan] Dev server started (PID: {dev_server_proc.pid})"
+        )
+        console.print()
+
+        # Wait a moment for server to start
+        import time
+        time.sleep(2)
+
+        # Send start request to dev server
+        import requests
+        try:
+            response = requests.post(
+                f"http://localhost:{dev_server_port}/actions/start",
+                json={
+                    "frontend_port": frontend_port,
+                    "backend_port": backend_port,
+                    "backend_host": backend_host,
+                    "obo": obo,
+                    "openapi": openapi,
+                    "max_retries": max_retries,
+                },
+                timeout=5,
+            )
+            
+            if response.status_code == 200:
                 console.print(
-                    f"[yellow]⚠️  Dev server is already running (PID: {pid}). Run 'apx dev stop' first.[/yellow]"
+                    "[bold green]✨ Development servers started successfully![/bold green]"
                 )
-                raise Exit(code=1)
             else:
-                # Clean up stale entries
-                self._remove_process_pid(name)
-
-        with in_path(self.app_dir):
-            # Get app module name from pyproject.toml
-            app_module_name = get_project_metadata()["app-module"]
-
-            console.print(
-                "[bold chartreuse1]🚀 Starting development servers in detached mode...[/bold chartreuse1]"
-            )
-            console.print(f"[cyan]Frontend:[/cyan] http://localhost:{frontend_port}")
-            console.print(
-                f"[green]Backend:[/green] http://{backend_host}:{backend_port}"
-            )
-            console.print()
-
-            # Start frontend process using internal command
-            frontend_proc = subprocess.Popen(
-                [
-                    "uv",
-                    "run",
-                    "apx",
-                    "_run-frontend-detached",
-                    str(self.app_dir),
-                    self.app_id,
-                    str(frontend_port),
-                    str(max_retries),
-                ],
-                cwd=self.app_dir,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-
-            self._save_process_pid("frontend", frontend_proc.pid, frontend_port)
-            console.print(
-                f"[cyan]✓[/cyan] Frontend process started (PID: {frontend_proc.pid})"
-            )
-            console.print(f"[dim]  Logs: {self.log_dir / 'frontend.log'}[/dim]")
-
-            # Start backend process using internal command
-            backend_proc = subprocess.Popen(
-                [
-                    "uv",
-                    "run",
-                    "apx",
-                    "_run-backend-detached",
-                    str(self.app_dir),
-                    self.app_id,
-                    app_module_name,
-                    backend_host,
-                    str(backend_port),
-                    str(obo).lower(),
-                    str(max_retries),
-                ],
-                cwd=self.app_dir,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-
-            self._save_process_pid("backend", backend_proc.pid, backend_port)
-            console.print(
-                f"[green]✓[/green] Backend process started (PID: {backend_proc.pid})"
-            )
-            console.print(f"[dim]  Logs: {self.log_dir / 'backend.log'}[/dim]")
-
-            # Start OpenAPI watcher process if enabled
-            if openapi:
-                openapi_proc = subprocess.Popen(
-                    [
-                        "uv",
-                        "run",
-                        "apx",
-                        "_run-openapi-detached",
-                        str(self.app_dir),
-                        self.app_id,
-                        str(max_retries),
-                    ],
-                    cwd=self.app_dir,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-
-                self._save_process_pid("openapi", openapi_proc.pid, None)
                 console.print(
-                    f"[magenta]✓[/magenta] OpenAPI watcher started (PID: {openapi_proc.pid})"
+                    f"[yellow]⚠️  Warning: Dev server responded with status {response.status_code}[/yellow]"
                 )
-                console.print(f"[dim]  Logs: {self.log_dir / 'openapi.log'}[/dim]")
+        except Exception as e:
+            console.print(
+                f"[yellow]⚠️  Warning: Could not connect to dev server: {e}[/yellow]"
+            )
 
-            console.print()
-            console.print(
-                "[bold green]✨ Development servers started successfully![/bold green]"
-            )
-            console.print(
-                "[dim]Run 'apx dev status' to check status or 'apx dev stop' to stop the servers.[/dim]"
-            )
+        console.print(
+            "[dim]Run 'apx dev status' to check status or 'apx dev stop' to stop the servers.[/dim]"
+        )
 
     def status(self):
         """Check the status of development servers."""
@@ -1385,290 +1143,286 @@ class DevManager:
             console.print("[dim]Run 'apx dev start' to start the servers.[/dim]")
             return
 
-        processes = self._get_all_processes()
+        config = self._get_or_create_config()
 
-        if not processes:
-            console.print("[yellow]No development servers found.[/yellow]")
-            console.print("[dim]Run 'apx dev start' to start the servers.[/dim]")
+        if not config.dev_server_pid:
+            console.print("[yellow]No development server found.[/yellow]")
+            console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
             return
 
-        # Create a status table
-        table = Table(
-            title="Development Server Status",
-            show_header=True,
-            header_style="bold magenta",
-        )
-        table.add_column("Process", style="cyan", width=12)
-        table.add_column("PID", justify="right", style="blue")
-        table.add_column("Port", justify="right", style="green")
-        table.add_column("Status", justify="center")
-
-        for name, pid, port in processes:
-            is_running = self._is_process_running(pid)
-            status = (
-                "[green]●[/green] Running" if is_running else "[red]●[/red] Stopped"
+        # Check if dev server is running
+        if not self._is_process_running(config.dev_server_pid):
+            console.print(
+                f"[red]Dev server (PID: {config.dev_server_pid}) is not running.[/red]"
             )
-            port_str = str(port) if port else "-"
-            table.add_row(name, str(pid), port_str, status)
+            console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
+            return
 
-        console.print(table)
-        console.print()
-        console.print(f"[dim]Logs: {self.log_dir}[/dim]")
-        console.print("[dim]Use 'apx dev logs' or 'apx dev tail' to view.[/dim]")
+        # Query dev server for status
+        import requests
+        try:
+            response = requests.get(
+                f"http://localhost:{config.dev_server_port}/status",
+                timeout=5,
+            )
+            
+            if response.status_code == 200:
+                status_data = response.json()
+                
+                # Create a status table
+                table = Table(
+                    title="Development Server Status",
+                    show_header=True,
+                    header_style="bold magenta",
+                )
+                table.add_column("Process", style="cyan", width=12)
+                table.add_column("Status", justify="center")
+                table.add_column("Port", justify="right", style="green")
+
+                # Dev server row
+                table.add_row(
+                    "Dev Server",
+                    "[green]●[/green] Running",
+                    str(config.dev_server_port),
+                )
+
+                # Frontend row
+                frontend_status = (
+                    "[green]●[/green] Running"
+                    if status_data["frontend_running"]
+                    else "[red]●[/red] Stopped"
+                )
+                table.add_row(
+                    "Frontend",
+                    frontend_status,
+                    str(status_data["frontend_port"]),
+                )
+
+                # Backend row
+                backend_status = (
+                    "[green]●[/green] Running"
+                    if status_data["backend_running"]
+                    else "[red]●[/red] Stopped"
+                )
+                table.add_row(
+                    "Backend",
+                    backend_status,
+                    str(status_data["backend_port"]),
+                )
+
+                # OpenAPI row
+                openapi_status = (
+                    "[green]●[/green] Running"
+                    if status_data["openapi_running"]
+                    else "[red]●[/red] Stopped"
+                )
+                table.add_row("OpenAPI", openapi_status, "-")
+
+                console.print(table)
+                console.print()
+                console.print(f"[dim]Dev Server PID: {config.dev_server_pid}[/dim]")
+                console.print("[dim]Use 'apx dev logs' to view logs or 'apx dev logs -f' to stream continuously.[/dim]")
+            else:
+                console.print(
+                    f"[yellow]⚠️  Dev server responded with status {response.status_code}[/yellow]"
+                )
+        except Exception as e:
+            console.print(
+                f"[yellow]⚠️  Could not connect to dev server: {e}[/yellow]"
+            )
 
     def stop(self):
-        """Stop development servers."""
+        """Stop development server."""
         if not self.project_json_path.exists():
-            console.print("[yellow]No development servers found.[/yellow]")
+            console.print("[yellow]No development server found.[/yellow]")
             return
 
-        processes = self._get_all_processes()
+        config = self._get_or_create_config()
 
-        if not processes:
-            console.print("[yellow]No development servers found.[/yellow]")
+        if not config.dev_server_pid:
+            console.print("[yellow]No development server found.[/yellow]")
             return
 
-        console.print("[bold yellow]Stopping development servers...[/bold yellow]")
+        console.print("[bold yellow]Stopping development server...[/bold yellow]")
 
-        for name, pid, _ in processes:
-            if self._is_process_running(pid):
+        # Try to send stop request to dev server first
+        if config.dev_server_port and self._is_process_running(config.dev_server_pid):
+            import requests
+            try:
+                response = requests.post(
+                    f"http://localhost:{config.dev_server_port}/actions/stop",
+                    timeout=5,
+                )
+                if response.status_code == 200:
+                    console.print("[green]✓[/green] Stopped all servers via API")
+            except Exception:
+                # If API fails, we'll kill the process below
+                pass
+
+        # Kill the dev server process and all its children
+        if self._is_process_running(config.dev_server_pid):
+            try:
+                # Get the process
+                process = psutil.Process(config.dev_server_pid)
+
+                # Get all child processes
+                children = process.children(recursive=True)
+
+                # Terminate the main process
+                process.terminate()
+
+                # Terminate all children
+                for child in children:
+                    try:
+                        child.terminate()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+
+                # Wait for process to terminate
                 try:
-                    # Get the process
-                    process = psutil.Process(pid)
-
-                    # Get all child processes
-                    children = process.children(recursive=True)
-
-                    # Terminate the main process
-                    process.terminate()
-
-                    # Terminate all children
+                    process.wait(timeout=5)
+                    console.print(
+                        f"[green]✓[/green] Stopped dev server (PID: {config.dev_server_pid})"
+                    )
+                except psutil.TimeoutExpired:
+                    # Force kill if it didn't terminate
+                    process.kill()
                     for child in children:
                         try:
-                            child.terminate()
+                            child.kill()
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             pass
-
-                    # Wait for process to terminate
-                    try:
-                        process.wait(timeout=5)
-                        console.print(f"[green]✓[/green] Stopped {name} (PID: {pid})")
-                    except psutil.TimeoutExpired:
-                        # Force kill if it didn't terminate
-                        process.kill()
-                        for child in children:
-                            try:
-                                child.kill()
-                            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                pass
-                        console.print(
-                            f"[green]✓[/green] Force killed {name} (PID: {pid})"
-                        )
-
-                except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
                     console.print(
-                        f"[yellow]⚠️  Could not stop {name} (PID: {pid}): {e}[/yellow]"
+                        f"[green]✓[/green] Force killed dev server (PID: {config.dev_server_pid})"
                     )
-            else:
-                console.print(f"[dim]  {name} (PID: {pid}) was not running[/dim]")
 
-            # Remove from database
-            self._remove_process_pid(name)
+            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                console.print(
+                    f"[yellow]⚠️  Could not stop dev server (PID: {config.dev_server_pid}): {e}[/yellow]"
+                )
+        else:
+            console.print(
+                f"[dim]Dev server (PID: {config.dev_server_pid}) was not running[/dim]"
+            )
+
+        # Clear dev server info
+        config.dev_server_pid = None
+        config.dev_server_port = None
+        config.write_to_file(self.project_json_path)
 
         console.print()
         console.print(
-            "[bold green]✨ Development servers stopped successfully![/bold green]"
+            "[bold green]✨ Development server stopped successfully![/bold green]"
         )
-        console.print("[dim]  Token remains valid in keyring until expiration[/dim]")
+        console.print("[dim]Token remains valid in keyring until expiration[/dim]")
 
-    def get_logs(
+    def stream_logs(
         self,
         duration_seconds: int | None = None,
         ui_only: bool = False,
         backend_only: bool = False,
         openapi_only: bool = False,
-        limit: int = 1000,
-    ) -> list[dict[str, Any | str]]:
-        """Retrieve logs from log files with filtering.
-
-        Args:
-            duration_seconds: Show logs from last N seconds (None = all logs)
-            ui_only: Only show frontend logs
-            backend_only: Only show backend logs
-            openapi_only: Only show OpenAPI logs
-            limit: Maximum number of log entries to return
-
-        Returns:
-            List of log entries sorted by timestamp (oldest first)
-        """
-        import datetime
-
-        results = []
-        cutoff_time = None
-
-        if duration_seconds:
-            cutoff_time = datetime.datetime.now() - datetime.timedelta(
-                seconds=duration_seconds
-            )
-
-        # Determine which log files to read
-        log_files = []
-
-        if ui_only and not backend_only and not openapi_only:
-            log_files = [("frontend", self.log_dir / "frontend.log")]
-        elif backend_only and not ui_only and not openapi_only:
-            log_files = [("backend", self.log_dir / "backend.log")]
-        elif openapi_only and not ui_only and not backend_only:
-            log_files = [("openapi", self.log_dir / "openapi.log")]
-        else:
-            # Show all logs if no filter or multiple filters
-            log_files = [
-                ("frontend", self.log_dir / "frontend.log"),
-                ("backend", self.log_dir / "backend.log"),
-                ("openapi", self.log_dir / "openapi.log"),
-            ]
-
-        for process_name, log_file in log_files:
-            if not log_file.exists():
-                continue
-
-            try:
-                with open(log_file, "r") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-
-                        # Parse log line: timestamp | level | stream | message
-                        parts = line.split(" | ", 2)
-                        if len(parts) < 3:
-                            continue
-
-                        timestamp_str, level, content = parts
-
-                        # Filter by time if needed
-                        if cutoff_time:
-                            try:
-                                log_time = datetime.datetime.strptime(
-                                    timestamp_str, "%Y-%m-%d %H:%M:%S,%f"
-                                )
-                                if log_time < cutoff_time:
-                                    continue
-                            except Exception:
-                                pass
-
-                        results.append(
-                            {
-                                "process_name": process_name,
-                                "content": content,
-                                "created_at": timestamp_str,
-                                "level": level,
-                            }
-                        )
-            except Exception:
-                pass
-
-        # Sort by timestamp and limit
-        results.sort(key=lambda x: x["created_at"])
-        return results[:limit]
-
-    def tail_logs(
-        self,
-        duration_seconds: int | None = None,
-        ui_only: bool = False,
-        backend_only: bool = False,
-        openapi_only: bool = False,
+        follow: bool = False,
         timeout_seconds: int | None = None,
     ):
-        """Tail logs continuously from log files.
+        """Stream logs from dev server using SSE.
 
         Args:
-            duration_seconds: Initially show logs from last N seconds
+            duration_seconds: Show logs from last N seconds (None = all logs from buffer)
             ui_only: Only show frontend logs
             backend_only: Only show backend logs
             openapi_only: Only show OpenAPI logs
-            timeout_seconds: Stop tailing after N seconds (None = indefinite)
+            follow: Continue streaming new logs (like tail -f). If False, exits after initial logs.
+            timeout_seconds: Stop streaming after N seconds (None = indefinite)
         """
-        # Get initial logs
-        initial_logs = self.get_logs(
-            duration_seconds=duration_seconds,
-            ui_only=ui_only,
-            backend_only=backend_only,
-            openapi_only=openapi_only,
-            limit=1000,
-        )
+        config = self._get_or_create_config()
 
-        # Display initial logs
-        for log in initial_logs:
-            self._print_log_entry(log)
+        if not config.dev_server_pid or not config.dev_server_port:
+            console.print("[yellow]No development server found.[/yellow]")
+            return
 
-        # Determine which log files to tail
-        log_files = []
+        if not self._is_process_running(config.dev_server_pid):
+            console.print("[red]Development server is not running.[/red]")
+            return
+
+        # Determine process filter
+        process_filter = "all"
         if ui_only and not backend_only and not openapi_only:
-            log_files = [("frontend", self.log_dir / "frontend.log")]
+            process_filter = "frontend"
         elif backend_only and not ui_only and not openapi_only:
-            log_files = [("backend", self.log_dir / "backend.log")]
+            process_filter = "backend"
         elif openapi_only and not ui_only and not backend_only:
-            log_files = [("openapi", self.log_dir / "openapi.log")]
-        else:
-            log_files = [
-                ("frontend", self.log_dir / "frontend.log"),
-                ("backend", self.log_dir / "backend.log"),
-                ("openapi", self.log_dir / "openapi.log"),
-            ]
+            process_filter = "openapi"
 
-        # Open files and seek to end
-        file_handles = {}
-        for process_name, log_file in log_files:
-            if log_file.exists():
-                f = open(log_file, "r")
-                f.seek(0, 2)  # Seek to end
-                file_handles[process_name] = f
+        # Connect to SSE endpoint
+        import requests
+        import json
 
-        start_time = time.time()
+        params: dict[str, str | int] = {"process": process_filter}
+        if duration_seconds:
+            params["duration"] = str(duration_seconds)
 
+        log_count = 0  # Initialize early to avoid unbound error
+        
         try:
-            while True:
+            response = requests.get(
+                f"http://localhost:{config.dev_server_port}/logs",
+                params=params,
+                stream=True,
+                timeout=None,
+            )
+
+            start_time = time.time()
+
+            for line in response.iter_lines():
                 # Check timeout
                 if timeout_seconds and (time.time() - start_time) >= timeout_seconds:
-                    console.print("\n[dim]Timeout reached, stopping tail.[/dim]")
+                    if follow:
+                        console.print("\n[dim]Timeout reached, stopping stream.[/dim]")
                     break
 
-                # Check each file for new lines
-                for process_name, f in file_handles.items():
-                    line = f.readline()
-                    if line:
-                        line = line.strip()
-                        if line:
-                            # Parse log line
-                            parts = line.split(" | ", 2)
-                            if len(parts) >= 3:
-                                timestamp_str, level, content = parts
-                                log_entry = {
-                                    "process_name": process_name,
-                                    "content": content,
-                                    "created_at": timestamp_str,
-                                    "level": level,
-                                }
-                                self._print_log_entry(log_entry)
-
-                # Sleep briefly before checking again
-                time.sleep(0.5)
+                if line:
+                    line_str = line.decode("utf-8")
+                    
+                    # Check for sentinel event marking end of buffered logs
+                    if line_str.startswith("event: buffered_done"):
+                        # If not following, we're done after buffered logs
+                        if not follow:
+                            break
+                        # If following, continue to stream new logs
+                        continue
+                    
+                    if line_str.startswith("data: "):
+                        # Parse SSE data
+                        data_str = line_str[6:]  # Remove "data: " prefix
+                        try:
+                            log_entry = json.loads(data_str)
+                            self._print_log_entry(log_entry)
+                            log_count += 1
+                        except json.JSONDecodeError:
+                            pass
 
         except KeyboardInterrupt:
-            console.print("\n[dim]Stopped tailing logs.[/dim]")
-        finally:
-            # Close file handles
-            for f in file_handles.values():
-                f.close()
+            if follow:
+                console.print("\n[dim]Stopped streaming logs.[/dim]")
+        except Exception as e:
+            console.print(f"\n[red]Error streaming logs: {e}[/red]")
+        
+        # Print summary for non-follow mode
+        if not follow:
+            if log_count > 0:
+                console.print(f"\n[dim]Showed {log_count} log entries[/dim]")
+            else:
+                console.print("[dim]No logs found[/dim]")
 
-    def _print_log_entry(self, log: dict):
+    def _print_log_entry(self, log: dict[str, Any]):
         """Print a single log entry with formatting.
 
         Args:
-            log: Log entry dict with keys: id, process_name, content, created_at
+            log: Log entry dict with keys: process_name, content, timestamp
         """
-        content = log["content"]
+        content = log.get("content", "")
+        timestamp = log.get("timestamp", log.get("created_at", ""))
 
         # For backend logs, parse the stream prefix (BE or APP)
         if log["process_name"] == "backend":
@@ -1701,9 +1455,6 @@ class DevManager:
             # Default fallback
             prefix_color = "white"
             prefix = f"[{log['process_name'].upper()}]".ljust(5)
-
-        # Use full datetime, not just time
-        timestamp = log["created_at"]
 
         console.print(
             f"[dim]{timestamp}[/dim] | [{prefix_color}]{prefix}[/{prefix_color}] | {content}"

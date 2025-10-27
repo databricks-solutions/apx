@@ -19,12 +19,10 @@ from databricks.sdk import WorkspaceClient
 from apx._version import version as apx_version
 from apx.dev import (
     DevManager,
-    create_obo_token,
     run_backend,
     validate_databricks_credentials,
     delete_token_from_keyring,
     save_token_id,
-    get_or_create_app_id,
     suppress_output_and_logs,
 )
 from apx.openapi import run_openapi
@@ -264,7 +262,7 @@ def init(
         if prompt_layout.lower() not in ["basic", "sidebar"]:
             print("[red]Invalid layout. Please choose from: basic, sidebar.[/red]")
             return Exit(code=1)
-        layout = prompt_layout.lower()
+        layout = "basic" if prompt_layout.lower() == "basic" else "sidebar"
 
     console.print(
         f"\n[bold cyan]Initializing app {app_name} in {app_path.resolve()}[/bold cyan]\n"
@@ -724,69 +722,24 @@ app.add_typer(dev_app, name="dev")
 
 
 @app.command(
-    name="_run-frontend-detached",
+    name="_run-dev-server",
     hidden=True,
-    help="Internal: Run frontend in detached mode",
+    help="Internal: Run dev server in detached mode",
 )
-def _run_frontend_detached(
+def _run_dev_server(
     app_dir: Path = Argument(..., help="App directory"),
-    app_id: str = Argument(..., help="Application ID"),
+    dev_server_port: int = Argument(..., help="Dev server port"),
     frontend_port: int = Argument(..., help="Frontend port"),
-    max_retries: int = Argument(10, help="Maximum retry attempts"),
-):
-    """Internal command to run frontend server with file logging. Not meant for direct use."""
-    from apx.dev import run_frontend_with_logging
-
-    asyncio.run(run_frontend_with_logging(app_dir, app_id, frontend_port, max_retries))
-
-
-@app.command(
-    name="_run-backend-detached",
-    hidden=True,
-    help="Internal: Run backend in detached mode",
-)
-def _run_backend_detached(
-    app_dir: Path = Argument(..., help="App directory"),
-    app_id: str = Argument(..., help="Application ID"),
-    app_module_name: str = Argument(..., help="App module name"),
-    backend_host: str = Argument(..., help="Backend host"),
     backend_port: int = Argument(..., help="Backend port"),
-    obo: bool = Argument(..., help="Enable OBO"),
+    backend_host: str = Argument(..., help="Backend host"),
+    obo: str = Argument(..., help="Enable OBO (true/false)"),
+    openapi: str = Argument(..., help="Enable OpenAPI (true/false)"),
     max_retries: int = Argument(10, help="Maximum retry attempts"),
 ):
-    """Internal command to run backend server with file logging. Not meant for direct use."""
-    from apx.dev import get_log_dir
+    """Internal command to run dev server. Not meant for direct use."""
+    from apx.dev_server import run_dev_server
 
-    log_dir = get_log_dir(app_id)
-    log_file = log_dir / "backend.log"
-
-    asyncio.run(
-        run_backend(
-            app_dir,
-            app_module_name,
-            backend_host,
-            backend_port,
-            obo=obo,
-            log_file=log_file,
-            max_retries=max_retries,
-        )
-    )
-
-
-@app.command(
-    name="_run-openapi-detached",
-    hidden=True,
-    help="Internal: Run OpenAPI watcher in detached mode",
-)
-def _run_openapi_detached(
-    app_dir: Path = Argument(..., help="App directory"),
-    app_id: str = Argument(..., help="Application ID"),
-    max_retries: int = Argument(10, help="Maximum retry attempts"),
-):
-    """Internal command to run OpenAPI watcher with file logging. Not meant for direct use."""
-    from apx.dev import run_openapi_with_logging
-
-    asyncio.run(run_openapi_with_logging(app_dir, app_id, max_retries))
+    run_dev_server(app_dir, dev_server_port)
 
 
 @dev_app.command(name="start", help="Start development servers in detached mode")
@@ -856,11 +809,11 @@ def dev_start(
 
         if not validate_databricks_credentials(ws):
             # Clear any cached OBO tokens since they were created with invalid credentials
-            app_id = get_or_create_app_id(app_dir)
+            keyring_id = str(app_dir.resolve())
             console.print(
                 "[yellow]⚠️  Invalid Databricks credentials detected. Clearing cached tokens...[/yellow]"
             )
-            delete_token_from_keyring(app_id)
+            delete_token_from_keyring(keyring_id)
             save_token_id(app_dir, token_id="")  # Clear the token_id
 
         console.print("[green]✓[/green] Databricks credentials validated")
@@ -877,21 +830,21 @@ def dev_start(
         max_retries=max_retries,
     )
 
-    # If watch mode is enabled, tail logs until Ctrl+C
+    # If watch mode is enabled, stream logs until Ctrl+C
     if watch:
         console.print()
         console.print(
-            "[bold cyan]📡 Tailing logs... Press Ctrl+C to stop servers[/bold cyan]"
+            "[bold cyan]📡 Streaming logs... Press Ctrl+C to stop servers[/bold cyan]"
         )
         console.print()
-        # tail_logs catches KeyboardInterrupt internally, so it returns normally
+        # stream_logs catches KeyboardInterrupt internally, so it returns normally
         # After it returns (for any reason), we should stop the servers
-        manager.tail_logs(
+        manager.stream_logs(
             duration_seconds=None,
             ui_only=False,
             backend_only=False,
             openapi_only=False,
-            timeout_seconds=None,
+            follow=True,
         )
         console.print()
         console.print("[bold yellow]🛑 Stopping development servers...[/bold yellow]")
@@ -934,7 +887,7 @@ def dev_stop(
     manager.stop()
 
 
-@dev_app.command(name="restart", help="Restart development servers (stop then start)")
+@dev_app.command(name="restart", help="Restart development servers")
 def dev_restart(
     app_dir: Annotated[
         Path | None,
@@ -942,116 +895,79 @@ def dev_restart(
             help="The path to the app. If not provided, current working directory will be used"
         ),
     ] = None,
-    frontend_port: Annotated[
-        int, Option(help="Port for the frontend development server")
-    ] = 5173,
-    backend_port: Annotated[int, Option(help="Port for the backend server")] = 8000,
-    backend_host: Annotated[
-        str, Option(help="Host for the backend server")
-    ] = "0.0.0.0",
-    obo: Annotated[
-        bool, Option(help="Whether to add On-Behalf-Of header to the backend server")
-    ] = True,
-    openapi: Annotated[
-        bool, Option(help="Whether to start OpenAPI watcher process")
-    ] = True,
-    max_retries: Annotated[
-        int, Option(help="Maximum number of retry attempts for processes")
-    ] = 10,
     watch: Annotated[
         bool,
         Option(
             "--watch",
             "-w",
-            help="Start servers and tail logs until Ctrl+C, then stop all servers",
+            help="Tail logs after restart until Ctrl+C, then stop all servers",
         ),
     ] = False,
 ):
-    """Restart development servers by stopping and then starting them."""
-    # Check prerequisites
-    if not is_bun_installed():
-        console.print(
-            "[red]❌ bun is not installed. Please install bun to continue.[/red]"
-        )
-        raise Exit(code=1)
-
+    """Restart development servers using the dev server API."""
     if app_dir is None:
         app_dir = Path.cwd()
 
-    # Validate Databricks credentials if OBO is enabled
-    if obo:
-        console.print("[cyan]🔐 Validating Databricks credentials...[/cyan]")
-        try:
-            with suppress_output_and_logs():
-                ws = WorkspaceClient(product="apx/dev", product_version=apx_lib_version)
-        except Exception as e:
-            console.print(f"[red]❌ Failed to initialize Databricks client: {e}[/red]")
-            console.print(
-                "[yellow]💡 Make sure you have Databricks credentials configured.[/yellow]"
-            )
-            raise Exit(code=1)
-
-        if not validate_databricks_credentials(ws):
-            # Clear any cached OBO tokens since they were created with invalid credentials
-            app_id = get_or_create_app_id(app_dir)
-            console.print(
-                "[yellow]⚠️  Invalid Databricks credentials detected. Clearing cached tokens...[/yellow]"
-            )
-            delete_token_from_keyring(app_id)
-            save_token_id(app_dir, "")  # Clear the token_id
-
-            console.print()
-            console.print(
-                "[red]❌ Unable to authenticate with Databricks to generate a new OBO token.[/red]"
-            )
-            console.print(
-                "[yellow]💡 Make sure you have Databricks credentials configured.[/yellow]"
-            )
-            console.print()
-            raise Exit(code=1)
-
-        console.print("[green]✓[/green] Databricks credentials validated")
-        console.print()
-
     # Use DevManager to restart servers
     manager = DevManager(app_dir)
+    
+    # Get config
+    config = manager._get_or_create_config()
+    
+    if not config.dev_server_pid or not config.dev_server_port:
+        console.print("[yellow]No development server found.[/yellow]")
+        console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
+        raise Exit(code=1)
+    
+    if not manager._is_process_running(config.dev_server_pid):
+        console.print("[red]Development server is not running.[/red]")
+        console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
+        raise Exit(code=1)
 
     console.print("[bold yellow]🔄 Restarting development servers...[/bold yellow]")
-    console.print("[bold yellow]🛑 Stopping servers...[/bold yellow]")
-    manager.stop()
 
-    console.print("[bold green]🚀 Starting servers...[/bold green]")
-    manager.start(
-        frontend_port=frontend_port,
-        backend_port=backend_port,
-        backend_host=backend_host,
-        obo=obo,
-        openapi=openapi,
-        max_retries=max_retries,
-    )
+    # Send restart request to dev server
+    import requests
+    try:
+        response = requests.post(
+            f"http://localhost:{config.dev_server_port}/actions/restart",
+            timeout=10,
+        )
+        
+        if response.status_code == 200:
+            console.print("[bold green]✨ Development servers restarted successfully![/bold green]")
+        else:
+            console.print(
+                f"[yellow]⚠️  Warning: Dev server responded with status {response.status_code}[/yellow]"
+            )
+    except Exception as e:
+        console.print(
+            f"[red]❌ Could not connect to dev server: {e}[/red]"
+        )
+        raise Exit(code=1)
 
-    # If watch mode is enabled, tail logs until Ctrl+C
+    # If watch mode is enabled, stream logs until Ctrl+C
     if watch:
         console.print()
         console.print(
-            "[bold cyan]📡 Tailing logs... Press Ctrl+C to stop servers[/bold cyan]"
+            "[bold cyan]📡 Streaming logs... Press Ctrl+C to stop servers[/bold cyan]"
         )
         console.print()
-        # tail_logs catches KeyboardInterrupt internally, so it returns normally
+        # stream_logs catches KeyboardInterrupt internally, so it returns normally
         # After it returns (for any reason), we should stop the servers
-        manager.tail_logs(
+        manager.stream_logs(
             duration_seconds=None,
             ui_only=False,
             backend_only=False,
             openapi_only=False,
-            timeout_seconds=None,
+            follow=True,
         )
         console.print()
         console.print("[bold yellow]🛑 Stopping development servers...[/bold yellow]")
         manager.stop()
 
 
-@dev_app.command(name="logs", help="Retrieve and display logs from the database")
+@dev_app.command(name="logs", help="Display logs from development servers")
 def dev_logs(
     app_dir: Annotated[
         Path | None,
@@ -1067,61 +983,14 @@ def dev_logs(
             help="Show logs from the last N seconds (None = all logs)",
         ),
     ] = None,
-    ui: Annotated[
+    follow: Annotated[
         bool,
-        Option("--ui", help="Show only frontend/UI logs"),
-    ] = False,
-    backend: Annotated[
-        bool,
-        Option("--backend", help="Show only backend logs"),
-    ] = False,
-    openapi: Annotated[
-        bool,
-        Option("--openapi", help="Show only OpenAPI logs"),
-    ] = False,
-):
-    """Retrieve and display logs from the log files."""
-    if app_dir is None:
-        app_dir = Path.cwd()
-
-    # Use DevManager to retrieve logs
-    manager = DevManager(app_dir)
-    logs = manager.get_logs(
-        duration_seconds=duration,
-        ui_only=ui,
-        backend_only=backend,
-        openapi_only=openapi,
-    )
-
-    if not logs:
-        console.print("[yellow]No logs found.[/yellow]")
-        return
-
-    # Display all logs
-    for log in logs:
-        manager._print_log_entry(log)
-
-    console.print(f"\n[dim]Showing {len(logs)} log entries[/dim]")
-
-
-@dev_app.command(name="tail", help="Tail logs continuously from log files")
-def dev_tail(
-    app_dir: Annotated[
-        Path | None,
-        Argument(
-            help="The path to the app. If not provided, current working directory will be used"
-        ),
-    ] = None,
-    duration: Annotated[
-        int | None,
-        Option("--duration", "-d", help="Initially show logs from the last N seconds"),
-    ] = None,
-    timeout: Annotated[
-        int | None,
         Option(
-            "--timeout", "-t", help="Stop tailing after N seconds (None = indefinite)"
+            "--follow",
+            "-f",
+            help="Follow log output (like tail -f). Streams new logs continuously.",
         ),
-    ] = None,
+    ] = False,
     ui: Annotated[
         bool,
         Option("--ui", help="Show only frontend/UI logs"),
@@ -1135,19 +1004,21 @@ def dev_tail(
         Option("--openapi", help="Show only OpenAPI logs"),
     ] = False,
 ):
-    """Tail logs continuously from log files."""
+    """Display logs from development servers. Use -f/--follow to stream continuously."""
     if app_dir is None:
         app_dir = Path.cwd()
 
-    # Use DevManager to tail logs
+    # Use DevManager to stream logs
     manager = DevManager(app_dir)
-    manager.tail_logs(
+    manager.stream_logs(
         duration_seconds=duration,
         ui_only=ui,
         backend_only=backend,
         openapi_only=openapi,
-        timeout_seconds=timeout,
+        follow=follow,
     )
+
+
 
 
 @dev_app.command(name="check", help="Check the project code for errors")

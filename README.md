@@ -199,10 +199,14 @@ uv run apx openapi
 
 Manually generates OpenAPI schema and orval client. Use `--watch` to enable automatic regeneration on changes.
 
-License
+
+### License and Third Party Libraries
+
+#### License
+
 © 2025 Databricks, Inc. All rights reserved. The source in this project is provided subject to the [Databricks License](LICENSE.md).
 
-All included or referenced third party libraries are subject to the licenses set forth below.
+#### Third Party Libraries
 
 | library                   | description                                                                                                                            | license      | source                                                      |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------- |
