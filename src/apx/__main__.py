@@ -844,6 +844,8 @@ def dev_start(
             ui_only=False,
             backend_only=False,
             openapi_only=False,
+            app_only=False,
+            raw_output=False,
             follow=True,
         )
         console.print()
@@ -910,15 +912,15 @@ def dev_restart(
 
     # Use DevManager to restart servers
     manager = DevManager(app_dir)
-    
+
     # Get config
     config = manager._get_or_create_config()
-    
+
     if not config.dev_server_pid or not config.dev_server_port:
         console.print("[yellow]No development server found.[/yellow]")
         console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
         raise Exit(code=1)
-    
+
     if not manager._is_process_running(config.dev_server_pid):
         console.print("[red]Development server is not running.[/red]")
         console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
@@ -928,22 +930,23 @@ def dev_restart(
 
     # Send restart request to dev server
     import requests
+
     try:
         response = requests.post(
             f"http://localhost:{config.dev_server_port}/actions/restart",
             timeout=10,
         )
-        
+
         if response.status_code == 200:
-            console.print("[bold green]✨ Development servers restarted successfully![/bold green]")
+            console.print(
+                "[bold green]✨ Development servers restarted successfully![/bold green]"
+            )
         else:
             console.print(
                 f"[yellow]⚠️  Warning: Dev server responded with status {response.status_code}[/yellow]"
             )
     except Exception as e:
-        console.print(
-            f"[red]❌ Could not connect to dev server: {e}[/red]"
-        )
+        console.print(f"[red]❌ Could not connect to dev server: {e}[/red]")
         raise Exit(code=1)
 
     # If watch mode is enabled, stream logs until Ctrl+C
@@ -960,6 +963,8 @@ def dev_restart(
             ui_only=False,
             backend_only=False,
             openapi_only=False,
+            app_only=False,
+            raw_output=False,
             follow=True,
         )
         console.print()
@@ -1003,6 +1008,14 @@ def dev_logs(
         bool,
         Option("--openapi", help="Show only OpenAPI logs"),
     ] = False,
+    app: Annotated[
+        bool,
+        Option("--app", help="Show only application logs (from your app code)"),
+    ] = False,
+    raw: Annotated[
+        bool,
+        Option("--raw", help="Show raw log output without prefix formatting"),
+    ] = False,
 ):
     """Display logs from development servers. Use -f/--follow to stream continuously."""
     if app_dir is None:
@@ -1015,10 +1028,10 @@ def dev_logs(
         ui_only=ui,
         backend_only=backend,
         openapi_only=openapi,
+        app_only=app,
+        raw_output=raw,
         follow=follow,
     )
-
-
 
 
 @dev_app.command(name="check", help="Check the project code for errors")

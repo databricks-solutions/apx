@@ -239,10 +239,10 @@ def create_obo_token(
 
 def validate_databricks_credentials(ws: WorkspaceClient) -> bool:
     """Validate that Databricks credentials are valid and not expired.
-    
+
     Args:
         ws: WorkspaceClient instance
-        
+
     Returns:
         True if credentials are valid, False otherwise
     """
@@ -254,7 +254,12 @@ def validate_databricks_credentials(ws: WorkspaceClient) -> bool:
     except Exception as e:
         error_str = str(e).lower()
         # Check for common authentication errors
-        if "invalid" in error_str or "token" in error_str or "401" in error_str or "403" in error_str:
+        if (
+            "invalid" in error_str
+            or "token" in error_str
+            or "401" in error_str
+            or "403" in error_str
+        ):
             return False
         # For other errors, assume credentials are valid but something else is wrong
         raise
@@ -301,11 +306,7 @@ def prepare_obo_token(
         with suppress_output_and_logs():
             user_tokens = ws.tokens.list()
             user_token = next(
-                (
-                    token
-                    for token in user_tokens
-                    if token.token_id == stored_token_id
-                ),
+                (token for token in user_tokens if token.token_id == stored_token_id),
                 None,
             )
 
@@ -332,9 +333,7 @@ def prepare_obo_token(
     elif keyring_token:
         # Have token but no token_id - clean up and recreate
         if status_context:
-            status_context.update(
-                "⚠️  Token found but missing metadata, recreating..."
-            )
+            status_context.update("⚠️  Token found but missing metadata, recreating...")
         delete_token_from_keyring(keyring_id)
 
     # Step 2: Create new token
@@ -373,13 +372,24 @@ def setup_uvicorn_logging(use_memory: bool = False):
             # Use the backend logger that's already configured by dev_server
             backend_logger = logging.getLogger("apx.backend")
             if backend_logger.handlers:
-                # Copy handler from backend logger and add BE prefix
+                # Create a wrapper handler that adds "BE | " prefix
+                class PrefixedHandler(logging.Handler):
+                    def __init__(self, base_handler, prefix):
+                        super().__init__()
+                        self.base_handler = base_handler
+                        self.prefix = prefix
+
+                    def emit(self, record):
+                        # Add prefix to the message
+                        original_msg = record.getMessage()
+                        record.msg = f"{self.prefix} | {original_msg}"
+                        record.args = ()
+                        self.base_handler.emit(record)
+
+                # Add the prefixed handler
                 for handler in backend_logger.handlers:
-                    logger.addHandler(handler)
-                # Add BE prefix to distinguish from APP logs
-                formatter = logging.Formatter("BE | %(message)s")
-                for handler in logger.handlers:
-                    handler.setFormatter(formatter)
+                    prefixed_handler = PrefixedHandler(handler, "BE")
+                    logger.addHandler(prefixed_handler)
             else:
                 # Fallback to console if no handlers found
                 handler = PrefixedLogHandler(prefix="[backend]", color="aquamarine1")
@@ -427,7 +437,7 @@ async def run_backend(
     retry_logger = logging.getLogger("apx.retry")
     retry_logger.setLevel(logging.INFO)
     retry_logger.handlers.clear()
-    
+
     if use_memory:
         # Use the backend logger that's already configured
         backend_logger = logging.getLogger("apx.backend")
@@ -438,55 +448,11 @@ async def run_backend(
         uvicorn_logger = logging.getLogger("uvicorn")
         if uvicorn_logger.handlers:
             retry_logger.addHandler(uvicorn_logger.handlers[0])
-    
+
     retry_logger.propagate = False
 
-    # Redirect stdout/stderr if in memory mode to capture app logs
-    original_stdout = None
-    original_stderr = None
-    if use_memory:
-        original_stdout = sys.stdout
-        original_stderr = sys.stderr
-        
-        backend_logger = logging.getLogger("apx.backend")
-        
-        class LoggerWriter:
-            def __init__(self, logger, level, prefix):
-                self.logger = logger
-                self.level = level
-                self.prefix = prefix
-                self.buffer = ""
-
-            def write(self, message):
-                if not message:
-                    return
-                
-                # Add to buffer
-                self.buffer += message
-                
-                # Split by newlines and log complete lines
-                lines = self.buffer.split('\n')
-                
-                # Keep the last incomplete line in the buffer
-                self.buffer = lines[-1]
-                
-                # Log all complete lines with APP prefix
-                for line in lines[:-1]:
-                    if line:  # Only log non-empty lines
-                        self.logger.log(self.level, f"{self.prefix} | {line}")
-
-            def flush(self):
-                # Log any remaining buffered content
-                if self.buffer:
-                    self.logger.log(self.level, f"{self.prefix} | {self.buffer}")
-                    self.buffer = ""
-
-            def isatty(self):
-                """Return False to indicate this is not a TTY."""
-                return False
-
-        sys.stdout = LoggerWriter(backend_logger, logging.INFO, "APP")
-        sys.stderr = LoggerWriter(backend_logger, logging.ERROR, "APP")
+    # Note: stdout/stderr redirection is handled in dev_server.py lifespan
+    # before any tasks start, so we don't need to do it here.
 
     @retry(
         stop=stop_after_attempt(max_retries),
@@ -497,7 +463,7 @@ async def run_backend(
     async def run_backend_with_retry():
         """Backend runner with retry logic."""
         backend_logger = logging.getLogger("uvicorn")
-        
+
         if use_memory:
             backend_logger.info(
                 f"Starting backend server on {backend_host}:{backend_port}"
@@ -559,9 +525,7 @@ async def run_backend(
                     )
 
                 # Load/reload the app instance (fully reload modules on hot reload)
-                app_instance = load_app(
-                    app_module_name, reload_modules=not first_run
-                )
+                app_instance = load_app(app_module_name, reload_modules=not first_run)
 
                 # Add OBO middleware if enabled
                 if obo and obo_token:
@@ -689,13 +653,7 @@ async def run_backend(
                 await asyncio.sleep(1)
 
     # Run backend with retry logic
-    try:
-        await run_backend_with_retry()
-    finally:
-        # Restore stdout/stderr if we redirected them
-        if original_stdout and original_stderr:
-            sys.stdout = original_stdout
-            sys.stderr = original_stderr
+    await run_backend_with_retry()
 
 
 # === Token Management Utilities ===
@@ -777,9 +735,7 @@ def delete_token_from_keyring(keyring_id: str):
         pass
 
 
-async def run_frontend_with_logging(
-    app_dir: Path, port: int, max_retries: int = 10
-):
+async def run_frontend_with_logging(app_dir: Path, port: int, max_retries: int = 10):
     """Run frontend dev server and capture output to in-memory buffer.
 
     Args:
@@ -1012,9 +968,7 @@ class DevManager:
         )
         console.print(f"[cyan]Dev Server:[/cyan] http://localhost:{dev_server_port}")
         console.print(f"[cyan]Frontend:[/cyan] http://localhost:{frontend_port}")
-        console.print(
-            f"[green]Backend:[/green] http://{backend_host}:{backend_port}"
-        )
+        console.print(f"[green]Backend:[/green] http://{backend_host}:{backend_port}")
         console.print()
 
         # Start the dev server process
@@ -1045,17 +999,17 @@ class DevManager:
         config.dev_server_port = dev_server_port
         config.write_to_file(self.project_json_path)
 
-        console.print(
-            f"[cyan]✓[/cyan] Dev server started (PID: {dev_server_proc.pid})"
-        )
+        console.print(f"[cyan]✓[/cyan] Dev server started (PID: {dev_server_proc.pid})")
         console.print()
 
         # Wait a moment for server to start
         import time
+
         time.sleep(2)
 
         # Send start request to dev server
         import requests
+
         try:
             response = requests.post(
                 f"http://localhost:{dev_server_port}/actions/start",
@@ -1069,7 +1023,7 @@ class DevManager:
                 },
                 timeout=5,
             )
-            
+
             if response.status_code == 200:
                 console.print(
                     "[bold green]✨ Development servers started successfully![/bold green]"
@@ -1111,15 +1065,16 @@ class DevManager:
 
         # Query dev server for status
         import requests
+
         try:
             response = requests.get(
                 f"http://localhost:{config.dev_server_port}/status",
                 timeout=5,
             )
-            
+
             if response.status_code == 200:
                 status_data = response.json()
-                
+
                 # Create a status table
                 table = Table(
                     title="Development Server Status",
@@ -1172,15 +1127,15 @@ class DevManager:
                 console.print(table)
                 console.print()
                 console.print(f"[dim]Dev Server PID: {config.dev_server_pid}[/dim]")
-                console.print("[dim]Use 'apx dev logs' to view logs or 'apx dev logs -f' to stream continuously.[/dim]")
+                console.print(
+                    "[dim]Use 'apx dev logs' to view logs or 'apx dev logs -f' to stream continuously.[/dim]"
+                )
             else:
                 console.print(
                     f"[yellow]⚠️  Dev server responded with status {response.status_code}[/yellow]"
                 )
         except Exception as e:
-            console.print(
-                f"[yellow]⚠️  Could not connect to dev server: {e}[/yellow]"
-            )
+            console.print(f"[yellow]⚠️  Could not connect to dev server: {e}[/yellow]")
 
     def stop(self):
         """Stop development server."""
@@ -1199,6 +1154,7 @@ class DevManager:
         # Try to send stop request to dev server first
         if config.dev_server_port and self._is_process_running(config.dev_server_pid):
             import requests
+
             try:
                 response = requests.post(
                     f"http://localhost:{config.dev_server_port}/actions/stop",
@@ -1273,6 +1229,8 @@ class DevManager:
         ui_only: bool = False,
         backend_only: bool = False,
         openapi_only: bool = False,
+        app_only: bool = False,
+        raw_output: bool = False,
         follow: bool = False,
         timeout_seconds: int | None = None,
     ):
@@ -1283,6 +1241,8 @@ class DevManager:
             ui_only: Only show frontend logs
             backend_only: Only show backend logs
             openapi_only: Only show OpenAPI logs
+            app_only: Only show application logs (from your app code)
+            raw_output: Show raw log output without prefix formatting
             follow: Continue streaming new logs (like tail -f). If False, exits after initial logs.
             timeout_seconds: Stop streaming after N seconds (None = indefinite)
         """
@@ -1297,13 +1257,17 @@ class DevManager:
             return
 
         # Determine process filter
+        # Note: app_only is handled client-side because it's a subset of backend logs
         process_filter = "all"
-        if ui_only and not backend_only and not openapi_only:
+        if ui_only and not backend_only and not openapi_only and not app_only:
             process_filter = "frontend"
-        elif backend_only and not ui_only and not openapi_only:
+        elif backend_only and not ui_only and not openapi_only and not app_only:
             process_filter = "backend"
-        elif openapi_only and not ui_only and not backend_only:
+        elif openapi_only and not ui_only and not backend_only and not app_only:
             process_filter = "openapi"
+        elif app_only and not ui_only and not backend_only and not openapi_only:
+            # For app-only, we need backend logs and will filter client-side
+            process_filter = "backend"
 
         # Connect to SSE endpoint
         import requests
@@ -1314,7 +1278,7 @@ class DevManager:
             params["duration"] = str(duration_seconds)
 
         log_count = 0  # Initialize early to avoid unbound error
-        
+
         try:
             response = requests.get(
                 f"http://localhost:{config.dev_server_port}/logs",
@@ -1334,7 +1298,7 @@ class DevManager:
 
                 if line:
                     line_str = line.decode("utf-8")
-                    
+
                     # Check for sentinel event marking end of buffered logs
                     if line_str.startswith("event: buffered_done"):
                         # If not following, we're done after buffered logs
@@ -1342,13 +1306,23 @@ class DevManager:
                             break
                         # If following, continue to stream new logs
                         continue
-                    
+
                     if line_str.startswith("data: "):
                         # Parse SSE data
                         data_str = line_str[6:]  # Remove "data: " prefix
                         try:
                             log_entry = json.loads(data_str)
-                            self._print_log_entry(log_entry)
+
+                            # Client-side filtering for app-only logs
+                            if app_only:
+                                # Only show backend logs that have "APP | " prefix
+                                if log_entry.get("process_name") != "backend":
+                                    continue
+                                content = log_entry.get("content", "")
+                                if not content.startswith("APP | "):
+                                    continue
+
+                            self._print_log_entry(log_entry, raw_output=raw_output)
                             log_count += 1
                         except json.JSONDecodeError:
                             pass
@@ -1358,7 +1332,7 @@ class DevManager:
                 console.print("\n[dim]Stopped streaming logs.[/dim]")
         except Exception as e:
             console.print(f"\n[red]Error streaming logs: {e}[/red]")
-        
+
         # Print summary for non-follow mode
         if not follow:
             if log_count > 0:
@@ -1366,14 +1340,26 @@ class DevManager:
             else:
                 console.print("[dim]No logs found[/dim]")
 
-    def _print_log_entry(self, log: dict[str, Any]):
+    def _print_log_entry(self, log: dict[str, Any], raw_output: bool = False):
         """Print a single log entry with formatting.
 
         Args:
             log: Log entry dict with keys: process_name, content, timestamp
+            raw_output: If True, print raw log content without prefix formatting
         """
         content = log.get("content", "")
         timestamp = log.get("timestamp", log.get("created_at", ""))
+
+        # For raw output, strip the internal prefix and print without color/formatting
+        if raw_output:
+            # For backend logs, strip the "BE | " or "APP | " prefix
+            if log["process_name"] == "backend" and " | " in content:
+                stream_prefix, message = content.split(" | ", 1)
+                if stream_prefix in ["BE", "APP"]:
+                    content = message
+            # Print without rich formatting
+            print(f"{content}")
+            return
 
         # For backend logs, parse the stream prefix (BE or APP)
         if log["process_name"] == "backend":

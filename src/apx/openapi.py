@@ -59,9 +59,7 @@ export default defineConfig({{
 
 
 def _generate_openapi_schema(
-    app_dir: Path, 
-    app_module_name: str,
-    logger: logging.Logger | None = None
+    app_dir: Path, app_module_name: str, logger: logging.Logger | None = None
 ) -> tuple[Path, bool]:
     """Generate OpenAPI schema JSON file.
 
@@ -82,99 +80,63 @@ def _generate_openapi_schema(
 
     module_path, attribute_name = app_module_name.split(":", 1)
 
-    # If logger is provided, redirect stdout/stderr during import to capture app initialization
-    original_stdout = None
-    original_stderr = None
-    
-    if logger:
-        class LoggerWriter:
-            def __init__(self, logger, level):
-                self.logger = logger
-                self.level = level
-                self.buffer = ""
+    # Note: We don't redirect stdout/stderr here because the backend process
+    # is responsible for capturing all app output. The OpenAPI watcher just
+    # uses the logger for its own messages.
 
-            def write(self, message):
-                if not message:
-                    return
-                self.buffer += message
-                lines = self.buffer.split('\n')
-                self.buffer = lines[-1]
-                for line in lines[:-1]:
-                    if line:
-                        self.logger.log(self.level, line)
-
-            def flush(self):
-                if self.buffer:
-                    self.logger.log(self.level, self.buffer)
-                    self.buffer = ""
-
-            def isatty(self):
-                return False
-
-        original_stdout = sys.stdout
-        original_stderr = sys.stderr
-        sys.stdout = LoggerWriter(logger, logging.INFO)
-        sys.stderr = LoggerWriter(logger, logging.ERROR)
-
+    # Import the module
     try:
-        # Import the module
-        try:
-            # Reload modules to get fresh changes
-            base_path = module_path.split(".")[0]
-            modules_to_delete = [
-                name
-                for name in sys.modules.keys()
-                if name.startswith(base_path + ".") or name == base_path
-            ]
-            for mod_name in modules_to_delete:
-                del sys.modules[mod_name]
+        # Reload modules to get fresh changes
+        base_path = module_path.split(".")[0]
+        modules_to_delete = [
+            name
+            for name in sys.modules.keys()
+            if name.startswith(base_path + ".") or name == base_path
+        ]
+        for mod_name in modules_to_delete:
+            del sys.modules[mod_name]
 
-            module = importlib.import_module(module_path)
-        except ImportError as e:
-            console.print(f"[red]❌ Failed to import module {module_path}: {e}[/red]")
-            raise Exit(code=1)
+        module = importlib.import_module(module_path)
+    except ImportError as e:
+        console.print(f"[red]❌ Failed to import module {module_path}: {e}[/red]")
+        raise Exit(code=1)
 
-        # Get the app attribute from the module
-        try:
-            app_instance = getattr(module, attribute_name)
-        except AttributeError:
-            console.print(
-                f"[red]❌ Module {module_path} does not have attribute '{attribute_name}'[/red]"
-            )
-            raise Exit(code=1)
+    # Get the app attribute from the module
+    try:
+        app_instance = getattr(module, attribute_name)
+    except AttributeError:
+        console.print(
+            f"[red]❌ Module {module_path} does not have attribute '{attribute_name}'[/red]"
+        )
+        raise Exit(code=1)
 
-        if not isinstance(app_instance, FastAPI):
-            console.print(
-                f"[red]❌ '{attribute_name}' is not a FastAPI app instance.[/red]"
-            )
-            raise Exit(code=1)
+    if not isinstance(app_instance, FastAPI):
+        console.print(
+            f"[red]❌ '{attribute_name}' is not a FastAPI app instance.[/red]"
+        )
+        raise Exit(code=1)
 
-        # Generate OpenAPI spec
-        spec = app_instance.openapi()
-        new_spec_json = json.dumps(spec, indent=2)
+    # Generate OpenAPI spec
+    spec = app_instance.openapi()
+    new_spec_json = json.dumps(spec, indent=2)
 
-        # Write to .apx/openapi.json
-        apx_dir = app_dir / ".apx"
-        ensure_dir(apx_dir)
-        output_path = apx_dir / "openapi.json"
+    # Write to .apx/openapi.json
+    apx_dir = app_dir / ".apx"
+    ensure_dir(apx_dir)
+    output_path = apx_dir / "openapi.json"
 
-        # Check if schema has changed
-        schema_changed = True
-        if output_path.exists():
-            existing_spec = output_path.read_text()
-            if existing_spec == new_spec_json:
-                schema_changed = False
+    # Check if schema has changed
+    schema_changed = True
+    if output_path.exists():
+        existing_spec = output_path.read_text()
+        if existing_spec == new_spec_json:
+            schema_changed = False
 
-        # Write the new schema if it changed
-        if schema_changed:
-            output_path.write_text(new_spec_json)
+    # Write the new schema if it changed
+    if schema_changed:
+        output_path.write_text(new_spec_json)
 
-        return output_path, schema_changed
-    finally:
-        # Restore stdout/stderr if we redirected them
-        if original_stdout and original_stderr:
-            sys.stdout = original_stdout
-            sys.stderr = original_stderr
+    return output_path, schema_changed
 
 
 def _run_orval(app_dir: Path, openapi_path: Path, orval_config_path: Path):
@@ -254,18 +216,19 @@ def _generate_openapi_and_client(app_dir: Path, force: bool = False):
 
 async def _openapi_watch(app_dir: Path, logger: logging.Logger | None = None):
     """Watch for Python file changes and regenerate OpenAPI schema and client.
-    
+
     Args:
         app_dir: The path to the app directory
         logger: Optional logger for outputting messages. If None, uses console.print()
     """
+
     # Use console.print if no logger provided (standalone mode)
     def log_info(msg: str):
         if logger:
             logger.info(msg)
         else:
             console.print(msg)
-    
+
     # Get project metadata
     try:
         with in_path(app_dir):

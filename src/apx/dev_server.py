@@ -175,7 +175,49 @@ async def lifespan(app: FastAPI):
     for process_name in ["frontend", "backend", "openapi"]:
         setup_buffered_logging(process_name)
 
-    yield
+    # Redirect stdout/stderr to backend logger BEFORE any tasks start
+    # This ensures app imports capture logs correctly
+    import sys
+
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+
+    backend_logger = logging.getLogger("apx.backend")
+
+    class LoggerWriter:
+        def __init__(self, logger, level, prefix):
+            self.logger = logger
+            self.level = level
+            self.prefix = prefix
+            self.buffer = ""
+
+        def write(self, message):
+            if not message:
+                return
+            self.buffer += message
+            lines = self.buffer.split("\n")
+            self.buffer = lines[-1]
+            for line in lines[:-1]:
+                if line:
+                    self.logger.log(self.level, f"{self.prefix} | {line}")
+
+        def flush(self):
+            if self.buffer:
+                self.logger.log(self.level, f"{self.prefix} | {self.buffer}")
+                self.buffer = ""
+
+        def isatty(self):
+            return False
+
+    sys.stdout = LoggerWriter(backend_logger, logging.INFO, "APP")
+    sys.stderr = LoggerWriter(backend_logger, logging.ERROR, "APP")
+
+    try:
+        yield
+    finally:
+        # Restore stdout/stderr
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
 
     # Shutdown: Stop all tasks
     tasks_to_cancel: list[asyncio.Task[None]] = []
@@ -413,7 +455,9 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 current_index = len(state.log_buffer) - 1
                 if current_index > last_index:
                     # Get new logs
-                    new_logs: list[dict[str, Any]] = list(state.log_buffer)[last_index + 1 :]  # type: ignore[misc]
+                    new_logs: list[dict[str, Any]] = list(state.log_buffer)[
+                        last_index + 1 :
+                    ]  # type: ignore[misc]
                     for log in new_logs:
                         # Filter by process if specified
                         process_name = str(log.get("process_name", ""))

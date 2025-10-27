@@ -37,9 +37,11 @@ dependencies = [
     { name = "keyring" },
     { name = "psutil" },
     { name = "python-dotenv" },
+    { name = "requests" },
     { name = "rich" },
     { name = "tenacity" },
     { name = "typer" },
+    { name = "typing-extensions" },
     { name = "uvicorn" },
     { name = "watchfiles" },
 ]
@@ -67,9 +69,11 @@ requires-dist = [
     { name = "keyring", specifier = ">=25.6.0" },
     { name = "psutil", specifier = ">=6.1.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
+    { name = "requests", specifier = ">=2.31.0" },
     { name = "rich", specifier = ">=14.2.0" },
     { name = "tenacity", specifier = ">=9.1.2" },
     { name = "typer", specifier = ">=0.19.2" },
+    { name = "typing-extensions", specifier = ">=4.12.0" },
     { name = "uvicorn", specifier = ">=0.37.0" },
     { name = "watchfiles", specifier = ">=1.1.1" },
 ]
