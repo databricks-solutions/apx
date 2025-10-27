@@ -1615,7 +1615,7 @@ class DevManager:
                 stream_prefix, message = content.split(" | ", 1)
                 if stream_prefix == "BE":
                     prefix_color = "green"
-                    prefix = "[BE]"
+                    prefix = "[BE] "
                     content = message
                 elif stream_prefix == "APP":
                     prefix_color = "yellow"
@@ -1624,29 +1624,25 @@ class DevManager:
                 else:
                     # Fallback if unknown stream
                     prefix_color = "green"
-                    prefix = "[BE]"
+                    prefix = "[BE] "
             else:
                 # No stream prefix found, default to BE
                 prefix_color = "green"
-                prefix = "[BE]"
+                prefix = "[BE] "
         elif log["process_name"] == "frontend":
             prefix_color = "cyan"
-            prefix = "[UI]"
+            prefix = "[UI] "
         elif log["process_name"] == "openapi":
             prefix_color = "magenta"
             prefix = "[GEN]"
         else:
             # Default fallback
             prefix_color = "white"
-            prefix = f"[{log['process_name'].upper()}]"
+            prefix = f"[{log['process_name'].upper()}]".ljust(5)
 
-        # Format timestamp (show only time part for brevity)
-        timestamp = (
-            log["created_at"].split()[1]
-            if " " in log["created_at"]
-            else log["created_at"]
-        )
+        # Use full datetime, not just time
+        timestamp = log["created_at"]
 
         console.print(
-            f"[dim]{timestamp}[/dim] [{prefix_color}]{prefix}[/{prefix_color}] {content}"
+            f"[dim]{timestamp}[/dim] | [{prefix_color}]{prefix}[/{prefix_color}] | {content}"
         )
