@@ -29,7 +29,7 @@ def node_modules_dir(
     """
 
     time_start = time.perf_counter()
-    console.print(f"Creating node_modules directory...")
+    console.print("Creating node_modules directory...")
     tmp_path = tmp_path_factory.mktemp("node_modules")
 
     # init bun project
