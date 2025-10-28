@@ -4,12 +4,16 @@ alwaysApply: true
 
 # Cursor Agent Rules
 
+# Do's and Don'ts
+- **Frontend:** Always use `bun` (never `npm`)
+- **Python:** Always use `uv` (never `pip`)
+- **Components**: when adding a new component via CLI command, always add `--yes` flag to skip confirmation
+- **Components**: if component was added to a wrong location, move it to the correct location (e.g. `src/{{app_name}}/ui/components/`)
+- **Components**: Prefer grouping components by functionality rather than by file type (e.g. `src/{{app_name}}/ui/components/chat/`)
+
 ## Project Structure
 Full-stack app: `src/{{app_name}}/ui/` (React + Vite) and `src/{{app_name}}/backend/` (FastAPI). Backend serves frontend at `/` and API at `/api`. API client auto-generated via `orval`.
 
-## Package Management
-- **Frontend:** Always use `bun` (never `npm`)
-- **Python:** Always use `uv` (never `pip`)
 
 ## Models & API
 - **3-model pattern:** `Entity` (DB), `EntityIn` (input), `EntityOut` (output)
