@@ -1,4 +1,5 @@
 from importlib import resources
+import shutil
 import time
 import pytest
 import os
@@ -71,7 +72,8 @@ def test_init_and_build_combinations(
     test_app_name = f"test-app-{template.value}-{layout.value}"
     app_path = tmp_path
     app_path.mkdir(parents=True, exist_ok=True)
-    app_path.joinpath("node_modules").symlink_to(node_modules_dir)
+    # copy the node_modules directory to the app path
+    shutil.copytree(node_modules_dir, app_path / "node_modules")
 
     # Mock the Prompt.ask to return empty string (to skip profile setup)
     # and Confirm.ask to return False (to skip assistant setup when profile is skipped)

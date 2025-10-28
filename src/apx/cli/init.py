@@ -151,19 +151,12 @@ def add_bun_dev_dependencies(cwd: Path) -> None:
 
 
 def add_shadcn_components(
-    cwd: Path, args: list[str], use_bun_runtime: bool = True
+    cwd: Path,
+    args: list[str],
 ) -> None:
-    base_cmd = ["bun", "x"]
-    if use_bun_runtime:
-        base_cmd.append("--bun")
-
-    base_cmd.extend(["shadcn@latest", "add", "--yes"])
-    base_cmd.extend(args)
-    run_subprocess(
-        base_cmd,
-        cwd=cwd,
-        error_msg=f"Failed to add shadcn with args: {', '.join(args)}",
-    )
+    base_cmd = ["bun", "x", "--bun"]
+    base_cmd.extend(["shadcn@latest", "add", "--yes", *args])
+    run_subprocess(base_cmd, cwd=cwd, error_msg="Failed to add shadcn components")
 
 
 @with_version

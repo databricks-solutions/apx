@@ -75,4 +75,4 @@ jobs:
 
             - name: Run tests
               run: |
-                  uv run pytest tests/ -v --cov=src/apx -n auto --cov-report markdown-append:$GITHUB_STEP_SUMMARY
+                  uv run pytest tests/ -v --cov=src/apx --cov-report markdown-append:$GITHUB_STEP_SUMMARY

@@ -12,8 +12,8 @@ types:
 
 check: lint types
 
-test:
-    uv run pytest tests/ -s -v --cov=src/apx -n auto
+test *args:
+    uv run pytest tests/ -s -v --cov=src/apx {{args}}
 
 # add-commit-push with a message
 pm message:
