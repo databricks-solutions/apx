@@ -168,7 +168,7 @@ def init(
             hidden=True,
             help="The apx package to install. Used for internal testing and development.",
         ),
-    ] = "git+https://github.com/renardeinside/apx.git",
+    ] = "https://github.com/databricks-solutions/apx.git",
     apx_editable: Annotated[
         bool,
         Option(

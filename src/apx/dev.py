@@ -356,6 +356,20 @@ def prepare_obo_token(
     return new_token
 
 
+class DevServerAccessLogFilter(logging.Filter):
+    """Filter to exclude dev server internal API logs from access logs."""
+
+    def filter(self, record):
+        """Return False for dev server internal endpoints to exclude them from logs."""
+        message = record.getMessage()
+        # Exclude logs for dev server internal endpoints
+        internal_paths = ["/logs", "/status", "/start", "/stop", "/restart"]
+        for path in internal_paths:
+            if f'"{path}' in message or f"'{path}" in message:
+                return False
+        return True
+
+
 def setup_uvicorn_logging(use_memory: bool = False):
     """Configure uvicorn loggers to use in-memory buffer or console.
 
@@ -367,6 +381,10 @@ def setup_uvicorn_logging(use_memory: bool = False):
     for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
         logger = logging.getLogger(logger_name)
         logger.handlers.clear()
+
+        # Add filter to uvicorn.access to exclude dev server internal API logs
+        if logger_name == "uvicorn.access":
+            logger.addFilter(DevServerAccessLogFilter())
 
         if use_memory:
             # Use the backend logger that's already configured by dev_server
@@ -859,9 +877,9 @@ class DevManager:
         Args:
             app_dir: The path to the application directory
         """
-        self.app_dir = app_dir
-        self.apx_dir = app_dir / ".apx"
-        self.project_json_path = self.apx_dir / "project.json"
+        self.app_dir: Path = app_dir
+        self.apx_dir: Path = app_dir / ".apx"
+        self.project_json_path: Path = self.apx_dir / "project.json"
 
     def _get_or_create_config(self) -> ProjectConfig:
         """Get or create project configuration."""

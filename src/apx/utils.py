@@ -8,7 +8,8 @@ import subprocess
 import time
 import tomllib
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
+from collections.abc import Generator
 from typing_extensions import override
 
 import jinja2
