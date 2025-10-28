@@ -83,9 +83,9 @@ def test_init_and_build_combinations(
     # Check basic structure
     assert (app_path / "src").exists(), "src directory should exist"
     assert (app_path / "src" / app_slug).exists(), "app module directory should exist"
-    assert (
-        app_path / "src" / app_slug / "backend"
-    ).exists(), "backend directory should exist"
+    assert (app_path / "src" / app_slug / "backend").exists(), (
+        "backend directory should exist"
+    )
     assert (app_path / "src" / app_slug / "ui").exists(), "ui directory should exist"
 
     # Check that package.json was created
@@ -101,41 +101,39 @@ def test_init_and_build_combinations(
     if template == "stateful":
         # Check that stateful-specific backend files exist
         backend_path = app_path / "src" / app_slug / "backend"
-        assert (
-            backend_path / "runtime.py"
-        ).exists(), "runtime.py should exist for stateful template"
+        assert (backend_path / "runtime.py").exists(), (
+            "runtime.py should exist for stateful template"
+        )
 
     # Verify layout-specific files
     if layout == "sidebar":
         # Check that sidebar-specific components exist
         ui_components_path = app_path / "src" / app_slug / "ui" / "components" / "apx"
-        assert (
-            ui_components_path / "SidebarLayout.tsx"
-        ).exists(), "SidebarLayout.tsx should exist for sidebar layout"
+        assert (ui_components_path / "SidebarLayout.tsx").exists(), (
+            "SidebarLayout.tsx should exist for sidebar layout"
+        )
 
     # Verify that .env file was created (but without DATABRICKS_CONFIG_PROFILE since profile=None)
     if (app_path / ".env").exists():
         env_contents = (app_path / ".env").read_text()
         # Ensure DATABRICKS_CONFIG_PROFILE is not in the file since profile=None
-        assert (
-            "DATABRICKS_CONFIG_PROFILE" not in env_contents
-        ), "DATABRICKS_CONFIG_PROFILE should not be set when profile=None"
+        assert "DATABRICKS_CONFIG_PROFILE" not in env_contents, (
+            "DATABRICKS_CONFIG_PROFILE should not be set when profile=None"
+        )
 
     # Verify that the build completed successfully
     # The build directory should contain a wheel file and requirements.txt
     build_dir = app_path / ".build"
     wheel_files = list(build_dir.glob("*.whl"))
-    assert (
-        len(wheel_files) > 0
-    ), f"At least one wheel file should exist in .build directory for {template}/{layout}"
-    assert (
-        build_dir / "requirements.txt"
-    ).exists(), (
+    assert len(wheel_files) > 0, (
+        f"At least one wheel file should exist in .build directory for {template}/{layout}"
+    )
+    assert (build_dir / "requirements.txt").exists(), (
         f"requirements.txt should exist in .build directory for {template}/{layout}"
     )
 
     # Verify requirements.txt contains the wheel file name
     requirements_content = (build_dir / "requirements.txt").read_text()
-    assert (
-        wheel_files[0].name in requirements_content
-    ), "requirements.txt should reference the wheel file"
+    assert wheel_files[0].name in requirements_content, (
+        "requirements.txt should reference the wheel file"
+    )

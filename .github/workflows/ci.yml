@@ -1,73 +1,73 @@
 name: CI
 
 on:
-    pull_request:
-        branches:
-            - "**" # Trigger on all branches
-            - "!main" # Exclude main branch
-    push:
-        branches:
-            - "**" # Trigger on all branches
-            - "!main" # Exclude main branch
+  pull_request:
+    branches:
+      - "**" # Trigger on all branches
+      - "!main" # Exclude main branch
+  push:
+    branches:
+      - "**" # Trigger on all branches
+      - "!main" # Exclude main branch
 
 jobs:
-    test:
-        runs-on: ubuntu-latest
+  test:
+    runs-on: ubuntu-latest
 
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-              with:
-                  fetch-depth: 0 # Full history for versioning
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history for versioning
 
-            - name: Install uv
-              uses: astral-sh/setup-uv@v6
-              with:
-                  enable-cache: true
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
 
-            - name: "Set up Python"
-              uses: actions/setup-python@v5
-              with:
-                  python-version-file: ".python-version"
+      - name: "Set up Python"
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
 
-            - name: Install Bun
-              uses: oven-sh/setup-bun@v2
-              with:
-                  bun-version: latest
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
-            - name: Cache Bun dependencies
-              uses: actions/cache@v4
-              with:
-                  path: |
-                      ~/.bun/install/cache
-                  key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lockb') }}
-                  restore-keys: |
-                      ${{ runner.os }}-bun-
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lockb') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
 
-            - name: Install Python dependencies
-              run: |
-                  uv sync --all-groups
+      - name: Install Python dependencies
+        run: |
+          uv sync --all-groups
 
-            - name: Install JavaScript dependencies
-              run: |
-                  bun install
+      - name: Install JavaScript dependencies
+        run: |
+          bun install
 
-            - name: Check Python formatting
-              run: |
-                  uv run ruff format --check .
+      - name: Check Python formatting
+        run: |
+          uv run ruff format --check .
 
-            # - name: Check Python linting
-            #   run: |
-            #       uv run ruff check .
+      # - name: Check Python linting
+      #   run: |
+      #       uv run ruff check .
 
-            # - name: Check JavaScript/TypeScript formatting
-            #   run: |
-            #       bun x prettier --check .
+      # - name: Check JavaScript/TypeScript formatting
+      #   run: |
+      #       bun x prettier --check .
 
-            # - name: Run Python type checking
-            #   run: |
-            #       uv run basedpyright --level error
+      # - name: Run Python type checking
+      #   run: |
+      #       uv run basedpyright --level error
 
-            # - name: Run tests
-            #   run: |
-            #       uv run pytest tests/ -v --cov=src/apx --cov-report=term-missing
+      # - name: Run tests
+      #   run: |
+      #       uv run pytest tests/ -v --cov=src/apx --cov-report=term-missing
