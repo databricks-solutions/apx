@@ -1,33 +1,47 @@
 """Centralized FastAPI dev server for managing frontend, backend, and OpenAPI watcher."""
 
 import asyncio
+from collections.abc import AsyncGenerator
 import logging
 import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Annotated, Literal, TypeAlias
+from typing import Annotated, Literal, TypeAlias
 from typing_extensions import override
 
 from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from apx.dev import (
+from apx.cli.dev.manager import (
     run_backend,
     run_frontend_with_logging,
     run_openapi_with_logging,
 )
-from apx.utils import get_project_metadata
+from apx.utils import ProjectMetadata, get_project_metadata
 
-LogBuffer: TypeAlias = deque[dict[str, Any]]  # pyright:ignore[reportExplicitAny]
+
+# === Log Entry Model ===
+
+
+class LogEntry(BaseModel):
+    """Strongly typed log entry model."""
+
+    timestamp: str
+    level: str
+    process_name: str
+    content: str
+
+
+LogBuffer: TypeAlias = deque[LogEntry]
 
 
 # Global state for background tasks
 class ServerState:
     """Global state for the dev server."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.frontend_task: asyncio.Task[None] | None = None
         self.backend_task: asyncio.Task[None] | None = None
         self.openapi_task: asyncio.Task[None] | None = None
@@ -81,7 +95,7 @@ class StatusResponse(BaseModel):
 class BufferedLogHandler(logging.Handler):
     """Custom log handler that stores logs in memory buffer."""
 
-    buffer: deque[dict[str, Any]]  # pyright:ignore[reportExplicitAny]
+    buffer: LogBuffer
     process_name: str
 
     def __init__(self, buffer: LogBuffer, process_name: str):
@@ -93,14 +107,14 @@ class BufferedLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         """Emit a log record to the buffer."""
         try:
-            log_entry: dict[str, Any] = {  # pyright:ignore[reportExplicitAny]
-                "timestamp": time.strftime(
+            log_entry = LogEntry(
+                timestamp=time.strftime(
                     "%Y-%m-%d %H:%M:%S", time.localtime(record.created)
                 ),
-                "level": record.levelname,
-                "process_name": self.process_name,
-                "content": self.format(record),
-            }
+                level=record.levelname,
+                process_name=self.process_name,
+                content=self.format(record),
+            )
             self.buffer.append(log_entry)
         except Exception:
             self.handleError(record)
@@ -168,8 +182,36 @@ async def run_openapi_task(app_dir: Path, max_retries: int):
 # === Lifecycle Management ===
 
 
+class LoggerWriter:
+    """Logger writer for redirecting stdout/stderr to the backend logger."""
+
+    def __init__(self, logger: logging.Logger, level: int, prefix: str):
+        self.logger: logging.Logger = logger
+        self.level: int = level
+        self.prefix: str = prefix
+        self.buffer: str = ""
+
+    def write(self, message: str | None) -> None:
+        if not message:
+            return
+        self.buffer += message
+        lines = self.buffer.split("\n")
+        self.buffer = lines[-1]
+        for line in lines[:-1]:
+            if line:
+                self.logger.log(self.level, f"{self.prefix} | {line}")
+
+    def flush(self):
+        if self.buffer:
+            self.logger.log(self.level, f"{self.prefix} | {self.buffer}")
+            self.buffer = ""
+
+    def isatty(self):
+        return False
+
+
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context manager for the FastAPI app."""
     # Setup in-memory logging (no files needed)
     for process_name in ["frontend", "backend", "openapi"]:
@@ -183,31 +225,6 @@ async def lifespan(app: FastAPI):
     original_stderr = sys.stderr
 
     backend_logger = logging.getLogger("apx.backend")
-
-    class LoggerWriter:
-        def __init__(self, logger, level, prefix):
-            self.logger = logger
-            self.level = level
-            self.prefix = prefix
-            self.buffer = ""
-
-        def write(self, message):
-            if not message:
-                return
-            self.buffer += message
-            lines = self.buffer.split("\n")
-            self.buffer = lines[-1]
-            for line in lines[:-1]:
-                if line:
-                    self.logger.log(self.level, f"{self.prefix} | {line}")
-
-        def flush(self):
-            if self.buffer:
-                self.logger.log(self.level, f"{self.prefix} | {self.buffer}")
-                self.buffer = ""
-
-        def isatty(self):
-            return False
 
     sys.stdout = LoggerWriter(backend_logger, logging.INFO, "APP")
     sys.stderr = LoggerWriter(backend_logger, logging.ERROR, "APP")
@@ -277,7 +294,7 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         )
 
     @app.post("/actions/start", response_model=ActionResponse)
-    async def start_servers(request: ActionRequest):
+    async def start_servers(request: ActionRequest) -> ActionResponse:
         """Start all development servers."""
         # Check if already running
         if (
@@ -300,8 +317,8 @@ def create_dev_server(app_dir: Path) -> FastAPI:
 
         # Get app module name
         if state.app_dir:
-            metadata: dict[str, str] = get_project_metadata()
-            app_module_name: str = metadata["app-module"]
+            metadata: ProjectMetadata = get_project_metadata()
+            app_module_name: str = metadata.app_module
         else:
             return ActionResponse(status="error", message="App directory not set")
 
@@ -338,7 +355,7 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         return ActionResponse(status="success", message="Servers started successfully")
 
     @app.post("/actions/stop", response_model=ActionResponse)
-    async def stop_servers():
+    async def stop_servers() -> ActionResponse:
         """Stop all development servers."""
         stopped: list[str] = []
 
@@ -375,7 +392,7 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         )
 
     @app.post("/actions/restart", response_model=ActionResponse)
-    async def restart_servers():
+    async def restart_servers() -> ActionResponse:
         """Restart all development servers."""
         # Stop first
         await stop_servers()
@@ -404,10 +421,10 @@ def create_dev_server(app_dir: Path) -> FastAPI:
             Literal["frontend", "backend", "openapi", "all"] | None,
             Query(description="Filter by process name"),
         ] = "all",
-    ):
+    ) -> StreamingResponse:
         """Stream logs using Server-Sent Events (SSE)."""
 
-        async def event_generator():
+        async def event_generator() -> AsyncGenerator[str, None]:
             """Generate SSE events for log streaming."""
             import datetime
             import json
@@ -420,27 +437,25 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 )
 
             # Send existing logs
-            buffered_logs: list[dict[str, Any]] = list(state.log_buffer)  # type: ignore[misc]
+            buffered_logs: list[LogEntry] = list(state.log_buffer)
             for log in buffered_logs:
                 # Filter by process if specified
-                process_name: str = str(log.get("process_name", ""))
-                if process != "all" and process_name != process:
+                if process != "all" and log.process_name != process:
                     continue
 
                 # Filter by time if specified
                 if cutoff_time:
                     try:
-                        timestamp_str: str = str(log.get("timestamp", ""))
                         log_time = datetime.datetime.strptime(
-                            timestamp_str, "%Y-%m-%d %H:%M:%S"
+                            log.timestamp, "%Y-%m-%d %H:%M:%S"
                         )
                         if log_time < cutoff_time:
                             continue
                     except Exception:
                         pass
 
-                # Format SSE event
-                yield f"data: {json.dumps(log)}\n\n"  # type: ignore[misc]
+                # Format SSE event (use model_dump for JSON serialization)
+                yield f"data: {json.dumps(log.model_dump())}\n\n"
 
             # Send a sentinel event to mark end of buffered logs
             yield "event: buffered_done\ndata: {}\n\n"
@@ -455,17 +470,14 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 current_index = len(state.log_buffer) - 1
                 if current_index > last_index:
                     # Get new logs
-                    new_logs: list[dict[str, Any]] = list(state.log_buffer)[
-                        last_index + 1 :
-                    ]  # type: ignore[misc]
+                    new_logs: list[LogEntry] = list(state.log_buffer)[last_index + 1 :]
                     for log in new_logs:
                         # Filter by process if specified
-                        process_name = str(log.get("process_name", ""))
-                        if process != "all" and process_name != process:
+                        if process != "all" and log.process_name != process:
                             continue
 
-                        # Format SSE event
-                        yield f"data: {json.dumps(log)}\n\n"  # type: ignore[misc]
+                        # Format SSE event (use model_dump for JSON serialization)
+                        yield f"data: {json.dumps(log.model_dump())}\n\n"
 
                     last_index = current_index
 

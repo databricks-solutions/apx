@@ -1,12 +1,19 @@
-# pack-plugin:
-#     rm -rf ./dist
-#     bun run build
-#     bun pm pack --filename ./src/apx/__dist__/apx-plugin.tgz
-
-
 fmt:
     uv run ruff format .
     bun x prettier --write .
+
+lint:
+    uv run ruff check .
+    bun x prettier --check .
+
+types:
+    uv run mypy .
+    uv run basedpyright --level error
+
+check: lint types
+
+test *args:
+    uv run pytest tests/ -s -v --cov=src/apx {{args}}
 
 # add-commit-push with a message
 pm message:

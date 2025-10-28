@@ -3,9 +3,7 @@ name = "apx"
 dynamic = ["version"]
 description = "apx is the toolkit for building Databricks Apps"
 readme = { file = "README.md", content-type = "text/markdown" }
-authors = [
-    { name = "renardeinside", email = "polarpersonal@gmail.com" }
-]
+authors = [{ name = "renardeinside", email = "polarpersonal@gmail.com" }]
 requires-python = ">=3.11"
 dependencies = [
     "basedpyright>=1.32.1",
@@ -49,12 +47,25 @@ dev = [
     "basedpyright>=1.32.1",
     "databricks-sdk>=0.68.0",
     "fastapi>=0.119.0",
+    "mypy>=1.18.2",
     "pydantic-settings>=2.11.0",
     "pytest>=8.4.2",
     "pytest-cov>=7.0.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.14.0",
     "sqlmodel>=0.0.27",
+    "types-cachetools>=6.2.0.20251022",
+    "types-cffi>=1.17.0.20250915",
+    "types-greenlet>=3.2.0.20250915",
     "types-jinja2>=2.11.9",
+    "types-pexpect>=4.9.0.20250916",
+    "types-protobuf>=6.32.1.20250918",
+    "types-psutil>=7.0.0.20251001",
+    "types-pyasn1>=0.6.0.20250914",
+    "types-pygments>=2.19.0.20250809",
+    "types-pyyaml>=6.0.12.20250915",
+    "types-requests>=2.32.4.20250913",
+    "types-ujson>=5.10.0.20250822",
 ]
 
 [project.scripts]
@@ -71,3 +82,18 @@ exclude = ["src/apx/templates", "**/node_modules", "**/__pycache__", "**/.*"]
 reportUnusedCallResult = false
 reportCallInDefaultInitializer = false
 reportUnusedFunction = false
+
+
+[tool.mypy]
+exclude = ['venv', '.venv', 'src/apx/templates', 'node_modules']
+
+[tool.coverage.run]
+parallel = true
+source = ["src/apx"]
+omit = [
+    "tests",
+    "src/apx/templates",
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+]

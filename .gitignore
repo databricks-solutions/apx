@@ -26,6 +26,8 @@ dist/
 .coverage
 coverage.xml
 htmlcov/
+*.coverage
+.coverage*  
 
 # pytest
 .pytest_cache/

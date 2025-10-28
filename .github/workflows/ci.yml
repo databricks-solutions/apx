@@ -1,0 +1,78 @@
+name: CI
+
+on:
+    pull_request:
+        branches:
+            - "**" # Trigger on all branches
+            - "!main" # Exclude main branch
+    push:
+        branches:
+            - "**" # Trigger on all branches
+            - "!main" # Exclude main branch
+
+jobs:
+    test:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0 # Full history for versioning
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@v6
+              with:
+                  enable-cache: true
+
+            - name: "Set up Python"
+              uses: actions/setup-python@v5
+              with:
+                  python-version-file: ".python-version"
+
+            - name: Install Bun
+              uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: 1.3.0
+
+            - name: Cache Bun dependencies
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.bun/install/cache
+                  key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lockb') }}
+                  restore-keys: |
+                      ${{ runner.os }}-bun-
+
+            - name: Install Python dependencies
+              run: |
+                  uv sync --all-groups
+
+            - name: Install JavaScript dependencies
+              run: |
+                  bun install
+
+            - name: Configure git for tests
+              run: |
+                  git config --global user.email "ci@github.com"
+                  git config --global user.name "GitHub CI"
+
+            - name: Check Python formatting
+              run: |
+                  uv run ruff format --check .
+
+            - name: Check Python linting
+              run: |
+                  uv run ruff check .
+
+            - name: Check JavaScript/TypeScript formatting
+              run: |
+                  bun x prettier --check .
+
+            - name: Run Python type checking
+              run: |
+                  uv run mypy .
+
+            - name: Run tests
+              run: |
+                  uv run pytest tests/ -v --cov=src/apx --cov-report markdown-append:$GITHUB_STEP_SUMMARY

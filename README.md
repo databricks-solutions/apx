@@ -8,6 +8,8 @@
     <b>🚀 <code>apx</code> is the toolkit for building Databricks Apps ⚡</b>
 </p>
 
+<div align="center">
+
 ![Databricks](https://img.shields.io/badge/databricks-000000?logo=databricks&logoColor=red)
 ![FastAPI](https://img.shields.io/badge/FastAPI-109989?logo=fastapi&logoColor=white)
 ![Pydantic](https://img.shields.io/badge/Pydantic-E92063?logo=pydantic&logoColor=white)
@@ -16,6 +18,8 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
 ![Bun](https://img.shields.io/badge/Bun-000000?logo=bun&logoColor=white)
 ![shadcn/ui](https://img.shields.io/badge/shadcn%2Fui-000000?logo=shadcnui&logoColor=white)
+
+</div>
 
 ---
 
