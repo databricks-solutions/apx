@@ -1,6 +1,6 @@
 <p align="center">
-    <a href="https://github.com/renardeinside/apx">
-        <img src="https://raw.githubusercontent.com/renardeinside/apx/refs/heads/main/assets/logo.svg" class="align-center" width="200" height="200" alt="logo" />
+    <a href="https://github.com/databricks-solutions/apx">
+        <img src="https://raw.githubusercontent.com/databricks-solutions/apx/refs/heads/main/assets/logo.svg" class="align-center" width="200" height="200" alt="logo" />
     </a>
 </p>
 
@@ -43,7 +43,7 @@ To kickstart your app, please make sure you have:
 Then you can use the following command:
 
 ```bash
-uvx git+https://github.com/renardeinside/apx.git init
+uvx git+https://github.com/databricks-solutions/apx.git init
 ```
 
 This will launch an interactive prompt that will guide you through:
@@ -103,7 +103,7 @@ my-app
 ### 🚀 `init`
 
 ```bash
-uvx git+https://github.com/renardeinside/apx.git init
+uvx git+https://github.com/databricks-solutions/apx.git init
 ```
 
 Initializes a new app project with interactive prompts for configuration. Supports optional flags to skip prompts:

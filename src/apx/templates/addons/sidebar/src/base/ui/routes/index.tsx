@@ -36,14 +36,14 @@ function Index() {
 
           {/* APX Card Button - Bottom Right */}
           <a
-            href="https://github.com/renardeinside/apx"
+            href="https://github.com/databricks-solutions/apx"
             target="_blank"
             rel="noopener noreferrer"
             className="absolute bottom-12 right-2 w-38 group"
           >
             <div className="flex items-center gap-3 px-4 py-3 rounded-lg border bg-card hover:bg-accent transition-colors">
               <img
-                src="https://raw.githubusercontent.com/renardeinside/apx/refs/heads/main/assets/logo.svg"
+                src="https://raw.githubusercontent.com/databricks-solutions/apx/refs/heads/main/assets/logo.svg"
                 className="h-8 w-8"
                 alt="apx logo"
               />
