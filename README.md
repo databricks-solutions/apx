@@ -202,7 +202,6 @@ Manually generates OpenAPI schema and orval client. Use `--watch` to enable auto
 
 Note: you don't need to run this command manually, watcher will run automatically when you start the development server.
 
-
 ## 📜 Project todos
 
 - [ ] Add chat template
@@ -242,5 +241,3 @@ Note: you don't need to run this command manually, watcher will run automaticall
 | tailwindcss               | Utility-first CSS framework for rapid UI development                                                                                   | MIT          | [GitHub](https://github.com/tailwindlabs/tailwindcss)       |
 | smol-toml                 | Tom's Obvious, Minimal Language for JS                                                                                                 | MIT          | [GitHub](https://github.com/squirrelchat/smol-toml)         |
 | psutil                    | Cross-platform library for retrieving information on running processes and system utilization (CPU, memory, disks, network) in Python. | BSD-3-Clause | [GitHub](https://github.com/giampaolo/psutil)               |
-
-

@@ -126,13 +126,13 @@ def init(
         ),
     ] = None,
     template: Annotated[
-        Literal["essential", "stateful"],
+        Literal["essential", "stateful"] | None,
         Option(
             "--template",
             "-t",
             help="The template to use. Will prompt if not provided",
         ),
-    ] = "essential",
+    ] = None,
     profile: Annotated[
         str | None,
         Option(
@@ -213,6 +213,23 @@ def init(
 
     # Create app_slug: internal version with underscores for module names and paths
     app_slug = app_name.replace("-", "_")
+
+    # Prompt for template if not provided
+    if template is None:
+        available_templates = ["essential", "stateful"]
+        prompt_template = Prompt.ask(
+            "[cyan]Which template would you like to use?[/cyan]",
+            choices=available_templates,
+            default="essential",
+        )
+
+        if prompt_template.lower() not in available_templates:
+            print(
+                "[red]Invalid template. Please choose from: essential, stateful.[/red]"
+            )
+            return Exit(code=1)
+
+        template = prompt_template.lower()
 
     # Prompt for profile if not provided
     if profile is None:
