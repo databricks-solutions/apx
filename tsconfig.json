@@ -6,9 +6,6 @@
     "module": "ESNext",
     "moduleDetection": "force",
     "jsx": "react-jsx",
-    "paths": {
-      "apx/vite-plugin": ["./src/apx/plugins/index.ts"]
-    },
     // Bundler-friendly
     "moduleResolution": "Bundler",
     "verbatimModuleSyntax": true,
@@ -16,8 +13,6 @@
     "declaration": true,
     "declarationMap": true,
     "emitDeclarationOnly": false,
-    "outDir": "dist",
-    "rootDir": "src/apx/plugins",
     // Best practices
     "strict": true,
     "skipLibCheck": true,
@@ -27,5 +22,5 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "include": ["src/apx/plugins"]
+  "include": ["src/apx/**/*.ts"]
 }

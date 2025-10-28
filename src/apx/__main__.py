@@ -1,4 +1,3 @@
-import asyncio
 from importlib import resources
 import os
 from pathlib import Path
@@ -19,7 +18,6 @@ from databricks.sdk import WorkspaceClient
 from apx._version import version as apx_version
 from apx.dev import (
     DevManager,
-    run_backend,
     validate_databricks_credentials,
     delete_token_from_keyring,
     save_token_id,

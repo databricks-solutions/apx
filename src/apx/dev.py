@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import keyring
 from databricks.sdk import WorkspaceClient
@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from rich.table import Table
 from starlette.middleware.base import BaseHTTPMiddleware
 from tenacity import (
+    RetryCallState,
     retry,
     stop_after_attempt,
     wait_exponential,
@@ -32,8 +33,6 @@ from apx.utils import (
     console,
     PrefixedLogHandler,
     ensure_dir,
-    get_project_metadata,
-    in_path,
 )
 from apx import __version__
 
@@ -45,7 +44,7 @@ ACCESS_TOKEN_HEADER_NAME = "x-forwarded-access-token"
 # === Retry Helpers ===
 
 
-def log_retry_attempt(retry_state):
+def log_retry_attempt(retry_state: RetryCallState) -> None:
     """Log retry attempts to the appropriate logger.
 
     Args:
@@ -67,16 +66,16 @@ class ProcessInfo(BaseModel):
     """Information about a running process."""
 
     pid: int
-    port: Optional[int] = None
+    port: int | None = None
     created_at: str = Field(default_factory=lambda: time.strftime("%Y-%m-%d %H:%M:%S"))
 
 
 class ProjectConfig(BaseModel):
     """Configuration stored in .apx/project.json."""
 
-    token_id: Optional[str] = None
-    dev_server_pid: Optional[int] = None
-    dev_server_port: Optional[int] = None
+    token_id: str | None = None
+    dev_server_pid: int | None = None
+    dev_server_port: int | None = None
     processes: dict[str, ProcessInfo] = Field(default_factory=dict)
 
     @classmethod

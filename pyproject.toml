@@ -69,3 +69,5 @@ version = "{version}"
 [tool.basedpyright]
 exclude = ["src/apx/templates", "**/node_modules", "**/__pycache__", "**/.*"]
 reportUnusedCallResult = false
+reportCallInDefaultInitializer = false
+reportUnusedFunction = false
