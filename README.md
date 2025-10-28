@@ -59,7 +59,7 @@ The app will be created in the current working directory by default.
 You can also specify all options via command-line flags to skip the prompts:
 
 ```bash
-uvx git+https://github.com/renardeinside/apx.git init \
+uvx https://github.com/databricks-solutions/apx.git init \
   --name my-app \
   --template essential \
   --profile my-profile \
