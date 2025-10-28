@@ -162,10 +162,10 @@ Options:
 #### Tail Logs
 
 ```bash
-uv run apx dev tail
+uv run apx dev logs -f
 ```
 
-Continuously streams logs from development servers (like `tail -f`).
+Continuously streams logs from development servers.
 
 Options:
 
@@ -173,7 +173,8 @@ Options:
 - `--timeout, -t`: Stop tailing after N seconds
 - `--ui`: Show only frontend logs
 - `--backend`: Show only backend logs
-- `--openapi`: Show only OpenAPI logs
+- `--app`: Show only app logs
+- `--raw`: Show raw log output without prefix formatting
 
 #### Stop Development Servers
 
@@ -198,6 +199,17 @@ uv run apx openapi
 ```
 
 Manually generates OpenAPI schema and orval client. Use `--watch` to enable automatic regeneration on changes.
+
+Note: you don't need to run this command manually, watcher will run automatically when you start the development server.
+
+
+## 📜 Project todos
+
+- [ ] Add chat template
+- [ ] Add MCP template
+- [ ] Add chat template
+- [ ] MCP of apx commands
+- [ ] Add a way to add a custom template
 
 ### License and Third Party Libraries
 
@@ -231,10 +243,4 @@ Manually generates OpenAPI schema and orval client. Use `--watch` to enable auto
 | smol-toml                 | Tom's Obvious, Minimal Language for JS                                                                                                 | MIT          | [GitHub](https://github.com/squirrelchat/smol-toml)         |
 | psutil                    | Cross-platform library for retrieving information on running processes and system utilization (CPU, memory, disks, network) in Python. | BSD-3-Clause | [GitHub](https://github.com/giampaolo/psutil)               |
 
-## 📜 Project todos
 
-- [ ] Add chat template
-- [ ] Add MCP template
-- [ ] Add chat template
-- [ ] MCP of apx commands
-- [ ] Add a way to add a custom template
