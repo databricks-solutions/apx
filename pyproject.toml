@@ -85,9 +85,15 @@ reportUnusedFunction = false
 
 
 [tool.mypy]
-exclude = [
-    'venv',
-    '.venv',
-    'src/apx/templates',
-    'node_modules',
+exclude = ['venv', '.venv', 'src/apx/templates', 'node_modules']
+
+[tool.coverage.run]
+parallel = true
+source = ["src/apx"]
+omit = [
+    "tests",
+    "src/apx/templates",
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
 ]

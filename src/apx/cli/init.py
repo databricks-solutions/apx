@@ -100,6 +100,55 @@ class Layout(str, Enum):
             raise ValueError(f"Invalid layout: {value}")
 
 
+def add_bun_dependencies(cwd: Path) -> None:
+    """
+    Add basic bun dependencies to the project.
+    """
+    bun_add(
+        [
+            "react-error-boundary",
+            "axios",
+            "react",
+            "react-dom",
+            "class-variance-authority",
+            "clsx",
+            "tailwind-merge",
+            "lucide-react",
+            "tw-animate-css",
+            "@tanstack/react-router",
+            "@tanstack/react-query",
+            "sonner",
+        ],
+        cwd=cwd,
+        error_msg="Failed to install main dependencies",
+    )
+
+
+def add_bun_dev_dependencies(cwd: Path) -> None:
+    """
+    Add basic bun dev dependencies to the project.
+    """
+
+    bun_add(
+        [
+            "smol-toml",
+            "orval",
+            "vite",
+            "typescript",
+            "@types/node",
+            "@types/react",
+            "@types/react-dom",
+            "@vitejs/plugin-react",
+            "@tailwindcss/vite",
+            "@tanstack/router-plugin",
+            "@tanstack/react-router-devtools",
+        ],
+        cwd=cwd,
+        dev=True,
+        error_msg="Failed to install dev dependencies",
+    )
+
+
 @with_version
 def init(
     app_path: Annotated[
@@ -317,44 +366,10 @@ def init(
         "📦 Installing frontend dependencies...", "✅ Frontend dependencies installed"
     ):
         # Install bun main dependencies
-        bun_add(
-            [
-                "react-error-boundary",
-                "axios",
-                "react",
-                "react-dom",
-                "class-variance-authority",
-                "clsx",
-                "tailwind-merge",
-                "lucide-react",
-                "tw-animate-css",
-                "@tanstack/react-router",
-                "@tanstack/react-query",
-                "sonner",
-            ],
-            cwd=app_path,
-            error_msg="Failed to install main dependencies",
-        )
+        add_bun_dependencies(app_path)
 
         # Install bun dev dependencies
-        bun_add(
-            [
-                "smol-toml",
-                "orval",
-                "vite",
-                "typescript",
-                "@types/node",
-                "@types/react",
-                "@types/react-dom",
-                "@vitejs/plugin-react",
-                "@tailwindcss/vite",
-                "@tanstack/router-plugin",
-                "@tanstack/react-router-devtools",
-            ],
-            cwd=app_path,
-            dev=True,
-            error_msg="Failed to install dev dependencies",
-        )
+        add_bun_dev_dependencies(app_path)
 
     # === PHASE 3: Bootstrapping shadcn ===
     with progress_spinner(

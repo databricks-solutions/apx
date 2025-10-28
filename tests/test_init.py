@@ -1,31 +1,50 @@
 from importlib import resources
+import time
 import pytest
 import os
 from pathlib import Path
 from unittest.mock import patch
 from typer.testing import CliRunner
-from apx.cli.init import Layout, Template, init
+from apx.cli.init import (
+    Layout,
+    Template,
+    add_bun_dependencies,
+    add_bun_dev_dependencies,
+    init,
+)
 from collections.abc import Generator
+import subprocess
+from apx.utils import console
 
 runner: CliRunner = CliRunner()
+apx_source_dir: str = str(Path(str(resources.files("apx"))).parent.parent)
 
 
 @pytest.fixture(scope="session", autouse=True)
-def common_caches(
+def node_modules_dir(
     tmp_path_factory: pytest.TempPathFactory,
-) -> Generator[tuple[Path, Path], None, None]:
+) -> Generator[Path, None, None]:
     """
-    Create a shared UV cache directory for all tests to speed up package installations.
-    Sets UV_CACHE_DIR environment variable to use this shared cache.
+    Create a node_modules directory for all tests to speed up package installations.
     """
-    # Create a shared temp directory for UV cache
-    cache_dir = tmp_path_factory.mktemp("uv_cache")
-    bun_cache_dir = tmp_path_factory.mktemp("bun_cache")
 
-    os.environ["UV_CACHE_DIR"] = str(cache_dir)
-    os.environ["BUN_CACHE_DIR"] = str(bun_cache_dir)
+    time_start = time.perf_counter()
+    console.print(f"Creating node_modules directory...")
+    tmp_path = tmp_path_factory.mktemp("node_modules")
 
-    yield cache_dir, bun_cache_dir
+    # init bun project
+    subprocess.run(
+        ["bun", "init", "-m", "-y"], cwd=tmp_path, env=os.environ, check=True
+    )
+
+    # add bun dependencies to populate the node_modules directory
+    add_bun_dependencies(tmp_path)
+    add_bun_dev_dependencies(tmp_path)
+
+    time_end = time.perf_counter()
+    console.print(f"Node modules directory created in {time_end - time_start} seconds")
+
+    yield tmp_path / "node_modules"
 
 
 @pytest.mark.parametrize(
@@ -38,6 +57,7 @@ def common_caches(
     ],
 )
 def test_init_and_build_combinations(
+    node_modules_dir: Path,
     tmp_path: Path,
     template: Template,
     layout: Layout,
@@ -49,8 +69,9 @@ def test_init_and_build_combinations(
     """
     # Create a unique directory for this test case
     test_app_name = f"test-app-{template.value}-{layout.value}"
-    app_path = tmp_path / test_app_name
+    app_path = tmp_path
     app_path.mkdir(parents=True, exist_ok=True)
+    app_path.joinpath("node_modules").symlink_to(node_modules_dir)
 
     # Mock the Prompt.ask to return empty string (to skip profile setup)
     # and Confirm.ask to return False (to skip assistant setup when profile is skipped)
@@ -68,8 +89,6 @@ def test_init_and_build_combinations(
         # Return False for assistant confirmation
         return False
 
-    current_apx_path: str = str(Path(str(resources.files("apx"))).parent.parent)
-
     # Patch the prompts to avoid interactive input during tests
     with (
         patch("apx.cli.init.Prompt.ask", side_effect=mock_prompt_ask),
@@ -82,7 +101,7 @@ def test_init_and_build_combinations(
             template=template,
             assistant=None,
             layout=layout,
-            apx_package=current_apx_path,
+            apx_package=apx_source_dir,
         )
         if result:
             assert result.exit_code == 0, "init should exit with code 0"
