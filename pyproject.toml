@@ -1,8 +1,8 @@
 [project]
 name = "apx"
 dynamic = ["version"]
-description = "Quickstarter for a Python + React project"
-readme = "README.md"
+description = "apx is the toolkit for building Databricks Apps"
+readme = { file = "README.md", content-type = "text/markdown" }
 authors = [
     { name = "renardeinside", email = "polarpersonal@gmail.com" }
 ]
