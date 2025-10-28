@@ -144,16 +144,6 @@ async def stream_output(
     )
 
 
-def version_callback(value: bool):
-    """Callback for version option."""
-    from apx._version import version as apx_version
-    from rich import print
-
-    if value:
-        print(f"apx version: {apx_version}")
-        raise Exit(code=0)
-
-
 def is_uv_installed() -> bool:
     """Check if uv is installed on the system."""
     return shutil.which("uv") is not None

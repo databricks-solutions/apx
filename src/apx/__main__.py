@@ -4,7 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from dotenv import load_dotenv, set_key
 import jinja2
@@ -16,6 +16,7 @@ from typer import Argument, Exit, Option, Typer
 from databricks.sdk import WorkspaceClient
 
 from apx._version import version as apx_version
+from apx.cli.version import with_version
 from apx.dev import (
     DevManager,
     validate_databricks_credentials,
@@ -37,7 +38,6 @@ from apx.utils import (
     progress_spinner,
     random_name,
     run_subprocess,
-    version_callback,
 )
 
 
@@ -78,28 +78,14 @@ app = Typer(
 )
 
 templates_dir: Path = Path(str(resources.files("apx"))).joinpath("templates")
-jinja2_env = jinja2.Environment(loader=jinja2.FileSystemLoader(templates_dir))
-
-
-version_option: Any = Option(
-    None,
-    "--version",
-    callback=version_callback,
-    is_eager=True,
-    help="Show the version and exit.",
+jinja2_env: jinja2.Environment = jinja2.Environment(
+    loader=jinja2.FileSystemLoader(templates_dir)
 )
 
 
 @app.callback()
-def main(
-    version: bool = Option(
-        None,
-        "--version",
-        callback=version_callback,
-        is_eager=True,
-        help="Show the version and exit.",
-    ),
-):
+@with_version
+def main():
     """Project quickstarter CLI."""
     pass
 
@@ -110,6 +96,7 @@ def version():
 
 
 @app.command(name="init", help="Initialize a new project")
+@with_version
 def init(
     app_path: Annotated[
         Path | None,
@@ -157,7 +144,6 @@ def init(
             help="The layout to use. Will prompt if not provided",
         ),
     ] = None,
-    version: bool | None = version_option,
     apx_package: Annotated[
         str | None,
         Option(
@@ -583,6 +569,7 @@ def init(
 
 
 @app.command(name="build", help="Build the project (frontend + Python wheel)")
+@with_version
 def build(
     app_path: Annotated[
         Path | None,
@@ -597,7 +584,6 @@ def build(
         ),
     ] = Path(".build"),
     skip_ui_build: Annotated[bool, Option(help="Skip the UI build step")] = False,
-    version: bool | None = version_option,
 ):
     """
     Build the project by:
@@ -704,6 +690,7 @@ def build(
 
 
 @app.command(name="openapi", help="Generate OpenAPI schema and orval client")
+@with_version
 def openapi(
     app_dir: Annotated[
         Path | None,
@@ -721,7 +708,6 @@ def openapi(
             "--force", "-f", help="Force regeneration even if schema hasn't changed"
         ),
     ] = False,
-    version: bool | None = version_option,
 ):
     """Generate OpenAPI schema from FastAPI app and run orval to generate client."""
     if app_dir is None:
@@ -758,6 +744,7 @@ def _run_dev_server(
 
 
 @dev_app.command(name="start", help="Start development servers in detached mode")
+@with_version
 def dev_start(
     app_dir: Annotated[
         Path | None,
@@ -869,6 +856,7 @@ def dev_start(
 
 
 @dev_app.command(name="status", help="Check the status of development servers")
+@with_version
 def dev_status(
     app_dir: Annotated[
         Path | None,
@@ -887,6 +875,7 @@ def dev_status(
 
 
 @dev_app.command(name="stop", help="Stop development servers")
+@with_version
 def dev_stop(
     app_dir: Annotated[
         Path | None,
@@ -1050,6 +1039,7 @@ def dev_logs(
 
 
 @dev_app.command(name="check", help="Check the project code for errors")
+@with_version
 def dev_check(
     app_dir: Annotated[
         Path | None,
@@ -1057,7 +1047,6 @@ def dev_check(
             help="The path to the app. If not provided, current working directory will be used"
         ),
     ] = None,
-    version: bool | None = version_option,
 ):
     """Check the project code for errors."""
     if app_dir is None:
