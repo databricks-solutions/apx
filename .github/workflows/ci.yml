@@ -52,6 +52,11 @@ jobs:
               run: |
                   bun install
 
+            - name: Configure git for tests
+              run: |
+                  git config --global user.email "ci@github.com"
+                  git config --global user.name "GitHub CI"
+
             - name: Check Python formatting
               run: |
                   uv run ruff format --check .
