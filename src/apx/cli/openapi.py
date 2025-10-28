@@ -31,4 +31,3 @@ def openapi(
         app_dir = Path.cwd()
 
     run_openapi(app_dir, watch=watch, force=force)
-

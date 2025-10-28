@@ -1,9 +1,10 @@
+from importlib import resources
 import pytest
 import os
 from pathlib import Path
 from unittest.mock import patch
 from typer.testing import CliRunner
-from apx.__main__ import init
+from apx.cli.init import Layout, Template, init
 from collections.abc import Generator
 
 runner: CliRunner = CliRunner()
@@ -30,16 +31,16 @@ def common_caches(
 @pytest.mark.parametrize(
     "template,layout",
     [
-        ("essential", "basic"),
-        ("essential", "sidebar"),
-        ("stateful", "basic"),
-        ("stateful", "sidebar"),
+        (Template.essential, Layout.basic),
+        (Template.essential, Layout.sidebar),
+        (Template.stateful, Layout.basic),
+        (Template.stateful, Layout.sidebar),
     ],
 )
 def test_init_and_build_combinations(
     tmp_path: Path,
-    template: str,
-    layout: str,
+    template: Template,
+    layout: Layout,
 ):
     """
     Test that init works with different template and layout combinations.
@@ -47,35 +48,44 @@ def test_init_and_build_combinations(
     Uses a shared UV cache directory to speed up package installations.
     """
     # Create a unique directory for this test case
-    test_app_name = f"test-app-{template}-{layout}"
+    test_app_name = f"test-app-{template.value}-{layout.value}"
     app_path = tmp_path / test_app_name
     app_path.mkdir(parents=True, exist_ok=True)
 
     # Mock the Prompt.ask to return empty string (to skip profile setup)
     # and Confirm.ask to return False (to skip assistant setup when profile is skipped)
-    def mock_prompt_ask(*args, **kwargs):
+    def mock_prompt_ask(
+        *args,  # pyright:ignore[reportUnusedParameter,reportMissingParameterType, reportUnknownParameterType]
+        **kwargs,  # pyright:ignore[reportUnusedParameter,reportMissingParameterType, reportUnknownParameterType]
+    ):
         # Return empty string for profile prompt
         return ""
 
-    def mock_confirm_ask(*args, **kwargs):
+    def mock_confirm_ask(
+        *args,  # pyright:ignore[reportUnusedParameter,reportMissingParameterType, reportUnknownParameterType]
+        **kwargs,  # pyright:ignore[reportUnusedParameter,reportMissingParameterType, reportUnknownParameterType]
+    ):
         # Return False for assistant confirmation
         return False
 
+    current_apx_path: str = str(Path(str(resources.files("apx"))).parent.parent)
+
     # Patch the prompts to avoid interactive input during tests
     with (
-        patch("apx.__main__.Prompt.ask", side_effect=mock_prompt_ask),
-        patch("apx.__main__.Confirm.ask", side_effect=mock_confirm_ask),
+        patch("apx.cli.init.Prompt.ask", side_effect=mock_prompt_ask),
+        patch("apx.cli.init.Confirm.ask", side_effect=mock_confirm_ask),
     ):
         # Run init with all parameters passed by name (typer requirement)
-        init(
+        result = init(
             app_path=app_path,
             app_name=test_app_name,
-            template=template,  # type: ignore
-            profile=None,  # This will trigger prompting, but we mock it to return ""
-            assistant=None,  # This will trigger prompting, but we mock it to return False
-            layout=layout,  # type: ignore
-            version=None,
+            template=template,
+            assistant=None,
+            layout=layout,
+            apx_package=current_apx_path,
         )
+        if result:
+            assert result.exit_code == 0, "init should exit with code 0"
 
     # Verify that key directories and files were created
     app_slug = test_app_name.replace("-", "_")
@@ -98,7 +108,7 @@ def test_init_and_build_combinations(
     assert (app_path / ".build").exists(), ".build directory should exist"
 
     # Verify template-specific files
-    if template == "stateful":
+    if template == Template.stateful:
         # Check that stateful-specific backend files exist
         backend_path = app_path / "src" / app_slug / "backend"
         assert (backend_path / "runtime.py").exists(), (
@@ -106,7 +116,7 @@ def test_init_and_build_combinations(
         )
 
     # Verify layout-specific files
-    if layout == "sidebar":
+    if layout == Layout.sidebar:
         # Check that sidebar-specific components exist
         ui_components_path = app_path / "src" / app_slug / "ui" / "components" / "apx"
         assert (ui_components_path / "SidebarLayout.tsx").exists(), (

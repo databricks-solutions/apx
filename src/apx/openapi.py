@@ -177,8 +177,8 @@ def _generate_openapi_and_client(app_dir: Path, force: bool = False):
     try:
         with in_path(app_dir):
             metadata = get_project_metadata()
-            app_module_name = metadata["app-module"]
-            app_slug = metadata["app-slug"]
+            app_module_name = metadata.app_module
+            app_slug = metadata.app_slug
     except Exception as e:
         console.print(f"[red]❌ Failed to read project metadata: {e}[/red]")
         console.print(
@@ -233,8 +233,8 @@ async def _openapi_watch(app_dir: Path, logger: logging.Logger | None = None):
     try:
         with in_path(app_dir):
             metadata = get_project_metadata()
-            app_module_name = metadata["app-module"]
-            app_slug = metadata["app-slug"]
+            app_module_name = metadata.app_module
+            app_slug = metadata.app_slug
     except Exception as e:
         if logger:
             logger.error(f"Failed to read project metadata: {e}")

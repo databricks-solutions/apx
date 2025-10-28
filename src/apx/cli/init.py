@@ -200,6 +200,8 @@ def init(
         )
 
     # Normalize app name: convert to lowercase and replace spaces with dashes
+    assert isinstance(app_name, str), "app_name must be a string"  # make mypy happy
+
     app_name = app_name.lower().replace(" ", "-").replace("_", "-")
     # Validate that app_name only contains alphanumeric characters and dashes
     if not app_name.replace("-", "").isalnum():

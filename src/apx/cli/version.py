@@ -1,7 +1,7 @@
 import inspect
 from inspect import Parameter
 from functools import wraps
-from typing import Callable, TypeVar, Any
+from typing import Callable, TypeVar, Any, cast
 import typer
 
 T = TypeVar("T", bound=Callable[..., Any])  # pyright: ignore[reportExplicitAny]
@@ -17,6 +17,7 @@ def version_callback(value: bool) -> None:
         raise typer.Exit(code=0)
 
 
+# some dark magic happening in this function, so we need to disable type checking
 def with_version(func: T) -> T:
     """Decorator that adds a --version option (eager) to a Typer/Click command."""
     sig = inspect.signature(func)
@@ -51,5 +52,5 @@ def with_version(func: T) -> T:
         return func(*args, **kwargs)  # pyright: ignore[reportAny]
 
     # Make Typer "see" the modified signature
-    wrapper.__signature__ = new_sig  # pyright: ignore[reportAttributeAccessIssue]
-    return wrapper  # pyright: ignore[reportReturnType]
+    wrapper.__signature__ = new_sig  # type: ignore[attr-defined]  # pyright:ignore[reportAttributeAccessIssue]
+    return cast(T, wrapper)

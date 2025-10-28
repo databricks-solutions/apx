@@ -10,6 +10,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 from collections.abc import Generator
+from pydantic import BaseModel, Field
 from typing_extensions import override
 
 import jinja2
@@ -220,7 +221,11 @@ def process_template_directory(
         jinja2_env: Jinja2 environment for template rendering
     """
     # Get the templates root directory (parent of 'base' or 'addons')
-    templates_root = jinja2_env.loader.searchpath[0]  # type: ignore
+    assert isinstance(jinja2_env.loader, jinja2.FileSystemLoader), (
+        "Loader must be a FileSystemLoader"
+    )
+
+    templates_root = jinja2_env.loader.searchpath[0]
 
     # Calculate the relative path from templates root to source_dir
     source_rel_to_templates = source_dir.relative_to(templates_root)
@@ -257,12 +262,14 @@ def process_template_directory(
                 template: jinja2.Template = jinja2_env.get_template(template_path)
                 # Pass both app_name (for display) and app_slug (for module names/paths) to templates
                 target_path.write_text(
-                    template.render(app_name=app_name, app_slug=app_slug)
+                    template.render(  # pyright:ignore[reportUnknownMemberType]
+                        app_name=app_name, app_slug=app_slug
+                    )
                 )
                 if item.name == "logo.svg.jinja2":
                     app_letter = app_name[0].upper()
                     target_path.write_text(
-                        template.render(
+                        template.render(  # pyright:ignore[reportUnknownMemberType]
                             app_name=app_name, app_slug=app_slug, app_letter=app_letter
                         )
                     )
@@ -288,7 +295,15 @@ def run_subprocess(cmd: list[str], cwd: Path, error_msg: str) -> None:
         raise Exit(code=1)
 
 
-def get_project_metadata() -> dict[str, str]:
+class ProjectMetadata(BaseModel):
+    app_name: str = Field(description="The user-facing app name.", alias="app-name")
+    app_module: str = Field(
+        description="The internal app module name.", alias="app-module"
+    )
+    app_slug: str = Field(description="The internal app slug.", alias="app-slug")
+
+
+def get_project_metadata() -> ProjectMetadata:
     """Read the project metadata from pyproject.toml."""
     pyproject_path = Path.cwd() / "pyproject.toml"
     if not pyproject_path.exists():
@@ -296,7 +311,8 @@ def get_project_metadata() -> dict[str, str]:
         raise Exit(code=1)
     with open(pyproject_path, "rb") as f:
         data = tomllib.load(f)
-    return data["tool"]["apx"]["metadata"]
+
+    return ProjectMetadata.model_validate(data["tool"]["apx"]["metadata"])
 
 
 async def run_frontend(frontend_port: int):
