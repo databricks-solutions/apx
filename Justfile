@@ -13,7 +13,7 @@ types:
 check: lint types
 
 test:
-    uv run pytest tests/ -s -v --cov=src/apx
+    uv run pytest tests/ -s -v --cov=src/apx -n auto
 
 # add-commit-push with a message
 pm message:

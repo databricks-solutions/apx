@@ -118,6 +118,7 @@ def add_bun_dependencies(cwd: Path) -> None:
             "@tanstack/react-router",
             "@tanstack/react-query",
             "sonner",
+            "motion",  # for animated elements
         ],
         cwd=cwd,
         error_msg="Failed to install main dependencies",
@@ -146,6 +147,22 @@ def add_bun_dev_dependencies(cwd: Path) -> None:
         cwd=cwd,
         dev=True,
         error_msg="Failed to install dev dependencies",
+    )
+
+
+def add_shadcn_components(
+    cwd: Path, args: list[str], use_bun_runtime: bool = True
+) -> None:
+    base_cmd = ["bun", "x"]
+    if use_bun_runtime:
+        base_cmd.append("--bun")
+
+    base_cmd.extend(["shadcn@latest", "add", "--yes"])
+    base_cmd.extend(args)
+    run_subprocess(
+        base_cmd,
+        cwd=cwd,
+        error_msg=f"Failed to add shadcn with args: {', '.join(args)}",
     )
 
 
@@ -376,47 +393,23 @@ def init(
         "🎨 Bootstrapping shadcn components...", "✅ Shadcn components added"
     ):
         # Add button component
-        run_subprocess(
-            ["bun", "x", "--bun", "shadcn@latest", "add", "button", "card", "--yes"],
-            cwd=app_path,
-            error_msg="Failed to add button component",
-        )
+        add_shadcn_components(app_path, ["button", "card"])
 
         # add bubble background component
-        run_subprocess(
+        add_shadcn_components(
+            app_path,
             [
-                "bun",
-                "x",
-                "--bun",
-                "shadcn@latest",
-                "add",
                 "@animate-ui/components-backgrounds-bubble",
                 "-p",
                 f"src/{app_slug}/ui/components/backgrounds/bubble.tsx",
-                "--yes",
             ],
-            cwd=app_path,
-            error_msg="Failed to add bubble background component",
         )
 
         if layout == "sidebar":
             # install necessary components for sidebar layout
-            run_subprocess(
-                [
-                    "bun",
-                    "x",
-                    "--bun",
-                    "shadcn@latest",
-                    "add",
-                    "avatar",
-                    "sidebar",
-                    "separator",
-                    "skeleton",
-                    "badge",
-                    "--yes",
-                ],
-                cwd=app_path,
-                error_msg="Failed to add avatar and sidebar components",
+            add_shadcn_components(
+                app_path,
+                ["avatar", "sidebar", "separator", "skeleton", "badge"],
             )
 
     # === PHASE 4: Initializing git ===
