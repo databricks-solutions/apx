@@ -20,7 +20,8 @@ Start all development servers (backend, frontend, and OpenAPI watcher) in detach
 uv run apx dev start
 ```
 
-All servers run in the background with logs written to `~/.apx/{app_id}/logs/`.
+This will start an apx development server, which in it's turn runs backend, frontend and OpenAPI watcher. 
+All servers run in the background, with logs kept in-memory of the apx dev server.
 
 ### 📊 Monitoring & Logs
 
@@ -29,7 +30,7 @@ All servers run in the background with logs written to `~/.apx/{app_id}/logs/`.
 uv run apx dev logs
 
 # Stream logs in real-time
-uv run apx dev tail
+uv run apx dev logs -f
 
 # Check server status
 uv run apx dev status

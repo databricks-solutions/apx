@@ -1048,9 +1048,14 @@ def dev_check(
     if app_dir is None:
         app_dir = Path.cwd()
 
+    console.print(
+        "[cyan]🔍 Checking project code for error, starting with TypeScript...[/cyan]"
+    )
+    console.print("[dim]Running 'bun run tsc -b --incremental'[/dim]")
+
     # run tsc to check for errors
     result = subprocess.run(
-        ["bun", "run", "tsc", "-b"],
+        ["bun", "run", "tsc", "-b", "--incremental"],
         cwd=app_dir,
         capture_output=True,
         text=True,
@@ -1062,6 +1067,10 @@ def dev_check(
         raise Exit(code=1)
 
     console.print("[green]✅ TypeScript compilation succeeded[/green]")
+    console.print()
+
+    console.print("[cyan]🔍 Checking Python code for errors...[/cyan]")
+    console.print("[dim]Running 'uv run basedpyright --level error'[/dim]")
 
     # run pyright to check for errors
     result = subprocess.run(
