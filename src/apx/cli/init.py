@@ -531,10 +531,24 @@ def init(
                 process_template_directory(
                     rules_addon, app_path, app_name, app_slug, jinja2_env
                 )
-            else:
+            elif assistant == Assistant.claude:
+                progress.update(task, description="🤖 Copying Claude rules...")
+                rules_addon = templates_dir / "addons/claude"
+                process_template_directory(
+                    rules_addon, app_path, app_name, app_slug, jinja2_env
+                )
+            elif assistant == Assistant.codex:
+                progress.update(task, description="🤖 Copying Codex rules...")
+                rules_addon = templates_dir / "addons/codex"
+                process_template_directory(
+                    rules_addon, app_path, app_name, app_slug, jinja2_env
+                )
+
                 console.print(
-                    f"""[yellow]⏭️  Skipping assistant rules setup for {assistant}.
-                Please add them manually to your editor of choice.[/yellow]"""
+                    "[yellow]Please note that Codex mcp config is not supported yet.[/]"
+                )
+                console.print(
+                    "[yellow]Follow this guide to set it up manually: https://ui.shadcn.com/docs/mcp#codex [/]"
                 )
 
         console.print(

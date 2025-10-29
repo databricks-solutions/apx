@@ -1,0 +1,55 @@
+## Project Structure
+Full-stack app: `src/{{app_name}}/ui/` (React + Vite) and `src/{{app_name}}/backend/` (FastAPI). Backend serves frontend at `/` and API at `/api`. API client auto-generated via `orval`.
+
+## Package Management
+- **Frontend:** Always use `bun` (never `npm`)
+- **Python:** Always use `uv` (never `pip`)
+
+## Models & API
+- **3-model pattern:** `Entity` (DB), `EntityIn` (input), `EntityOut` (output)
+- **API routes must have:** `response_model` and `operation_id` for client generation
+
+## Frontend Rules
+- **Routing:** `@tanstack/react-router` (routes in `src/{{app_name}}/ui/routes/`)
+- **Data fetching:** Always use `useXSuspense` hooks with `Suspense` and `Skeleton` components
+- **Pattern:** Render static elements immediately, fetch API data with suspense
+- **Components:** Use shadcn/ui, add to `src/{{app_name}}/ui/components/`
+- **Data access:** Use `selector()` function for clean destructuring (e.g., `const {data: profile} = useProfileSuspense(selector())`)
+
+## Development Commands
+
+**Start dev servers** (backend, frontend, OpenAPI watcher):
+```bash
+uv run apx dev start
+```
+
+**Check status** (shows running servers and ports):
+```bash
+uv run apx dev status
+```
+
+**View logs** (stored in `~/.apx/{app_id}/logs/`):
+```bash
+uv run apx dev logs              # All logs
+uv run apx dev logs --ui         # Frontend only
+uv run apx dev logs --backend    # Backend only
+uv run apx dev tail              # Live stream
+```
+
+**Stop servers:**
+```bash
+uv run apx dev stop
+```
+
+**Build for production:**
+```bash
+uv run apx build
+```
+
+**OpenAPI generation** (auto-runs with `dev start`):
+```bash
+uv run apx openapi               # Generate once
+uv run apx openapi --watch       # Watch mode
+```
+
+**Note:** The OpenAPI watcher runs automatically with `dev start`. Manual generation is rarely needed.
