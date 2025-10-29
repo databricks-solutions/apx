@@ -130,15 +130,17 @@ The `dev` command group manages development servers in detached mode:
 uv run apx dev start
 ```
 
-Starts backend, frontend, and OpenAPI watcher in detached mode. All servers run in the background with logs written to `~/.apx/{app_id}/logs/`.
+Starts backend, frontend, and OpenAPI watcher in detached mode.
 
 Options:
 
 - `--frontend-port`: Frontend port (default: 5173)
 - `--backend-port`: Backend port (default: 8000)
-- `--backend-host`: Backend host (default: 0.0.0.0)
+- `--host`: Host for dev, frontend, and backend servers (default: localhost)
 - `--obo/--no-obo`: Enable/disable On-Behalf-Of header (default: enabled)
 - `--openapi/--no-openapi`: Enable/disable OpenAPI watcher (default: enabled)
+- `--max-retries`: Maximum number of retry attempts for processes (default: 10)
+- `--watch`: Start servers and tail logs until Ctrl+C, then stop all servers
 
 #### Check Server Status
 
@@ -209,7 +211,6 @@ Note: you don't need to run this command manually, watcher will run automaticall
 ## 📜 Project todos
 
 - [ ] Add chat template
-- [ ] Add MCP template
 - [ ] Add chat template
 - [ ] MCP of apx commands
 - [ ] Add a way to add a custom template
