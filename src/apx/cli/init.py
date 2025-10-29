@@ -118,6 +118,7 @@ def add_bun_dependencies(cwd: Path) -> None:
             "@tanstack/react-router",
             "@tanstack/react-query",
             "sonner",
+            "@radix-ui/react-slot",
             "motion",  # for animated elements
         ],
         cwd=cwd,
@@ -155,7 +156,7 @@ def add_shadcn_components(
     args: list[str],
 ) -> None:
     base_cmd = ["bun", "x", "--bun"]
-    base_cmd.extend(["shadcn@latest", "add", "--yes", *args])
+    base_cmd.extend(["shadcn@latest", "add", *args, "--yes", "--overwrite"])
     run_subprocess(base_cmd, cwd=cwd, error_msg="Failed to add shadcn components")
 
 
@@ -386,23 +387,21 @@ def init(
         "🎨 Bootstrapping shadcn components...", "✅ Shadcn components added"
     ):
         # Add button component
-        add_shadcn_components(app_path, ["button", "card"])
+        add_shadcn_components(app_path, ["button"])
 
-        # add bubble background component
-        add_shadcn_components(
-            app_path,
-            [
-                "@animate-ui/components-backgrounds-bubble",
-                "-p",
-                f"src/{app_slug}/ui/components/backgrounds/bubble.tsx",
-            ],
-        )
-
-        if layout == "sidebar":
+        if layout == Layout.sidebar:
             # install necessary components for sidebar layout
             add_shadcn_components(
                 app_path,
-                ["avatar", "sidebar", "separator", "skeleton", "badge"],
+                [
+                    "avatar",
+                    "sidebar",
+                    "separator",
+                    "skeleton",
+                    "badge",
+                    "sidebar",
+                    "card",
+                ],
             )
 
     # === PHASE 4: Initializing git ===

@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import psutil
+import socket
 import subprocess
 import sys
 import time
@@ -17,7 +18,6 @@ import keyring
 from databricks.sdk import WorkspaceClient
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, Field
 from rich.table import Table
 from starlette.middleware.base import BaseHTTPMiddleware
 from tenacity import (
@@ -29,6 +29,8 @@ from tenacity import (
 from typer import Exit
 import watchfiles
 import uvicorn
+from apx.cli.dev.models import ProcessInfo, ProjectConfig
+from apx.cli.dev.client import DevServerClient
 from apx.utils import (
     console,
     PrefixedLogHandler,
@@ -39,6 +41,44 @@ from apx import __version__
 
 # note: header name must be lowercase and with - symbols
 ACCESS_TOKEN_HEADER_NAME = "x-forwarded-access-token"
+
+
+# === Port Finding Utilities ===
+
+
+def is_port_available(port: int, host: str = "127.0.0.1") -> bool:
+    """Check if a port is available for binding.
+
+    Args:
+        port: Port number to check
+        host: Host to check on (default: 127.0.0.1)
+
+    Returns:
+        True if port is available, False otherwise
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((host, port))
+            return True
+    except OSError:
+        return False
+
+
+def find_available_port(start: int, end: int, host: str = "127.0.0.1") -> int | None:
+    """Find an available port in the given range.
+
+    Args:
+        start: Start of port range (inclusive)
+        end: End of port range (inclusive)
+        host: Host to check on (default: 127.0.0.1)
+
+    Returns:
+        Available port number or None if no port is available
+    """
+    for port in range(start, end + 1):
+        if is_port_available(port, host):
+            return port
+    return None
 
 
 # === Retry Helpers ===
@@ -59,57 +99,34 @@ def log_retry_attempt(retry_state: RetryCallState) -> None:
         )
 
 
-# === Pydantic Models for Project Configuration ===
+# === Project Configuration Utilities ===
 
 
-class ProcessInfo(BaseModel):
-    """Information about a running process."""
+def read_project_config(file_path: Path) -> ProjectConfig:
+    """Read project config from file.
 
-    pid: int
-    port: int | None = None
-    created_at: str = Field(default_factory=lambda: time.strftime("%Y-%m-%d %H:%M:%S"))
+    Args:
+        file_path: Path to project.json
+
+    Returns:
+        ProjectConfig instance
+    """
+    if not file_path.exists():
+        raise FileNotFoundError(f"Project config not found at {file_path}")
+
+    data = json.loads(file_path.read_text())
+    return ProjectConfig(**data)
 
 
-class ProjectConfig(BaseModel):
-    """Configuration stored in .apx/project.json."""
+def write_project_config(file_path: Path, config: ProjectConfig) -> None:
+    """Write project config to file.
 
-    token_id: str | None = None
-    dev_server_pid: int | None = None
-    dev_server_port: int | None = None
-    processes: dict[str, ProcessInfo] = Field(default_factory=dict)
-
-    @classmethod
-    def read_from_file(cls, file_path: Path) -> "ProjectConfig":
-        """Read project config from file.
-
-        Args:
-            file_path: Path to project.json
-
-        Returns:
-            ProjectConfig instance
-        """
-        if not file_path.exists():
-            raise FileNotFoundError(f"Project config not found at {file_path}")
-
-        data = json.loads(file_path.read_text())
-        return cls(**data)
-
-    def write_to_file(self, file_path: Path):
-        """Write project config to file.
-
-        Args:
-            file_path: Path to project.json
-        """
-        ensure_dir(file_path.parent)
-        file_path.write_text(self.model_dump_json(indent=2))
-
-    def update_to_file(self, file_path: Path):
-        """Update project config in file (convenience method).
-
-        Args:
-            file_path: Path to project.json
-        """
-        self.write_to_file(file_path)
+    Args:
+        file_path: Path to project.json
+        config: ProjectConfig instance to write
+    """
+    ensure_dir(file_path.parent)
+    file_path.write_text(config.model_dump_json(indent=2))
 
 
 @contextlib.contextmanager
@@ -687,13 +704,18 @@ def save_token_id(app_dir: Path, token_id: str):
     ensure_dir(app_dir / ".apx")
 
     try:
-        config = ProjectConfig.read_from_file(project_json_path)
+        config = read_project_config(project_json_path)
     except (FileNotFoundError, Exception):
         # If file doesn't exist or is corrupted, create new config
         config = ProjectConfig()
 
-    config.token_id = token_id
-    config.write_to_file(project_json_path)
+    config = ProjectConfig(
+        token_id=token_id,
+        dev_server_pid=config.dev_server_pid,
+        dev_server_port=config.dev_server_port,
+        processes=config.processes,
+    )
+    write_project_config(project_json_path, config)
 
 
 def get_token_id(app_dir: Path) -> str | None:
@@ -709,7 +731,7 @@ def get_token_id(app_dir: Path) -> str | None:
 
     if project_json_path.exists():
         try:
-            config = ProjectConfig.read_from_file(project_json_path)
+            config = read_project_config(project_json_path)
             return config.token_id
         except Exception:
             pass
@@ -886,20 +908,27 @@ class DevManager:
 
         if self.project_json_path.exists():
             try:
-                return ProjectConfig.read_from_file(self.project_json_path)
+                return read_project_config(self.project_json_path)
             except Exception:
                 pass
 
         # Create new config
         config = ProjectConfig()
-        config.write_to_file(self.project_json_path)
+        write_project_config(self.project_json_path, config)
         return config
 
     def _save_process_pid(self, name: str, pid: int, port: int | None = None):
         """Save a process PID to project.json."""
         config = self._get_or_create_config()
-        config.processes[name] = ProcessInfo(pid=pid, port=port)
-        config.write_to_file(self.project_json_path)
+        processes = dict(config.processes)
+        processes[name] = ProcessInfo(pid=pid, port=port)
+        config = ProjectConfig(
+            token_id=config.token_id,
+            dev_server_pid=config.dev_server_pid,
+            dev_server_port=config.dev_server_port,
+            processes=processes,
+        )
+        write_project_config(self.project_json_path, config)
 
     def _get_process_info(self, name: str) -> tuple[int, int | None] | None:
         """Get process PID and port from project.json. Returns (pid, port) or None."""
@@ -907,7 +936,7 @@ class DevManager:
             return None
 
         try:
-            config = ProjectConfig.read_from_file(self.project_json_path)
+            config = read_project_config(self.project_json_path)
             if name in config.processes:
                 proc_info = config.processes[name]
                 return (proc_info.pid, proc_info.port)
@@ -922,7 +951,7 @@ class DevManager:
             return []
 
         try:
-            config = ProjectConfig.read_from_file(self.project_json_path)
+            config = read_project_config(self.project_json_path)
             return [
                 (name, proc_info.pid, proc_info.port)
                 for name, proc_info in config.processes.items()
@@ -936,10 +965,17 @@ class DevManager:
             return
 
         try:
-            config = ProjectConfig.read_from_file(self.project_json_path)
-            if name in config.processes:
-                del config.processes[name]
-                config.write_to_file(self.project_json_path)
+            config = read_project_config(self.project_json_path)
+            processes = dict(config.processes)
+            if name in processes:
+                del processes[name]
+                config = ProjectConfig(
+                    token_id=config.token_id,
+                    dev_server_pid=config.dev_server_pid,
+                    dev_server_port=config.dev_server_port,
+                    processes=processes,
+                )
+                write_project_config(self.project_json_path, config)
         except Exception:
             pass
 
@@ -980,6 +1016,43 @@ class DevManager:
             )
             raise Exit(code=1)
 
+        # Find available ports
+        console.print("[cyan]🔍 Finding available ports...[/cyan]")
+
+        # Find dev server port (8040-8100)
+        available_dev_server_port = find_available_port(8040, 8100)
+        if available_dev_server_port is None:
+            console.print(
+                "[red]❌ No available ports found for dev server in range 8040-8100[/red]"
+            )
+            raise Exit(code=1)
+
+        # Find frontend/vite server port (5173-5200)
+        available_frontend_port = find_available_port(5173, 5200)
+        if available_frontend_port is None:
+            console.print(
+                "[red]❌ No available ports found for frontend server in range 5173-5200[/red]"
+            )
+            raise Exit(code=1)
+
+        # Find backend/app server port (8000-8040)
+        available_backend_port = find_available_port(8000, 8040)
+        if available_backend_port is None:
+            console.print(
+                "[red]❌ No available ports found for backend server in range 8000-8040[/red]"
+            )
+            raise Exit(code=1)
+
+        # Use the found ports instead of the provided/default values
+        dev_server_port = available_dev_server_port
+        frontend_port = available_frontend_port
+        backend_port = available_backend_port
+
+        console.print(
+            f"[green]✓[/green] Found available ports - Dev: {dev_server_port}, Frontend: {frontend_port}, Backend: {backend_port}"
+        )
+        console.print()
+
         console.print(
             "[bold chartreuse1]🚀 Starting development server in detached mode...[/bold chartreuse1]"
         )
@@ -1013,43 +1086,42 @@ class DevManager:
         )
 
         # Save dev server info
-        config.dev_server_pid = dev_server_proc.pid
-        config.dev_server_port = dev_server_port
-        config.write_to_file(self.project_json_path)
+        config = ProjectConfig(
+            token_id=config.token_id,
+            dev_server_pid=dev_server_proc.pid,
+            dev_server_port=dev_server_port,
+            processes=config.processes,
+        )
+        write_project_config(self.project_json_path, config)
 
         console.print(f"[cyan]✓[/cyan] Dev server started (PID: {dev_server_proc.pid})")
         console.print()
 
         # Wait a moment for server to start
-        import time
-
         time.sleep(2)
 
-        # Send start request to dev server
-        import requests
+        # Send start request to dev server using the client
+        from apx.cli.dev.models import ActionRequest
+
+        client = DevServerClient(f"http://localhost:{dev_server_port}")
 
         try:
-            response = requests.post(
-                f"http://localhost:{dev_server_port}/actions/start",
-                json={
-                    "frontend_port": frontend_port,
-                    "backend_port": backend_port,
-                    "backend_host": backend_host,
-                    "obo": obo,
-                    "openapi": openapi,
-                    "max_retries": max_retries,
-                },
-                timeout=5,
+            request = ActionRequest(
+                frontend_port=frontend_port,
+                backend_port=backend_port,
+                backend_host=backend_host,
+                obo=obo,
+                openapi=openapi,
+                max_retries=max_retries,
             )
+            response = client.start(request)
 
-            if response.status_code == 200:
+            if response.status == "success":
                 console.print(
                     "[bold green]✨ Development servers started successfully![/bold green]"
                 )
             else:
-                console.print(
-                    f"[yellow]⚠️  Warning: Dev server responded with status {response.status_code}[/yellow]"
-                )
+                console.print(f"[yellow]⚠️  Warning: {response.message}[/yellow]")
         except Exception as e:
             console.print(
                 f"[yellow]⚠️  Warning: Could not connect to dev server: {e}[/yellow]"
@@ -1081,77 +1153,67 @@ class DevManager:
             console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
             return
 
-        # Query dev server for status
-        import requests
+        # Query dev server for status using the client
+        client = DevServerClient(f"http://localhost:{config.dev_server_port}")
 
         try:
-            response = requests.get(
-                f"http://localhost:{config.dev_server_port}/status",
-                timeout=5,
+            status_data = client.status()
+
+            # Create a status table
+            table = Table(
+                title="Development Server Status",
+                show_header=True,
+                header_style="bold magenta",
+            )
+            table.add_column("Process", style="cyan", width=12)
+            table.add_column("Status", justify="center")
+            table.add_column("Port", justify="right", style="green")
+
+            # Dev server row
+            table.add_row(
+                "Dev Server",
+                "[green]●[/green] Running",
+                str(config.dev_server_port),
             )
 
-            if response.status_code == 200:
-                status_data = response.json()
+            # Frontend row
+            frontend_status = (
+                "[green]●[/green] Running"
+                if status_data.frontend_running
+                else "[red]●[/red] Stopped"
+            )
+            table.add_row(
+                "Frontend",
+                frontend_status,
+                str(status_data.frontend_port),
+            )
 
-                # Create a status table
-                table = Table(
-                    title="Development Server Status",
-                    show_header=True,
-                    header_style="bold magenta",
-                )
-                table.add_column("Process", style="cyan", width=12)
-                table.add_column("Status", justify="center")
-                table.add_column("Port", justify="right", style="green")
+            # Backend row
+            backend_status = (
+                "[green]●[/green] Running"
+                if status_data.backend_running
+                else "[red]●[/red] Stopped"
+            )
+            table.add_row(
+                "Backend",
+                backend_status,
+                str(status_data.backend_port),
+            )
 
-                # Dev server row
-                table.add_row(
-                    "Dev Server",
-                    "[green]●[/green] Running",
-                    str(config.dev_server_port),
-                )
+            # OpenAPI row
+            openapi_status = (
+                "[green]●[/green] Running"
+                if status_data.openapi_running
+                else "[red]●[/red] Stopped"
+            )
+            table.add_row("OpenAPI", openapi_status, "-")
 
-                # Frontend row
-                frontend_status = (
-                    "[green]●[/green] Running"
-                    if status_data["frontend_running"]
-                    else "[red]●[/red] Stopped"
-                )
-                table.add_row(
-                    "Frontend",
-                    frontend_status,
-                    str(status_data["frontend_port"]),
-                )
-
-                # Backend row
-                backend_status = (
-                    "[green]●[/green] Running"
-                    if status_data["backend_running"]
-                    else "[red]●[/red] Stopped"
-                )
-                table.add_row(
-                    "Backend",
-                    backend_status,
-                    str(status_data["backend_port"]),
-                )
-
-                # OpenAPI row
-                openapi_status = (
-                    "[green]●[/green] Running"
-                    if status_data["openapi_running"]
-                    else "[red]●[/red] Stopped"
-                )
-                table.add_row("OpenAPI", openapi_status, "-")
-
-                console.print(table)
-                console.print()
-                console.print(f"[dim]Dev Server PID: {config.dev_server_pid}[/dim]")
-                console.print(
-                    "[dim]Use 'apx dev logs' to view logs or 'apx dev logs -f' to stream continuously.[/dim]"
-                )
-            else:
-                console.print(
-                    f"[yellow]⚠️  Dev server responded with status {response.status_code}[/yellow]"
-                )
+            console.print(table)
+            console.print()
+            console.print(f"[dim]Dev Server PID: {config.dev_server_pid}[/dim]")
+            console.print(
+                "[dim]Use 'apx dev logs' to view logs or 'apx dev logs -f' to stream continuously.[/dim]"
+            )
         except Exception as e:
             console.print(f"[yellow]⚠️  Could not connect to dev server: {e}[/yellow]")
 
@@ -1171,14 +1233,11 @@ class DevManager:
 
         # Try to send stop request to dev server first
         if config.dev_server_port and self._is_process_running(config.dev_server_pid):
-            import requests
+            client = DevServerClient(f"http://localhost:{config.dev_server_port}")
 
             try:
-                response = requests.post(
-                    f"http://localhost:{config.dev_server_port}/actions/stop",
-                    timeout=5,
-                )
-                if response.status_code == 200:
+                response = client.stop()
+                if response.status == "success":
                     console.print("[green]✓[/green] Stopped all servers via API")
             except Exception:
                 # If API fails, we'll kill the process below
@@ -1231,9 +1290,13 @@ class DevManager:
             )
 
         # Clear dev server info
-        config.dev_server_pid = None
-        config.dev_server_port = None
-        config.write_to_file(self.project_json_path)
+        config = ProjectConfig(
+            token_id=config.token_id,
+            dev_server_pid=None,
+            dev_server_port=None,
+            processes=config.processes,
+        )
+        write_project_config(self.project_json_path, config)
 
         console.print()
         console.print(
@@ -1276,7 +1339,9 @@ class DevManager:
 
         # Determine process filter
         # Note: app_only is handled client-side because it's a subset of backend logs
-        process_filter = "all"
+        from typing import Literal
+
+        process_filter: Literal["frontend", "backend", "openapi", "all"] = "all"
         if ui_only and not backend_only and not openapi_only and not app_only:
             process_filter = "frontend"
         elif backend_only and not ui_only and not openapi_only and not app_only:
@@ -1287,63 +1352,56 @@ class DevManager:
             # For app-only, we need backend logs and will filter client-side
             process_filter = "backend"
 
-        # Connect to SSE endpoint
-        import requests
-        import json
+        # Connect to SSE endpoint using the client
+        from apx.cli.dev.client import StreamEvent
 
-        params: dict[str, str | int] = {"process": process_filter}
-        if duration_seconds:
-            params["duration"] = str(duration_seconds)
+        client = DevServerClient(f"http://localhost:{config.dev_server_port}")
 
         log_count = 0  # Initialize early to avoid unbound error
 
         try:
-            response = requests.get(
-                f"http://localhost:{config.dev_server_port}/logs",
-                params=params,
-                stream=True,
-                timeout=None,
-            )
+            with client.stream_logs(
+                duration=duration_seconds,
+                process=process_filter,
+            ) as log_stream:
+                start_time = time.time()
 
-            start_time = time.time()
+                for item in log_stream:
+                    # Check timeout
+                    if (
+                        timeout_seconds
+                        and (time.time() - start_time) >= timeout_seconds
+                    ):
+                        if follow:
+                            console.print(
+                                "\n[dim]Timeout reached, stopping stream.[/dim]"
+                            )
+                        break
 
-            for line in response.iter_lines():
-                # Check timeout
-                if timeout_seconds and (time.time() - start_time) >= timeout_seconds:
-                    if follow:
-                        console.print("\n[dim]Timeout reached, stopping stream.[/dim]")
-                    break
-
-                if line:
-                    line_str = line.decode("utf-8")
-
-                    # Check for sentinel event marking end of buffered logs
-                    if line_str.startswith("event: buffered_done"):
-                        # If not following, we're done after buffered logs
+                    # Handle sentinel event for end of buffered logs
+                    if item == StreamEvent.BUFFERED_DONE:
                         if not follow:
+                            # Stop streaming after buffered logs if not following
                             break
-                        # If following, continue to stream new logs
+                        # Otherwise, continue to stream new logs
                         continue
 
-                    if line_str.startswith("data: "):
-                        # Parse SSE data
-                        data_str = line_str[6:]  # Remove "data: " prefix
-                        try:
-                            log_entry = json.loads(data_str)
+                    # Must be a LogEntry at this point
+                    from apx.cli.dev.models import LogEntry
 
-                            # Client-side filtering for app-only logs
-                            if app_only:
-                                # Only show backend logs that have "APP | " prefix
-                                if log_entry.get("process_name") != "backend":
-                                    continue
-                                content = log_entry.get("content", "")
-                                if not content.startswith("APP | "):
-                                    continue
+                    if not isinstance(item, LogEntry):
+                        continue
 
-                            self._print_log_entry(log_entry, raw_output=raw_output)
-                            log_count += 1
-                        except json.JSONDecodeError:
-                            pass
+                    # Client-side filtering for app-only logs
+                    if app_only:
+                        # Only show backend logs that have "APP | " prefix
+                        if item.process_name != "backend":
+                            continue
+                        if not item.content.startswith("APP | "):
+                            continue
+
+                    self._print_log_entry(item.model_dump(), raw_output=raw_output)
+                    log_count += 1
 
         except KeyboardInterrupt:
             if follow:
