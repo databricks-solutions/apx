@@ -1,6 +1,6 @@
 {
   "svg.preview.background": "dark-transparent",
-  "python.testing.pytestArgs": ["tests", "-v"],
+  "python.testing.pytestArgs": ["tests", "-v", "-s"],
   "python.testing.unittestEnabled": false,
   "python.testing.pytestEnabled": true
 }

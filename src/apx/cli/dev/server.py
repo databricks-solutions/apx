@@ -12,26 +12,14 @@ from typing_extensions import override
 
 from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 
 from apx.cli.dev.manager import (
     run_backend,
     run_frontend_with_logging,
     run_openapi_with_logging,
 )
+from apx.cli.dev.models import ActionRequest, ActionResponse, LogEntry, StatusResponse
 from apx.utils import ProjectMetadata, get_project_metadata
-
-
-# === Log Entry Model ===
-
-
-class LogEntry(BaseModel):
-    """Strongly typed log entry model."""
-
-    timestamp: str
-    level: str
-    process_name: str
-    content: str
 
 
 LogBuffer: TypeAlias = deque[LogEntry]
@@ -56,37 +44,6 @@ class ServerState:
 
 
 state = ServerState()
-
-
-# === Pydantic Models ===
-
-
-class ActionRequest(BaseModel):
-    """Request model for action endpoints."""
-
-    frontend_port: int = 5173
-    backend_port: int = 8000
-    backend_host: str = "0.0.0.0"
-    obo: bool = True
-    openapi: bool = True
-    max_retries: int = 10
-
-
-class ActionResponse(BaseModel):
-    """Response model for action endpoints."""
-
-    status: Literal["success", "error"]
-    message: str
-
-
-class StatusResponse(BaseModel):
-    """Response model for status endpoint."""
-
-    frontend_running: bool
-    backend_running: bool
-    openapi_running: bool
-    frontend_port: int
-    backend_port: int
 
 
 # === Logging Setup ===

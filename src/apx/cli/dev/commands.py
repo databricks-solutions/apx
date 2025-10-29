@@ -238,23 +238,20 @@ def dev_restart(
 
     console.print("[bold yellow]🔄 Restarting development servers...[/bold yellow]")
 
-    # Send restart request to dev server
-    import requests
+    # Send restart request to dev server using the client
+    from apx.cli.dev.client import DevServerClient
+
+    client = DevServerClient(f"http://localhost:{config.dev_server_port}", timeout=10.0)
 
     try:
-        response = requests.post(
-            f"http://localhost:{config.dev_server_port}/actions/restart",
-            timeout=10,
-        )
+        response = client.restart()
 
-        if response.status_code == 200:
+        if response.status == "success":
             console.print(
                 "[bold green]✨ Development servers restarted successfully![/bold green]"
             )
         else:
-            console.print(
-                f"[yellow]⚠️  Warning: Dev server responded with status {response.status_code}[/yellow]"
-            )
+            console.print(f"[yellow]⚠️  Warning: {response.message}[/yellow]")
     except Exception as e:
         console.print(f"[red]❌ Could not connect to dev server: {e}[/red]")
         raise Exit(code=1)
