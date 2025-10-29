@@ -1,9 +1,16 @@
-## Project Structure
-Full-stack app: `src/{{app_name}}/ui/` (React + Vite) and `src/{{app_name}}/backend/` (FastAPI). Backend serves frontend at `/` and API at `/api`. API client auto-generated via `orval`.
+# Do's and Don'ts
 
 ## Package Management
 - **Frontend:** Always use `bun` (never `npm`)
 - **Python:** Always use `uv` (never `pip`)
+
+## Component Management
+- **Adding components:** When adding a new component via CLI command, always add `--yes` flag to skip confirmation
+- **Component location:** If component was added to a wrong location (e.g. stored into `src/components` instead of `src/{{app_name}}/ui/components`), move it to the proper folder
+- **Component organization:** Prefer grouping components by functionality rather than by file type (e.g. `src/{{app_name}}/ui/components/chat/`)
+
+## Project Structure
+Full-stack app: `src/{{app_name}}/ui/` (React + Vite) and `src/{{app_name}}/backend/` (FastAPI). Backend serves frontend at `/` and API at `/api`. API client auto-generated via `orval`.
 
 ## Models & API
 - **3-model pattern:** `Entity` (DB), `EntityIn` (input), `EntityOut` (output)
