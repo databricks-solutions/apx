@@ -18,8 +18,13 @@ from apx.cli.dev.manager import (
     run_frontend_with_logging,
     run_openapi_with_logging,
 )
-from apx.cli.dev.models import ActionRequest, ActionResponse, LogEntry, StatusResponse
-from apx.utils import ProjectMetadata, get_project_metadata
+from apx.cli.dev.models import (
+    ActionRequest,
+    ActionResponse,
+    LogEntry,
+    PortsResponse,
+    StatusResponse,
+)
 
 
 LogBuffer: TypeAlias = deque[LogEntry]
@@ -37,7 +42,7 @@ class ServerState:
         self.app_dir: Path | None = None
         self.frontend_port: int = 5173
         self.backend_port: int = 8000
-        self.backend_host: str = "0.0.0.0"
+        self.host: str = "localhost"
         self.obo: bool = True
         self.openapi_enabled: bool = True
         self.max_retries: int = 10
@@ -250,6 +255,15 @@ def create_dev_server(app_dir: Path) -> FastAPI:
             backend_port=state.backend_port,
         )
 
+    @app.get("/ports", response_model=PortsResponse)
+    async def get_ports():
+        """Get the frontend and backend ports."""
+        return PortsResponse(
+            frontend_port=state.frontend_port,
+            backend_port=state.backend_port,
+            host=state.host,
+        )
+
     @app.post("/actions/start", response_model=ActionResponse)
     async def start_servers(request: ActionRequest) -> ActionResponse:
         """Start all development servers."""
@@ -267,13 +281,15 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         # Store configuration
         state.frontend_port = request.frontend_port
         state.backend_port = request.backend_port
-        state.backend_host = request.backend_host
+        state.host = request.host
         state.obo = request.obo
         state.openapi_enabled = request.openapi
         state.max_retries = request.max_retries
 
         # Get app module name
         if state.app_dir:
+            from apx.utils import get_project_metadata, ProjectMetadata
+
             metadata: ProjectMetadata = get_project_metadata()
             app_module_name: str = metadata.app_module
         else:
@@ -295,7 +311,7 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 run_backend_task(
                     state.app_dir,
                     app_module_name,
-                    request.backend_host,
+                    request.host,
                     request.backend_port,
                     request.obo,
                     None,  # log_file no longer used
@@ -361,7 +377,7 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         request = ActionRequest(
             frontend_port=state.frontend_port,
             backend_port=state.backend_port,
-            backend_host=state.backend_host,
+            host=state.host,
             obo=state.obo,
             openapi=state.openapi_enabled,
             max_retries=state.max_retries,

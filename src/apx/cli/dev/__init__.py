@@ -4,8 +4,9 @@ from apx.cli.dev.client import DevServerClient, StreamEvent
 from apx.cli.dev.models import (
     ActionRequest,
     ActionResponse,
+    DevConfig,
     LogEntry,
-    ProcessInfo,
+    PortsResponse,
     ProjectConfig,
     StatusResponse,
 )
@@ -13,9 +14,10 @@ from apx.cli.dev.models import (
 __all__ = [
     "ActionRequest",
     "ActionResponse",
+    "DevConfig",
     "DevServerClient",
     "LogEntry",
-    "ProcessInfo",
+    "PortsResponse",
     "ProjectConfig",
     "StatusResponse",
     "StreamEvent",
