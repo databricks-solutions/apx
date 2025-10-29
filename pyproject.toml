@@ -15,7 +15,6 @@ dependencies = [
     "keyring>=25.6.0",
     "psutil>=6.1.0",
     "python-dotenv>=1.1.1",
-    "requests>=2.31.0",
     "rich>=14.2.0",
     "tenacity>=9.1.2",
     "typer>=0.19.2",
