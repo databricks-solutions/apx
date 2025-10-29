@@ -1,6 +1,5 @@
 """Data models for client-server communication in the dev module."""
 
-import time
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -21,21 +20,18 @@ class LogEntry(BaseModel):
 # === Process Management Models ===
 
 
-class ProcessInfo(BaseModel):
-    """Information about a running process."""
+class DevConfig(BaseModel):
+    """Dev server configuration."""
 
-    pid: int
+    token_id: str | None = None
+    pid: int | None = None
     port: int | None = None
-    created_at: str = Field(default_factory=lambda: time.strftime("%Y-%m-%d %H:%M:%S"))
 
 
 class ProjectConfig(BaseModel):
     """Configuration stored in .apx/project.json."""
 
-    token_id: str | None = None
-    dev_server_pid: int | None = None
-    dev_server_port: int | None = None
-    processes: dict[str, ProcessInfo] = Field(default_factory=dict)
+    dev: DevConfig = Field(default_factory=DevConfig)
 
 
 # === API Request/Response Models ===
@@ -46,7 +42,7 @@ class ActionRequest(BaseModel):
 
     frontend_port: int = 5173
     backend_port: int = 8000
-    backend_host: str = "0.0.0.0"
+    host: str = "localhost"
     obo: bool = True
     openapi: bool = True
     max_retries: int = 10
@@ -67,3 +63,11 @@ class StatusResponse(BaseModel):
     openapi_running: bool
     frontend_port: int
     backend_port: int
+
+
+class PortsResponse(BaseModel):
+    """Response model for ports endpoint."""
+
+    frontend_port: int
+    backend_port: int
+    host: str

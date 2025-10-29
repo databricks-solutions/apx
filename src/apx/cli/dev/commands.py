@@ -38,7 +38,7 @@ def _run_server(
     dev_server_port: int = Argument(..., help="Dev server port"),
     frontend_port: int = Argument(..., help="Frontend port"),
     backend_port: int = Argument(..., help="Backend port"),
-    backend_host: str = Argument(..., help="Backend host"),
+    host: str = Argument(..., help="Host for servers"),
     obo: str = Argument(..., help="Enable OBO (true/false)"),
     openapi: str = Argument(..., help="Enable OpenAPI (true/false)"),
     max_retries: int = Argument(10, help="Maximum retry attempts"),
@@ -62,9 +62,9 @@ def dev_start(
         int, Option(help="Port for the frontend development server")
     ] = 5173,
     backend_port: Annotated[int, Option(help="Port for the backend server")] = 8000,
-    backend_host: Annotated[
-        str, Option(help="Host for the backend server")
-    ] = "0.0.0.0",
+    host: Annotated[
+        str, Option(help="Host for dev, frontend, and backend servers")
+    ] = "localhost",
     obo: Annotated[
         bool, Option(help="Whether to add On-Behalf-Of header to the backend server")
     ] = True,
@@ -132,7 +132,7 @@ def dev_start(
     manager.start(
         frontend_port=frontend_port,
         backend_port=backend_port,
-        backend_host=backend_host,
+        host=host,
         obo=obo,
         openapi=openapi,
         max_retries=max_retries,
@@ -226,12 +226,12 @@ def dev_restart(
     # Get config
     config = manager._get_or_create_config()
 
-    if not config.dev_server_pid or not config.dev_server_port:
+    if not config.dev.pid or not config.dev.port:
         console.print("[yellow]No development server found.[/yellow]")
         console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
         raise Exit(code=1)
 
-    if not manager._is_process_running(config.dev_server_pid):
+    if not manager._is_process_running(config.dev.pid):
         console.print("[red]Development server is not running.[/red]")
         console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
         raise Exit(code=1)
@@ -241,7 +241,7 @@ def dev_restart(
     # Send restart request to dev server using the client
     from apx.cli.dev.client import DevServerClient
 
-    client = DevServerClient(f"http://localhost:{config.dev_server_port}", timeout=10.0)
+    client = DevServerClient(f"http://localhost:{config.dev.port}", timeout=10.0)
 
     try:
         response = client.restart()
