@@ -21,6 +21,53 @@ from apx import __version__ as apx_version
 mcp = FastMCP("APX Dev Server")
 
 
+@mcp.resource("apx://info")
+async def apx_info() -> str:
+    """Information about apx toolkit.
+
+    apx is a toolkit for building Databricks Apps. It provides a convenient,
+    fast and AI-friendly development experience for creating full-stack applications
+    with Python/FastAPI backend and React/shadcn/ui frontend.
+
+    Key features:
+    - Full-stack app development (Python + FastAPI + React + TypeScript)
+    - Development server management (frontend, backend, OpenAPI watcher)
+    - Integrated build and deployment tools
+    - AI-friendly project structure and tooling
+    - Automatic client code generation from OpenAPI schema
+
+    This MCP server provides tools to manage development servers and access project metadata.
+    """
+    return """# apx - Toolkit for Building Databricks Apps
+
+🚀 **apx** is the toolkit for building Databricks Apps ⚡**
+
+apx bundles together a set of tools and libraries to help you with the complete app development lifecycle: develop, build and deploy.
+
+## Overview
+
+The main idea of apx is to provide convenient, fast and AI-friendly development experience for building modern full-stack applications.
+
+## Technology Stack
+
+- **Backend**: Python + FastAPI + Pydantic
+- **Frontend**: React + TypeScript + shadcn/ui
+- **Build Tools**: uv (Python), bun (JavaScript/TypeScript)
+- **Code Generation**: orval (OpenAPI client generation)
+
+## What This MCP Server Provides
+
+This MCP server gives you access to development server management tools:
+- **start**: Start development servers (frontend, backend, OpenAPI watcher)
+- **restart**: Restart all development servers
+- **stop**: Stop all development servers  
+- **status**: Get status of all development servers
+- **get_metadata**: Get project metadata from pyproject.toml
+- **get_frontend_url**: Get the frontend development server URL
+
+Use these tools to interact with your apx project during development."""
+
+
 def _get_manager() -> DevManager:
     """Get DevManager instance for the current project directory."""
     return DevManager(Path.cwd())
