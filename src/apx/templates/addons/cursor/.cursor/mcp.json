@@ -3,6 +3,10 @@
     "shadcn": {
       "command": "bun",
       "args": ["x", "--bun", "shadcn@latest", "mcp"]
+    },
+    "apx": {
+      "command": "uv",
+      "args": ["run", "apx", "dev", "mcp"]
     }
   }
 }

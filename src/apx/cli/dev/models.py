@@ -71,3 +71,53 @@ class PortsResponse(BaseModel):
     frontend_port: int
     backend_port: int
     host: str
+
+
+# === MCP Response Models ===
+
+
+class McpActionResponse(BaseModel):
+    """MCP response model for action endpoints (start/restart/stop).
+
+    Reuses ActionResponse structure but named for MCP context.
+    """
+
+    status: Literal["success", "error"]
+    message: str
+
+
+class McpStatusResponse(BaseModel):
+    """MCP response model for status endpoint.
+
+    Extends StatusResponse with additional dev server information.
+    """
+
+    dev_server_running: bool
+    dev_server_port: int | None = None
+    dev_server_pid: int | None = None
+    frontend_running: bool
+    frontend_port: int | None = None
+    backend_running: bool
+    backend_port: int | None = None
+    openapi_running: bool
+
+
+class McpMetadataResponse(BaseModel):
+    """MCP response model for project metadata."""
+
+    app_name: str
+    app_module: str
+    app_slug: str
+    apx_version: str
+
+
+class McpErrorResponse(BaseModel):
+    """MCP response model for errors."""
+
+    error: str
+
+
+class McpUrlResponse(BaseModel):
+    """MCP response model for the frontend URL."""
+
+    url: str

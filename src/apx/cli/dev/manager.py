@@ -999,7 +999,7 @@ class DevManager:
         self.apx_dir: Path = app_dir / ".apx"
         self.project_json_path: Path = self.apx_dir / "project.json"
 
-    def _get_or_create_config(self) -> ProjectConfig:
+    def get_or_create_config(self) -> ProjectConfig:
         """Get or create project configuration."""
         ensure_dir(self.apx_dir)
 
@@ -1046,7 +1046,7 @@ class DevManager:
             watch: Whether in watch mode or detached mode
         """
         # Check if dev server is already running
-        config = self._get_or_create_config()
+        config = self.get_or_create_config()
         if config.dev.pid and self._is_process_running(config.dev.pid):
             console.print(
                 f"[yellow]⚠️  Dev server is already running (PID: {config.dev.pid}). Run 'apx dev stop' first.[/yellow]"
@@ -1174,7 +1174,7 @@ class DevManager:
             console.print("[dim]Run 'apx dev start' to start the servers.[/dim]")
             return
 
-        config = self._get_or_create_config()
+        config = self.get_or_create_config()
 
         if not config.dev.pid:
             console.print("[yellow]No development server found.[/yellow]")
@@ -1259,7 +1259,7 @@ class DevManager:
             console.print("[yellow]No development server found.[/yellow]")
             return
 
-        config = self._get_or_create_config()
+        config = self.get_or_create_config()
 
         if not config.dev.pid:
             console.print("[yellow]No development server found.[/yellow]")
@@ -1359,7 +1359,7 @@ class DevManager:
             follow: Continue streaming new logs (like tail -f). If False, exits after initial logs.
             timeout_seconds: Stop streaming after N seconds (None = indefinite)
         """
-        config = self._get_or_create_config()
+        config = self.get_or_create_config()
 
         if not config.dev.pid or not config.dev.port:
             console.print("[yellow]No development server found.[/yellow]")

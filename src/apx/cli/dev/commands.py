@@ -225,7 +225,7 @@ def dev_restart(
     manager = DevManager(app_dir)
 
     # Get config
-    config = manager._get_or_create_config()
+    config = manager.get_or_create_config()
 
     if not config.dev.pid or not config.dev.port:
         console.print("[yellow]No development server found.[/yellow]")
@@ -394,3 +394,21 @@ def dev_check(
         raise Exit(code=1)
     else:
         console.print("[green]✅ Pyright found no errors[/green]")
+
+
+@dev_app.command(name="mcp", help="Start MCP server for development server management")
+def dev_mcp():
+    """Start MCP server that provides tools for managing development servers.
+
+    The MCP server runs over stdio and provides the following tools:
+    - start: Start development servers (frontend, backend, OpenAPI watcher)
+    - restart: Restart all development servers
+    - stop: Stop all development servers
+    - status: Get the status of all development servers
+    - get_metadata: Get project metadata from pyproject.toml
+
+    This command should be run from the project root directory.
+    """
+    from apx.cli.dev.mcp import run_mcp_server
+
+    run_mcp_server()
