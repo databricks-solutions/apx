@@ -5,21 +5,12 @@ import { defineConfig } from "vite";
 import { existsSync, readFileSync } from "fs";
 import { join, resolve } from "path";
 import { parse } from "smol-toml";
+import axios from "axios";
 
 type ApxMetadata = {
   appName: string;
   appSlug: string;
   appModule: string;
-};
-
-type DevConfig = {
-  token_id: string | null;
-  pid: number | null;
-  port: number | null;
-};
-
-type ProjectConfig = {
-  dev: DevConfig;
 };
 
 type PortsResponse = {
@@ -46,43 +37,34 @@ export function readMetadata(): ApxMetadata {
   };
 }
 
-// read dev server port from .apx/project.json
-export function readDevServerPort(): number | null {
-  const projectJsonPath = join(process.cwd(), ".apx", "project.json");
-
-  if (!existsSync(projectJsonPath)) {
-    return null;
-  }
-
-  try {
-    const projectConfig: ProjectConfig = JSON.parse(
-      readFileSync(projectJsonPath, "utf-8"),
-    );
-    return projectConfig.dev.port;
-  } catch (error) {
-    return null;
-  }
+// check if dev server socket exists
+export function devServerSocketExists(): boolean {
+  const socketPath = join(process.cwd(), ".apx", "dev.sock");
+  return existsSync(socketPath);
 }
 
-// fetch ports from dev server
 export async function fetchPorts(): Promise<{
   frontendPort: number;
   backendPort: number;
   host: string;
 }> {
-  const devServerPort = readDevServerPort();
-
-  // If no dev server is running, use defaults
-  if (!devServerPort) {
+  // If no dev server socket exists, use defaults
+  if (!devServerSocketExists()) {
     return { frontendPort: 5173, backendPort: 8000, host: "localhost" };
   }
 
   try {
-    const response = await fetch(`http://localhost:${devServerPort}/ports`);
-    if (!response.ok) {
+    const socketPath = join(process.cwd(), ".apx", "dev.sock");
+
+    const response = await axios.get("http://unix/ports", {
+      socketPath,
+    });
+
+    if (response.status < 200 || response.status >= 300) {
       throw new Error(`HTTP ${response.status}`);
     }
-    const data: PortsResponse = await response.json();
+
+    const data: PortsResponse = response.data;
     return {
       frontendPort: data.frontend_port,
       backendPort: data.backend_port,
@@ -90,7 +72,7 @@ export async function fetchPorts(): Promise<{
     };
   } catch (error) {
     console.warn(
-      `Failed to fetch ports from dev server on port ${devServerPort}:`,
+      "Failed to fetch ports from dev server via Unix socket:",
       error,
     );
     // Fallback to defaults

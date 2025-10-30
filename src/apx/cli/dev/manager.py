@@ -1,9 +1,7 @@
 """Development server utilities for apx."""
 
 import asyncio
-import contextlib
 import importlib
-import io
 import json
 import logging
 import psutil
@@ -31,9 +29,13 @@ import watchfiles
 import uvicorn
 from apx.cli.dev.models import ActionRequest, LogEntry, ProjectConfig
 from apx.cli.dev.client import DevServerClient, StreamEvent
+from apx.cli.dev.logging import (
+    setup_uvicorn_logging,
+    suppress_output_and_logs,
+    print_log_entry,
+)
 from apx.utils import (
     console,
-    PrefixedLogHandler,
     ensure_dir,
 )
 from apx import __version__
@@ -231,45 +233,6 @@ def write_project_config(file_path: Path, config: ProjectConfig) -> None:
     """
     ensure_dir(file_path.parent)
     file_path.write_text(config.model_dump_json(indent=2))
-
-
-@contextlib.contextmanager
-def suppress_output_and_logs():
-    """Suppress stdout, stderr and logging output temporarily."""
-    # Save original stdout/stderr
-    old_stdout = sys.stdout
-    old_stderr = sys.stderr
-
-    # Save original log level for root logger and all existing loggers
-    root_logger = logging.getLogger()
-    original_root_level = root_logger.level
-    original_levels = {}
-
-    for name in logging.Logger.manager.loggerDict:
-        logger = logging.getLogger(name)
-        if hasattr(logger, "level"):
-            original_levels[name] = logger.level
-
-    try:
-        # Redirect stdout/stderr to devnull
-        sys.stdout = io.StringIO()
-        sys.stderr = io.StringIO()
-
-        # Set all loggers to CRITICAL to suppress INFO/WARNING logs
-        root_logger.setLevel(logging.CRITICAL)
-        for name in original_levels:
-            logging.getLogger(name).setLevel(logging.CRITICAL)
-
-        yield
-    finally:
-        # Restore stdout/stderr
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
-
-        # Restore log levels
-        root_logger.setLevel(original_root_level)
-        for name, level in original_levels.items():
-            logging.getLogger(name).setLevel(level)
 
 
 def load_app(app_module_name: str, reload_modules: bool = False) -> FastAPI:
@@ -474,75 +437,6 @@ def prepare_obo_token(
         status_context.update("💾 Token stored securely in keyring")
 
     return new_token
-
-
-class DevServerAccessLogFilter(logging.Filter):
-    """Filter to exclude dev server internal API logs from access logs."""
-
-    def filter(self, record):
-        """Return False for dev server internal endpoints to exclude them from logs."""
-        message = record.getMessage()
-        # Exclude logs for dev server internal endpoints
-        internal_paths = ["/logs", "/status", "/start", "/stop", "/restart"]
-        for path in internal_paths:
-            if f'"{path}' in message or f"'{path}" in message:
-                return False
-        return True
-
-
-def setup_uvicorn_logging(use_memory: bool = False):
-    """Configure uvicorn loggers to use in-memory buffer or console.
-
-    Args:
-        use_memory: If True, use the in-memory logger (set up by dev_server)
-                    If False, use console logging (for standalone mode)
-    """
-    # Configure ONLY uvicorn loggers
-    for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
-        logger = logging.getLogger(logger_name)
-        logger.handlers.clear()
-
-        # Add filter to uvicorn.access to exclude dev server internal API logs
-        if logger_name == "uvicorn.access":
-            logger.addFilter(DevServerAccessLogFilter())
-
-        if use_memory:
-            # Use the backend logger that's already configured by dev_server
-            backend_logger = logging.getLogger("apx.backend")
-            if backend_logger.handlers:
-                # Create a wrapper handler that adds "BE | " prefix
-                class PrefixedHandler(logging.Handler):
-                    def __init__(self, base_handler, prefix):
-                        super().__init__()
-                        self.base_handler = base_handler
-                        self.prefix = prefix
-
-                    def emit(self, record):
-                        # Add prefix to the message
-                        original_msg = record.getMessage()
-                        record.msg = f"{self.prefix} | {original_msg}"
-                        record.args = ()
-                        self.base_handler.emit(record)
-
-                # Add the prefixed handler
-                for handler in backend_logger.handlers:
-                    prefixed_handler = PrefixedHandler(handler, "BE")
-                    logger.addHandler(prefixed_handler)
-            else:
-                # Fallback to console if no handlers found
-                handler = PrefixedLogHandler(prefix="[backend]", color="aquamarine1")
-                formatter = logging.Formatter("%(message)s")
-                handler.setFormatter(formatter)
-                logger.addHandler(handler)
-        else:
-            # Console logging (no buffering needed)
-            handler = PrefixedLogHandler(prefix="[backend]", color="aquamarine1")
-            formatter = logging.Formatter("%(message)s")
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-
-        logger.setLevel(logging.INFO)
-        logger.propagate = False
 
 
 async def run_backend(
@@ -871,13 +765,16 @@ def delete_token_from_keyring(keyring_id: str):
         pass
 
 
-async def run_frontend_with_logging(app_dir: Path, port: int, max_retries: int = 10):
+async def run_frontend_with_logging(
+    app_dir: Path, port: int, max_retries: int = 10, state=None
+):
     """Run frontend dev server and capture output to in-memory buffer.
 
     Args:
         app_dir: Application directory
         port: Frontend port
         max_retries: Maximum number of retry attempts
+        state: Optional ServerState object to store process reference
     """
     # Use the already-configured logger (set up by dev_server)
     logger = logging.getLogger("apx.frontend")
@@ -900,6 +797,7 @@ async def run_frontend_with_logging(app_dir: Path, port: int, max_retries: int =
         """Frontend runner with retry logic."""
         logger.info(f"Starting frontend server on port {port}")
 
+        # Create process with new session to enable process group killing
         process = await asyncio.create_subprocess_exec(
             "bun",
             "run",
@@ -907,7 +805,12 @@ async def run_frontend_with_logging(app_dir: Path, port: int, max_retries: int =
             cwd=app_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,  # Critical: creates process group
         )
+
+        # Store process reference in state if provided
+        if state is not None:
+            state.frontend_process = process
 
         async def read_stream(stream, stream_name):
             """Read from stream and log each line."""
@@ -921,20 +824,24 @@ async def run_frontend_with_logging(app_dir: Path, port: int, max_retries: int =
                 # Small delay to prevent excessive I/O
                 await asyncio.sleep(0.01)
 
-        # Read both stdout and stderr
-        await asyncio.gather(
-            read_stream(process.stdout, "stdout"),
-            read_stream(process.stderr, "stderr"),
-        )
-
-        await process.wait()
-
-        # Check exit code
-        if process.returncode != 0:
-            logger.error(f"Frontend process exited with code {process.returncode}")
-            raise RuntimeError(
-                f"Frontend process failed with exit code {process.returncode}"
+        try:
+            # Read both stdout and stderr
+            await asyncio.gather(
+                read_stream(process.stdout, "stdout"),
+                read_stream(process.stderr, "stderr"),
             )
+
+            await process.wait()
+
+            # Check exit code
+            if process.returncode != 0:
+                logger.error(f"Frontend process exited with code {process.returncode}")
+                raise RuntimeError(
+                    f"Frontend process failed with exit code {process.returncode}"
+                )
+        except asyncio.CancelledError:
+            # Process will be killed by the caller
+            raise
 
     # Run with retry
     await run_with_retry()
@@ -998,6 +905,7 @@ class DevManager:
         self.app_dir: Path = app_dir
         self.apx_dir: Path = app_dir / ".apx"
         self.project_json_path: Path = self.apx_dir / "project.json"
+        self.socket_path: Path = self.apx_dir / "dev.sock"
 
     def get_or_create_config(self) -> ProjectConfig:
         """Get or create project configuration."""
@@ -1014,13 +922,9 @@ class DevManager:
         write_project_config(self.project_json_path, config)
         return config
 
-    def _is_process_running(self, pid: int) -> bool:
-        """Check if a process with the given PID is running."""
-        try:
-            process = psutil.Process(pid)
-            return process.is_running()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            return False
+    def is_dev_server_running(self) -> bool:
+        """Check if the dev server is running by checking socket existence."""
+        return self.socket_path.exists()
 
     def start(
         self,
@@ -1030,7 +934,6 @@ class DevManager:
         obo: bool = True,
         openapi: bool = True,
         max_retries: int = 10,
-        dev_server_port: int = 8040,
         watch: bool = False,
     ):
         """Start development server in detached mode.
@@ -1042,27 +945,17 @@ class DevManager:
             obo: Whether to add On-Behalf-Of header to the backend server
             openapi: Whether to start OpenAPI watcher process
             max_retries: Maximum number of retry attempts for processes
-            dev_server_port: Port for the dev server
             watch: Whether in watch mode or detached mode
         """
         # Check if dev server is already running
-        config = self.get_or_create_config()
-        if config.dev.pid and self._is_process_running(config.dev.pid):
+        if self.is_dev_server_running():
             console.print(
-                f"[yellow]⚠️  Dev server is already running (PID: {config.dev.pid}). Run 'apx dev stop' first.[/yellow]"
+                "[yellow]⚠️  Dev server is already running. Run 'apx dev stop' first.[/yellow]"
             )
             raise Exit(code=1)
 
         # Find available ports
         console.print("[cyan]🔍 Finding available ports...[/cyan]")
-
-        # Find dev server port (8040-8100)
-        available_dev_server_port = find_available_port(8040, 8100)
-        if available_dev_server_port is None:
-            console.print(
-                "[red]❌ No available ports found for dev server in range 8040-8100[/red]"
-            )
-            raise Exit(code=1)
 
         # Find frontend/vite server port (5173-5200)
         available_frontend_port = find_available_port(5173, 5200)
@@ -1081,12 +974,11 @@ class DevManager:
             raise Exit(code=1)
 
         # Use the found ports instead of the provided/default values
-        dev_server_port = available_dev_server_port
         frontend_port = available_frontend_port
         backend_port = available_backend_port
 
         console.print(
-            f"[green]✓[/green] Found available ports - Dev: {dev_server_port}, Frontend: {frontend_port}, Backend: {backend_port}"
+            f"[green]✓[/green] Found available ports - Frontend: {frontend_port}, Backend: {backend_port}"
         )
         console.print()
 
@@ -1097,7 +989,7 @@ class DevManager:
         )
 
         console.print(f"[bold chartreuse1]{mode_msg}[/bold chartreuse1]")
-        console.print(f"[cyan]Dev Server:[/cyan] http://localhost:{dev_server_port}")
+        console.print(f"[cyan]Dev Socket:[/cyan] {self.socket_path}")
         console.print(f"[cyan]Frontend:[/cyan] http://localhost:{frontend_port}")
         console.print(f"[green]Backend:[/green] http://{host}:{backend_port}")
         console.print()
@@ -1111,7 +1003,7 @@ class DevManager:
                 "dev",
                 "_run_server",
                 str(self.app_dir),
-                str(dev_server_port),
+                str(self.socket_path),
                 str(frontend_port),
                 str(backend_port),
                 host,
@@ -1126,19 +1018,29 @@ class DevManager:
             start_new_session=True,
         )
 
-        # Save dev server info
-        config.dev.pid = dev_server_proc.pid
-        config.dev.port = dev_server_port
-        write_project_config(self.project_json_path, config)
-
-        console.print(f"[cyan]✓[/cyan] Dev server started (PID: {dev_server_proc.pid})")
+        console.print("[cyan]✓[/cyan] Dev server started")
         console.print()
 
-        # Wait a moment for server to start
-        time.sleep(2)
+        # Wait a moment for server to start and create socket
+        max_wait = 5  # seconds
+        for _ in range(max_wait * 10):
+            if self.socket_path.exists():
+                break
+            time.sleep(0.1)
+        else:
+            console.print(
+                "[red]❌ Dev server did not create socket within timeout[/red]"
+            )
+            # Try to kill the process if it's still running
+            try:
+                dev_server_proc.terminate()
+                dev_server_proc.wait(timeout=2)
+            except Exception:
+                pass
+            raise Exit(code=1)
 
         # Send start request to dev server using the client
-        client = DevServerClient(f"http://localhost:{dev_server_port}")
+        client = DevServerClient(self.socket_path)
 
         try:
             request = ActionRequest(
@@ -1169,28 +1071,14 @@ class DevManager:
 
     def status(self):
         """Check the status of development servers."""
-        if not self.project_json_path.exists():
-            console.print("[yellow]No development servers found.[/yellow]")
-            console.print("[dim]Run 'apx dev start' to start the servers.[/dim]")
-            return
-
-        config = self.get_or_create_config()
-
-        if not config.dev.pid:
+        # Check if dev server is running
+        if not self.is_dev_server_running():
             console.print("[yellow]No development server found.[/yellow]")
             console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
             return
 
-        # Check if dev server is running
-        if not self._is_process_running(config.dev.pid):
-            console.print(
-                f"[red]Dev server (PID: {config.dev.pid}) is not running.[/red]"
-            )
-            console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
-            return
-
         # Query dev server for status using the client
-        client = DevServerClient(f"http://localhost:{config.dev.port}")
+        client = DevServerClient(self.socket_path)
 
         try:
             status_data = client.status()
@@ -1209,7 +1097,7 @@ class DevManager:
             table.add_row(
                 "Dev Server",
                 "[green]●[/green] Running",
-                str(config.dev.port),
+                "Unix Socket",
             )
 
             # Frontend row
@@ -1246,7 +1134,7 @@ class DevManager:
 
             console.print(table)
             console.print()
-            console.print(f"[dim]Dev Server PID: {config.dev.pid}[/dim]")
+            console.print(f"[dim]Dev Server Socket: {self.socket_path}[/dim]")
             console.print(
                 "[dim]Use 'apx dev logs' to view logs or 'apx dev logs -f' to stream continuously.[/dim]"
             )
@@ -1255,80 +1143,29 @@ class DevManager:
 
     def stop(self):
         """Stop development server."""
-        if not self.project_json_path.exists():
-            console.print("[yellow]No development server found.[/yellow]")
-            return
-
-        config = self.get_or_create_config()
-
-        if not config.dev.pid:
+        if not self.is_dev_server_running():
             console.print("[yellow]No development server found.[/yellow]")
             return
 
         console.print("[bold yellow]Stopping development server...[/bold yellow]")
 
         # Try to send stop request to dev server first
-        if config.dev.port and self._is_process_running(config.dev.pid):
-            client = DevServerClient(f"http://localhost:{config.dev.port}")
+        client = DevServerClient(self.socket_path)
 
-            try:
-                response = client.stop()
-                if response.status == "success":
-                    console.print("[green]✓[/green] Stopped all servers via API")
-            except Exception:
-                # If API fails, we'll kill the process below
-                pass
-
-        # Kill the dev server process and all its children
-        if self._is_process_running(config.dev.pid):
-            try:
-                # Get the process
-                process = psutil.Process(config.dev.pid)
-
-                # Get all child processes
-                children = process.children(recursive=True)
-
-                # Terminate the main process
-                process.terminate()
-
-                # Terminate all children
-                for child in children:
-                    try:
-                        child.terminate()
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-
-                # Wait for process to terminate
-                try:
-                    process.wait(timeout=5)
-                    console.print(
-                        f"[green]✓[/green] Stopped dev server (PID: {config.dev.pid})"
-                    )
-                except psutil.TimeoutExpired:
-                    # Force kill if it didn't terminate
-                    process.kill()
-                    for child in children:
-                        try:
-                            child.kill()
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-                    console.print(
-                        f"[green]✓[/green] Force killed dev server (PID: {config.dev.pid})"
-                    )
-
-            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-                console.print(
-                    f"[yellow]⚠️  Could not stop dev server (PID: {config.dev.pid}): {e}[/yellow]"
-                )
-        else:
+        try:
+            response = client.stop()
+            if response.status == "success":
+                console.print("[green]✓[/green] Stopped all servers via API")
+        except Exception:
+            # If API fails, socket will be removed when process dies
             console.print(
-                f"[dim]Dev server (PID: {config.dev.pid}) was not running[/dim]"
+                "[yellow]⚠️  Could not stop gracefully via API, server may have crashed[/yellow]"
             )
 
-        # Clear dev server info
-        config.dev.pid = None
-        config.dev.port = None
-        write_project_config(self.project_json_path, config)
+        # Wait for socket a bit to be removed
+        time.sleep(1)
+        if self.socket_path.exists():
+            self.socket_path.unlink(missing_ok=True)
 
         console.print()
         console.print(
@@ -1359,14 +1196,8 @@ class DevManager:
             follow: Continue streaming new logs (like tail -f). If False, exits after initial logs.
             timeout_seconds: Stop streaming after N seconds (None = indefinite)
         """
-        config = self.get_or_create_config()
-
-        if not config.dev.pid or not config.dev.port:
+        if not self.is_dev_server_running():
             console.print("[yellow]No development server found.[/yellow]")
-            return
-
-        if not self._is_process_running(config.dev.pid):
-            console.print("[red]Development server is not running.[/red]")
             return
 
         # Determine process filter
@@ -1383,7 +1214,7 @@ class DevManager:
             process_filter = "backend"
 
         # Connect to SSE endpoint using the client
-        client = DevServerClient(f"http://localhost:{config.dev.port}")
+        client = DevServerClient(self.socket_path)
 
         log_count = 0  # Initialize early to avoid unbound error
 
@@ -1426,7 +1257,7 @@ class DevManager:
                         if not item.content.startswith("APP | "):
                             continue
 
-                    self._print_log_entry(item.model_dump(), raw_output=raw_output)
+                    print_log_entry(item.model_dump(), raw_output=raw_output)
                     log_count += 1
 
         except KeyboardInterrupt:
@@ -1441,61 +1272,3 @@ class DevManager:
                 console.print(f"\n[dim]Showed {log_count} log entries[/dim]")
             else:
                 console.print("[dim]No logs found[/dim]")
-
-    def _print_log_entry(self, log: dict[str, Any], raw_output: bool = False):
-        """Print a single log entry with formatting.
-
-        Args:
-            log: Log entry dict with keys: process_name, content, timestamp
-            raw_output: If True, print raw log content without prefix formatting
-        """
-        content = log.get("content", "")
-        timestamp = log.get("timestamp", log.get("created_at", ""))
-
-        # For raw output, strip the internal prefix and print without color/formatting
-        if raw_output:
-            # For backend logs, strip the "BE | " or "APP | " prefix
-            if log["process_name"] == "backend" and " | " in content:
-                stream_prefix, message = content.split(" | ", 1)
-                if stream_prefix in ["BE", "APP"]:
-                    content = message
-            # Print without rich formatting
-            print(f"{content}")
-            return
-
-        # For backend logs, parse the stream prefix (BE or APP)
-        if log["process_name"] == "backend":
-            # Content format is "BE | message" or "APP | message"
-            if " | " in content:
-                stream_prefix, message = content.split(" | ", 1)
-                if stream_prefix == "BE":
-                    prefix_color = "green"
-                    prefix = "[BE] "
-                    content = message
-                elif stream_prefix == "APP":
-                    prefix_color = "yellow"
-                    prefix = "[APP]"
-                    content = message
-                else:
-                    # Fallback if unknown stream
-                    prefix_color = "green"
-                    prefix = "[BE] "
-            else:
-                # No stream prefix found, default to BE
-                prefix_color = "green"
-                prefix = "[BE] "
-        elif log["process_name"] == "frontend":
-            prefix_color = "cyan"
-            prefix = "[UI] "
-        elif log["process_name"] == "openapi":
-            # OpenAPI watcher logs come directly from the logger (no stream prefix)
-            prefix_color = "magenta"
-            prefix = "[GEN]"
-        else:
-            # Default fallback
-            prefix_color = "white"
-            prefix = f"[{log['process_name'].upper()}]".ljust(5)
-
-        console.print(
-            f"[dim]{timestamp}[/dim] | [{prefix_color}]{prefix}[/{prefix_color}] | {content}"
-        )
