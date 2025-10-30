@@ -1031,6 +1031,7 @@ class DevManager:
         openapi: bool = True,
         max_retries: int = 10,
         dev_server_port: int = 8040,
+        watch: bool = False,
     ):
         """Start development server in detached mode.
 
@@ -1042,6 +1043,7 @@ class DevManager:
             openapi: Whether to start OpenAPI watcher process
             max_retries: Maximum number of retry attempts for processes
             dev_server_port: Port for the dev server
+            watch: Whether in watch mode or detached mode
         """
         # Check if dev server is already running
         config = self._get_or_create_config()
@@ -1088,9 +1090,13 @@ class DevManager:
         )
         console.print()
 
-        console.print(
-            "[bold chartreuse1]🚀 Starting development server in detached mode...[/bold chartreuse1]"
+        mode_msg = (
+            "🚀 Starting development server in watch mode..."
+            if watch
+            else "🚀 Starting development server in detached mode..."
         )
+
+        console.print(f"[bold chartreuse1]{mode_msg}[/bold chartreuse1]")
         console.print(f"[cyan]Dev Server:[/cyan] http://localhost:{dev_server_port}")
         console.print(f"[cyan]Frontend:[/cyan] http://localhost:{frontend_port}")
         console.print(f"[green]Backend:[/green] http://{host}:{backend_port}")
@@ -1156,9 +1162,10 @@ class DevManager:
                 f"[yellow]⚠️  Warning: Could not connect to dev server: {e}[/yellow]"
             )
 
-        console.print(
-            "[dim]Run 'apx dev status' to check status or 'apx dev stop' to stop the servers.[/dim]"
-        )
+        if not watch:
+            console.print(
+                "[dim]Run 'apx dev status' to check status or 'apx dev stop' to stop the servers.[/dim]"
+            )
 
     def status(self):
         """Check the status of development servers."""

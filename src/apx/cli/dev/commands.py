@@ -136,6 +136,7 @@ def dev_start(
         obo=obo,
         openapi=openapi,
         max_retries=max_retries,
+        watch=watch,
     )
 
     # If watch mode is enabled, stream logs until Ctrl+C
