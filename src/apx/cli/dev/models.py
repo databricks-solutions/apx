@@ -24,8 +24,6 @@ class DevConfig(BaseModel):
     """Dev server configuration."""
 
     token_id: str | None = None
-    pid: int | None = None
-    port: int | None = None
 
 
 class ProjectConfig(BaseModel):

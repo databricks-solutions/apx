@@ -1,0 +1,9 @@
+---
+alwaysApply: true
+---
+
+
+Rules:
+- **Python:** Always use `uv` (never `pip`)
+- when running python commands use `uv run python` instead of `python`
+- after any change run `just check` to check for errors

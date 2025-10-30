@@ -1,14 +1,28 @@
-"""Centralized FastAPI dev server for managing frontend, backend, and OpenAPI watcher."""
+"""Centralized FastAPI dev server for managing frontend, backend, and OpenAPI watcher.
+
+Architecture:
+- Runs as a Unix domain socket server
+- Manages three background tasks: frontend (Node.js/Bun), backend (Python), OpenAPI watcher
+- Uses process groups (start_new_session=True) to enable killing all child processes
+- Explicit process cleanup on stop/restart to prevent orphaned processes
+- Cleanup of orphaned processes on start for bulletproof operation
+
+Key Features:
+1. Process Group Killing: Uses os.killpg() to kill entire process trees
+2. Graceful Shutdown: SIGTERM first, then SIGKILL after timeout
+3. Orphan Cleanup: Scans for and kills orphaned bun/node/vite processes on start
+4. State Tracking: Maintains references to subprocess objects for explicit cleanup
+5. Port Cleanup: Kills processes holding onto ports before starting new servers
+"""
 
 import asyncio
 from collections.abc import AsyncGenerator
 import logging
-import time
-from collections import deque
+import os
+import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Literal, TypeAlias
-from typing_extensions import override
+from typing import Annotated, Literal
 
 from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
@@ -25,9 +39,11 @@ from apx.cli.dev.models import (
     PortsResponse,
     StatusResponse,
 )
-
-
-LogBuffer: TypeAlias = deque[LogEntry]
+from apx.cli.dev.logging import (
+    LogBuffer,
+    LoggerWriter,
+    setup_buffered_logging,
+)
 
 
 # Global state for background tasks
@@ -35,9 +51,12 @@ class ServerState:
     """Global state for the dev server."""
 
     def __init__(self) -> None:
+        from collections import deque
+
         self.frontend_task: asyncio.Task[None] | None = None
         self.backend_task: asyncio.Task[None] | None = None
         self.openapi_task: asyncio.Task[None] | None = None
+        self.frontend_process: asyncio.subprocess.Process | None = None
         self.log_buffer: LogBuffer = deque(maxlen=10000)
         self.app_dir: Path | None = None
         self.frontend_port: int = 5173
@@ -51,54 +70,106 @@ class ServerState:
 state = ServerState()
 
 
-# === Logging Setup ===
+# === Process Cleanup ===
 
 
-class BufferedLogHandler(logging.Handler):
-    """Custom log handler that stores logs in memory buffer."""
+def cleanup_orphaned_processes(app_dir: Path, ports: list[int] | None = None):
+    """Kill any orphaned frontend/backend processes.
 
-    buffer: LogBuffer
-    process_name: str
-
-    def __init__(self, buffer: LogBuffer, process_name: str):
-        super().__init__()
-        self.buffer = buffer
-        self.process_name = process_name
-
-    @override
-    def emit(self, record: logging.LogRecord) -> None:
-        """Emit a log record to the buffer."""
-        try:
-            log_entry = LogEntry(
-                timestamp=time.strftime(
-                    "%Y-%m-%d %H:%M:%S", time.localtime(record.created)
-                ),
-                level=record.levelname,
-                process_name=self.process_name,
-                content=self.format(record),
-            )
-            self.buffer.append(log_entry)
-        except Exception:
-            self.handleError(record)
-
-
-def setup_buffered_logging(process_name: str):
-    """Setup logging that writes to in-memory buffer only.
+    This ensures a clean slate when starting servers.
 
     Args:
-        process_name: Name of the process (frontend, backend, openapi)
+        app_dir: Application directory
+        ports: Optional list of ports to check for orphaned processes
     """
-    logger = logging.getLogger(f"apx.{process_name}")
-    logger.setLevel(logging.INFO)
-    logger.handlers.clear()
+    try:
+        import psutil
 
-    # Buffer handler (in-memory only)
-    buffer_handler = BufferedLogHandler(state.log_buffer, process_name)
-    buffer_formatter = logging.Formatter("%(message)s")
-    buffer_handler.setFormatter(buffer_formatter)
-    logger.addHandler(buffer_handler)
+        # Find processes using the specified ports
+        killed = []
+        if ports:
+            for proc in psutil.process_iter(["pid", "name", "connections"]):
+                try:
+                    # Check if process is using any of our ports
+                    connections = proc.connections()
+                    for conn in connections:
+                        if (
+                            hasattr(conn, "laddr")
+                            and conn.laddr
+                            and hasattr(conn.laddr, "port")
+                        ):
+                            if conn.laddr.port in ports:
+                                proc.kill()
+                                killed.append(f"{proc.name()} (PID {proc.pid})")
+                                break
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
 
-    logger.propagate = False
+        # Also look for bun/node processes in our app directory
+        for proc in psutil.process_iter(["pid", "name", "cwd", "cmdline"]):
+            try:
+                if proc.name() in ["bun", "node", "vite"]:
+                    cwd = proc.cwd()
+                    if cwd and Path(cwd) == app_dir:
+                        proc.kill()
+                        killed.append(f"{proc.name()} (PID {proc.pid})")
+            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                pass
+
+        if killed:
+            logger = logging.getLogger("apx.server")
+            logger.info(f"Cleaned up orphaned processes: {', '.join(killed)}")
+    except Exception as e:
+        logger = logging.getLogger("apx.server")
+        logger.warning(f"Failed to cleanup orphaned processes: {e}")
+
+
+async def kill_process_group(process: asyncio.subprocess.Process, timeout: float = 5.0):
+    """Kill a process and all its children using process group.
+
+    Args:
+        process: The subprocess to kill
+        timeout: How long to wait before force killing
+    """
+    if process.returncode is not None:
+        return  # Already dead
+
+    try:
+        # Try graceful shutdown first (SIGTERM)
+        if hasattr(os, "killpg"):
+            # Kill entire process group
+            pgid = os.getpgid(process.pid)
+            os.killpg(pgid, signal.SIGTERM)
+        else:
+            process.terminate()
+
+        # Wait for process to die
+        try:
+            await asyncio.wait_for(process.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            # Force kill if still alive (SIGKILL)
+            if hasattr(os, "killpg"):
+                try:
+                    pgid = os.getpgid(process.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # Already dead
+            else:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass  # Already dead
+
+            # Final wait
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass  # Give up, OS will clean up eventually
+    except ProcessLookupError:
+        pass  # Process already dead
+    except Exception as e:
+        logger = logging.getLogger("apx.server")
+        logger.warning(f"Error killing process: {e}")
 
 
 # === Background Task Runners ===
@@ -107,10 +178,17 @@ def setup_buffered_logging(process_name: str):
 async def run_frontend_task(app_dir: Path, port: int, max_retries: int):
     """Run frontend as a background task."""
     try:
-        await run_frontend_with_logging(app_dir, port, max_retries)
+        await run_frontend_with_logging(app_dir, port, max_retries, state)
+    except asyncio.CancelledError:
+        # Kill the frontend process on cancellation
+        if state.frontend_process:
+            await kill_process_group(state.frontend_process)
+        raise
     except Exception as e:
         logger = logging.getLogger("apx.frontend")
         logger.error(f"Frontend task failed: {e}")
+        if state.frontend_process:
+            await kill_process_group(state.frontend_process)
 
 
 async def run_backend_task(
@@ -119,14 +197,15 @@ async def run_backend_task(
     host: str,
     port: int,
     obo: bool,
-    log_file: Path | None,
     max_retries: int,
 ):
     """Run backend as a background task."""
     try:
         await run_backend(
-            app_dir, app_module_name, host, port, obo, log_file, max_retries
+            app_dir, app_module_name, host, port, obo, max_retries=max_retries
         )
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger = logging.getLogger("apx.backend")
         logger.error(f"Backend task failed: {e}")
@@ -136,6 +215,8 @@ async def run_openapi_task(app_dir: Path, max_retries: int):
     """Run OpenAPI watcher as a background task."""
     try:
         await run_openapi_with_logging(app_dir, max_retries)
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger = logging.getLogger("apx.openapi")
         logger.error(f"OpenAPI watcher task failed: {e}")
@@ -144,40 +225,12 @@ async def run_openapi_task(app_dir: Path, max_retries: int):
 # === Lifecycle Management ===
 
 
-class LoggerWriter:
-    """Logger writer for redirecting stdout/stderr to the backend logger."""
-
-    def __init__(self, logger: logging.Logger, level: int, prefix: str):
-        self.logger: logging.Logger = logger
-        self.level: int = level
-        self.prefix: str = prefix
-        self.buffer: str = ""
-
-    def write(self, message: str | None) -> None:
-        if not message:
-            return
-        self.buffer += message
-        lines = self.buffer.split("\n")
-        self.buffer = lines[-1]
-        for line in lines[:-1]:
-            if line:
-                self.logger.log(self.level, f"{self.prefix} | {line}")
-
-    def flush(self):
-        if self.buffer:
-            self.logger.log(self.level, f"{self.prefix} | {self.buffer}")
-            self.buffer = ""
-
-    def isatty(self):
-        return False
-
-
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context manager for the FastAPI app."""
     # Setup in-memory logging (no files needed)
     for process_name in ["frontend", "backend", "openapi"]:
-        setup_buffered_logging(process_name)
+        setup_buffered_logging(state.log_buffer, process_name)
 
     # Redirect stdout/stderr to backend logger BEFORE any tasks start
     # This ensures app imports capture logs correctly
@@ -198,21 +251,25 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         sys.stdout = original_stdout
         sys.stderr = original_stderr
 
-    # Shutdown: Stop all tasks
-    tasks_to_cancel: list[asyncio.Task[None]] = []
-    if state.frontend_task and not state.frontend_task.done():
-        tasks_to_cancel.append(state.frontend_task)
-    if state.backend_task and not state.backend_task.done():
-        tasks_to_cancel.append(state.backend_task)
-    if state.openapi_task and not state.openapi_task.done():
-        tasks_to_cancel.append(state.openapi_task)
+        # Kill frontend process first (most important for orphans)
+        if state.frontend_process and state.frontend_process.returncode is None:
+            await kill_process_group(state.frontend_process, timeout=2.0)
 
-    for task in tasks_to_cancel:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        # Cancel all tasks
+        tasks_to_cancel: list[asyncio.Task[None]] = []
+        if state.frontend_task and not state.frontend_task.done():
+            tasks_to_cancel.append(state.frontend_task)
+        if state.backend_task and not state.backend_task.done():
+            tasks_to_cancel.append(state.backend_task)
+        if state.openapi_task and not state.openapi_task.done():
+            tasks_to_cancel.append(state.openapi_task)
+
+        for task in tasks_to_cancel:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 # === FastAPI App ===
@@ -278,6 +335,12 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         ):
             return ActionResponse(status="error", message="Servers are already running")
 
+        # Kill any orphaned processes before starting
+        if state.app_dir:
+            cleanup_orphaned_processes(
+                state.app_dir, ports=[request.frontend_port, request.backend_port]
+            )
+
         # Store configuration
         state.frontend_port = request.frontend_port
         state.backend_port = request.backend_port
@@ -314,7 +377,6 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                     request.host,
                     request.backend_port,
                     request.obo,
-                    None,  # log_file no longer used
                     request.max_retries,
                 )
             )
@@ -332,12 +394,19 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         """Stop all development servers."""
         stopped: list[str] = []
 
+        # Kill frontend process explicitly first
+        if state.frontend_process and state.frontend_process.returncode is None:
+            await kill_process_group(state.frontend_process, timeout=3.0)
+            state.frontend_process = None
+
+        # Cancel tasks
         if state.frontend_task and not state.frontend_task.done():
             state.frontend_task.cancel()
             try:
                 await state.frontend_task
             except asyncio.CancelledError:
                 pass
+            state.frontend_task = None
             stopped.append("frontend")
 
         if state.backend_task and not state.backend_task.done():
@@ -346,6 +415,7 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 await state.backend_task
             except asyncio.CancelledError:
                 pass
+            state.backend_task = None
             stopped.append("backend")
 
         if state.openapi_task and not state.openapi_task.done():
@@ -354,11 +424,13 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 await state.openapi_task
             except asyncio.CancelledError:
                 pass
+            state.openapi_task = None
             stopped.append("openapi")
 
         if not stopped:
             return ActionResponse(status="error", message="No servers were running")
 
+        os.kill(os.getpid(), signal.SIGTERM)
         return ActionResponse(
             status="success",
             message=f"Stopped servers: {', '.join(stopped)}",
@@ -370,8 +442,8 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         # Stop first
         await stop_servers()
 
-        # Wait a moment
-        await asyncio.sleep(1)
+        # Wait for ports to be fully released
+        await asyncio.sleep(2)
 
         # Start with stored configuration
         request = ActionRequest(
@@ -383,7 +455,15 @@ def create_dev_server(app_dir: Path) -> FastAPI:
             max_retries=state.max_retries,
         )
 
-        return await start_servers(request)
+        start_response = await start_servers(request)
+
+        # Combine messages
+        if start_response.status == "success":
+            return ActionResponse(
+                status="success", message="Servers restarted successfully"
+            )
+        else:
+            return start_response
 
     @app.get("/logs")
     async def stream_logs(
@@ -467,13 +547,12 @@ def create_dev_server(app_dir: Path) -> FastAPI:
     return app
 
 
-def run_dev_server(app_dir: Path, port: int = 8040, host: str = "127.0.0.1"):
-    """Run the dev server.
+def run_dev_server(app_dir: Path, socket_path: Path | str):
+    """Run the dev server on a Unix domain socket.
 
     Args:
         app_dir: Application directory
-        port: Port to run the server on
-        host: Host to bind to
+        socket_path: Path to Unix domain socket
     """
     import os
     import uvicorn
@@ -481,12 +560,22 @@ def run_dev_server(app_dir: Path, port: int = 8040, host: str = "127.0.0.1"):
     # Change to app directory so get_project_metadata() works correctly
     os.chdir(app_dir)
 
+    # Ensure socket path is a Path object
+    if isinstance(socket_path, str):
+        socket_path = Path(socket_path)
+
+    # Remove old socket file if it exists
+    if socket_path.exists():
+        socket_path.unlink()
+
+    # Ensure parent directory exists
+    socket_path.parent.mkdir(parents=True, exist_ok=True)
+
     app = create_dev_server(app_dir)
 
     config = uvicorn.Config(
         app=app,
-        host=host,
-        port=port,
+        uds=str(socket_path),
         log_level="info",
     )
 

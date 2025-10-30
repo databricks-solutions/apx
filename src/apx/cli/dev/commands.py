@@ -15,8 +15,8 @@ from apx.cli.dev.manager import (
     validate_databricks_credentials,
     delete_token_from_keyring,
     save_token_id,
-    suppress_output_and_logs,
 )
+from apx.cli.dev.logging import suppress_output_and_logs
 from apx.cli.version import with_version
 from apx.utils import (
     console,
@@ -35,7 +35,7 @@ dev_app = Typer(name="dev", help="Manage development servers")
 )
 def _run_server(
     app_dir: Path = Argument(..., help="App directory"),
-    dev_server_port: int = Argument(..., help="Dev server port"),
+    socket_path: Path = Argument(..., help="Socket path"),
     frontend_port: int = Argument(..., help="Frontend port"),
     backend_port: int = Argument(..., help="Backend port"),
     host: str = Argument(..., help="Host for servers"),
@@ -46,7 +46,7 @@ def _run_server(
     """Internal command to run dev server. Not meant for direct use."""
     from apx.cli.dev.server import run_dev_server
 
-    run_dev_server(app_dir, dev_server_port)
+    run_dev_server(app_dir, socket_path)
 
 
 @dev_app.command(name="start", help="Start development servers in detached mode")
@@ -208,14 +208,6 @@ def dev_restart(
             help="The path to the app. If not provided, current working directory will be used"
         ),
     ] = None,
-    watch: Annotated[
-        bool,
-        Option(
-            "--watch",
-            "-w",
-            help="Tail logs after restart until Ctrl+C, then stop all servers",
-        ),
-    ] = False,
 ):
     """Restart development servers using the dev server API."""
     if app_dir is None:
@@ -224,60 +216,19 @@ def dev_restart(
     # Use DevManager to restart servers
     manager = DevManager(app_dir)
 
-    # Get config
-    config = manager.get_or_create_config()
-
-    if not config.dev.pid or not config.dev.port:
+    if not manager.is_dev_server_running():
         console.print("[yellow]No development server found.[/yellow]")
-        console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
-        raise Exit(code=1)
-
-    if not manager._is_process_running(config.dev.pid):
-        console.print("[red]Development server is not running.[/red]")
         console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
         raise Exit(code=1)
 
     console.print("[bold yellow]🔄 Restarting development servers...[/bold yellow]")
 
-    # Send restart request to dev server using the client
-    from apx.cli.dev.client import DevServerClient
+    manager.stop()
+    manager.start()
 
-    client = DevServerClient(f"http://localhost:{config.dev.port}", timeout=10.0)
-
-    try:
-        response = client.restart()
-
-        if response.status == "success":
-            console.print(
-                "[bold green]✨ Development servers restarted successfully![/bold green]"
-            )
-        else:
-            console.print(f"[yellow]⚠️  Warning: {response.message}[/yellow]")
-    except Exception as e:
-        console.print(f"[red]❌ Could not connect to dev server: {e}[/red]")
-        raise Exit(code=1)
-
-    # If watch mode is enabled, stream logs until Ctrl+C
-    if watch:
-        console.print()
-        console.print(
-            "[bold cyan]📡 Streaming logs... Press Ctrl+C to stop servers[/bold cyan]"
-        )
-        console.print()
-        # stream_logs catches KeyboardInterrupt internally, so it returns normally
-        # After it returns (for any reason), we should stop the servers
-        manager.stream_logs(
-            duration_seconds=None,
-            ui_only=False,
-            backend_only=False,
-            openapi_only=False,
-            app_only=False,
-            raw_output=False,
-            follow=True,
-        )
-        console.print()
-        console.print("[bold yellow]🛑 Stopping development servers...[/bold yellow]")
-        manager.stop()
+    console.print(
+        "[bold green]✨ Development servers restarted successfully![/bold green]"
+    )
 
 
 @dev_app.command(name="logs", help="Display logs from development servers")

@@ -2,10 +2,12 @@
 
 import asyncio
 from pathlib import Path
+import time
 
 from mcp.server.fastmcp import FastMCP
 
-from apx.cli.dev.manager import DevManager, suppress_output_and_logs
+from apx.cli.dev.manager import DevManager
+from apx.cli.dev.logging import suppress_output_and_logs
 from apx.cli.dev.client import DevServerClient
 from apx.cli.dev.models import (
     McpActionResponse,
@@ -76,15 +78,11 @@ def _get_manager() -> DevManager:
 def _get_dev_server_client() -> DevServerClient | None:
     """Get DevServerClient if dev server is running, None otherwise."""
     manager = _get_manager()
-    config = manager.get_or_create_config()
 
-    if not config.dev.pid or not config.dev.port:
+    if not manager.is_dev_server_running():
         return None
 
-    if not manager._is_process_running(config.dev.pid):
-        return None
-
-    return DevServerClient(f"http://localhost:{config.dev.port}")
+    return DevServerClient(manager.socket_path)
 
 
 @mcp.tool()
@@ -148,30 +146,27 @@ async def restart() -> McpActionResponse:
         McpActionResponse with status and message indicating success or failure
     """
     manager = _get_manager()
-    config = await asyncio.to_thread(manager.get_or_create_config)
 
-    if not config.dev.pid or not config.dev.port:
-        return McpActionResponse(
-            status="error", message="No development server found. Run 'start' first."
-        )
-
-    is_running = await asyncio.to_thread(manager._is_process_running, config.dev.pid)
+    is_running = await asyncio.to_thread(manager.is_dev_server_running)
     if not is_running:
         return McpActionResponse(
             status="error",
             message="Development server is not running. Run 'start' first.",
         )
 
-    client = DevServerClient(f"http://localhost:{config.dev.port}", timeout=10.0)
+    def restart_suppressed():
+        """Restart servers with suppressed console output."""
+        with suppress_output_and_logs():
+            manager.stop()
+            time.sleep(1)
+            manager.start()
 
     try:
-        response = await asyncio.to_thread(client.restart)
-        if response.status == "success":
-            return McpActionResponse(
-                status="success", message="Development servers restarted successfully"
-            )
-        else:
-            return McpActionResponse(status="error", message=response.message)
+        # Run sync operation in thread pool with suppressed output
+        await asyncio.to_thread(restart_suppressed)
+        return McpActionResponse(
+            status="success", message="Development servers restarted successfully"
+        )
     except Exception as e:
         return McpActionResponse(
             status="error", message=f"Failed to restart servers: {str(e)}"
@@ -225,7 +220,6 @@ async def status() -> McpStatusResponse:
         - openapi_running: Whether the OpenAPI watcher is running
     """
     manager = _get_manager()
-    config = await asyncio.to_thread(manager.get_or_create_config)
 
     # Initialize with default values
     result = McpStatusResponse(
@@ -239,19 +233,17 @@ async def status() -> McpStatusResponse:
         openapi_running=False,
     )
 
-    if not config.dev.pid or not config.dev.port:
-        return result
-
-    is_running = await asyncio.to_thread(manager._is_process_running, config.dev.pid)
+    is_running = await asyncio.to_thread(manager.is_dev_server_running)
     if not is_running:
         return result
 
     result.dev_server_running = True
-    result.dev_server_port = config.dev.port
-    result.dev_server_pid = config.dev.pid
+    # Port and PID are no longer tracked, set to None
+    result.dev_server_port = None
+    result.dev_server_pid = None
 
     # Try to get status from dev server
-    client = DevServerClient(f"http://localhost:{config.dev.port}")
+    client = DevServerClient(manager.socket_path)
     try:
         status_data = await asyncio.to_thread(client.status)
         result.frontend_running = status_data.frontend_running
@@ -276,8 +268,16 @@ async def get_frontend_url() -> McpUrlResponse | McpErrorResponse:
 
     try:
         manager = _get_manager()
-        config = await asyncio.to_thread(manager.get_or_create_config)
-        return McpUrlResponse(url=f"http://localhost:{config.dev.port}")
+        is_running = await asyncio.to_thread(manager.is_dev_server_running)
+
+        if not is_running:
+            return McpErrorResponse(error="Dev server is not running")
+
+        # Get frontend port from dev server status
+        client = DevServerClient(manager.socket_path)
+        status_data = await asyncio.to_thread(client.status)
+
+        return McpUrlResponse(url=f"http://localhost:{status_data.frontend_port}")
     except Exception as e:
         return McpErrorResponse(error=f"Failed to get frontend URL: {str(e)}")
 

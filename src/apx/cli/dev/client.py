@@ -1,12 +1,14 @@
-"""HTTP client for communicating with the dev server using httpx."""
+"""HTTP client for communicating with the dev server using httpx over Unix domain socket."""
 
 import json
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
 from enum import Enum
+from pathlib import Path
 from typing import Literal
 
 import httpx
+from pydantic import ValidationError
 
 from apx.cli.dev.models import ActionRequest, ActionResponse, LogEntry, StatusResponse
 
@@ -18,17 +20,24 @@ class StreamEvent(str, Enum):
 
 
 class DevServerClient:
-    """Client for communicating with the dev server."""
+    """Client for communicating with the dev server over Unix domain socket."""
 
-    def __init__(self, base_url: str, timeout: float = 5.0):
+    def __init__(self, socket_path: Path | str, timeout: float = 5.0):
         """Initialize the dev server client.
 
         Args:
-            base_url: Base URL of the dev server (e.g., "http://localhost:8040")
+            socket_path: Path to Unix domain socket (e.g., ".apx/dev.sock")
             timeout: Default timeout for requests in seconds
         """
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
+        if isinstance(socket_path, str):
+            socket_path = Path(socket_path)
+
+        self.socket_path: Path = socket_path
+        self.timeout: float = timeout
+        # Use a custom transport for Unix domain sockets
+        self.transport: httpx.HTTPTransport = httpx.HTTPTransport(uds=str(socket_path))
+        # Base URL doesn't matter for Unix sockets, but httpx needs one
+        self.base_url: str = "http://localhost"
 
     def start(self, request: ActionRequest) -> ActionResponse:
         """Start the development servers.
@@ -42,13 +51,13 @@ class DevServerClient:
         Raises:
             httpx.HTTPError: If the request fails
         """
-        with httpx.Client(timeout=self.timeout) as client:
+        with httpx.Client(transport=self.transport, timeout=self.timeout) as client:
             response = client.post(
                 f"{self.base_url}/actions/start",
                 json=request.model_dump(),
             )
             response.raise_for_status()
-            return ActionResponse(**response.json())
+            return ActionResponse.model_validate(response.json())
 
     def stop(self) -> ActionResponse:
         """Stop the development servers.
@@ -59,10 +68,10 @@ class DevServerClient:
         Raises:
             httpx.HTTPError: If the request fails
         """
-        with httpx.Client(timeout=self.timeout) as client:
+        with httpx.Client(transport=self.transport, timeout=self.timeout) as client:
             response = client.post(f"{self.base_url}/actions/stop")
             response.raise_for_status()
-            return ActionResponse(**response.json())
+            return ActionResponse.model_validate(response.json())
 
     def restart(self) -> ActionResponse:
         """Restart the development servers.
@@ -73,10 +82,13 @@ class DevServerClient:
         Raises:
             httpx.HTTPError: If the request fails
         """
-        with httpx.Client(timeout=10.0) as client:  # Longer timeout for restart
+        transport = httpx.HTTPTransport(uds=str(self.socket_path))
+        with httpx.Client(
+            transport=transport, timeout=10.0
+        ) as client:  # Longer timeout for restart
             response = client.post(f"{self.base_url}/actions/restart")
             response.raise_for_status()
-            return ActionResponse(**response.json())
+            return ActionResponse.model_validate(response.json())
 
     def status(self) -> StatusResponse:
         """Get the status of development servers.
@@ -87,10 +99,10 @@ class DevServerClient:
         Raises:
             httpx.HTTPError: If the request fails
         """
-        with httpx.Client(timeout=self.timeout) as client:
+        with httpx.Client(transport=self.transport, timeout=self.timeout) as client:
             response = client.get(f"{self.base_url}/status")
             response.raise_for_status()
-            return StatusResponse(**response.json())
+            return StatusResponse.model_validate(response.json())
 
     @contextmanager
     def stream_logs(
@@ -131,7 +143,8 @@ class DevServerClient:
         if duration is not None:
             params["duration"] = str(duration)
 
-        with httpx.Client(timeout=None) as client:
+        transport = httpx.HTTPTransport(uds=str(self.socket_path))
+        with httpx.Client(transport=transport, timeout=None) as client:
             with client.stream(
                 "GET", f"{self.base_url}/logs", params=params
             ) as response:
@@ -160,20 +173,8 @@ class DevServerClient:
 
                             data_str = line[6:]  # Remove "data: " prefix
                             try:
-                                log_data = json.loads(data_str)
-                                # Validate that we have all required fields before creating LogEntry
-                                if all(
-                                    key in log_data
-                                    for key in [
-                                        "timestamp",
-                                        "level",
-                                        "process_name",
-                                        "content",
-                                    ]
-                                ):
-                                    yield LogEntry(**log_data)
-                            except (json.JSONDecodeError, TypeError, ValueError):
-                                # Skip malformed log entries
+                                yield LogEntry.model_validate(json.loads(data_str))
+                            except ValidationError:
                                 continue
 
                 yield log_iterator()
@@ -199,7 +200,8 @@ class DevServerClient:
         if duration is not None:
             params["duration"] = str(duration)
 
-        async with httpx.AsyncClient(timeout=None) as client:
+        transport = httpx.AsyncHTTPTransport(uds=str(self.socket_path))
+        async with httpx.AsyncClient(transport=transport, timeout=None) as client:
             async with client.stream(
                 "GET", f"{self.base_url}/logs", params=params
             ) as response:
@@ -226,18 +228,7 @@ class DevServerClient:
 
                         data_str = line[6:]  # Remove "data: " prefix
                         try:
-                            log_data = json.loads(data_str)
-                            # Validate that we have all required fields before creating LogEntry
-                            if all(
-                                key in log_data
-                                for key in [
-                                    "timestamp",
-                                    "level",
-                                    "process_name",
-                                    "content",
-                                ]
-                            ):
-                                yield LogEntry(**log_data)
-                        except (json.JSONDecodeError, TypeError, ValueError):
+                            yield LogEntry.model_validate(json.loads(data_str))
+                        except ValidationError:
                             # Skip malformed log entries
                             continue

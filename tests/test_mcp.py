@@ -31,7 +31,7 @@ from apx.utils import ProjectMetadata
 def mock_project_config():
     """Create a mock project configuration."""
     config = ProjectConfig()
-    config.dev = DevConfig(pid=12345, port=8040)
+    config.dev = DevConfig()
     return config
 
 
@@ -51,8 +51,8 @@ def mock_status_response():
 def mock_manager(mock_project_config):
     """Create a mock DevManager."""
     manager = MagicMock()
-    manager.get_or_create_config = Mock(return_value=mock_project_config)
-    manager._is_process_running = Mock(return_value=True)
+    manager.socket_path = Path("/test/project/.apx/dev.sock")
+    manager.is_dev_server_running = Mock(return_value=True)
     manager.start = Mock()
     manager.stop = Mock()
     return manager
@@ -119,11 +119,10 @@ async def test_start_failure(mock_manager):
 
 
 @pytest.mark.asyncio
-async def test_restart_success(mock_manager, mock_client):
+async def test_restart_success(mock_manager):
     """Test the restart tool with successful restart."""
     with (
         patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
-        patch("apx.cli.dev.mcp.DevServerClient", return_value=mock_client),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await restart()
@@ -132,37 +131,20 @@ async def test_restart_success(mock_manager, mock_client):
         assert result.status == "success"
         assert "Development servers restarted successfully" in result.message
 
-        # Verify client.restart was called
-        mock_client.restart.assert_called_once()
+        # Verify manager methods were called
+        mock_manager.stop.assert_called_once()
+        mock_manager.start.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_restart_no_server(mock_manager):
+async def test_restart_no_server():
     """Test the restart tool when no server is running."""
-    config = ProjectConfig()  # No PID or port
-    mock_manager.get_or_create_config.return_value = config
+    manager = MagicMock()
+    manager.is_dev_server_running = Mock(return_value=False)
+    manager.socket_path = Path("/test/project/.apx/dev.sock")
 
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
-        patch("pathlib.Path.cwd", return_value=Path("/test/project")),
-    ):
-        result = await restart()
-
-        assert isinstance(result, McpActionResponse)
-        assert result.status == "error"
-        assert "No development server found" in result.message
-
-
-@pytest.mark.asyncio
-async def test_restart_server_not_running(mock_manager):
-    """Test the restart tool when server is not running."""
-    config = ProjectConfig()
-    config.dev = DevConfig(pid=12345, port=8040)
-    mock_manager.get_or_create_config.return_value = config
-    mock_manager._is_process_running.return_value = False
-
-    with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
+        patch("apx.cli.dev.mcp._get_manager", return_value=manager),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await restart()
@@ -173,13 +155,30 @@ async def test_restart_server_not_running(mock_manager):
 
 
 @pytest.mark.asyncio
-async def test_restart_failure(mock_manager, mock_client):
+async def test_restart_server_not_running():
+    """Test the restart tool when server is not running."""
+    manager = MagicMock()
+    manager.is_dev_server_running = Mock(return_value=False)
+    manager.socket_path = Path("/test/project/.apx/dev.sock")
+
+    with (
+        patch("apx.cli.dev.mcp._get_manager", return_value=manager),
+        patch("pathlib.Path.cwd", return_value=Path("/test/project")),
+    ):
+        result = await restart()
+
+        assert isinstance(result, McpActionResponse)
+        assert result.status == "error"
+        assert "Development server is not running" in result.message
+
+
+@pytest.mark.asyncio
+async def test_restart_failure(mock_manager):
     """Test the restart tool when restart fails."""
-    mock_client.restart.side_effect = Exception("Connection refused")
+    mock_manager.start.side_effect = Exception("Connection refused")
 
     with (
         patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
-        patch("apx.cli.dev.mcp.DevServerClient", return_value=mock_client),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await restart()
@@ -234,8 +233,8 @@ async def test_status_all_running(mock_manager, mock_client, mock_status_respons
 
         assert isinstance(result, McpStatusResponse)
         assert result.dev_server_running is True
-        assert result.dev_server_port == 8040
-        assert result.dev_server_pid == 12345
+        assert result.dev_server_port is None  # No port tracking with Unix sockets
+        assert result.dev_server_pid is None  # No PID tracking with Unix sockets
         assert result.frontend_running is True
         assert result.frontend_port == 5173
         assert result.backend_running is True
@@ -249,9 +248,9 @@ async def test_status_all_running(mock_manager, mock_client, mock_status_respons
 @pytest.mark.asyncio
 async def test_status_no_server():
     """Test the status tool when no server is configured."""
-    config = ProjectConfig()  # No PID or port
     manager = MagicMock()
-    manager.get_or_create_config = Mock(return_value=config)
+    manager.is_dev_server_running = Mock(return_value=False)
+    manager.socket_path = Path("/test/project/.apx/dev.sock")
 
     with (
         patch("apx.cli.dev.mcp._get_manager", return_value=manager),
@@ -271,7 +270,7 @@ async def test_status_no_server():
 @pytest.mark.asyncio
 async def test_status_server_not_running(mock_manager):
     """Test the status tool when server process is not running."""
-    mock_manager._is_process_running.return_value = False
+    mock_manager.is_dev_server_running.return_value = False
 
     with (
         patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
@@ -301,8 +300,8 @@ async def test_status_client_error(mock_manager, mock_client):
         # Should still return server info even if client fails
         assert isinstance(result, McpStatusResponse)
         assert result.dev_server_running is True
-        assert result.dev_server_port == 8040
-        assert result.dev_server_pid == 12345
+        assert result.dev_server_port is None  # No port tracking with Unix sockets
+        assert result.dev_server_pid is None  # No PID tracking with Unix sockets
         # But process statuses should be False
         assert result.frontend_running is False
         assert result.backend_running is False
@@ -415,10 +414,8 @@ async def test_start_suppresses_console_output(mock_manager):
 async def test_mcp_tool_responses_are_valid_models():
     """Test that MCP tool responses are valid Pydantic models."""
     manager = MagicMock()
-    config = ProjectConfig()
-    config.dev = DevConfig(pid=12345, port=8040)
-    manager.get_or_create_config = Mock(return_value=config)
-    manager._is_process_running = Mock(return_value=True)
+    manager.socket_path = Path("/test/project/.apx/dev.sock")
+    manager.is_dev_server_running = Mock(return_value=True)
     manager.start = Mock()
     manager.stop = Mock()
 

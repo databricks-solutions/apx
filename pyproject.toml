@@ -98,4 +98,5 @@ omit = [
     "**/node_modules",
     "**/__pycache__",
     "**/.*",
+    "**/.jinja2"
 ]
