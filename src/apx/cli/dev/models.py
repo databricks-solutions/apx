@@ -115,3 +115,9 @@ class McpErrorResponse(BaseModel):
     """MCP response model for errors."""
 
     error: str
+
+
+class McpUrlResponse(BaseModel):
+    """MCP response model for the frontend URL."""
+
+    url: str

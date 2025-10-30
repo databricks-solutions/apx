@@ -5,13 +5,14 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from apx.cli.dev.manager import DevManager
+from apx.cli.dev.manager import DevManager, suppress_output_and_logs
 from apx.cli.dev.client import DevServerClient
 from apx.cli.dev.models import (
     McpActionResponse,
     McpErrorResponse,
     McpMetadataResponse,
     McpStatusResponse,
+    McpUrlResponse,
 )
 from apx.utils import get_project_metadata
 from apx import __version__ as apx_version
@@ -64,18 +65,22 @@ async def start(
     """
     manager = _get_manager()
 
+    def start_suppressed():
+        """Start servers with suppressed console output."""
+        with suppress_output_and_logs():
+            manager.start(
+                frontend_port=frontend_port,
+                backend_port=backend_port,
+                host=host,
+                obo=obo,
+                openapi=openapi,
+                max_retries=max_retries,
+                watch=False,  # MCP tools always run in detached mode
+            )
+
     try:
-        # Run sync operation in thread pool
-        await asyncio.to_thread(
-            manager.start,
-            frontend_port=frontend_port,
-            backend_port=backend_port,
-            host=host,
-            obo=obo,
-            openapi=openapi,
-            max_retries=max_retries,
-            watch=False,  # MCP tools always run in detached mode
-        )
+        # Run sync operation in thread pool with suppressed output
+        await asyncio.to_thread(start_suppressed)
         return McpActionResponse(
             status="success", message="Development servers started successfully"
         )
@@ -137,8 +142,14 @@ async def stop() -> McpActionResponse:
     """
     manager = _get_manager()
 
+    def stop_suppressed():
+        """Stop servers with suppressed console output."""
+        with suppress_output_and_logs():
+            manager.stop()
+
     try:
-        await asyncio.to_thread(manager.stop)
+        # Run sync operation in thread pool with suppressed output
+        await asyncio.to_thread(stop_suppressed)
         return McpActionResponse(
             status="success", message="Development servers stopped successfully"
         )
@@ -206,6 +217,22 @@ async def status() -> McpStatusResponse:
         pass
 
     return result
+
+
+@mcp.tool()
+async def get_frontend_url() -> McpUrlResponse | McpErrorResponse:
+    """Get the URL of the frontend development server.
+
+    Returns:
+        McpUrlResponse with the URL of the frontend development server
+    """
+
+    try:
+        manager = _get_manager()
+        config = await asyncio.to_thread(manager.get_or_create_config)
+        return McpUrlResponse(url=f"http://localhost:{config.dev.port}")
+    except Exception as e:
+        return McpErrorResponse(error=f"Failed to get frontend URL: {str(e)}")
 
 
 @mcp.tool()

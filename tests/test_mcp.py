@@ -1,5 +1,7 @@
 """Tests for the MCP server implementation."""
 
+import io
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -49,7 +51,7 @@ def mock_status_response():
 def mock_manager(mock_project_config):
     """Create a mock DevManager."""
     manager = MagicMock()
-    manager._get_or_create_config = Mock(return_value=mock_project_config)
+    manager.get_or_create_config = Mock(return_value=mock_project_config)
     manager._is_process_running = Mock(return_value=True)
     manager.start = Mock()
     manager.stop = Mock()
@@ -138,7 +140,7 @@ async def test_restart_success(mock_manager, mock_client):
 async def test_restart_no_server(mock_manager):
     """Test the restart tool when no server is running."""
     config = ProjectConfig()  # No PID or port
-    mock_manager._get_or_create_config.return_value = config
+    mock_manager.get_or_create_config.return_value = config
 
     with (
         patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
@@ -156,7 +158,7 @@ async def test_restart_server_not_running(mock_manager):
     """Test the restart tool when server is not running."""
     config = ProjectConfig()
     config.dev = DevConfig(pid=12345, port=8040)
-    mock_manager._get_or_create_config.return_value = config
+    mock_manager.get_or_create_config.return_value = config
     mock_manager._is_process_running.return_value = False
 
     with (
@@ -249,7 +251,7 @@ async def test_status_no_server():
     """Test the status tool when no server is configured."""
     config = ProjectConfig()  # No PID or port
     manager = MagicMock()
-    manager._get_or_create_config = Mock(return_value=config)
+    manager.get_or_create_config = Mock(return_value=config)
 
     with (
         patch("apx.cli.dev.mcp._get_manager", return_value=manager),
@@ -376,3 +378,101 @@ async def test_status_with_mocked_response(mock_manager, mock_status_response):
         assert result.backend_running is True
         assert result.backend_port == 8080
         assert result.openapi_running is False
+
+
+@pytest.mark.asyncio
+async def test_start_suppresses_console_output(mock_manager):
+    """Test that start tool suppresses console output when called."""
+    original_stdout = sys.stdout
+    captured_output = io.StringIO()
+
+    try:
+        sys.stdout = captured_output
+
+        with (
+            patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
+            patch("pathlib.Path.cwd", return_value=Path("/test/project")),
+        ):
+            result = await start(frontend_port=5173, backend_port=8000)
+
+            # Verify the result is successful
+            assert isinstance(result, McpActionResponse)
+            assert result.status == "success"
+
+            # Verify that console output was suppressed
+            # The captured output should be empty or minimal
+            output = captured_output.getvalue()
+            # Console.print statements from manager.start() should not appear
+            assert "🔍 Finding" not in output
+            assert "✓ Found available ports" not in output
+            assert "🚀 Starting" not in output
+            assert "Dev Server:" not in output
+    finally:
+        sys.stdout = original_stdout
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_responses_are_valid_models():
+    """Test that MCP tool responses are valid Pydantic models."""
+    manager = MagicMock()
+    config = ProjectConfig()
+    config.dev = DevConfig(pid=12345, port=8040)
+    manager.get_or_create_config = Mock(return_value=config)
+    manager._is_process_running = Mock(return_value=True)
+    manager.start = Mock()
+    manager.stop = Mock()
+
+    client = MagicMock()
+    client.status = Mock(
+        return_value=StatusResponse(
+            frontend_running=True,
+            backend_running=True,
+            openapi_running=True,
+            frontend_port=5173,
+            backend_port=8000,
+        )
+    )
+    client.restart = Mock(
+        return_value=ActionResponse(status="success", message="Restarted")
+    )
+
+    with (
+        patch("apx.cli.dev.mcp._get_manager", return_value=manager),
+        patch("apx.cli.dev.mcp.DevServerClient", return_value=client),
+        patch("pathlib.Path.cwd", return_value=Path("/test/project")),
+        patch(
+            "apx.cli.dev.mcp.get_project_metadata",
+            return_value=ProjectMetadata(
+                **{
+                    "app-name": "Test App",
+                    "app-module": "test_app",
+                    "app-slug": "test-app",
+                }
+            ),
+        ),
+        patch("apx.cli.dev.mcp.apx_version", "1.0.0"),
+    ):
+        # Test start response
+        start_result = await start()
+        assert isinstance(start_result, McpActionResponse)
+        assert start_result.model_dump()  # Should serialize to dict
+
+        # Test status response
+        status_result = await status()
+        assert isinstance(status_result, McpStatusResponse)
+        assert status_result.model_dump()  # Should serialize to dict
+
+        # Test get_metadata response
+        metadata_result = await get_metadata()
+        assert isinstance(metadata_result, McpMetadataResponse)
+        assert metadata_result.model_dump()  # Should serialize to dict
+
+        # Test restart response
+        restart_result = await restart()
+        assert isinstance(restart_result, McpActionResponse)
+        assert restart_result.model_dump()  # Should serialize to dict
+
+        # Test stop response
+        stop_result = await stop()
+        assert isinstance(stop_result, McpActionResponse)
+        assert stop_result.model_dump()  # Should serialize to dict
