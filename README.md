@@ -27,6 +27,27 @@
 
 💡 The main idea of `apx` is to provide convenient, fast and AI-friendly development experience.
 
+## 🚀 Quickstart
+
+1. Run the command to initialize the project:
+
+```bash
+uvx git+https://github.com/databricks-solutions/apx.git init
+```
+
+2. Open the project in Cursor (or any IDE of your choice, for that matter), allow usage of apx and shadcn mcp
+3. Start providing prompts to build an app, e.g.:
+
+```text
+Use apx mcp server to start development server, then create a nice application for order management. Use shadcn mcp to add new components, make sure style is consistent and data is properly fetched from the backend. Start with mocking the backend data (yet use pydantic models), then implement the actual backend.
+```
+
+4. Deploy whenever ready via Databricks CLI:
+
+```bash
+databricks bundle deploy -p <your-profile>
+```
+
 ## 🛠️ Stack
 
 `apx` is built on top of the following stack:

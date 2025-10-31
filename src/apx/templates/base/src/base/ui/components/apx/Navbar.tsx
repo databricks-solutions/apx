@@ -1,5 +1,5 @@
 import { ModeToggle } from "@/components/apx/mode-toggle";
-import Logo from "@/components/apx/Logo";
+import Logo from "@/components/apx/logo";
 import { ReactNode } from "react";
 
 interface NavbarProps {

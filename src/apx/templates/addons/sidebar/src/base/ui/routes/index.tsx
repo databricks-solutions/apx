@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
-import Navbar from "@/components/apx/Navbar";
+import Navbar from "@/components/apx/navbar";
 import { User } from "lucide-react";
 import { BubbleBackground } from "@/components/backgrounds/bubble";
 
