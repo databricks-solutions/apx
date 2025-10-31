@@ -28,6 +28,7 @@ from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
 
 from apx.cli.dev.manager import (
+    is_port_available,
     run_backend,
     run_frontend_with_logging,
     run_openapi_with_logging,
@@ -170,6 +171,68 @@ async def kill_process_group(process: asyncio.subprocess.Process, timeout: float
     except Exception as e:
         logger = logging.getLogger("apx.server")
         logger.warning(f"Error killing process: {e}")
+
+
+async def verify_port_released(port: int, timeout: float = 1.0) -> bool:
+    """Verify that a port has been released.
+
+    Args:
+        port: Port number to check
+        timeout: How long to wait for port to be released
+
+    Returns:
+        True if port is available, False otherwise
+    """
+    # Give a small initial delay for the port to be released
+    await asyncio.sleep(timeout)
+    return is_port_available(port)
+
+
+async def ensure_port_released(
+    process: asyncio.subprocess.Process | None,
+    port: int,
+    max_attempts: int = 3,
+    attempt_delay: float = 1.0,
+) -> None:
+    """Ensure a port is released by killing the process if needed with retries.
+
+    Args:
+        process: The subprocess that might be holding the port
+        port: Port number to ensure is released
+        max_attempts: Maximum number of attempts to free the port (default: 3)
+        attempt_delay: Delay between attempts in seconds (default: 1.0)
+
+    Raises:
+        RuntimeError: If port is not freed after max_attempts
+    """
+    logger = logging.getLogger("apx.server")
+
+    for attempt in range(1, max_attempts + 1):
+        # Check if port is released
+        if await verify_port_released(port, timeout=attempt_delay):
+            if attempt > 1:
+                logger.info(
+                    f"Port {port} successfully released after {attempt} attempts"
+                )
+            return
+
+        # Port is still in use
+        logger.warning(f"Port {port} still in use (attempt {attempt}/{max_attempts})")
+
+        # Try to kill the process if we have one
+        if process and process.returncode is None:
+            logger.info(f"Killing process group for port {port}")
+            await kill_process_group(process, timeout=3.0)
+
+        # If this was the last attempt, raise an error
+        if attempt == max_attempts:
+            msg = (
+                f"Failed to free port {port} after {max_attempts} attempts. "
+                "Please manually kill any processes using this port."
+            )
+            raise RuntimeError(msg)
+
+        # Wait before next attempt (already waited in verify_port_released)
 
 
 # === Background Task Runners ===
@@ -393,12 +456,6 @@ def create_dev_server(app_dir: Path) -> FastAPI:
     async def stop_servers() -> ActionResponse:
         """Stop all development servers."""
         stopped: list[str] = []
-
-        # Kill frontend process explicitly first
-        if state.frontend_process and state.frontend_process.returncode is None:
-            await kill_process_group(state.frontend_process, timeout=3.0)
-            state.frontend_process = None
-
         # Cancel tasks
         if state.frontend_task and not state.frontend_task.done():
             state.frontend_task.cancel()
@@ -406,6 +463,28 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 await state.frontend_task
             except asyncio.CancelledError:
                 pass
+
+            # Kill frontend process explicitly to avoid orphaned processes
+            if state.frontend_process and state.frontend_process.returncode is None:
+                await kill_process_group(state.frontend_process, timeout=3.0)
+
+            # Ensure port is released with retries (3 attempts over 3 seconds)
+            if state.frontend_port:
+                try:
+                    await ensure_port_released(
+                        state.frontend_process,
+                        state.frontend_port,
+                        max_attempts=3,
+                        attempt_delay=0.1,
+                    )
+                except RuntimeError:
+                    # If port release failed after retries, do a final cleanup
+                    if state.app_dir:
+                        cleanup_orphaned_processes(
+                            state.app_dir, ports=[state.frontend_port]
+                        )
+
+            state.frontend_process = None
             state.frontend_task = None
             stopped.append("frontend")
 
@@ -429,6 +508,12 @@ def create_dev_server(app_dir: Path) -> FastAPI:
 
         if not stopped:
             return ActionResponse(status="error", message="No servers were running")
+
+        # Final cleanup to ensure all orphaned processes are killed
+        if state.app_dir:
+            cleanup_orphaned_processes(
+                state.app_dir, ports=[state.frontend_port, state.backend_port]
+            )
 
         os.kill(os.getpid(), signal.SIGTERM)
         return ActionResponse(
