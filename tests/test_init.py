@@ -38,18 +38,20 @@ def node_modules_dir(
     console.print("[dim]Running bun init...[/dim]")
     try:
         result = subprocess.run(
-            ["bun", "init", "-m", "-y"], 
-            cwd=tmp_path, 
-            env=os.environ, 
+            ["bun", "init", "-m", "-y"],
+            cwd=tmp_path,
+            env=os.environ,
             check=True,
             capture_output=True,
-            text=True
+            text=True,
         )
         console.print(f"[dim]Bun init stdout: {result.stdout}[/dim]")
         if result.stderr:
             console.print(f"[dim]Bun init stderr: {result.stderr}[/dim]")
     except subprocess.CalledProcessError as e:
-        console.print(f"[red]ERROR: Bun init failed with exit code {e.returncode}[/red]")
+        console.print(
+            f"[red]ERROR: Bun init failed with exit code {e.returncode}[/red]"
+        )
         console.print(f"[red]stdout: {e.stdout}[/red]")
         console.print(f"[red]stderr: {e.stderr}[/red]")
         raise
@@ -61,8 +63,10 @@ def node_modules_dir(
     add_bun_dev_dependencies(tmp_path)
 
     time_end = time.perf_counter()
-    console.print(f"Node modules directory created in {time_end - time_start:.2f} seconds")
-    
+    console.print(
+        f"Node modules directory created in {time_end - time_start:.2f} seconds"
+    )
+
     # Verify node_modules was created
     node_modules_path = tmp_path / "node_modules"
     if node_modules_path.exists():
@@ -74,7 +78,9 @@ def node_modules_dir(
         except Exception as e:
             console.print(f"[yellow]Warning: Could not count packages: {e}[/yellow]")
     else:
-        console.print(f"[red]WARNING: node_modules does not exist at {node_modules_path}[/red]")
+        console.print(
+            f"[red]WARNING: node_modules does not exist at {node_modules_path}[/red]"
+        )
 
     yield node_modules_path
 
@@ -103,13 +109,15 @@ def test_init_and_build_combinations(
     test_app_name = f"test-app-{template.value}-{layout.value}"
     console.print(f"\n[bold]Testing {template.value}/{layout.value}[/bold]")
     console.print(f"[dim]Test app name: {test_app_name}[/dim]")
-    
+
     app_path = tmp_path
     console.print(f"[dim]App path: {app_path}[/dim]")
     app_path.mkdir(parents=True, exist_ok=True)
-    
+
     # copy the node_modules directory to the app path
-    console.print(f"[dim]Copying node_modules from {node_modules_dir} to {app_path / 'node_modules'}[/dim]")
+    console.print(
+        f"[dim]Copying node_modules from {node_modules_dir} to {app_path / 'node_modules'}[/dim]"
+    )
     try:
         shutil.copytree(node_modules_dir, app_path / "node_modules")
         console.print("[dim]node_modules copied successfully[/dim]")
@@ -145,7 +153,7 @@ def test_init_and_build_combinations(
         console.print(f"[dim]  template: {template.value}[/dim]")
         console.print(f"[dim]  layout: {layout.value}[/dim]")
         console.print(f"[dim]  apx-package: {apx_source_dir}[/dim]")
-        
+
         result = runner.invoke(
             app,
             [
@@ -174,7 +182,10 @@ def test_init_and_build_combinations(
             console.print("\n[red]Exception occurred:[/red]")
             console.print(f"[red]{result.exception}[/red]")
             import traceback
-            console.print(f"[red]{''.join(traceback.format_exception(type(result.exception), result.exception, result.exception.__traceback__))}[/red]")
+
+            console.print(
+                f"[red]{''.join(traceback.format_exception(type(result.exception), result.exception, result.exception.__traceback__))}[/red]"
+            )
 
         # Assert successful execution
         assert result.exit_code == 0, (
@@ -192,16 +203,22 @@ def test_init_and_build_combinations(
     # Check basic structure
     console.print(f"[dim]Checking src directory: {app_path / 'src'}[/dim]")
     assert (app_path / "src").exists(), "src directory should exist"
-    
-    console.print(f"[dim]Checking app module directory: {app_path / 'src' / app_slug}[/dim]")
+
+    console.print(
+        f"[dim]Checking app module directory: {app_path / 'src' / app_slug}[/dim]"
+    )
     assert (app_path / "src" / app_slug).exists(), "app module directory should exist"
-    
-    console.print(f"[dim]Checking backend directory: {app_path / 'src' / app_slug / 'backend'}[/dim]")
+
+    console.print(
+        f"[dim]Checking backend directory: {app_path / 'src' / app_slug / 'backend'}[/dim]"
+    )
     assert (app_path / "src" / app_slug / "backend").exists(), (
         "backend directory should exist"
     )
-    
-    console.print(f"[dim]Checking ui directory: {app_path / 'src' / app_slug / 'ui'}[/dim]")
+
+    console.print(
+        f"[dim]Checking ui directory: {app_path / 'src' / app_slug / 'ui'}[/dim]"
+    )
     assert (app_path / "src" / app_slug / "ui").exists(), "ui directory should exist"
 
     # Check that package.json was created
@@ -220,7 +237,9 @@ def test_init_and_build_combinations(
     if template == Template.stateful:
         # Check that stateful-specific backend files exist
         backend_path = app_path / "src" / app_slug / "backend"
-        console.print(f"[dim]Checking stateful template runtime.py: {backend_path / 'runtime.py'}[/dim]")
+        console.print(
+            f"[dim]Checking stateful template runtime.py: {backend_path / 'runtime.py'}[/dim]"
+        )
         assert (backend_path / "runtime.py").exists(), (
             "runtime.py should exist for stateful template"
         )
@@ -229,7 +248,9 @@ def test_init_and_build_combinations(
     if layout == Layout.sidebar:
         # Check that sidebar-specific components exist
         ui_components_path = app_path / "src" / app_slug / "ui" / "components" / "apx"
-        console.print(f"[dim]Checking sidebar layout component: {ui_components_path / 'sidebar-layout.tsx'}[/dim]")
+        console.print(
+            f"[dim]Checking sidebar layout component: {ui_components_path / 'sidebar-layout.tsx'}[/dim]"
+        )
         assert (ui_components_path / "sidebar-layout.tsx").exists(), (
             "sidebar-layout.tsx should exist for sidebar layout"
         )
@@ -249,12 +270,16 @@ def test_init_and_build_combinations(
     build_dir = app_path / ".build"
     console.print(f"[dim]Verifying build artifacts in {build_dir}...[/dim]")
     wheel_files = list(build_dir.glob("*.whl"))
-    console.print(f"[dim]Found {len(wheel_files)} wheel file(s): {[f.name for f in wheel_files]}[/dim]")
+    console.print(
+        f"[dim]Found {len(wheel_files)} wheel file(s): {[f.name for f in wheel_files]}[/dim]"
+    )
     assert len(wheel_files) > 0, (
         f"At least one wheel file should exist in .build directory for {template}/{layout}"
     )
-    
-    console.print(f"[dim]Checking requirements.txt: {build_dir / 'requirements.txt'}[/dim]")
+
+    console.print(
+        f"[dim]Checking requirements.txt: {build_dir / 'requirements.txt'}[/dim]"
+    )
     assert (build_dir / "requirements.txt").exists(), (
         f"requirements.txt should exist in .build directory for {template}/{layout}"
     )
@@ -265,5 +290,5 @@ def test_init_and_build_combinations(
     assert wheel_files[0].name in requirements_content, (
         "requirements.txt should reference the wheel file"
     )
-    
+
     console.print(f"[green]✓ Test passed for {template.value}/{layout.value}[/green]")
