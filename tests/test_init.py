@@ -140,8 +140,8 @@ def test_init_and_build_combinations(
     if layout == Layout.sidebar:
         # Check that sidebar-specific components exist
         ui_components_path = app_path / "src" / app_slug / "ui" / "components" / "apx"
-        assert (ui_components_path / "SidebarLayout.tsx").exists(), (
-            "SidebarLayout.tsx should exist for sidebar layout"
+        assert (ui_components_path / "sidebar-layout.tsx").exists(), (
+            "sidebar-layout.tsx should exist for sidebar layout"
         )
 
     # Verify that .env file was created (but without DATABRICKS_CONFIG_PROFILE since profile=None)
