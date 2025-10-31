@@ -11,8 +11,8 @@ from apx.cli.init import (
     Template,
     add_bun_dependencies,
     add_bun_dev_dependencies,
-    init,
 )
+from apx.__main__ import app
 from collections.abc import Generator
 import subprocess
 from apx.utils import console
@@ -96,17 +96,35 @@ def test_init_and_build_combinations(
         patch("apx.cli.init.Prompt.ask", side_effect=mock_prompt_ask),
         patch("apx.cli.init.Confirm.ask", side_effect=mock_confirm_ask),
     ):
-        # Run init with all parameters passed by name (typer requirement)
-        result = init(
-            app_path=app_path,
-            app_name=test_app_name,
-            template=template,
-            assistant=None,
-            layout=layout,
-            apx_package=apx_source_dir,
+        # Run init using CliRunner to capture all output
+        result = runner.invoke(
+            app,
+            [
+                "init",
+                str(app_path),
+                "--name",
+                test_app_name,
+                "--template",
+                template.value,
+                "--layout",
+                layout.value,
+                "--apx-package",
+                apx_source_dir,
+            ],
         )
-        if result:
-            assert result.exit_code == 0, "init should exit with code 0"
+
+        # Print captured output for debugging
+        if result.stdout:
+            console.print("\n[dim]Captured stdout:[/dim]")
+            console.print(result.stdout)
+        if result.stderr:
+            console.print("\n[dim]Captured stderr:[/dim]")
+            console.print(result.stderr)
+
+        # Assert successful execution
+        assert result.exit_code == 0, (
+            f"init should exit with code 0, got {result.exit_code}\nOutput: {result.stdout}\nError: {result.stderr}"
+        )
 
     # Verify that key directories and files were created
     app_slug = test_app_name.replace("-", "_")
