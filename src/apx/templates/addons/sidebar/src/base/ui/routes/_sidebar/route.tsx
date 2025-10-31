@@ -1,4 +1,4 @@
-import SidebarLayout from "@/components/apx/SidebarLayout";
+import SidebarLayout from "@/components/apx/sidebar-layout";
 import { createFileRoute, Link, useLocation } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
 import { User } from "lucide-react";

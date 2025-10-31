@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import Navbar from "@/components/apx/Navbar";
+import Navbar from "@/components/apx/navbar";
 import { BubbleBackground } from "@/components/backgrounds/bubble";
 
 export const Route = createFileRoute("/")({
