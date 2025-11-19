@@ -258,20 +258,22 @@ def process_template_directory(
             # Process file
             if item.suffix == ".jinja2":
                 # Render Jinja2 template using the correct path relative to templates root
-                template_path = str(source_rel_to_templates / rel_path)
+                template_path = (source_rel_to_templates / rel_path).as_posix()
                 template: jinja2.Template = jinja2_env.get_template(template_path)
                 # Pass both app_name (for display) and app_slug (for module names/paths) to templates
                 target_path.write_text(
                     template.render(  # pyright:ignore[reportUnknownMemberType]
                         app_name=app_name, app_slug=app_slug
-                    )
+                    ),
+                    encoding="utf-8",
                 )
                 if item.name == "logo.svg.jinja2":
                     app_letter = app_name[0].upper()
                     target_path.write_text(
                         template.render(  # pyright:ignore[reportUnknownMemberType]
                             app_name=app_name, app_slug=app_slug, app_letter=app_letter
-                        )
+                        ),
+                        encoding="utf-8",
                     )
             else:
                 # Copy file as-is
