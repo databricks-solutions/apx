@@ -25,7 +25,7 @@ class DatabaseConfig(BaseModel):
 class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=env_file,
-        env_prefix=f"{app_name.upper()}_",
+        env_prefix=f"{app_slug.upper()}_",
         extra="ignore",
         env_nested_delimiter="__",
     )
