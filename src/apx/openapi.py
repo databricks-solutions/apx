@@ -96,6 +96,15 @@ def _generate_openapi_schema(
         for mod_name in modules_to_delete:
             del sys.modules[mod_name]
 
+        # check if sqlmodel is available, and if it is, reset the state of metadata
+        try:
+            from sqlmodel import SQLModel
+
+            SQLModel.registry.dispose()
+            SQLModel.metadata.clear()
+        except ImportError:
+            pass
+
         module = importlib.import_module(module_path)
     except ImportError as e:
         console.print(f"[red]❌ Failed to import module {module_path}: {e}[/red]")

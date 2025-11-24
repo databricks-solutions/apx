@@ -10,6 +10,15 @@ from pathlib import Path
 # List of process names to explicitly kill (build tools and dev servers)
 PROCESS_NAMES_TO_KILL = ["bun", "node", "vite", "esbuild", "vite-node"]
 
+# Patterns in command line that indicate IDE/development tools we should NOT kill
+PROTECTED_PROCESS_PATTERNS = [
+    "pyright",
+    "pylance",
+    "typescript-language-server",
+    "vscode-eslint",
+    "eslint_d",
+]
+
 
 def cleanup_orphaned_processes(
     app_dir: Path,
@@ -45,7 +54,7 @@ def cleanup_orphaned_processes(
             for proc in psutil.process_iter(["pid", "name", "connections"]):
                 try:
                     # Check if process is using any of our ports
-                    connections = proc.connections()
+                    connections = proc.net_connections()
                     for conn in connections:
                         if (
                             hasattr(conn, "laddr")
@@ -63,6 +72,22 @@ def cleanup_orphaned_processes(
         for proc in psutil.process_iter(["pid", "name", "cwd", "cmdline"]):
             try:
                 if proc.name() in PROCESS_NAMES_TO_KILL:
+                    # Get command line early to check for protected processes
+                    try:
+                        cmdline = proc.cmdline()
+                        if cmdline:
+                            cmdline_str = " ".join(cmdline)
+                            # Skip if this is a protected IDE/development tool
+                            if any(
+                                pattern in cmdline_str
+                                for pattern in PROTECTED_PROCESS_PATTERNS
+                            ):
+                                continue
+                        else:
+                            cmdline_str = None
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                        cmdline_str = None
+
                     # Check if process is in our app directory
                     try:
                         cwd = proc.cwd()
@@ -74,15 +99,9 @@ def cleanup_orphaned_processes(
                         pass
 
                     # Also check command line for app directory reference
-                    try:
-                        cmdline = proc.cmdline()
-                        if cmdline:
-                            cmdline_str = " ".join(cmdline)
-                            if app_dir_str in cmdline_str:
-                                proc.kill()
-                                killed.append(f"{proc.name()} (PID {proc.pid})")
-                    except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-                        pass
+                    if cmdline_str and app_dir_str in cmdline_str:
+                        proc.kill()
+                        killed.append(f"{proc.name()} (PID {proc.pid})")
             except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
                 pass
 

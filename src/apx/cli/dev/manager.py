@@ -264,6 +264,15 @@ def load_app(app_module_name: str, reload_modules: bool = False) -> FastAPI:
         for mod_name in modules_to_delete:
             del sys.modules[mod_name]
 
+    # check if sqlmodel is available, and if it is, reset the state of metadata
+    try:
+        from sqlmodel import SQLModel
+
+        SQLModel.registry.dispose()
+        SQLModel.metadata.clear()
+    except ImportError:
+        pass
+
     # Import the module
     try:
         module = importlib.import_module(module_path)
