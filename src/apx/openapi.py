@@ -1,14 +1,11 @@
 """OpenAPI schema generation and orval client generation utilities."""
 
 import asyncio
-import importlib
 import json
 import logging
 import subprocess
-import sys
 from pathlib import Path
 
-from fastapi import FastAPI
 from typer import Exit
 import watchfiles
 
@@ -71,59 +68,24 @@ def _generate_openapi_schema(
     Returns:
         Tuple of (output_path, schema_changed) where schema_changed indicates if the schema differs from previous
     """
-    # Split the app_name into module path and attribute name (like uvicorn does)
-    if ":" not in app_module_name:
-        console.print(
-            "[red]❌ Invalid app module format. Expected format: some.package.file:app[/red]"
-        )
-        raise Exit(code=1)
-
-    module_path, attribute_name = app_module_name.split(":", 1)
-
-    # Note: We don't redirect stdout/stderr here because the backend process
-    # is responsible for capturing all app output. The OpenAPI watcher just
-    # uses the logger for its own messages.
-
-    # Import the module
-    try:
-        # Reload modules to get fresh changes
-        base_path = module_path.split(".")[0]
-        modules_to_delete = [
-            name
-            for name in sys.modules.keys()
-            if name.startswith(base_path + ".") or name == base_path
-        ]
-        for mod_name in modules_to_delete:
-            del sys.modules[mod_name]
-
-        # check if sqlmodel is available, and if it is, reset the state of metadata
-        try:
-            from sqlmodel import SQLModel
-
-            SQLModel.registry.dispose()
-            SQLModel.metadata.clear()
-        except ImportError:
-            pass
-
-        module = importlib.import_module(module_path)
-    except ImportError as e:
-        console.print(f"[red]❌ Failed to import module {module_path}: {e}[/red]")
-        raise Exit(code=1)
-
-    # Get the app attribute from the module
-    try:
-        app_instance = getattr(module, attribute_name)
-    except AttributeError:
-        console.print(
-            f"[red]❌ Module {module_path} does not have attribute '{attribute_name}'[/red]"
-        )
-        raise Exit(code=1)
-
-    if not isinstance(app_instance, FastAPI):
-        console.print(
-            f"[red]❌ '{attribute_name}' is not a FastAPI app instance.[/red]"
-        )
-        raise Exit(code=1)
+    # Use the centralized reloader to get the app instance
+    # This ensures we use the same app instance as the backend server
+    from apx.cli.dev.reloader import get_app
+    
+    app_instance = get_app()
+    
+    if app_instance is None:
+        # If app hasn't been loaded yet by the backend, this shouldn't happen
+        # in dev mode, but handle it gracefully
+        if logger:
+            logger.warning("App not loaded yet, this shouldn't happen in dev mode")
+        else:
+            console.print(
+                "[yellow]⚠️  App not loaded yet by backend server[/yellow]"
+            )
+        # Fall back to loading it ourselves (shouldn't happen in practice)
+        from apx.cli.dev.reloader import load_app
+        app_instance, _ = load_app(app_module_name, reload=False)
 
     # Generate OpenAPI spec
     spec = app_instance.openapi()

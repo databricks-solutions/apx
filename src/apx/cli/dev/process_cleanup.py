@@ -51,7 +51,7 @@ def cleanup_orphaned_processes(
 
         # Find processes using the specified ports
         if ports:
-            for proc in psutil.process_iter(["pid", "name", "connections"]):
+            for proc in psutil.process_iter(["pid", "name"]):
                 try:
                     # Check if process is using any of our ports
                     connections = proc.net_connections()

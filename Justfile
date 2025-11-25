@@ -20,3 +20,6 @@ pm message:
     git add .
     git commit -m "{{message}}"
     git push
+
+get-version:
+    uvx uv-dynamic-versioning

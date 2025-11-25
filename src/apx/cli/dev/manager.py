@@ -1,13 +1,11 @@
 """Development server utilities for apx."""
 
 import asyncio
-import importlib
 import json
 import logging
 import psutil
 import socket
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any, Literal
@@ -35,6 +33,7 @@ from apx.cli.dev.logging import (
     suppress_output_and_logs,
     print_log_entry,
 )
+from apx.cli.dev.reloader import load_app as _load_app_from_reloader
 from apx.utils import (
     console,
     ensure_dir,
@@ -242,59 +241,11 @@ def write_project_config(file_path: Path, config: ProjectConfig) -> None:
 
 
 def load_app(app_module_name: str, reload_modules: bool = False) -> FastAPI:
-    """Load and return the FastAPI app instance."""
-    # Split the app_name into module path and attribute name
-    if ":" not in app_module_name:
-        console.print(
-            "[red]❌ Invalid app module format. Expected format: some.package.file:app[/red]"
-        )
-        raise Exit(code=1)
-
-    module_path, attribute_name = app_module_name.split(":", 1)
-
-    # If reloading, clear the module and all its submodules from cache
-    if reload_modules:
-        # Find all modules that start with the base module path
-        base_path = module_path.split(".")[0]
-        modules_to_delete = [
-            name
-            for name in sys.modules.keys()
-            if name.startswith(base_path + ".") or name == base_path
-        ]
-        for mod_name in modules_to_delete:
-            del sys.modules[mod_name]
-
-    # check if sqlmodel is available, and if it is, reset the state of metadata
-    try:
-        from sqlmodel import SQLModel
-
-        SQLModel.registry.dispose()
-        SQLModel.metadata.clear()
-    except ImportError:
-        pass
-
-    # Import the module
-    try:
-        module = importlib.import_module(module_path)
-    except ImportError as e:
-        console.print(f"[red]❌ Failed to import module {module_path}: {e}[/red]")
-        raise Exit(code=1)
-
-    # Get the app attribute from the module
-    try:
-        app_instance = getattr(module, attribute_name)
-    except AttributeError:
-        console.print(
-            f"[red]❌ Module {module_path} does not have attribute '{attribute_name}'[/red]"
-        )
-        raise Exit(code=1)
-
-    if not isinstance(app_instance, FastAPI):
-        console.print(
-            f"[red]❌ '{attribute_name}' is not a FastAPI app instance.[/red]"
-        )
-        raise Exit(code=1)
-
+    """Load and return the FastAPI app instance.
+    
+    This function now uses the centralized reloader to prevent duplicate imports.
+    """
+    app_instance, _ = _load_app_from_reloader(app_module_name, reload=reload_modules)
     return app_instance
 
 
