@@ -1172,9 +1172,7 @@ class DevManager:
                 console.print("[green]✓[/green] Stopped all servers via API")
         except Exception:
             # If API fails, we'll need to forcefully clean up processes
-            console.print(
-                "[yellow]⚠️  Could not stop gracefully via API, server may have crashed[/yellow]"
-            )
+            pass
 
         # Always do cleanup to ensure all processes are killed (double-pass)
         console.print(

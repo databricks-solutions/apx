@@ -14,6 +14,32 @@ from typer import Exit
 from apx.utils import console
 
 
+def _clear_sqlmodel_registry() -> None:
+    """Clear SQLModel/SQLAlchemy registry to prevent duplicate class warnings.
+
+    When reloading modules, SQLModel's internal registry still contains references
+    to the old classes. This function clears those registries before reload.
+    """
+    try:
+        from sqlmodel import SQLModel
+
+        # Clear the metadata (table definitions)
+        SQLModel.metadata.clear()
+
+        # Clear the class registry to prevent "duplicate class" warnings
+        # SQLModel uses _sa_registry which contains the SQLAlchemy registry
+        if hasattr(SQLModel, "_sa_registry") and hasattr(
+            SQLModel._sa_registry, "_class_registry"
+        ):
+            SQLModel._sa_registry._class_registry.clear()
+    except ImportError:
+        # SQLModel not installed, nothing to clear
+        pass
+    except Exception:
+        # If clearing fails, continue anyway (better than blocking reload)
+        pass
+
+
 class AppReloader:
     """Manages app loading and reloading with caching to prevent duplicate imports."""
 
@@ -57,6 +83,9 @@ class AppReloader:
 
         # Clear module cache if reloading
         if reload or self._app_instance is not None:
+            # Clear SQLModel/SQLAlchemy registries BEFORE clearing modules
+            _clear_sqlmodel_registry()
+
             base_path = module_path.split(".")[0]
             modules_to_delete = [
                 name
