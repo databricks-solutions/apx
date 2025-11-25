@@ -242,7 +242,7 @@ def write_project_config(file_path: Path, config: ProjectConfig) -> None:
 
 def load_app(app_module_name: str, reload_modules: bool = False) -> FastAPI:
     """Load and return the FastAPI app instance.
-    
+
     This function now uses the centralized reloader to prevent duplicate imports.
     """
     app_instance, _ = _load_app_from_reloader(app_module_name, reload=reload_modules)

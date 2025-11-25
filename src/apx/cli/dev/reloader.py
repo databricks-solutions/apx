@@ -17,7 +17,7 @@ from apx.utils import console
 class AppReloader:
     """Manages app loading and reloading with caching to prevent duplicate imports."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._app_instance: FastAPI | None = None
         self._app_module_name: str | None = None
         self._reload_count: int = 0
@@ -159,4 +159,3 @@ def get_reload_count() -> int:
 def clear_app():
     """Clear the cached app instance."""
     _dev_reloader.clear()
-
