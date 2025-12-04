@@ -100,7 +100,7 @@ export default defineConfig(async () => {
       tanstackRouter({
         target: "react",
         autoCodeSplitting: true,
-        routesDirectory: `${APP_UI_PATH}/routes`,
+        routesDirectory: `./routes`,
         generatedRouteTree: "./types/routeTree.gen.ts",
       }),
       react(),
