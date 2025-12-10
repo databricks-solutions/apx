@@ -40,5 +40,5 @@ version = "{version}"
 '''
 
 [tool.hatch.build]
-artifacts = ["src/{{app_slug}}/__dist__"]
+artifacts = ["src/{{app_slug}}/__dist__", "src/{{app_slug}}/_metadata.py"]
 exclude = ["src/{{app_slug}}/ui"]

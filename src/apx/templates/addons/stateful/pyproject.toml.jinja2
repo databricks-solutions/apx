@@ -10,8 +10,7 @@ dependencies = [
     "uvicorn>=0.37.0",
     "databricks-sdk>=0.68.0",
     "sqlmodel>=0.0.27",
-    "psycopg2-binary>=2.9.11",
-    "psycopg>=3.2.11",
+    "psycopg[binary,pool]>=3.2.11",
 ]
 
 [dependency-groups]
@@ -47,5 +46,5 @@ version = "{version}"
 '''
 
 [tool.hatch.build]
-artifacts = ["src/{{app_slug}}/__dist__"]
+artifacts = ["src/{{app_slug}}/__dist__", "src/{{app_slug}}/_metadata.py"]
 exclude = ["src/{{app_slug}}/ui"]
