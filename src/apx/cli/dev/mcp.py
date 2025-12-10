@@ -2,7 +2,6 @@
 
 import asyncio
 from pathlib import Path
-import time
 
 from mcp.server.fastmcp import FastMCP
 
@@ -154,18 +153,20 @@ async def restart() -> McpActionResponse:
             message="Development server is not running. Run 'start' first.",
         )
 
-    def restart_suppressed():
-        """Restart servers with suppressed console output."""
+    # Use the DevServerClient to send restart request to the dev server
+    # This ensures proper process cleanup including killing all vite/bun/node processes
+    client = DevServerClient(manager.socket_path)
+
+    def restart_via_client():
+        """Restart servers via dev server API which includes proper cleanup."""
         with suppress_output_and_logs():
-            manager.stop()
-            time.sleep(1)
-            manager.start()
+            return client.restart()
 
     try:
         # Run sync operation in thread pool with suppressed output
-        await asyncio.to_thread(restart_suppressed)
+        response = await asyncio.to_thread(restart_via_client)
         return McpActionResponse(
-            status="success", message="Development servers restarted successfully"
+            status=response.status, message=response.message
         )
     except Exception as e:
         return McpActionResponse(
