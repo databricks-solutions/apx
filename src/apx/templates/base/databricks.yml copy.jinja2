@@ -15,8 +15,6 @@ resources:
       name: "{{app_name}}"
       description: "{{app_name}} created with apx"
       source_code_path: ./.build
-      config:
-        command: ["uvicorn", "{{app_slug}}.backend.app:app", "--workers", "2"]
 
 targets:
   dev:
