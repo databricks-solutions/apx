@@ -234,9 +234,8 @@ Note: you don't need to run this command manually, watcher will run automaticall
 When the project is initialized, the following directories are added to the `shadcn` directory (via `repositories` key in the `components.json` file):
 
 - https://animate-ui.com/ - for animations. MIT License.
-- https://ai-sdk.dev/ - for AI components. Apache-2.0 License.
-- https://motion-primitives.com/ - for motion primitives. MIT License.
-- https://svgl.app/docs/shadcn-ui - for SVG components. MIT License.
+- https://ai-sdk.dev/ - for AI components (e.g. chat and prompts). Apache-2.0 License.
+- https://svgl.app/docs/shadcn-ui - various SVG icons. MIT License.
 
 We've carefully selected these repositories to ensure that the components are of high quality and are well-maintained.
 
