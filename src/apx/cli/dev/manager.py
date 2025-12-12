@@ -7,6 +7,8 @@ import psutil
 import socket
 import subprocess
 import time
+import os
+import signal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -39,10 +41,19 @@ from apx.utils import (
     ensure_dir,
 )
 from apx import __version__
-from apx.cli.dev.process_cleanup import (
-    cleanup_orphaned_processes_double_pass,
+from apx.cli.dev.process_control import (
+    TrackedProcess,
     cleanup_dev_server_processes,
+    find_listeners_for_port,
+    kill_pids,
+    pids_belong_to_app,
+    stop_tracked_process,
+    track_process,
+    wait_for_no_descendants,
+    wait_for_port_free,
 )
+from apx.cli.dev.models import DevProcessInfo
+from apx.cli.dev.state_types import FrontendProcessState
 
 
 # note: header name must be lowercase and with - symbols
@@ -625,6 +636,25 @@ async def run_backend(
                     if exc:
                         raise exc
 
+            except asyncio.CancelledError:
+                # IMPORTANT: allow task cancellation to actually stop the backend.
+                # Without this, CancelledError would be caught by the generic Exception
+                # handler below and the loop would keep running.
+                if server:
+                    server.should_exit = True
+                if server_task and not server_task.done():
+                    server_task.cancel()
+                    try:
+                        await server_task
+                    except asyncio.CancelledError:
+                        pass
+                if watch_task and not watch_task.done():
+                    watch_task.cancel()
+                    try:
+                        await watch_task
+                    except asyncio.CancelledError:
+                        pass
+                raise
             except KeyboardInterrupt:
                 # Clean shutdown on Ctrl+C
                 if server:
@@ -753,8 +783,11 @@ def delete_token_from_keyring(keyring_id: str):
 
 
 async def run_frontend_with_logging(
-    app_dir: Path, port: int, max_retries: int = 10, state=None
-):
+    app_dir: Path,
+    port: int,
+    max_retries: int = 10,
+    state: FrontendProcessState | None = None,
+) -> None:
     """Run frontend dev server and capture output to in-memory buffer.
 
     Args:
@@ -781,11 +814,18 @@ async def run_frontend_with_logging(
         retry=retry_if_not_exception_type(RuntimeError),
         reraise=True,
     )
-    async def run_with_retry():
+    async def run_with_retry() -> None:
         """Frontend runner with retry logic."""
         logger.info(f"Starting frontend server on port {port}")
 
-        # Create process with new session to enable process group killing
+        # Create process group/session so we can stop the full vite tree reliably.
+        creationflags = 0
+        start_new_session = False
+        if os.name == "nt":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        else:
+            start_new_session = True
+
         process = await asyncio.create_subprocess_exec(
             "bun",
             "run",
@@ -793,12 +833,20 @@ async def run_frontend_with_logging(
             cwd=app_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,  # Critical: creates process group
+            start_new_session=start_new_session,
+            creationflags=creationflags,
         )
 
         # Store process reference in state if provided
         if state is not None:
             state.frontend_process = process
+            # Track process metadata immediately (bun may hand off to node and exit quickly).
+            try:
+                from apx.cli.dev.process_control import track_process as _track
+
+                state.frontend_tracked = _track(process.pid)
+            except Exception:
+                state.frontend_tracked = None
 
         async def read_stream(stream, stream_name):
             """Read from stream and log each line."""
@@ -942,28 +990,90 @@ class DevManager:
             )
             raise Exit(code=1)
 
-        # Preventive cleanup: kill any orphaned processes from previous failed stops
-        # IMPORTANT: This prevents duplicate frontend servers
-        console.print(
-            "[cyan]🧹 Checking for orphaned processes from previous session...[/cyan]"
-        )
+        # If we have previous process metadata in project.json, we only stop processes we tracked.
+        # This avoids kill-by-name cleanups that might terminate unrelated processes.
+        config = self.get_or_create_config()
+        if config.dev.frontend_process or config.dev.dev_server_process:
+            console.print(
+                "[cyan]🧹 Found previous dev session state; attempting safe cleanup of tracked processes...[/cyan]"
+            )
+            # Prefer pgid-based shutdown (works even if bun pid is gone).
+            if config.dev.frontend_process:
+                stop_tracked_process(
+                    TrackedProcess(
+                        pid=config.dev.frontend_process.pid,
+                        create_time=config.dev.frontend_process.create_time,
+                        pgid=config.dev.frontend_process.pgid,
+                    ),
+                    name="frontend",
+                    sigint_timeout=0.2,
+                    sigterm_timeout=0.6,
+                    sigkill_timeout=0.6,
+                )
+                wait_for_no_descendants(
+                    TrackedProcess(
+                        pid=config.dev.frontend_process.pid,
+                        create_time=config.dev.frontend_process.create_time,
+                        pgid=config.dev.frontend_process.pgid,
+                    ),
+                    timeout=2.0,
+                    poll=0.1,
+                )
 
-        # Clean up dev server processes first
-        dev_server_killed = cleanup_dev_server_processes(self.app_dir, silent=True)
-
-        # Clean up build tool processes (vite/bun/node/esbuild) with double-pass
-        build_tools_killed = cleanup_orphaned_processes_double_pass(
-            self.app_dir,
-            ports=None,  # Will find available ports later
-            silent=True,
-            delay=0.5,
-        )
-
-        if dev_server_killed > 0 or build_tools_killed > 0:
-            total = dev_server_killed + build_tools_killed
-            console.print(f"[green]✓[/green] Cleaned up {total} orphaned process(es)")
-        else:
-            console.print("[dim]No orphaned processes found[/dim]")
+                # Port-aware last resort: if the previous frontend port is still held,
+                # kill only listener PIDs that look like they belong to this app.
+                if config.dev.frontend_port is not None:
+                    if not wait_for_port_free(
+                        is_port_available_fn=is_port_available,
+                        port=config.dev.frontend_port,
+                        timeout=1.5,
+                        poll=0.1,
+                    ):
+                        listeners = find_listeners_for_port(config.dev.frontend_port)
+                        to_kill = pids_belong_to_app(
+                            listeners,
+                            app_dir=self.app_dir,
+                            expected_pgid=config.dev.frontend_process.pgid,
+                        )
+                        if to_kill:
+                            kill_pids(
+                                to_kill, name="frontend-listener", sig=signal.SIGKILL
+                            )
+                        if not wait_for_port_free(
+                            is_port_available_fn=is_port_available,
+                            port=config.dev.frontend_port,
+                            timeout=1.5,
+                            poll=0.1,
+                        ):
+                            listeners2 = find_listeners_for_port(
+                                config.dev.frontend_port
+                            )
+                            console.print(
+                                f"[red]❌ Could not free previous frontend port {config.dev.frontend_port} "
+                                f"(listening PIDs: {listeners2})[/red]"
+                            )
+                            raise Exit(code=1)
+            if config.dev.dev_server_process:
+                stop_tracked_process(
+                    TrackedProcess(
+                        pid=config.dev.dev_server_process.pid,
+                        create_time=config.dev.dev_server_process.create_time,
+                        pgid=config.dev.dev_server_process.pgid,
+                    ),
+                    name="dev-server",
+                    sigint_timeout=0.2,
+                    sigterm_timeout=0.6,
+                    sigkill_timeout=0.6,
+                )
+                wait_for_no_descendants(
+                    TrackedProcess(
+                        pid=config.dev.dev_server_process.pid,
+                        create_time=config.dev.dev_server_process.create_time,
+                        pgid=config.dev.dev_server_process.pgid,
+                    ),
+                    timeout=2.0,
+                    poll=0.1,
+                )
 
         # Find available ports
         console.print("[cyan]🔍 Finding available ports...[/cyan]")
@@ -1006,6 +1116,12 @@ class DevManager:
         console.print()
 
         # Start the dev server process
+        popen_kwargs: dict[str, Any] = {}
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        else:
+            popen_kwargs["start_new_session"] = True
+
         dev_server_proc = subprocess.Popen(
             [
                 "uv",
@@ -1026,8 +1142,25 @@ class DevManager:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **popen_kwargs,
         )
+
+        # Persist dev server process metadata into project.json for robust stop fallback.
+        dev_tp = track_process(dev_server_proc.pid)
+        config = self.get_or_create_config()
+        config.dev.host = host
+        config.dev.frontend_port = frontend_port
+        config.dev.backend_port = backend_port
+        if dev_tp is not None:
+            config.dev.dev_server_process = DevProcessInfo(
+                pid=dev_tp.pid,
+                create_time=dev_tp.create_time,
+                pgid=dev_tp.pgid,
+            )
+        else:
+            config.dev.dev_server_process = None
+        config.dev.frontend_process = None
+        write_project_config(self.project_json_path, config)
 
         console.print("[cyan]✓[/cyan] Dev server started")
         console.print()
@@ -1155,7 +1288,7 @@ class DevManager:
     def stop(self):
         """Stop development server.
 
-        Ensures all vite, bun, node, esbuild processes are explicitly killed.
+        Stops servers deterministically by targeting only processes we started.
         """
         if not self.is_dev_server_running():
             console.print("[yellow]No development server found.[/yellow]")
@@ -1163,37 +1296,77 @@ class DevManager:
 
         console.print("[bold yellow]Stopping development server...[/bold yellow]")
 
-        # Try to send stop request to dev server first
+        # Capture project.json state early (dev server may be unresponsive / exiting).
+        config_before = self.get_or_create_config()
+        frontend_port = config_before.dev.frontend_port
+        backend_port = config_before.dev.backend_port
+
+        # Try to send stop request to dev server first (graceful stop path).
         client = DevServerClient(self.socket_path)
 
         try:
             response = client.stop()
             if response.status == "success":
                 console.print("[green]✓[/green] Stopped all servers via API")
-        except Exception:
-            # If API fails, we'll need to forcefully clean up processes
-            pass
+            else:
+                raise RuntimeError(response.message)
+        except Exception as e:
+            # API path failed; fall back to project.json-targeted shutdown.
+            console.print(
+                f"[yellow]⚠️  Dev server API stop failed; falling back to process cleanup: {e}[/yellow]"
+            )
+            config = self.get_or_create_config()
+            did_any = False
+            if config.dev.frontend_process:
+                stop_tracked_process(
+                    TrackedProcess(
+                        pid=config.dev.frontend_process.pid,
+                        create_time=config.dev.frontend_process.create_time,
+                        pgid=config.dev.frontend_process.pgid,
+                    ),
+                    name="frontend",
+                    sigint_timeout=0.2,
+                    sigterm_timeout=0.6,
+                    sigkill_timeout=0.6,
+                )
+                wait_for_no_descendants(
+                    TrackedProcess(
+                        pid=config.dev.frontend_process.pid,
+                        create_time=config.dev.frontend_process.create_time,
+                        pgid=config.dev.frontend_process.pgid,
+                    ),
+                    timeout=2.0,
+                    poll=0.1,
+                )
+                did_any = True
 
-        # Always do cleanup to ensure all processes are killed (double-pass)
-        console.print(
-            "[cyan]🧹 Ensuring all build tool processes are terminated...[/cyan]"
-        )
+            if config.dev.dev_server_process:
+                stop_tracked_process(
+                    TrackedProcess(
+                        pid=config.dev.dev_server_process.pid,
+                        create_time=config.dev.dev_server_process.create_time,
+                        pgid=config.dev.dev_server_process.pgid,
+                    ),
+                    name="dev-server",
+                    sigint_timeout=0.2,
+                    sigterm_timeout=0.6,
+                    sigkill_timeout=0.6,
+                )
+                wait_for_no_descendants(
+                    TrackedProcess(
+                        pid=config.dev.dev_server_process.pid,
+                        create_time=config.dev.dev_server_process.create_time,
+                        pgid=config.dev.dev_server_process.pgid,
+                    ),
+                    timeout=2.0,
+                    poll=0.1,
+                )
+                did_any = True
 
-        # Clean up dev server processes
-        cleanup_dev_server_processes(self.app_dir, silent=True)
-
-        # Clean up build tool processes with double-pass
-        killed_count = cleanup_orphaned_processes_double_pass(
-            self.app_dir,
-            ports=None,  # Don't filter by port, kill all
-            silent=True,
-            delay=0.5,
-        )
-
-        if killed_count > 0:
-            console.print(f"[green]✓[/green] Terminated {killed_count} process(es)")
-        else:
-            console.print("[green]✓[/green] All processes terminated")
+            if not did_any:
+                # Last-resort: only attempt to stop the dev server process by cmdline.
+                # We intentionally do NOT kill bun/vite/node by name.
+                cleanup_dev_server_processes(self.app_dir, silent=True)
 
         # Wait for socket to be removed (whether by API or by our cleanup)
         max_wait = 3  # seconds
@@ -1205,6 +1378,57 @@ class DevManager:
         # Force remove socket if it still exists
         if self.socket_path.exists():
             self.socket_path.unlink(missing_ok=True)
+
+        # Verify ports are free (from captured pidfile if available).
+        if frontend_port is not None:
+            if not wait_for_port_free(
+                is_port_available_fn=is_port_available,
+                port=frontend_port,
+                timeout=2.0,
+                poll=0.1,
+            ):
+                listeners = find_listeners_for_port(frontend_port)
+                expected_pgid = (
+                    config_before.dev.frontend_process.pgid
+                    if config_before.dev.frontend_process is not None
+                    else None
+                )
+                to_kill = pids_belong_to_app(
+                    listeners, app_dir=self.app_dir, expected_pgid=expected_pgid
+                )
+                if to_kill:
+                    kill_pids(to_kill, name="frontend-listener", sig=signal.SIGKILL)
+                if not wait_for_port_free(
+                    is_port_available_fn=is_port_available,
+                    port=frontend_port,
+                    timeout=1.5,
+                    poll=0.1,
+                ):
+                    listeners2 = find_listeners_for_port(frontend_port)
+                    console.print(
+                        f"[red]❌ Frontend port {frontend_port} is still in use "
+                        f"(listening PIDs: {listeners2})[/red]"
+                    )
+                    raise Exit(code=1)
+        if backend_port is not None:
+            if not wait_for_port_free(
+                is_port_available_fn=is_port_available,
+                port=backend_port,
+                timeout=2.0,
+                poll=0.1,
+            ):
+                listeners = find_listeners_for_port(backend_port)
+                console.print(
+                    f"[red]❌ Backend port {backend_port} is still in use "
+                    f"(listening PIDs: {listeners})[/red]"
+                )
+                raise Exit(code=1)
+
+        # Clear stored process metadata (token_id remains).
+        config = self.get_or_create_config()
+        config.dev.dev_server_process = None
+        config.dev.frontend_process = None
+        write_project_config(self.project_json_path, config)
 
         console.print()
         console.print(

@@ -20,6 +20,7 @@ from collections.abc import AsyncGenerator
 import logging
 import os
 import signal
+
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
@@ -45,7 +46,16 @@ from apx.cli.dev.logging import (
     LoggerWriter,
     setup_buffered_logging,
 )
-from apx.cli.dev.process_cleanup import cleanup_orphaned_processes_double_pass
+from apx.cli.dev.process_control import (
+    TrackedProcess,
+    find_listeners_for_port,
+    kill_pids,
+    pids_belong_to_app,
+    stop_tracked_process,
+    track_process,
+    wait_for_no_descendants,
+    wait_for_port_free,
+)
 
 
 # Global state for background tasks
@@ -59,6 +69,7 @@ class ServerState:
         self.backend_task: asyncio.Task[None] | None = None
         self.openapi_task: asyncio.Task[None] | None = None
         self.frontend_process: asyncio.subprocess.Process | None = None
+        self.frontend_tracked: TrackedProcess | None = None
         self.log_buffer: LogBuffer = deque(maxlen=10000)
         self.app_dir: Path | None = None
         self.frontend_port: int = 5173
@@ -73,117 +84,133 @@ state = ServerState()
 
 
 # === Process Cleanup ===
-# Note: Cleanup functions are now in apx.cli.dev.process_cleanup module
+# Process lifecycle is handled by `apx.cli.dev.process_control` and stored in `.apx/project.json`.
 
 
-async def kill_process_group(process: asyncio.subprocess.Process, timeout: float = 5.0):
-    """Kill a process and all its children using process group.
+def _project_json_path() -> Path | None:
+    if not state.app_dir:
+        return None
+    return state.app_dir / ".apx" / "project.json"
 
-    Args:
-        process: The subprocess to kill
-        timeout: How long to wait before force killing
-    """
-    if process.returncode is not None:
-        return  # Already dead
+
+def _update_project_frontend_process(tp: TrackedProcess | None) -> None:
+    """Persist frontend process metadata to `.apx/project.json` (best-effort)."""
+    path = _project_json_path()
+    if path is None:
+        return
+    from apx.cli.dev.manager import read_project_config, write_project_config
+    from apx.cli.dev.models import DevProcessInfo, ProjectConfig
 
     try:
-        # Try graceful shutdown first (SIGTERM)
-        if hasattr(os, "killpg"):
-            # Kill entire process group
-            pgid = os.getpgid(process.pid)
-            os.killpg(pgid, signal.SIGTERM)
-        else:
-            process.terminate()
+        config = read_project_config(path) if path.exists() else ProjectConfig()
+    except Exception:
+        config = ProjectConfig()
 
-        # Wait for process to die
+    config.dev.frontend_port = state.frontend_port
+    config.dev.backend_port = state.backend_port
+    config.dev.host = state.host
+    if tp is None:
+        config.dev.frontend_process = None
+    else:
+        config.dev.frontend_process = DevProcessInfo(
+            pid=tp.pid,
+            create_time=tp.create_time,
+            pgid=tp.pgid,
+        )
+    write_project_config(path, config)
+
+
+async def stop_children(*, verify_ports: bool = True) -> list[str]:
+    """Stop frontend/backend/openapi tasks and ensure frontend process tree is gone."""
+    stopped: list[str] = []
+
+    # Frontend: cancel task, then stop tracked process tree/group.
+    if state.frontend_task and not state.frontend_task.done():
+        state.frontend_task.cancel()
         try:
-            await asyncio.wait_for(process.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            # Force kill if still alive (SIGKILL)
-            if hasattr(os, "killpg"):
-                try:
-                    pgid = os.getpgid(process.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass  # Already dead
-            else:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass  # Already dead
+            await state.frontend_task
+        except asyncio.CancelledError:
+            pass
+        state.frontend_task = None
 
-            # Final wait
-            try:
-                await asyncio.wait_for(process.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                pass  # Give up, OS will clean up eventually
-    except ProcessLookupError:
-        pass  # Process already dead
-    except Exception as e:
-        logger = logging.getLogger("apx.server")
-        logger.warning(f"Error killing process: {e}")
+    if state.frontend_process is not None:
+        tp = state.frontend_tracked or track_process(state.frontend_process.pid)
+        if tp is not None:
+            stop_tracked_process(tp, name="frontend")
+            wait_for_no_descendants(tp, timeout=5.0, poll=0.1)
+        state.frontend_process = None
+        state.frontend_tracked = None
+        stopped.append("frontend")
 
+    if state.backend_task and not state.backend_task.done():
+        state.backend_task.cancel()
+        try:
+            await state.backend_task
+        except asyncio.CancelledError:
+            pass
+        state.backend_task = None
+        stopped.append("backend")
 
-async def verify_port_released(port: int, timeout: float = 1.0) -> bool:
-    """Verify that a port has been released.
+    if state.openapi_task and not state.openapi_task.done():
+        state.openapi_task.cancel()
+        try:
+            await state.openapi_task
+        except asyncio.CancelledError:
+            pass
+        state.openapi_task = None
+        stopped.append("openapi")
 
-    Args:
-        port: Port number to check
-        timeout: How long to wait for port to be released
+    # Persist cleared frontend pid.
+    _update_project_frontend_process(None)
 
-    Returns:
-        True if port is available, False otherwise
-    """
-    # Give a small initial delay for the port to be released
-    await asyncio.sleep(timeout)
-    return is_port_available(port)
-
-
-async def ensure_port_released(
-    process: asyncio.subprocess.Process | None,
-    port: int,
-    max_attempts: int = 3,
-    attempt_delay: float = 1.0,
-) -> None:
-    """Ensure a port is released by killing the process if needed with retries.
-
-    Args:
-        process: The subprocess that might be holding the port
-        port: Port number to ensure is released
-        max_attempts: Maximum number of attempts to free the port (default: 3)
-        attempt_delay: Delay between attempts in seconds (default: 1.0)
-
-    Raises:
-        RuntimeError: If port is not freed after max_attempts
-    """
-    logger = logging.getLogger("apx.server")
-
-    for attempt in range(1, max_attempts + 1):
-        # Check if port is released
-        if await verify_port_released(port, timeout=attempt_delay):
-            if attempt > 1:
-                logger.info(
-                    f"Port {port} successfully released after {attempt} attempts"
+    if verify_ports:
+        # Verify frontend+backend ports are free (best-effort; backend is in-process)
+        if state.frontend_port:
+            if not wait_for_port_free(
+                is_port_available_fn=is_port_available,
+                port=state.frontend_port,
+                timeout=2.0,
+                poll=0.1,
+            ):
+                # Try to kill remaining listeners that belong to this app (fast, scoped).
+                pids = find_listeners_for_port(state.frontend_port)
+                if state.app_dir is not None and pids:
+                    expected_pgid = (
+                        state.frontend_tracked.pgid if state.frontend_tracked else None
+                    )
+                    to_kill = pids_belong_to_app(
+                        pids, app_dir=state.app_dir, expected_pgid=expected_pgid
+                    )
+                    if to_kill:
+                        kill_pids(to_kill, name="frontend-listener", sig=signal.SIGKILL)
+                if not wait_for_port_free(
+                    is_port_available_fn=is_port_available,
+                    port=state.frontend_port,
+                    timeout=1.5,
+                    poll=0.1,
+                ):
+                    pids2 = find_listeners_for_port(state.frontend_port)
+                    raise RuntimeError(
+                        f"Frontend port {state.frontend_port} still in use (listening PIDs: {pids2})"
+                    )
+        if state.backend_port:
+            if not wait_for_port_free(
+                is_port_available_fn=is_port_available,
+                port=state.backend_port,
+                timeout=8.0,
+                poll=0.1,
+            ):
+                pids = find_listeners_for_port(state.backend_port)
+                raise RuntimeError(
+                    f"Backend port {state.backend_port} still in use (listening PIDs: {pids})"
                 )
-            return
 
-        # Port is still in use
-        logger.warning(f"Port {port} still in use (attempt {attempt}/{max_attempts})")
+    return stopped
 
-        # Try to kill the process if we have one
-        if process and process.returncode is None:
-            logger.info(f"Killing process group for port {port}")
-            await kill_process_group(process, timeout=3.0)
 
-        # If this was the last attempt, raise an error
-        if attempt == max_attempts:
-            msg = (
-                f"Failed to free port {port} after {max_attempts} attempts. "
-                "Please manually kill any processes using this port."
-            )
-            raise RuntimeError(msg)
-
-        # Wait before next attempt (already waited in verify_port_released)
+def request_dev_server_shutdown() -> None:
+    """Terminate the dev server process (used by /actions/stop only)."""
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 # === Background Task Runners ===
@@ -194,15 +221,15 @@ async def run_frontend_task(app_dir: Path, port: int, max_retries: int):
     try:
         await run_frontend_with_logging(app_dir, port, max_retries, state)
     except asyncio.CancelledError:
-        # Kill the frontend process on cancellation
-        if state.frontend_process:
-            await kill_process_group(state.frontend_process)
+        # Frontend process cleanup is handled by stop_children()
         raise
     except Exception as e:
         logger = logging.getLogger("apx.frontend")
         logger.error(f"Frontend task failed: {e}")
         if state.frontend_process:
-            await kill_process_group(state.frontend_process)
+            tp = track_process(state.frontend_process.pid)
+            if tp is not None:
+                stop_tracked_process(tp, name="frontend")
 
 
 async def run_backend_task(
@@ -265,35 +292,11 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         sys.stdout = original_stdout
         sys.stderr = original_stderr
 
-        # Kill frontend process first (most important for orphans)
-        if state.frontend_process and state.frontend_process.returncode is None:
-            await kill_process_group(state.frontend_process, timeout=2.0)
+        # Stop children deterministically; do not kill-by-name unrelated processes.
+        await stop_children(verify_ports=False)
 
-        # Cancel all tasks
-        tasks_to_cancel: list[asyncio.Task[None]] = []
-        if state.frontend_task and not state.frontend_task.done():
-            tasks_to_cancel.append(state.frontend_task)
-        if state.backend_task and not state.backend_task.done():
-            tasks_to_cancel.append(state.backend_task)
-        if state.openapi_task and not state.openapi_task.done():
-            tasks_to_cancel.append(state.openapi_task)
-
-        for task in tasks_to_cancel:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-        # Aggressive cleanup: kill all vite/bun/node/esbuild processes (double-pass)
-        if state.app_dir:
-            logger = logging.getLogger("apx.server")
-            cleanup_orphaned_processes_double_pass(
-                state.app_dir,
-                ports=[state.frontend_port, state.backend_port],
-                logger=logger,
-                delay=0.3,
-            )
+        # Ensure project.json doesn't keep stale frontend process metadata.
+        _update_project_frontend_process(None)
 
 
 # === FastAPI App ===
@@ -362,17 +365,23 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         ):
             return ActionResponse(status="error", message="Servers are already running")
 
-        # IMPORTANT: Kill any orphaned processes before starting to prevent duplicates
-        # This includes vite/bun/node/esbuild from previous failed sessions
+        # If project.json has stale frontend process metadata, attempt pgid-based cleanup.
         if state.app_dir:
-            logger = logging.getLogger("apx.server")
-            logger.info("Cleaning up any orphaned processes before starting servers...")
-            cleanup_orphaned_processes_double_pass(
-                state.app_dir,
-                ports=[request.frontend_port, request.backend_port],
-                logger=logger,
-                delay=0.5,
-            )
+            from apx.cli.dev.manager import read_project_config
+
+            path = _project_json_path()
+            if path and path.exists():
+                try:
+                    cfg = read_project_config(path)
+                    info = cfg.dev.frontend_process
+                    if info is not None:
+                        tp = TrackedProcess(
+                            pid=info.pid, create_time=info.create_time, pgid=info.pgid
+                        )
+                        stop_tracked_process(tp, name="frontend")
+                        wait_for_no_descendants(tp, timeout=5.0, poll=0.1)
+                except Exception:
+                    pass
 
         # Store configuration
         state.frontend_port = request.frontend_port
@@ -400,6 +409,18 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                     request.max_retries,
                 )
             )
+            # Wait briefly for the bun process to be created and tracked, then persist.
+            for _ in range(20):
+                if (
+                    state.frontend_tracked is not None
+                    or state.frontend_process is not None
+                ):
+                    break
+                await asyncio.sleep(0.05)
+            if state.frontend_tracked is None and state.frontend_process is not None:
+                state.frontend_tracked = track_process(state.frontend_process.pid)
+            if state.frontend_tracked is not None:
+                _update_project_frontend_process(state.frontend_tracked)
 
         # Start backend
         if state.app_dir:
@@ -413,12 +434,14 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                     request.max_retries,
                 )
             )
+            # Backend is in-process; nothing to persist beyond ports/host.
 
         # Start OpenAPI watcher
         if request.openapi and state.app_dir:
             state.openapi_task = asyncio.create_task(
                 run_openapi_task(state.app_dir, request.max_retries)
             )
+            # No additional process metadata to persist.
 
         return ActionResponse(status="success", message="Servers started successfully")
 
@@ -428,68 +451,16 @@ def create_dev_server(app_dir: Path) -> FastAPI:
 
         Explicitly kills all vite, bun, node, esbuild processes to ensure clean shutdown.
         """
-        stopped: list[str] = []
-        # Cancel tasks
-        if state.frontend_task and not state.frontend_task.done():
-            state.frontend_task.cancel()
-            try:
-                await state.frontend_task
-            except asyncio.CancelledError:
-                pass
-
-            # Kill frontend process explicitly to avoid orphaned processes
-            if state.frontend_process and state.frontend_process.returncode is None:
-                await kill_process_group(state.frontend_process, timeout=3.0)
-
-            # Ensure port is released with retries (3 attempts over 3 seconds)
-            if state.frontend_port:
-                try:
-                    await ensure_port_released(
-                        state.frontend_process,
-                        state.frontend_port,
-                        max_attempts=3,
-                        attempt_delay=0.1,
-                    )
-                except RuntimeError:
-                    # If port release failed after retries, do a final cleanup
-                    pass  # Will be handled by the double-pass cleanup below
-
-            state.frontend_process = None
-            state.frontend_task = None
-            stopped.append("frontend")
-
-        if state.backend_task and not state.backend_task.done():
-            state.backend_task.cancel()
-            try:
-                await state.backend_task
-            except asyncio.CancelledError:
-                pass
-            state.backend_task = None
-            stopped.append("backend")
-
-        if state.openapi_task and not state.openapi_task.done():
-            state.openapi_task.cancel()
-            try:
-                await state.openapi_task
-            except asyncio.CancelledError:
-                pass
-            state.openapi_task = None
-            stopped.append("openapi")
-
+        try:
+            # For "stop", we terminate the dev-server process immediately after stopping
+            # children. Port verification can be flaky on some platforms and is redundant
+            # because the dev-server process (which owns the backend listener) is about to exit.
+            stopped = await stop_children(verify_ports=False)
+        except Exception as e:
+            return ActionResponse(status="error", message=str(e))
         if not stopped:
             return ActionResponse(status="error", message="No servers were running")
-
-        # Aggressive double-pass cleanup to kill all vite/bun/node/esbuild processes
-        if state.app_dir:
-            logger = logging.getLogger("apx.server")
-            cleanup_orphaned_processes_double_pass(
-                state.app_dir,
-                ports=[state.frontend_port, state.backend_port],
-                logger=logger,
-                delay=0.5,
-            )
-
-        os.kill(os.getpid(), signal.SIGTERM)
+        request_dev_server_shutdown()
         return ActionResponse(
             status="success",
             message=f"Stopped servers: {', '.join(stopped)}",
@@ -498,11 +469,11 @@ def create_dev_server(app_dir: Path) -> FastAPI:
     @app.post("/actions/restart", response_model=ActionResponse)
     async def restart_servers() -> ActionResponse:
         """Restart all development servers."""
-        # Stop first
-        await stop_servers()
-
-        # Wait for ports to be fully released
-        await asyncio.sleep(2)
+        # Stop children only (do NOT terminate dev server process).
+        try:
+            await stop_children(verify_ports=True)
+        except Exception as e:
+            return ActionResponse(status="error", message=str(e))
 
         # Start with stored configuration
         request = ActionRequest(

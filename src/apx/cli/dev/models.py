@@ -20,10 +20,27 @@ class LogEntry(BaseModel):
 # === Process Management Models ===
 
 
+class DevProcessInfo(BaseModel):
+    """Tracked process metadata for safe shutdown/restart.
+
+    create_time protects against PID reuse. pgid enables POSIX process-group shutdown
+    even if the original PID has already exited (common with bun -> node handoff).
+    """
+
+    pid: int | None = None
+    create_time: float | None = None
+    pgid: int | None = None
+
+
 class DevConfig(BaseModel):
     """Dev server configuration."""
 
     token_id: str | None = None
+    host: str | None = None
+    frontend_port: int | None = None
+    backend_port: int | None = None
+    dev_server_process: DevProcessInfo | None = None
+    frontend_process: DevProcessInfo | None = None
 
 
 class ProjectConfig(BaseModel):

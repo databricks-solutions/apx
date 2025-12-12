@@ -68,7 +68,9 @@ class DevServerClient:
         Raises:
             httpx.HTTPError: If the request fails
         """
-        with httpx.Client(transport=self.transport, timeout=self.timeout) as client:
+        # Stop can involve process teardown; use a slightly longer timeout than "status".
+        timeout = max(self.timeout, 15.0)
+        with httpx.Client(transport=self.transport, timeout=timeout) as client:
             response = client.post(f"{self.base_url}/actions/stop")
             response.raise_for_status()
             return ActionResponse.model_validate(response.json())
