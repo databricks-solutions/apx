@@ -1,11 +1,13 @@
 """MCP server implementation for apx dev commands."""
 
 import asyncio
+import os
 from pathlib import Path
 import subprocess
 import time
 from typing import Literal, cast
 
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from pydantic import TypeAdapter
 from pydantic import JsonValue
@@ -17,6 +19,7 @@ from apx.cli.dev.models import (
     CheckCommandResult,
     JsonObject,
     McpActionResponse,
+    McpDatabricksAppsLogsResponse,
     McpDevCheckResponse,
     McpErrorResponse,
     McpMetadataResponse,
@@ -110,6 +113,108 @@ def _truncate(s: str, max_chars: int) -> str:
 
 
 _JSON_ADAPTER: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
+
+
+def _resolve_app_name_from_databricks_yml(*, project_dir: Path) -> str:
+    """Resolve app name from databricks.yml in the project root.
+
+    Looks for exactly one app under resources.apps.*.name.
+    """
+    yml_path = project_dir / "databricks.yml"
+    if not yml_path.exists():
+        raise ValueError(
+            (
+                f"Could not auto-detect app name because databricks.yml was not found at {yml_path}. "
+                "Please pass app_name explicitly."
+            )
+        )
+
+    try:
+        import yaml
+    except Exception as e:  # pragma: no cover
+        raise ValueError(f"Failed to import PyYAML: {e}") from e
+
+    try:
+        data_any = cast(object, yaml.safe_load(yml_path.read_text(encoding="utf-8")))
+    except Exception as e:
+        raise ValueError(f"Failed to parse databricks.yml: {e}") from e
+
+    if not isinstance(data_any, dict):
+        raise ValueError("databricks.yml root must be a mapping/object")
+
+    data = cast(dict[str, object], data_any)
+
+    resources_any: object = data.get("resources", {})
+    if not isinstance(resources_any, dict):
+        raise ValueError("databricks.yml 'resources' must be a mapping/object")
+
+    resources = cast(dict[str, object], resources_any)
+
+    apps_any: object = resources.get("apps", {})
+    if not isinstance(apps_any, dict):
+        raise ValueError("databricks.yml 'resources.apps' must be a mapping/object")
+
+    apps = cast(dict[str, object], apps_any)
+
+    app_names: list[str] = []
+    for app_def_any in apps.values():
+        if not isinstance(app_def_any, dict):
+            continue
+        app_def = cast(dict[str, object], app_def_any)
+        name_any: object = app_def.get("name")
+        if isinstance(name_any, str) and name_any.strip():
+            app_names.append(name_any.strip())
+
+    app_names = sorted(set(app_names))
+
+    if len(app_names) == 1:
+        return app_names[0]
+    if len(app_names) == 0:
+        raise ValueError(
+            (
+                "Could not auto-detect app name because no apps were found in databricks.yml under "
+                "resources.apps.*.name. Please pass app_name explicitly."
+            )
+        )
+    raise ValueError(
+        (
+            "Could not auto-detect app name because multiple apps were found in databricks.yml "
+            f"({', '.join(app_names)}). Please pass app_name explicitly."
+        )
+    )
+
+
+async def _run_cli(
+    *, cmd: list[str], cwd: Path, timeout_seconds: float | None
+) -> tuple[int, str, str, int]:
+    """Run a CLI command asynchronously and capture stdout/stderr."""
+    start = time.time()
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=str(cwd),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=os.environ,
+    )
+
+    try:
+        if timeout_seconds is not None and timeout_seconds > 0:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds
+            )
+        else:
+            stdout_b, stderr_b = await proc.communicate()
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise
+
+    duration_ms = int((time.time() - start) * 1000)
+    stdout = (stdout_b or b"").decode("utf-8", errors="replace")
+    stderr = (stderr_b or b"").decode("utf-8", errors="replace")
+    return proc.returncode or 0, stdout, stderr, duration_ms
 
 
 def _get_ports(*, client: DevServerClient) -> PortsResponse:
@@ -599,6 +704,130 @@ async def dev_check(
         return McpDevCheckResponse(success=success, tsc=tsc, pyright=pyright)
     except Exception as e:
         return McpErrorResponse(error=f"Failed to run dev check: {str(e)}")
+
+
+@mcp.tool()
+async def databricks_apps_logs(
+    app_name: str | None = None,
+    tail_lines: int = 200,
+    search: str | None = None,
+    source: list[Literal["APP", "SYSTEM"]] | None = None,
+    profile: str | None = None,
+    target: str | None = None,
+    output: Literal["text", "json"] = "text",
+    timeout_seconds: float = 60.0,
+    max_output_chars: int = 20000,
+) -> McpDatabricksAppsLogsResponse | McpErrorResponse:
+    """Fetch Databricks Apps logs in production via the Databricks CLI.
+
+    Uses: `databricks apps logs NAME [flags]`
+
+    Args:
+        app_name: Databricks App name. If omitted, resolves from `databricks.yml` in CWD
+                  by requiring exactly one app under `resources.apps.*.name`.
+        tail_lines: Number of recent log lines to show (default: 200).
+        search: Optional server-side search term.
+        source: Optional list of sources to include (APP and/or SYSTEM).
+        profile: Optional Databricks CLI profile (`-p`).
+        target: Optional bundle target (`-t`) if applicable.
+        output: Databricks CLI output format (`-o`), text or json (default: text).
+        timeout_seconds: Max time to wait for the CLI command to finish.
+        max_output_chars: Truncate stdout/stderr to this many characters.
+    """
+    cwd = Path.cwd()
+    resolved_from_yml = False
+
+    try:
+        # Load env vars from .env if present (common for DATABRICKS_CONFIG_PROFILE, etc.)
+        dotenv_path = cwd / ".env"
+        if dotenv_path.exists():
+            load_dotenv(dotenv_path)
+
+        if app_name is None or not app_name.strip():
+            try:
+                app_name = _resolve_app_name_from_databricks_yml(project_dir=cwd)
+                resolved_from_yml = True
+            except ValueError as e:
+                # Explicit error handling for app-name auto-detection failures
+                return McpErrorResponse(error=str(e))
+        else:
+            app_name = app_name.strip()
+
+        cmd: list[str] = ["databricks", "apps", "logs", app_name]
+        cmd += ["--tail-lines", str(tail_lines)]
+        if search is not None and search.strip():
+            cmd += ["--search", search.strip()]
+        if source:
+            for s in source:
+                cmd += ["--source", s]
+        if profile is not None and profile.strip():
+            cmd += ["-p", profile.strip()]
+        if target is not None and target.strip():
+            cmd += ["-t", target.strip()]
+        cmd += ["-o", output]
+
+        try:
+            returncode, stdout, stderr, duration_ms = await _run_cli(
+                cmd=cmd, cwd=cwd, timeout_seconds=timeout_seconds
+            )
+        except FileNotFoundError:
+            return McpErrorResponse(
+                error=(
+                    "Databricks CLI executable not found (`databricks`). "
+                    "Please install Databricks CLI v0.280.0 or higher and ensure it's on PATH."
+                )
+            )
+        except asyncio.TimeoutError:
+            return McpErrorResponse(
+                error=f"Timed out after {timeout_seconds}s running: {' '.join(cmd)}"
+            )
+
+        stdout_t = _truncate(stdout, max_output_chars)
+        stderr_t = _truncate(stderr, max_output_chars)
+
+        if returncode != 0:
+            combined = f"{stderr}\n{stdout}".lower()
+            # Explicit error handling: `databricks apps logs` subcommand not available
+            if (
+                'unknown command "logs"' in combined
+                or "unknown command logs" in combined
+                or "unknown subcommand" in combined
+                or "no such command" in combined
+            ):
+                return McpErrorResponse(
+                    error=(
+                        "Databricks CLI does not support `databricks apps logs` in this version. "
+                        "Please upgrade Databricks CLI to v0.280.0 or higher.\n\n"
+                        f"Command: {' '.join(cmd)}\n"
+                        f"Exit code: {returncode}\n"
+                        f"stderr:\n{stderr_t}\n"
+                        f"stdout:\n{stdout_t}"
+                    )
+                )
+
+            # Forward any other CLI error
+            return McpErrorResponse(
+                error=(
+                    f"`databricks apps logs` failed.\n\n"
+                    f"Command: {' '.join(cmd)}\n"
+                    f"Exit code: {returncode}\n"
+                    f"stderr:\n{stderr_t}\n"
+                    f"stdout:\n{stdout_t}"
+                )
+            )
+
+        return McpDatabricksAppsLogsResponse(
+            app_name=app_name,
+            resolved_from_databricks_yml=resolved_from_yml,
+            command=cmd,
+            cwd=str(cwd),
+            returncode=returncode,
+            stdout=stdout_t,
+            stderr=stderr_t,
+            duration_ms=duration_ms,
+        )
+    except Exception as e:
+        return McpErrorResponse(error=f"Failed to fetch Databricks app logs: {e}")
 
 
 def run_mcp_server() -> None:

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 
 from apx.cli.dev.mcp import (
+    databricks_apps_logs,
     get_metadata,
     restart,
     start,
@@ -17,6 +18,7 @@ from apx.cli.dev.mcp import (
 from apx.cli.dev.models import (
     ActionResponse,
     DevConfig,
+    McpDatabricksAppsLogsResponse,
     McpActionResponse,
     McpErrorResponse,
     McpMetadataResponse,
@@ -473,3 +475,210 @@ async def test_mcp_tool_responses_are_valid_models():
         stop_result = await stop()
         assert isinstance(stop_result, McpActionResponse)
         assert stop_result.model_dump()  # Should serialize to dict
+
+
+@pytest.mark.asyncio
+async def test_databricks_apps_logs_with_explicit_app_name(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeProc:
+        def __init__(self):
+            self.returncode = 0
+
+        async def communicate(self):
+            return b"hello\n", b""
+
+        def kill(self):
+            return None
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr(
+        "apx.cli.dev.mcp.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    result = await databricks_apps_logs(app_name="my-app", tail_lines=10)
+    assert isinstance(result, McpDatabricksAppsLogsResponse)
+    assert result.app_name == "my-app"
+    assert result.resolved_from_databricks_yml is False
+    assert "databricks" in result.command[0]
+    assert result.returncode == 0
+    assert "hello" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_databricks_apps_logs_resolves_app_from_databricks_yml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / "databricks.yml").write_text(
+        """
+resources:
+  apps:
+    demo-app:
+      name: "resolved-app"
+""".lstrip()
+    )
+
+    class FakeProc:
+        def __init__(self):
+            self.returncode = 0
+
+        async def communicate(self):
+            return b"resolved logs\n", b""
+
+        def kill(self):
+            return None
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr(
+        "apx.cli.dev.mcp.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+    )
+    monkeypatch.setattr("apx.cli.dev.mcp.Path.cwd", lambda: tmp_path)
+
+    result = await databricks_apps_logs(app_name=None)
+    assert isinstance(result, McpDatabricksAppsLogsResponse)
+    assert result.app_name == "resolved-app"
+    assert result.resolved_from_databricks_yml is True
+    assert "resolved logs" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_databricks_apps_logs_errors_when_multiple_apps_in_yml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / "databricks.yml").write_text(
+        """
+resources:
+  apps:
+    a1:
+      name: "app-1"
+    a2:
+      name: "app-2"
+""".lstrip()
+    )
+
+    monkeypatch.setattr("apx.cli.dev.mcp.Path.cwd", lambda: tmp_path)
+
+    result = await databricks_apps_logs(app_name=None)
+    assert isinstance(result, McpErrorResponse)
+    assert "Multiple apps found" in result.error
+
+
+@pytest.mark.asyncio
+async def test_databricks_apps_logs_errors_when_databricks_yml_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("apx.cli.dev.mcp.Path.cwd", lambda: tmp_path)
+    result = await databricks_apps_logs(app_name=None)
+    assert isinstance(result, McpErrorResponse)
+    assert "databricks.yml was not found" in result.error
+
+
+@pytest.mark.asyncio
+async def test_databricks_apps_logs_logs_subcommand_not_found_upgrade_message(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeProc:
+        def __init__(self):
+            self.returncode = 1
+
+        async def communicate(self):
+            return b"", b'Error: unknown command "logs" for "apps"\\n'
+
+        def kill(self):
+            return None
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr(
+        "apx.cli.dev.mcp.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    result = await databricks_apps_logs(app_name="my-app")
+    assert isinstance(result, McpErrorResponse)
+    assert "upgrade Databricks CLI to v0.280.0 or higher" in result.error
+
+
+@pytest.mark.asyncio
+async def test_databricks_apps_logs_forwards_other_cli_errors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeProc:
+        def __init__(self):
+            self.returncode = 2
+
+        async def communicate(self):
+            return b"some stdout", b"some stderr"
+
+        def kill(self):
+            return None
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr(
+        "apx.cli.dev.mcp.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    result = await databricks_apps_logs(app_name="my-app")
+    assert isinstance(result, McpErrorResponse)
+    assert "some stderr" in result.error
+    assert "some stdout" in result.error
+
+
+@pytest.mark.asyncio
+async def test_databricks_apps_logs_errors_when_databricks_cli_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        raise FileNotFoundError("databricks")
+
+    monkeypatch.setattr(
+        "apx.cli.dev.mcp.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    result = await databricks_apps_logs(app_name="my-app")
+    assert isinstance(result, McpErrorResponse)
+    assert "Databricks CLI executable not found" in result.error
+
+
+@pytest.mark.asyncio
+async def test_databricks_apps_logs_loads_dotenv_when_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / ".env").write_text("DATABRICKS_CONFIG_PROFILE=DEFAULT\n")
+    monkeypatch.setattr("apx.cli.dev.mcp.Path.cwd", lambda: tmp_path)
+
+    called = {"val": False}
+
+    def fake_load_dotenv(path, *args, **kwargs):
+        # Ensure we load the expected file
+        assert str(path).endswith(str(tmp_path / ".env"))
+        called["val"] = True
+        return True
+
+    class FakeProc:
+        def __init__(self):
+            self.returncode = 0
+
+        async def communicate(self):
+            return b"ok\n", b""
+
+        def kill(self):
+            return None
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr("apx.cli.dev.mcp.load_dotenv", fake_load_dotenv)
+    monkeypatch.setattr(
+        "apx.cli.dev.mcp.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    result = await databricks_apps_logs(app_name="my-app")
+    assert isinstance(result, McpDatabricksAppsLogsResponse)
+    assert called["val"] is True

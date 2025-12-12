@@ -211,4 +211,17 @@ class McpDevCheckResponse(BaseModel):
     pyright: CheckCommandResult
 
 
+class McpDatabricksAppsLogsResponse(BaseModel):
+    """MCP response model for `databricks apps logs` output."""
+
+    app_name: str
+    resolved_from_databricks_yml: bool = False
+    command: list[str]
+    cwd: str
+    returncode: int
+    stdout: str
+    stderr: str
+    duration_ms: int
+
+
 JsonObject: TypeAlias = dict[str, JsonValue]

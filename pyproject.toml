@@ -7,7 +7,7 @@ authors = [{ name = "renardeinside", email = "polarpersonal@gmail.com" }]
 requires-python = ">=3.11"
 dependencies = [
     "basedpyright>=1.32.1",
-    "databricks-sdk>=0.68.0",
+    "databricks-sdk>=0.74.0",
     "fastapi>=0.119.0",
     "hatchling>=1.27.0",
     "httpx>=0.28.1",
@@ -16,6 +16,7 @@ dependencies = [
     "mcp>=1.0.0",
     "psutil>=6.1.0",
     "python-dotenv>=1.1.1",
+    "pyyaml>=6.0.3",
     "rich>=14.2.0",
     "tenacity>=9.1.2",
     "typer>=0.19.2",
@@ -46,7 +47,7 @@ format-jinja = "{{version}}"
 [dependency-groups]
 dev = [
     "basedpyright>=1.32.1",
-    "databricks-sdk>=0.68.0",
+    "databricks-sdk>=0.74.0",
     "fastapi>=0.119.0",
     "mypy>=1.18.2",
     "pydantic-settings>=2.11.0",
