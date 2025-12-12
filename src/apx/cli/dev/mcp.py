@@ -2,19 +2,31 @@
 
 import asyncio
 from pathlib import Path
+import subprocess
 import time
+from typing import Literal, cast
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import TypeAdapter
 
 from apx.cli.dev.manager import DevManager
 from apx.cli.dev.logging import suppress_output_and_logs
 from apx.cli.dev.client import DevServerClient
 from apx.cli.dev.models import (
+    CheckCommandResult,
+    JsonObject,
+    JsonValue,
     McpActionResponse,
+    McpDevCheckResponse,
     McpErrorResponse,
     McpMetadataResponse,
+    McpOpenApiSchemaResponse,
+    McpRouteCallResponse,
+    McpRoutesResponse,
     McpStatusResponse,
     McpUrlResponse,
+    PortsResponse,
+    RouteInfo,
 )
 from apx.utils import get_project_metadata
 from apx import __version__ as apx_version
@@ -83,6 +95,164 @@ def _get_dev_server_client() -> DevServerClient | None:
         return None
 
     return DevServerClient(manager.socket_path)
+
+
+def _truncate(s: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(s) <= max_chars:
+        return s
+    head = s[: max_chars - 50]
+    tail = s[-40:] if max_chars >= 100 else ""
+    return (
+        f"{head}\n\n...[truncated {len(s) - len(head) - len(tail)} chars]...\n\n{tail}"
+    )
+
+
+_JSON_ADAPTER: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
+
+
+def _get_ports(*, client: DevServerClient) -> PortsResponse:
+    import httpx
+
+    with httpx.Client(transport=client.transport, timeout=client.timeout) as http:
+        resp = http.get(f"{client.base_url}/ports")
+        resp.raise_for_status()
+        return PortsResponse.model_validate(resp.json())
+
+
+def _get_backend_base_url(*, client: DevServerClient) -> str:
+    """Return backend base url like http://host:port using dev server config."""
+    data = _get_ports(client=client)
+    return f"http://{data.host}:{data.backend_port}"
+
+
+def _get_backend_base_url_safe(
+    *, manager: DevManager
+) -> tuple[str | None, McpErrorResponse | None]:
+    """Get backend base URL or return a typed error response."""
+    if not manager.is_dev_server_running():
+        return None, McpErrorResponse(error="Dev server is not running")
+
+    client = DevServerClient(manager.socket_path)
+    try:
+        status = client.status()
+        if not status.backend_running:
+            return None, McpErrorResponse(error="Backend is not running")
+        backend_url = _get_backend_base_url(client=client)
+        return backend_url, None
+    except Exception as e:
+        return None, McpErrorResponse(
+            error=f"Failed to determine backend URL from dev server: {str(e)}"
+        )
+
+
+def _fetch_backend_openapi_schema(
+    *, backend_url: str, timeout_seconds: float = 10.0
+) -> JsonObject:
+    """Fetch backend OpenAPI schema from /openapi.json."""
+    import httpx
+
+    with httpx.Client(timeout=timeout_seconds) as client:
+        resp = client.get(f"{backend_url}/openapi.json")
+        resp.raise_for_status()
+        parsed = _JSON_ADAPTER.validate_python(resp.json())
+        if not isinstance(parsed, dict):
+            raise ValueError("OpenAPI schema is not a JSON object")
+        return cast(JsonObject, parsed)
+
+
+@mcp.resource("apx://backend/openapi")
+async def backend_openapi() -> McpOpenApiSchemaResponse | McpErrorResponse:
+    """Return the backend FastAPI OpenAPI schema as a structured object."""
+    manager = _get_manager()
+    backend_url, err = await asyncio.to_thread(
+        _get_backend_base_url_safe, manager=manager
+    )
+    if err is not None or backend_url is None:
+        return err or McpErrorResponse(error="Failed to determine backend URL")
+
+    try:
+        schema = await asyncio.to_thread(
+            _fetch_backend_openapi_schema, backend_url=backend_url
+        )
+        return McpOpenApiSchemaResponse(backend_url=backend_url, openapi_schema=schema)
+    except Exception as e:
+        return McpErrorResponse(error=f"Failed to fetch OpenAPI schema: {str(e)}")
+
+
+@mcp.resource("apx://backend/routes")
+async def backend_routes() -> McpRoutesResponse | McpErrorResponse:
+    """List available backend routes derived from the OpenAPI schema."""
+    manager = _get_manager()
+    backend_url, err = await asyncio.to_thread(
+        _get_backend_base_url_safe, manager=manager
+    )
+    if err is not None or backend_url is None:
+        return err or McpErrorResponse(error="Failed to determine backend URL")
+
+    try:
+        schema = await asyncio.to_thread(
+            _fetch_backend_openapi_schema, backend_url=backend_url
+        )
+        paths_any = schema.get("paths", {})
+        paths: dict[str, JsonValue]
+        if isinstance(paths_any, dict):
+            paths = cast(dict[str, JsonValue], paths_any)
+        else:
+            paths = {}
+
+        routes: list[RouteInfo] = []
+        for path, ops_any in paths.items():
+            if not isinstance(ops_any, dict):
+                continue
+            ops = cast(dict[str, JsonValue], ops_any)
+            methods: list[str] = []
+            operation_ids: list[str] = []
+            summaries: list[str] = []
+
+            for method, op_any in ops.items():
+                # OpenAPI uses lowercase methods in "paths"
+                method_upper = str(method).upper()
+                if method_upper not in {
+                    "GET",
+                    "POST",
+                    "PUT",
+                    "PATCH",
+                    "DELETE",
+                    "HEAD",
+                    "OPTIONS",
+                }:
+                    continue
+                methods.append(method_upper)
+                op: dict[str, JsonValue]
+                if isinstance(op_any, dict):
+                    op = cast(dict[str, JsonValue], op_any)
+                else:
+                    op = {}
+
+                operation_id = op.get("operationId")
+                if isinstance(operation_id, str):
+                    operation_ids.append(operation_id)
+
+                summary = op.get("summary")
+                if isinstance(summary, str):
+                    summaries.append(summary)
+
+            if methods:
+                routes.append(
+                    RouteInfo(
+                        path=str(path),
+                        methods=sorted(set(methods)),
+                        operation_ids=operation_ids,
+                        summaries=summaries,
+                    )
+                )
+
+        routes.sort(key=lambda r: r.path)
+        return McpRoutesResponse(backend_url=backend_url, routes=routes)
+    except Exception as e:
+        return McpErrorResponse(error=f"Failed to list routes: {str(e)}")
 
 
 @mcp.tool()
@@ -273,11 +443,13 @@ async def get_frontend_url() -> McpUrlResponse | McpErrorResponse:
         if not is_running:
             return McpErrorResponse(error="Dev server is not running")
 
-        # Get frontend port from dev server status
+        # Get frontend port/host from dev server
         client = DevServerClient(manager.socket_path)
         status_data = await asyncio.to_thread(client.status)
+        ports_data = await asyncio.to_thread(_get_ports, client=client)
+        host = ports_data.host
 
-        return McpUrlResponse(url=f"http://localhost:{status_data.frontend_port}")
+        return McpUrlResponse(url=f"http://{host}:{status_data.frontend_port}")
     except Exception as e:
         return McpErrorResponse(error=f"Failed to get frontend URL: {str(e)}")
 
@@ -307,6 +479,126 @@ async def get_metadata() -> McpMetadataResponse | McpErrorResponse:
         )
     except Exception as e:
         return McpErrorResponse(error=f"Failed to get metadata: {str(e)}")
+
+
+@mcp.tool()
+async def call_route(
+    method: Literal[
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "HEAD",
+        "OPTIONS",
+    ],
+    path: str,
+    query: dict[str, str | int | float | bool] | None = None,
+    headers: dict[str, str] | None = None,
+    json_body: JsonValue | None = None,
+    text_body: str | None = None,
+    timeout_seconds: float = 30.0,
+) -> McpRouteCallResponse | McpErrorResponse:
+    """Call a backend route and return the HTTP response.
+
+    Args:
+        method: HTTP method (e.g., GET/POST)
+        path: Route path (e.g., /api/items). If it doesn't start with '/', it will be added.
+        query: Query parameters to include
+        headers: Request headers to include
+        json_body: JSON body (for POST/PUT/PATCH)
+        text_body: Text body (alternative to json_body)
+        timeout_seconds: Request timeout in seconds
+    """
+    manager = _get_manager()
+    backend_url, err = await asyncio.to_thread(
+        _get_backend_base_url_safe, manager=manager
+    )
+    if err is not None or backend_url is None:
+        return err or McpErrorResponse(error="Failed to determine backend URL")
+
+    if not path.startswith("/"):
+        path = f"/{path}"
+
+    def do_request() -> McpRouteCallResponse:
+        import httpx
+
+        url = f"{backend_url}{path}"
+        with httpx.Client(timeout=timeout_seconds) as client:
+            resp = client.request(
+                method=method,
+                url=url,
+                params=query,
+                headers=headers,
+                json=json_body if json_body is not None else None,
+                content=None if json_body is not None else text_body,
+            )
+
+            parsed_json: JsonValue | None = None
+            try:
+                parsed_json = _JSON_ADAPTER.validate_python(resp.json())
+            except Exception:
+                parsed_json = None
+
+            return McpRouteCallResponse(
+                request_url=str(resp.request.url),
+                method=method,
+                status_code=resp.status_code,
+                headers={k: v for k, v in resp.headers.items()},
+                text=resp.text,
+                json_body=parsed_json,
+            )
+
+    try:
+        return await asyncio.to_thread(do_request)
+    except Exception as e:
+        return McpErrorResponse(error=f"Failed to call route: {str(e)}")
+
+
+@mcp.tool()
+async def dev_check(
+    app_dir: str | None = None,
+    max_output_chars: int = 20000,
+) -> McpDevCheckResponse | McpErrorResponse:
+    """Run the equivalent of `apx dev check` and return structured results.
+
+    This checks:
+    - TypeScript: `bun run tsc -b --incremental`
+    - Python: `uv run basedpyright --level error`
+    """
+    cwd = Path(app_dir) if app_dir else Path.cwd()
+
+    def run_one(name: str, cmd: list[str]) -> CheckCommandResult:
+        start = time.time()
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        duration_ms = int((time.time() - start) * 1000)
+        return CheckCommandResult(
+            name=name,
+            command=cmd,
+            cwd=str(cwd),
+            returncode=result.returncode,
+            stdout=_truncate(result.stdout or "", max_output_chars),
+            stderr=_truncate(result.stderr or "", max_output_chars),
+            duration_ms=duration_ms,
+        )
+
+    try:
+        tsc = await asyncio.to_thread(
+            run_one, "tsc", ["bun", "run", "tsc", "-b", "--incremental"]
+        )
+        pyright = await asyncio.to_thread(
+            run_one, "basedpyright", ["uv", "run", "basedpyright", "--level", "error"]
+        )
+        success = (tsc.returncode == 0) and (pyright.returncode == 0)
+
+        return McpDevCheckResponse(success=success, tsc=tsc, pyright=pyright)
+    except Exception as e:
+        return McpErrorResponse(error=f"Failed to run dev check: {str(e)}")
 
 
 def run_mcp_server() -> None:

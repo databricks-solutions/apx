@@ -1,6 +1,8 @@
 """Data models for client-server communication in the dev module."""
 
-from typing import Literal
+from __future__ import annotations
+
+from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, Field
 
@@ -136,3 +138,79 @@ class McpUrlResponse(BaseModel):
     """MCP response model for the frontend URL."""
 
     url: str
+
+
+# === MCP Backend Introspection / Invocation Models ===
+
+
+class McpOpenApiSchemaResponse(BaseModel):
+    """MCP response model for fetching backend OpenAPI schema."""
+
+    backend_url: str
+
+    # NOTE: Don't name this field "schema" because it collides with BaseModel.schema().
+    openapi_schema: "JsonObject"
+
+
+class RouteInfo(BaseModel):
+    """A single API route from an OpenAPI schema."""
+
+    path: str
+    methods: list[str]
+    operation_ids: list[str] = Field(default_factory=list)
+    summaries: list[str] = Field(default_factory=list)
+
+
+class McpRoutesResponse(BaseModel):
+    """MCP response model for listing backend routes."""
+
+    backend_url: str
+    routes: list[RouteInfo]
+
+
+HttpMethod = Literal[
+    "GET",
+    "POST",
+    "PUT",
+    "PATCH",
+    "DELETE",
+    "HEAD",
+    "OPTIONS",
+]
+
+
+class McpRouteCallResponse(BaseModel):
+    """MCP response model for calling a backend route."""
+
+    request_url: str
+    method: HttpMethod
+    status_code: int
+    headers: dict[str, str]
+    text: str | None = None
+    # NOTE: Don't name this field "json" because it collides with BaseModel.json().
+    json_body: "JsonValue | None" = None
+
+
+class CheckCommandResult(BaseModel):
+    """Result of running a single command as part of `apx dev check`."""
+
+    name: str
+    command: list[str]
+    cwd: str
+    returncode: int
+    stdout: str
+    stderr: str
+    duration_ms: int
+
+
+class McpDevCheckResponse(BaseModel):
+    """MCP response model for running `apx dev check` (structured)."""
+
+    success: bool
+    tsc: CheckCommandResult
+    pyright: CheckCommandResult
+
+
+JsonPrimitive: TypeAlias = str | int | float | bool | None
+JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
+JsonObject: TypeAlias = dict[str, JsonValue]
