@@ -6,7 +6,7 @@ interface LogoProps {
   showText?: boolean;
 }
 
-function Logo({ to = "/", className = "", showText = true }: LogoProps) {
+export function Logo({ to = "/", className = "", showText = true }: LogoProps) {
   const content = (
     <div className={`flex items-center gap-2 ${className}`}>
       <img

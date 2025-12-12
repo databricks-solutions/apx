@@ -221,6 +221,26 @@ def test_init_and_build_combinations(
     )
     assert (app_path / "src" / app_slug / "ui").exists(), "ui directory should exist"
 
+    # Verify all generated UI component filenames are lowercase (regression test)
+    ui_components_apx_path = app_path / "src" / app_slug / "ui" / "components" / "apx"
+    console.print(f"[dim]Checking UI components naming: {ui_components_apx_path}[/dim]")
+    assert ui_components_apx_path.exists(), "ui/components/apx directory should exist"
+    assert ui_components_apx_path.is_dir(), "ui/components/apx should be a directory"
+
+    component_files = sorted(
+        [
+            p.name
+            for p in ui_components_apx_path.iterdir()
+            if p.is_file() and not p.name.startswith(".")
+        ]
+    )
+    assert component_files, "ui/components/apx should contain at least one file"
+    non_lowercase = [name for name in component_files if name != name.lower()]
+    assert not non_lowercase, (
+        "All files in ui/components/apx must be named in lowercase, "
+        f"but found: {non_lowercase}"
+    )
+
     # Check that package.json was created
     console.print(f"[dim]Checking package.json: {app_path / 'package.json'}[/dim]")
     assert (app_path / "package.json").exists(), "package.json should exist"
