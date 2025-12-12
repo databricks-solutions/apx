@@ -10,7 +10,7 @@ alwaysApply: true
 - Prefer to add new components via shadcn mcp server if it's available.
 - When using the API calls on the frontend, use error boundaries to handle errors.
 - Run apx dev check command (via CLI or via mcp) to check for errors in the project code after making changes.
-- Whenever possible, use browser tools to inspect the UI (e.g. make a screenshot of the UI or click a button to see the result).
+- If agent has access to native browser tool, use it to verify changes on the frontend. If such tool is not present or is not working, use playwright mcp to automate browser actions (e.g. screenshots, clicks, etc.).
 - Avoid unnecessary restarts of the development servers
 
 ## Package Management
