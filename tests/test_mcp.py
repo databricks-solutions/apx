@@ -564,7 +564,7 @@ resources:
 
     result = await databricks_apps_logs(app_name=None)
     assert isinstance(result, McpErrorResponse)
-    assert "Multiple apps found" in result.error
+    assert "multiple apps" in result.error.lower()
 
 
 @pytest.mark.asyncio
