@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal, TypeAlias
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
 
 
 # === Log Models ===
@@ -149,7 +149,7 @@ class McpOpenApiSchemaResponse(BaseModel):
     backend_url: str
 
     # NOTE: Don't name this field "schema" because it collides with BaseModel.schema().
-    openapi_schema: "JsonObject"
+    openapi_schema: JsonObject
 
 
 class RouteInfo(BaseModel):
@@ -188,7 +188,7 @@ class McpRouteCallResponse(BaseModel):
     headers: dict[str, str]
     text: str | None = None
     # NOTE: Don't name this field "json" because it collides with BaseModel.json().
-    json_body: "JsonValue | None" = None
+    json_body: JsonValue | None = None
 
 
 class CheckCommandResult(BaseModel):
@@ -211,6 +211,4 @@ class McpDevCheckResponse(BaseModel):
     pyright: CheckCommandResult
 
 
-JsonPrimitive: TypeAlias = str | int | float | bool | None
-JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
 JsonObject: TypeAlias = dict[str, JsonValue]

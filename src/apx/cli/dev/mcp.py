@@ -8,6 +8,7 @@ from typing import Literal, cast
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import TypeAdapter
+from pydantic import JsonValue
 
 from apx.cli.dev.manager import DevManager
 from apx.cli.dev.logging import suppress_output_and_logs
@@ -15,7 +16,6 @@ from apx.cli.dev.client import DevServerClient
 from apx.cli.dev.models import (
     CheckCommandResult,
     JsonObject,
-    JsonValue,
     McpActionResponse,
     McpDevCheckResponse,
     McpErrorResponse,
