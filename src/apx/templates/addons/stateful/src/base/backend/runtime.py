@@ -1,3 +1,4 @@
+from functools import cached_property
 from databricks.sdk.errors import NotFound
 from sqlalchemy import Engine
 from .config import conf, AppConfig
@@ -11,13 +12,13 @@ class Runtime:
     def __init__(self):
         self.config: AppConfig = conf
 
-    @property
+    @cached_property
     def ws(self) -> WorkspaceClient:
         # note - this workspace client is usually an SP-based client
         # in development it usually uses the DATABRICKS_CONFIG_PROFILE
         return WorkspaceClient()
 
-    @property
+    @cached_property
     def engine_url(self) -> str:
         instance = self.ws.database.get_database_instance(self.config.db.instance_name)
         prefix = "postgresql+psycopg"
@@ -32,11 +33,19 @@ class Runtime:
         return f"{prefix}://{username}:@{host}:{port}/{database}"
 
     def _before_connect(self, dialect, conn_rec, cargs, cparams):
-        cparams["password"] = self.ws.config.oauth_token().access_token
+        cred = self.ws.database.generate_database_credential(
+            instance_names=[self.config.db.instance_name]
+        )
+        cparams["password"] = cred.token
 
     @property
     def engine(self) -> Engine:
-        engine = create_engine(self.engine_url, pool_recycle=45 * 60)  # 45 minutes
+        engine = create_engine(
+            self.engine_url,
+            pool_recycle=45 * 60,
+            connect_args={"sslmode": "require"},
+            pool_size=4,
+        )  # 45 minutes
         event.listens_for(engine, "do_connect")(self._before_connect)
         return engine
 
