@@ -1,7 +1,7 @@
 """Dev command group for apx CLI."""
 
-from apx.cli.dev.client import DevServerClient, StreamEvent
-from apx.cli.dev.models import (
+from apx.cli.dev.client import DevServerClient
+from apx.models import (
     ActionRequest,
     ActionResponse,
     DevConfig,
@@ -9,6 +9,7 @@ from apx.cli.dev.models import (
     PortsResponse,
     ProjectConfig,
     StatusResponse,
+    StreamEvent,
 )
 
 __all__ = [

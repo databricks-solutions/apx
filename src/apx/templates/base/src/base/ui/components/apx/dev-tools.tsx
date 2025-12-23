@@ -13,9 +13,9 @@ type LogPayload = {
 function sendLog(payload: LogPayload) {
   const body = JSON.stringify(payload);
   if (navigator.sendBeacon) {
-    navigator.sendBeacon("/__apx/logs", body);
+    navigator.sendBeacon("/__apx__/browser-logs", body);
   } else {
-    fetch("/__apx/logs", {
+    fetch("/__apx__/browser-logs", {
       method: "POST",
       body,
       keepalive: true,

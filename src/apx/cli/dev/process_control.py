@@ -2,7 +2,8 @@
 
 Design goals:
 - Only stop processes we started (tracked by pid + create_time).
-- Prefer graceful shutdown (SIGINT first), escalate deterministically.
+- Use SIGTERM -> SIGKILL sequence for reliable termination (no SIGINT).
+- Target process groups to catch child processes (vite/esbuild) that outlive parents (bun).
 - Verify children are gone and ports are released.
 - Work on POSIX + Windows (best-effort graceful on Windows).
 """
@@ -14,23 +15,13 @@ import os
 import signal
 import time
 from pathlib import Path
-from typing import Callable, ClassVar
+from typing import Callable
 
 import psutil
-from pydantic import BaseModel, ConfigDict
 
+from apx.models import TrackedProcess
 
 logger = logging.getLogger("apx.process_control")
-
-
-class TrackedProcess(BaseModel):
-    """A process we started and are allowed to manage."""
-
-    pid: int | None = None
-    create_time: float | None = None
-    pgid: int | None = None
-
-    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
 
 def _get_pgid_safe(pid: int) -> int | None:
@@ -117,6 +108,99 @@ def _wait_for_exit(proc: psutil.Process, timeout: float) -> bool:
         return True
 
 
+def kill_process_group(
+    pgid: int,
+    *,
+    sigterm_timeout: float = 1.0,
+    sigkill_timeout: float = 1.0,
+) -> bool:
+    """Aggressively kill all processes in a process group with SIGTERM then SIGKILL.
+
+    This is the primary method for stopping frontend processes (vite/esbuild) that
+    may outlive their parent (bun). Unlike the old approach that relied on the
+    tracked parent being alive, this targets the process group directly.
+
+    Args:
+        pgid: Process group ID to kill
+        sigterm_timeout: Seconds to wait after SIGTERM before escalating to SIGKILL
+        sigkill_timeout: Seconds to wait after SIGKILL for processes to exit
+
+    Returns:
+        True if process group is empty after termination, False otherwise
+    """
+    if os.name == "nt":
+        # Windows doesn't have process groups in the POSIX sense
+        return True
+
+    logger.debug(f"Killing process group pgid={pgid}")
+
+    # Step 1: Get current members before sending any signals
+    members_before = _list_pgid_members(pgid)
+    if not members_before:
+        logger.debug(f"Process group pgid={pgid} already empty")
+        return True
+
+    logger.debug(
+        f"Process group pgid={pgid} has {len(members_before)} members: {members_before}"
+    )
+
+    # Step 2: Send SIGTERM to entire process group
+    try:
+        _send_posix_signal_group(pgid, signal.SIGTERM)
+        logger.debug(f"Sent SIGTERM to pgid={pgid}")
+    except ProcessLookupError:
+        # Group already gone
+        return True
+    except Exception as e:
+        logger.debug(f"Failed to send SIGTERM to pgid={pgid}: {e}")
+
+    # Step 3: Wait for processes to exit gracefully
+    if _wait_for_pgid_empty(pgid, sigterm_timeout, poll=0.1):
+        logger.debug(f"Process group pgid={pgid} exited after SIGTERM")
+        return True
+
+    # Step 4: Send SIGKILL to entire process group
+    remaining = _list_pgid_members(pgid)
+    logger.debug(
+        f"SIGTERM timeout; {len(remaining)} processes remain in pgid={pgid}: {remaining}"
+    )
+
+    try:
+        _send_posix_signal_group(pgid, signal.SIGKILL)
+        logger.debug(f"Sent SIGKILL to pgid={pgid}")
+    except ProcessLookupError:
+        return True
+    except Exception as e:
+        logger.debug(f"Failed to send SIGKILL to pgid={pgid}: {e}")
+
+    # Step 5: Wait for SIGKILL to take effect
+    if _wait_for_pgid_empty(pgid, sigkill_timeout, poll=0.1):
+        logger.debug(f"Process group pgid={pgid} exited after SIGKILL")
+        return True
+
+    # Step 6: Kill any remaining stragglers individually (belt and suspenders)
+    stragglers = _list_pgid_members(pgid)
+    if stragglers:
+        logger.debug(f"Killing {len(stragglers)} stragglers individually: {stragglers}")
+        for pid in stragglers:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+        # Brief wait for stragglers
+        time.sleep(0.2)
+
+    final_members = _list_pgid_members(pgid)
+    if final_members:
+        logger.warning(
+            f"Process group pgid={pgid} still has members after SIGKILL: {final_members}"
+        )
+        return False
+
+    logger.debug(f"Process group pgid={pgid} fully terminated")
+    return True
+
+
 def _terminate_tree_posix(root: psutil.Process, timeout: float) -> None:
     """Terminate a process tree on POSIX (best-effort).
 
@@ -185,14 +269,15 @@ def stop_tracked_process(
     tp: TrackedProcess,
     *,
     name: str,
-    sigint_timeout: float = 1.0,
-    sigterm_timeout: float = 1.5,
+    sigterm_timeout: float = 1.0,
     sigkill_timeout: float = 1.0,
 ) -> None:
     """Stop a tracked process and its children.
 
     Behavior:
-    - POSIX: signal process group (SIGINT -> SIGTERM -> SIGKILL).
+    - POSIX: signal process group with SIGTERM -> SIGKILL (no SIGINT).
+      This is aggressive but reliable for stopping vite/esbuild which may
+      outlive their bun parent process.
     - Windows: best-effort CTRL_BREAK_EVENT, then terminate/kill process tree.
     """
     if os.name == "nt":
@@ -210,65 +295,58 @@ def stop_tracked_process(
         _terminate_tree_windows(proc, timeout=sigterm_timeout + sigkill_timeout)
         return
 
-    # POSIX: prefer process group.
+    # POSIX: prefer process group for reliable shutdown of vite/esbuild
     pgid = tp.pgid or (_get_pgid_safe(tp.pid) if tp.pid is not None else None)
-    if pgid is None:
-        # Fallback: signal just the process (requires pid + create_time).
-        proc = validate_tracked(tp)
-        if proc is None:
-            return
+
+    logger.debug(f"Stopping {name} pid={tp.pid} pgid={pgid}")
+
+    if pgid is not None:
+        # Use aggressive process group killing (SIGTERM -> SIGKILL)
+        # This works even if the original bun process has already exited
+        kill_process_group(
+            pgid,
+            sigterm_timeout=sigterm_timeout,
+            sigkill_timeout=sigkill_timeout,
+        )
+
+    # Fallback: also try to terminate the tracked process tree directly
+    # This handles edge cases where:
+    # 1. PGID is None
+    # 2. Process didn't inherit the PGID properly
+    # 3. Children somehow escaped the process group
+    proc = validate_tracked(tp)
+    if proc is not None:
         try:
-            proc.send_signal(signal.SIGINT)
+            # Get children before we terminate the parent
+            children = proc.children(recursive=True)
         except Exception:
-            pass
-        if _wait_for_exit(proc, sigint_timeout):
-            return
+            children = []
+
+        # Terminate parent
         try:
             proc.terminate()
         except Exception:
             pass
-        if _wait_for_exit(proc, sigterm_timeout):
-            return
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        _wait_for_exit(proc, sigkill_timeout)
-        return
 
-    # Group shutdown (works even if the original pid has already exited).
-    try:
-        _send_posix_signal_group(pgid, signal.SIGINT)
-    except Exception:
-        pass
-    if _wait_for_pgid_empty(pgid, sigint_timeout):
-        # Even if the pgid looks empty, be defensive: attempt to terminate the tree
-        # for the tracked PID (if still valid) to avoid orphaned children.
-        proc = validate_tracked(tp)
-        if proc is not None:
-            _terminate_tree_posix(proc, timeout=max(0.2, sigterm_timeout))
-        return
+        # Terminate children
+        for child in children:
+            try:
+                child.terminate()
+            except Exception:
+                pass
 
-    try:
-        _send_posix_signal_group(pgid, signal.SIGTERM)
-    except Exception:
-        pass
-    if _wait_for_pgid_empty(pgid, sigterm_timeout):
-        proc = validate_tracked(tp)
-        if proc is not None:
-            _terminate_tree_posix(proc, timeout=max(0.2, sigterm_timeout))
-        return
+        # Wait briefly
+        all_procs = [proc] + children
+        _, alive = psutil.wait_procs(all_procs, timeout=sigterm_timeout)
 
-    try:
-        _send_posix_signal_group(pgid, signal.SIGKILL)
-    except Exception:
-        pass
-    _wait_for_pgid_empty(pgid, sigkill_timeout)
-
-    # Last resort: if we still have a valid root process, kill its tree explicitly.
-    proc = validate_tracked(tp)
-    if proc is not None:
-        _terminate_tree_posix(proc, timeout=max(0.2, sigkill_timeout))
+        # Kill anything still alive
+        if alive:
+            for p in alive:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+            psutil.wait_procs(alive, timeout=sigkill_timeout)
 
 
 def kill_pids(

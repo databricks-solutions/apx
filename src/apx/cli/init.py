@@ -1,20 +1,20 @@
-from enum import Enum
-from importlib import resources
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import time
-
+from importlib import resources
+from pathlib import Path
 from typing import Annotated
-from dotenv import set_key
+
 import jinja2
+from dotenv import set_key
 from rich import print
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.prompt import Confirm, Prompt
 from typer import Argument, Exit, Option
 
 from apx.cli.version import with_version
+from apx.models import Assistant, Layout, Template
 from apx.utils import (
     console,
     ensure_dir,
@@ -60,44 +60,6 @@ def bun_add(
     # Add packages
     cmd.extend(packages)
     run_subprocess(cmd, cwd=cwd, error_msg=error_msg)
-
-
-class Template(str, Enum):
-    essential = "essential"
-    stateful = "stateful"
-
-    @classmethod
-    def from_string(cls, value: str) -> "Template":
-        try:
-            return cls(value.lower())
-        except ValueError:
-            raise ValueError(f"Invalid template: {value}")
-
-
-class Assistant(str, Enum):
-    cursor = "cursor"
-    vscode = "vscode"
-    codex = "codex"
-    claude = "claude"
-
-    @classmethod
-    def from_string(cls, value: str) -> "Assistant":
-        try:
-            return cls(value.lower())
-        except ValueError:
-            raise ValueError(f"Invalid assistant: {value}")
-
-
-class Layout(str, Enum):
-    basic = "basic"
-    sidebar = "sidebar"
-
-    @classmethod
-    def from_string(cls, value: str) -> "Layout":
-        try:
-            return cls(value.lower())
-        except ValueError:
-            raise ValueError(f"Invalid layout: {value}")
 
 
 def add_bun_dependencies(cwd: Path) -> None:

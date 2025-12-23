@@ -15,18 +15,18 @@ from apx.cli.dev.mcp import (
     status,
     stop,
 )
-from apx.cli.dev.models import (
+from apx.models import (
     ActionResponse,
     DevConfig,
-    McpDatabricksAppsLogsResponse,
     McpActionResponse,
+    McpDatabricksAppsLogsResponse,
     McpErrorResponse,
     McpMetadataResponse,
     McpStatusResponse,
     ProjectConfig,
+    ProjectMetadata,
     StatusResponse,
 )
-from apx.utils import ProjectMetadata
 
 
 @pytest.fixture
@@ -44,7 +44,8 @@ def mock_status_response():
         frontend_running=True,
         backend_running=True,
         openapi_running=True,
-        frontend_port=5173,
+        dev_server_port=7000,
+        frontend_port=5000,
         backend_port=8000,
     )
 
@@ -358,6 +359,7 @@ async def test_status_with_mocked_response(mock_manager, mock_status_response):
         frontend_running=False,
         backend_running=True,
         openapi_running=False,
+        dev_server_port=7000,
         frontend_port=3000,
         backend_port=8080,
     )
@@ -427,7 +429,8 @@ async def test_mcp_tool_responses_are_valid_models():
             frontend_running=True,
             backend_running=True,
             openapi_running=True,
-            frontend_port=5173,
+            dev_server_port=7000,
+            frontend_port=5000,
             backend_port=8000,
         )
     )

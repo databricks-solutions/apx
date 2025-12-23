@@ -1,6 +1,8 @@
 from importlib import resources
+import json
 import shutil
 import time
+import traceback
 import pytest
 import os
 from pathlib import Path
@@ -181,8 +183,6 @@ def test_init_and_build_combinations(
         if result.exception:
             console.print("\n[red]Exception occurred:[/red]")
             console.print(f"[red]{result.exception}[/red]")
-            import traceback
-
             console.print(
                 f"[red]{''.join(traceback.format_exception(type(result.exception), result.exception, result.exception.__traceback__))}[/red]"
             )
@@ -297,8 +297,6 @@ def test_components_json_app_slug_replacement(
     This test verifies that the generated components.json file contains the actual
     app_slug (e.g., "my_test_app") and not the literal string "base".
     """
-    import json
-
     # Use a specific app name with dashes to test slug conversion
     test_app_name = "my-test-app"
     expected_app_slug = "my_test_app"  # dashes should be converted to underscores

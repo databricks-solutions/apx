@@ -10,7 +10,7 @@ from typing import Any, TypeAlias
 
 from typing_extensions import override
 
-from apx.cli.dev.models import LogEntry
+from apx.models import LogEntry
 from apx.utils import console, PrefixedLogHandler
 
 
@@ -231,6 +231,10 @@ def print_log_entry(log: dict[str, Any], raw_output: bool = False):
             stream_prefix, message = content.split(" | ", 1)
             if stream_prefix in ["BE", "APP"]:
                 content = message
+        # For browser logs, strip the source prefix (console | window | promise)
+        elif log["process_name"] == "browser" and " | " in content:
+            _, message = content.split(" | ", 1)
+            content = message
         # Print without rich formatting
         print(f"{content}")
         return
@@ -263,6 +267,10 @@ def print_log_entry(log: dict[str, Any], raw_output: bool = False):
         # OpenAPI watcher logs come directly from the logger (no stream prefix)
         prefix_color = "magenta"
         prefix = "[GEN]"
+    elif log["process_name"] == "browser":
+        # Browser logs from frontend dev tools
+        prefix_color = "red"
+        prefix = "[BRW]"
     else:
         # Default fallback
         prefix_color = "white"

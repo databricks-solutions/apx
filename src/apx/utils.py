@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import contextmanager
+import configparser
 import logging
 import os
 import random
@@ -7,17 +7,19 @@ import shutil
 import subprocess
 import time
 import tomllib
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-from collections.abc import Generator
-from pydantic import BaseModel, Field
-from typing_extensions import override
 
 import jinja2
 from rich.console import Console
 from rich.markup import escape
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from typer import Exit
+from typing_extensions import override
+
+from apx.models import ProjectMetadata
 
 console = Console()
 
@@ -297,14 +299,6 @@ def run_subprocess(cmd: list[str], cwd: Path, error_msg: str) -> None:
         raise Exit(code=1)
 
 
-class ProjectMetadata(BaseModel):
-    app_name: str = Field(description="The user-facing app name.", alias="app-name")
-    app_module: str = Field(
-        description="The internal app module name.", alias="app-module"
-    )
-    app_slug: str = Field(description="The internal app slug.", alias="app-slug")
-
-
 def get_project_metadata() -> ProjectMetadata:
     """Read the project metadata from pyproject.toml."""
     pyproject_path = Path.cwd() / "pyproject.toml"
@@ -352,20 +346,22 @@ def generate_metadata_file(app_path: Path):
     metadata: dict[str, str] = pyproject["tool"]["apx"]["metadata"]
     metadata_path = app_path / metadata["metadata-path"]
 
+    # Use /api as default if api-prefix is not specified
+    api_prefix = metadata.get("api-prefix", "/api")
+
     metadata_path.write_text(
         "\n".join(
             [
                 f'app_name = "{metadata["app-name"]}"',
                 f'app_module = "{metadata["app-module"]}"',
                 f'app_slug = "{metadata["app-slug"]}"',
+                f'api_prefix = "{api_prefix}"',
             ]
         )
     )
 
 
 def list_profiles() -> list[str]:
-    import configparser
-
     cfg_path = os.path.expanduser("~/.databrickscfg")
     if not os.path.exists(cfg_path):
         return []

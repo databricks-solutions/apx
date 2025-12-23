@@ -2,21 +2,24 @@
 
 import asyncio
 import os
-from pathlib import Path
 import subprocess
 import time
+from pathlib import Path
 from typing import Literal, cast
 
+import httpx
+import yaml
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-from pydantic import TypeAdapter
-from pydantic import JsonValue
+from pydantic import BaseModel, JsonValue, TypeAdapter
 
-from apx.cli.dev.manager import DevManager
-from apx.cli.dev.logging import suppress_output_and_logs
+from apx import __version__ as apx_version
 from apx.cli.dev.client import DevServerClient
-from apx.cli.dev.models import (
+from apx.cli.dev.logging import suppress_output_and_logs
+from apx.cli.dev.manager import DevManager
+from apx.models import (
     CheckCommandResult,
+    DevServerConfig,
     JsonObject,
     McpActionResponse,
     McpDatabricksAppsLogsResponse,
@@ -26,13 +29,23 @@ from apx.cli.dev.models import (
     McpOpenApiSchemaResponse,
     McpRouteCallResponse,
     McpRoutesResponse,
-    McpStatusResponse,
-    McpUrlResponse,
+    OpenApiStatusResponse,
     PortsResponse,
     RouteInfo,
 )
 from apx.utils import get_project_metadata
-from apx import __version__ as apx_version
+
+
+class McpSimpleStatusResponse(BaseModel):
+    """Simplified MCP status response focused on dev server URL."""
+
+    dev_server_running: bool = False
+    dev_server_url: str | None = None
+    api_prefix: str | None = None
+    frontend_running: bool = False
+    backend_running: bool = False
+    openapi_running: bool = False
+
 
 # Initialize the MCP server
 mcp = FastMCP("APX Dev Server")
@@ -78,9 +91,16 @@ This MCP server gives you access to development server management tools:
 - **start**: Start development servers (frontend, backend, OpenAPI watcher)
 - **restart**: Restart all development servers
 - **stop**: Stop all development servers  
-- **status**: Get status of all development servers
+- **status**: Get dev server status and URL
+- **refresh_openapi**: Trigger OpenAPI schema and api.ts regeneration
+- **list_routes**: List available backend API routes
+- **call_route**: Call a backend route through the dev server proxy
 - **get_metadata**: Get project metadata from pyproject.toml
-- **get_frontend_url**: Get the frontend development server URL
+
+Resources:
+- **apx://info**: Information about apx toolkit
+- **apx://backend/openapi**: Backend OpenAPI schema
+- **apx://openapi/status**: OpenAPI regeneration timestamps
 
 Use these tools to interact with your apx project during development."""
 
@@ -93,11 +113,13 @@ def _get_manager() -> DevManager:
 def _get_dev_server_client() -> DevServerClient | None:
     """Get DevServerClient if dev server is running, None otherwise."""
     manager = _get_manager()
+    config = manager.get_or_create_config()
+    port = config.dev.dev_server_port
 
-    if not manager.is_dev_server_running():
+    if port is None or not manager.is_dev_server_running():
         return None
 
-    return DevServerClient(manager.socket_path)
+    return DevServerClient(port=port)
 
 
 def _truncate(s: str, max_chars: int) -> str:
@@ -128,11 +150,6 @@ def _resolve_app_name_from_databricks_yml(*, project_dir: Path) -> str:
                 "Please pass app_name explicitly."
             )
         )
-
-    try:
-        import yaml
-    except Exception as e:  # pragma: no cover
-        raise ValueError(f"Failed to import PyYAML: {e}") from e
 
     try:
         data_any = cast(object, yaml.safe_load(yml_path.read_text(encoding="utf-8")))
@@ -218,10 +235,8 @@ async def _run_cli(
 
 
 def _get_ports(*, client: DevServerClient) -> PortsResponse:
-    import httpx
-
-    with httpx.Client(transport=client.transport, timeout=client.timeout) as http:
-        resp = http.get(f"{client.base_url}/ports")
+    with httpx.Client(timeout=client.timeout) as http:
+        resp = http.get(f"{client.base_url}/__apx__/ports")
         resp.raise_for_status()
         return PortsResponse.model_validate(resp.json())
 
@@ -236,10 +251,13 @@ def _get_backend_base_url_safe(
     *, manager: DevManager
 ) -> tuple[str | None, McpErrorResponse | None]:
     """Get backend base URL or return a typed error response."""
-    if not manager.is_dev_server_running():
+    config = manager.get_or_create_config()
+    port = config.dev.dev_server_port
+
+    if port is None or not manager.is_dev_server_running():
         return None, McpErrorResponse(error="Dev server is not running")
 
-    client = DevServerClient(manager.socket_path)
+    client = DevServerClient(port=port)
     try:
         status = client.status()
         if not status.backend_running:
@@ -252,12 +270,37 @@ def _get_backend_base_url_safe(
         )
 
 
+def _get_dev_server_url_safe(
+    *, manager: DevManager
+) -> tuple[str | None, str | None, McpErrorResponse | None]:
+    """Get dev server URL and api_prefix, or return a typed error response.
+
+    Returns:
+        Tuple of (dev_server_url, api_prefix, error).
+    """
+    config = manager.get_or_create_config()
+    port = config.dev.dev_server_port
+
+    if port is None or not manager.is_dev_server_running():
+        return None, None, McpErrorResponse(error="Dev server is not running")
+
+    client = DevServerClient(port=port)
+    try:
+        ports_data = _get_ports(client=client)
+        dev_server_url = f"http://{ports_data.host}:{port}"
+        return dev_server_url, ports_data.api_prefix, None
+    except Exception as e:
+        return (
+            None,
+            None,
+            McpErrorResponse(error=f"Failed to get dev server info: {str(e)}"),
+        )
+
+
 def _fetch_backend_openapi_schema(
     *, backend_url: str, timeout_seconds: float = 10.0
 ) -> JsonObject:
     """Fetch backend OpenAPI schema from /openapi.json."""
-    import httpx
-
     with httpx.Client(timeout=timeout_seconds) as client:
         resp = client.get(f"{backend_url}/openapi.json")
         resp.raise_for_status()
@@ -286,97 +329,52 @@ async def backend_openapi() -> McpOpenApiSchemaResponse | McpErrorResponse:
         return McpErrorResponse(error=f"Failed to fetch OpenAPI schema: {str(e)}")
 
 
-@mcp.resource("apx://backend/routes")
-async def backend_routes() -> McpRoutesResponse | McpErrorResponse:
-    """List available backend routes derived from the OpenAPI schema."""
+@mcp.resource("apx://openapi/status")
+async def openapi_status() -> OpenApiStatusResponse | McpErrorResponse:
+    """Get OpenAPI regeneration status and timestamps.
+
+    Returns information about the OpenAPI schema and api.ts client files,
+    including their paths and last regeneration timestamps.
+    """
     manager = _get_manager()
-    backend_url, err = await asyncio.to_thread(
-        _get_backend_base_url_safe, manager=manager
+    dev_server_url, _, err = await asyncio.to_thread(
+        _get_dev_server_url_safe, manager=manager
     )
-    if err is not None or backend_url is None:
-        return err or McpErrorResponse(error="Failed to determine backend URL")
+    if err is not None or dev_server_url is None:
+        return err or McpErrorResponse(error="Dev server is not running")
+
+    def fetch_status() -> OpenApiStatusResponse:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(f"{dev_server_url}/__apx__/openapi-status")
+            resp.raise_for_status()
+            return OpenApiStatusResponse.model_validate(resp.json())
 
     try:
-        schema = await asyncio.to_thread(
-            _fetch_backend_openapi_schema, backend_url=backend_url
-        )
-        paths_any = schema.get("paths", {})
-        paths: dict[str, JsonValue]
-        if isinstance(paths_any, dict):
-            paths = cast(dict[str, JsonValue], paths_any)
-        else:
-            paths = {}
-
-        routes: list[RouteInfo] = []
-        for path, ops_any in paths.items():
-            if not isinstance(ops_any, dict):
-                continue
-            ops = cast(dict[str, JsonValue], ops_any)
-            methods: list[str] = []
-            operation_ids: list[str] = []
-            summaries: list[str] = []
-
-            for method, op_any in ops.items():
-                # OpenAPI uses lowercase methods in "paths"
-                method_upper = str(method).upper()
-                if method_upper not in {
-                    "GET",
-                    "POST",
-                    "PUT",
-                    "PATCH",
-                    "DELETE",
-                    "HEAD",
-                    "OPTIONS",
-                }:
-                    continue
-                methods.append(method_upper)
-                op: dict[str, JsonValue]
-                if isinstance(op_any, dict):
-                    op = cast(dict[str, JsonValue], op_any)
-                else:
-                    op = {}
-
-                operation_id = op.get("operationId")
-                if isinstance(operation_id, str):
-                    operation_ids.append(operation_id)
-
-                summary = op.get("summary")
-                if isinstance(summary, str):
-                    summaries.append(summary)
-
-            if methods:
-                routes.append(
-                    RouteInfo(
-                        path=str(path),
-                        methods=sorted(set(methods)),
-                        operation_ids=operation_ids,
-                        summaries=summaries,
-                    )
-                )
-
-        routes.sort(key=lambda r: r.path)
-        return McpRoutesResponse(backend_url=backend_url, routes=routes)
+        return await asyncio.to_thread(fetch_status)
     except Exception as e:
-        return McpErrorResponse(error=f"Failed to list routes: {str(e)}")
+        return McpErrorResponse(error=f"Failed to get OpenAPI status: {str(e)}")
 
 
 @mcp.tool()
 async def start(
-    frontend_port: int = 5173,
-    backend_port: int = 8000,
-    host: str = "localhost",
-    obo: bool = True,
-    openapi: bool = True,
-    max_retries: int = 10,
+    host: str | None = None,
+    api_prefix: str | None = None,
+    obo: bool | None = None,
+    openapi: bool | None = None,
+    max_retries: int | None = None,
 ) -> McpActionResponse:
     """Start development servers (frontend, backend, and optionally OpenAPI watcher).
 
+    The dev server will find available ports automatically:
+    - Dev server (reverse proxy): 7000-7999
+    - Frontend: 5000-5999
+    - Backend: 8000-8999
+
     Args:
-        frontend_port: Port for the frontend development server (default: 5173)
-        backend_port: Port for the backend server (default: 8000)
         host: Host for dev, frontend, and backend servers (default: localhost)
+        api_prefix: URL prefix for API routes (default: /api)
         obo: Whether to add On-Behalf-Of header to the backend server (default: True)
-        This enables OBO token generation for Databricks API calls
+            This enables OBO token generation for Databricks API calls
         openapi: Whether to start OpenAPI watcher process (default: True)
         max_retries: Maximum number of retry attempts for processes (default: 10)
 
@@ -385,18 +383,23 @@ async def start(
     """
     manager = _get_manager()
 
+    # Build config from tool arguments, using defaults from DevServerConfig
+    default_config = DevServerConfig()
+    config = DevServerConfig(
+        host=host if host is not None else default_config.host,
+        api_prefix=api_prefix if api_prefix is not None else default_config.api_prefix,
+        obo=obo if obo is not None else default_config.obo,
+        openapi=openapi if openapi is not None else default_config.openapi,
+        max_retries=max_retries
+        if max_retries is not None
+        else default_config.max_retries,
+        watch=False,  # MCP tools always run in detached mode
+    )
+
     def start_suppressed():
         """Start servers with suppressed console output."""
         with suppress_output_and_logs():
-            manager.start(
-                frontend_port=frontend_port,
-                backend_port=backend_port,
-                host=host,
-                obo=obo,
-                openapi=openapi,
-                max_retries=max_retries,
-                watch=False,  # MCP tools always run in detached mode
-            )
+            manager.start(config=config)
 
     try:
         # Run sync operation in thread pool with suppressed output
@@ -477,34 +480,75 @@ async def stop() -> McpActionResponse:
 
 
 @mcp.tool()
-async def status() -> McpStatusResponse:
-    """Get the status of development servers.
+async def refresh_openapi() -> McpActionResponse:
+    """Trigger OpenAPI schema and api.ts client regeneration.
 
-    Returns information about whether the frontend, backend, OpenAPI watcher,
-    and dev server are running, along with their ports.
+    Forces regeneration of:
+    - OpenAPI schema (.apx/openapi.json)
+    - TypeScript API client (src/<app>/ui/lib/api.ts)
+
+    This is useful when you want to manually refresh the API client after
+    making changes to the backend API without waiting for the file watcher.
 
     Returns:
-        McpStatusResponse with status information including:
+        McpActionResponse with status and message indicating success or failure
+    """
+    manager = _get_manager()
+    dev_server_url, _, err = await asyncio.to_thread(
+        _get_dev_server_url_safe, manager=manager
+    )
+    if err is not None or dev_server_url is None:
+        return McpActionResponse(
+            status="error",
+            message=err.error if err else "Dev server is not running",
+        )
+
+    def do_refresh() -> McpActionResponse:
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.post(f"{dev_server_url}/__apx__/actions/refresh-openapi")
+            if resp.status_code != 200:
+                return McpActionResponse(
+                    status="error",
+                    message=f"Failed to refresh OpenAPI: HTTP {resp.status_code}",
+                )
+            data = resp.json()
+            return McpActionResponse(
+                status=data.get("status", "error"),
+                message=data.get("message", "Unknown response"),
+            )
+
+    try:
+        return await asyncio.to_thread(do_refresh)
+    except Exception as e:
+        return McpActionResponse(
+            status="error", message=f"Failed to refresh OpenAPI: {str(e)}"
+        )
+
+
+@mcp.tool()
+async def status() -> McpSimpleStatusResponse:
+    """Get the status of development servers.
+
+    Returns simplified status focused on the dev server URL (the single entry point).
+
+    Returns:
+        McpSimpleStatusResponse with status information including:
         - dev_server_running: Whether the dev server is running
-        - dev_server_port: Port of the dev server (if running)
-        - dev_server_pid: PID of the dev server (if running)
+        - dev_server_url: The URL of the dev server (e.g., http://localhost:7000)
+        - api_prefix: The API prefix used for backend routes (e.g., /api)
         - frontend_running: Whether the frontend server is running
-        - frontend_port: Port of the frontend server (if running)
         - backend_running: Whether the backend server is running
-        - backend_port: Port of the backend server (if running)
         - openapi_running: Whether the OpenAPI watcher is running
     """
     manager = _get_manager()
 
     # Initialize with default values
-    result = McpStatusResponse(
+    result = McpSimpleStatusResponse(
         dev_server_running=False,
-        dev_server_port=None,
-        dev_server_pid=None,
+        dev_server_url=None,
+        api_prefix=None,
         frontend_running=False,
-        frontend_port=None,
         backend_running=False,
-        backend_port=None,
         openapi_running=False,
     )
 
@@ -512,51 +556,28 @@ async def status() -> McpStatusResponse:
     if not is_running:
         return result
 
+    config = manager.get_or_create_config()
+    port = config.dev.dev_server_port
+
     result.dev_server_running = True
-    # Port and PID are no longer tracked, set to None
-    result.dev_server_port = None
-    result.dev_server_pid = None
 
     # Try to get status from dev server
-    client = DevServerClient(manager.socket_path)
-    try:
-        status_data = await asyncio.to_thread(client.status)
-        result.frontend_running = status_data.frontend_running
-        result.frontend_port = status_data.frontend_port
-        result.backend_running = status_data.backend_running
-        result.backend_port = status_data.backend_port
-        result.openapi_running = status_data.openapi_running
-    except Exception:
-        # Dev server is running but not responding - likely still starting
-        pass
+    if port is not None:
+        client = DevServerClient(port=port)
+        try:
+            ports_data = await asyncio.to_thread(_get_ports, client=client)
+            result.dev_server_url = f"http://{ports_data.host}:{port}"
+            result.api_prefix = ports_data.api_prefix
+
+            status_data = await asyncio.to_thread(client.status)
+            result.frontend_running = status_data.frontend_running
+            result.backend_running = status_data.backend_running
+            result.openapi_running = status_data.openapi_running
+        except Exception:
+            # Dev server is running but not responding - likely still starting
+            result.dev_server_url = f"http://localhost:{port}"
 
     return result
-
-
-@mcp.tool()
-async def get_frontend_url() -> McpUrlResponse | McpErrorResponse:
-    """Get the URL of the frontend development server.
-
-    Returns:
-        McpUrlResponse with the URL of the frontend development server
-    """
-
-    try:
-        manager = _get_manager()
-        is_running = await asyncio.to_thread(manager.is_dev_server_running)
-
-        if not is_running:
-            return McpErrorResponse(error="Dev server is not running")
-
-        # Get frontend port/host from dev server
-        client = DevServerClient(manager.socket_path)
-        status_data = await asyncio.to_thread(client.status)
-        ports_data = await asyncio.to_thread(_get_ports, client=client)
-        host = ports_data.host
-
-        return McpUrlResponse(url=f"http://{host}:{status_data.frontend_port}")
-    except Exception as e:
-        return McpErrorResponse(error=f"Failed to get frontend URL: {str(e)}")
 
 
 @mcp.tool()
@@ -604,11 +625,16 @@ async def call_route(
     text_body: str | None = None,
     timeout_seconds: float = 30.0,
 ) -> McpRouteCallResponse | McpErrorResponse:
-    """Call a backend route and return the HTTP response.
+    """Call a backend route through the dev server proxy.
+
+    The request goes through the dev server which proxies to the backend.
+    API routes should use the configured api_prefix (default: /api).
 
     Args:
         method: HTTP method (e.g., GET/POST)
-        path: Route path (e.g., /api/items). If it doesn't start with '/', it will be added.
+        path: Route path (e.g., /api/items or /api/health).
+              If it doesn't start with '/', it will be added.
+              Use the api_prefix (typically /api) for backend routes.
         query: Query parameters to include
         headers: Request headers to include
         json_body: JSON body (for POST/PUT/PATCH)
@@ -616,19 +642,17 @@ async def call_route(
         timeout_seconds: Request timeout in seconds
     """
     manager = _get_manager()
-    backend_url, err = await asyncio.to_thread(
-        _get_backend_base_url_safe, manager=manager
+    dev_server_url, _api_prefix, err = await asyncio.to_thread(
+        _get_dev_server_url_safe, manager=manager
     )
-    if err is not None or backend_url is None:
-        return err or McpErrorResponse(error="Failed to determine backend URL")
+    if err is not None or dev_server_url is None:
+        return err or McpErrorResponse(error="Dev server is not running")
 
     if not path.startswith("/"):
         path = f"/{path}"
 
     def do_request() -> McpRouteCallResponse:
-        import httpx
-
-        url = f"{backend_url}{path}"
+        url = f"{dev_server_url}{path}"
         with httpx.Client(timeout=timeout_seconds) as client:
             resp = client.request(
                 method=method,
@@ -658,6 +682,95 @@ async def call_route(
         return await asyncio.to_thread(do_request)
     except Exception as e:
         return McpErrorResponse(error=f"Failed to call route: {str(e)}")
+
+
+@mcp.tool()
+async def list_routes() -> McpRoutesResponse | McpErrorResponse:
+    """List available backend API routes.
+
+    Returns a list of routes derived from the backend's OpenAPI schema,
+    including paths, HTTP methods, operation IDs, and summaries.
+
+    Returns:
+        McpRoutesResponse with the list of available routes
+    """
+    manager = _get_manager()
+    dev_server_url, _api_prefix, err = await asyncio.to_thread(
+        _get_dev_server_url_safe, manager=manager
+    )
+    if err is not None or dev_server_url is None:
+        return err or McpErrorResponse(error="Dev server is not running")
+
+    # Need backend URL for fetching OpenAPI schema
+    backend_url, backend_err = await asyncio.to_thread(
+        _get_backend_base_url_safe, manager=manager
+    )
+    if backend_err is not None or backend_url is None:
+        return backend_err or McpErrorResponse(error="Backend is not running")
+
+    try:
+        schema = await asyncio.to_thread(
+            _fetch_backend_openapi_schema, backend_url=backend_url
+        )
+        paths_any = schema.get("paths", {})
+        paths: dict[str, JsonValue]
+        if isinstance(paths_any, dict):
+            paths = cast(dict[str, JsonValue], paths_any)
+        else:
+            paths = {}
+
+        routes: list[RouteInfo] = []
+        for path, ops_any in paths.items():
+            if not isinstance(ops_any, dict):
+                continue
+            ops = cast(dict[str, JsonValue], ops_any)
+            methods: list[str] = []
+            operation_ids: list[str] = []
+            summaries: list[str] = []
+
+            for method_key, op_any in ops.items():
+                # OpenAPI uses lowercase methods in "paths"
+                method_upper = str(method_key).upper()
+                if method_upper not in {
+                    "GET",
+                    "POST",
+                    "PUT",
+                    "PATCH",
+                    "DELETE",
+                    "HEAD",
+                    "OPTIONS",
+                }:
+                    continue
+                methods.append(method_upper)
+                op: dict[str, JsonValue]
+                if isinstance(op_any, dict):
+                    op = cast(dict[str, JsonValue], op_any)
+                else:
+                    op = {}
+
+                operation_id = op.get("operationId")
+                if isinstance(operation_id, str):
+                    operation_ids.append(operation_id)
+
+                summary = op.get("summary")
+                if isinstance(summary, str):
+                    summaries.append(summary)
+
+            if methods:
+                routes.append(
+                    RouteInfo(
+                        path=str(path),
+                        methods=sorted(set(methods)),
+                        operation_ids=operation_ids,
+                        summaries=summaries,
+                    )
+                )
+
+        routes.sort(key=lambda r: r.path)
+        # Use dev_server_url as the base URL since that's where clients should call
+        return McpRoutesResponse(backend_url=dev_server_url, routes=routes)
+    except Exception as e:
+        return McpErrorResponse(error=f"Failed to list routes: {str(e)}")
 
 
 @mcp.tool()

@@ -75,12 +75,6 @@ def _generate_openapi_schema(
     app_instance = get_app()
 
     if app_instance is None:
-        # If app hasn't been loaded yet by the backend, this shouldn't happen
-        # in dev mode, but handle it gracefully
-        if logger:
-            logger.warning("App not loaded yet, this shouldn't happen in dev mode")
-        else:
-            console.print("[yellow]⚠️  App not loaded yet by backend server[/yellow]")
         # Fall back to loading it ourselves (shouldn't happen in practice)
         from apx.cli.dev.reloader import load_app
 

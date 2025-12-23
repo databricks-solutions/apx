@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from pydantic import Field, BaseModel
 from dotenv import load_dotenv
-from .._metadata import app_name, app_slug
+from .._metadata import app_name, app_slug, api_prefix
 from pydantic.fields import _Unset
 
 # project root is the parent of the src folder
@@ -30,7 +30,7 @@ class AppConfig(BaseSettings):
         env_nested_delimiter="__",
     )
     app_name: str = Field(default=app_name)
-    api_prefix: str = Field(default="/api")
+    api_prefix: str = Field(default=api_prefix)
     db: DatabaseConfig = _Unset
 
     @property

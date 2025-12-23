@@ -1,43 +1,66 @@
-"""HTTP client for communicating with the dev server using httpx over Unix domain socket."""
+"""HTTP client for communicating with the dev server over TCP."""
 
 import json
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
-from enum import Enum
-from pathlib import Path
 from typing import Literal
 
 import httpx
 from pydantic import ValidationError
 
-from apx.cli.dev.models import ActionRequest, ActionResponse, LogEntry, StatusResponse
-
-
-class StreamEvent(str, Enum):
-    """Marker for special SSE events."""
-
-    BUFFERED_DONE = "buffered_done"
+from apx.models import (
+    ActionRequest,
+    ActionResponse,
+    LogEntry,
+    StatusResponse,
+    StreamEvent,
+)
 
 
 class DevServerClient:
-    """Client for communicating with the dev server over Unix domain socket."""
+    """Client for communicating with the dev server over TCP.
 
-    def __init__(self, socket_path: Path | str, timeout: float = 5.0):
+    The dev server now listens on localhost:<port> instead of a Unix domain socket.
+    All management endpoints are under the /__apx__/ prefix.
+    """
+
+    def __init__(
+        self, base_url: str | None = None, port: int | None = None, timeout: float = 5.0
+    ):
         """Initialize the dev server client.
 
         Args:
-            socket_path: Path to Unix domain socket (e.g., ".apx/dev.sock")
+            base_url: Full base URL (e.g., "http://localhost:7000"). If provided, port is ignored.
+            port: Port number for localhost connection (e.g., 7000). Used if base_url is None.
             timeout: Default timeout for requests in seconds
         """
-        if isinstance(socket_path, str):
-            socket_path = Path(socket_path)
+        if base_url:
+            self.base_url: str = base_url.rstrip("/")
+        elif port:
+            self.base_url = f"http://localhost:{port}"
+        else:
+            raise ValueError("Either base_url or port must be provided")
 
-        self.socket_path: Path = socket_path
         self.timeout: float = timeout
-        # Use a custom transport for Unix domain sockets
-        self.transport: httpx.HTTPTransport = httpx.HTTPTransport(uds=str(socket_path))
-        # Base URL doesn't matter for Unix sockets, but httpx needs one
-        self.base_url: str = "http://localhost"
+
+    @classmethod
+    def from_port(cls, port: int, timeout: float = 5.0) -> "DevServerClient":
+        """Create a client from a port number.
+
+        Args:
+            port: Port number for the dev server
+            timeout: Default timeout for requests in seconds
+
+        Returns:
+            DevServerClient instance
+        """
+        return cls(port=port, timeout=timeout)
+
+    def _management_url(self, path: str) -> str:
+        """Build URL for management endpoints."""
+        if not path.startswith("/"):
+            path = f"/{path}"
+        return f"{self.base_url}/__apx__{path}"
 
     def start(self, request: ActionRequest) -> ActionResponse:
         """Start the development servers.
@@ -51,9 +74,9 @@ class DevServerClient:
         Raises:
             httpx.HTTPError: If the request fails
         """
-        with httpx.Client(transport=self.transport, timeout=self.timeout) as client:
+        with httpx.Client(timeout=self.timeout) as client:
             response = client.post(
-                f"{self.base_url}/actions/start",
+                self._management_url("/actions/start"),
                 json=request.model_dump(),
             )
             response.raise_for_status()
@@ -66,14 +89,27 @@ class DevServerClient:
             ActionResponse indicating success or failure
 
         Raises:
-            httpx.HTTPError: If the request fails
+            httpx.HTTPError: If the request fails (except for connection errors
+                during shutdown, which are treated as success)
         """
-        # Stop can involve process teardown; use a slightly longer timeout than "status".
         timeout = max(self.timeout, 15.0)
-        with httpx.Client(transport=self.transport, timeout=timeout) as client:
-            response = client.post(f"{self.base_url}/actions/stop")
-            response.raise_for_status()
-            return ActionResponse.model_validate(response.json())
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.post(self._management_url("/actions/stop"))
+                response.raise_for_status()
+                return ActionResponse.model_validate(response.json())
+        except (
+            httpx.RemoteProtocolError,
+            httpx.ReadError,
+            httpx.ConnectError,
+            ConnectionResetError,
+        ):
+            # Server disconnected during shutdown - this is expected behavior.
+            # The stop request was received and the server is terminating.
+            return ActionResponse(
+                status="success",
+                message="Server shutdown initiated (connection closed)",
+            )
 
     def restart(self) -> ActionResponse:
         """Restart the development servers.
@@ -84,11 +120,8 @@ class DevServerClient:
         Raises:
             httpx.HTTPError: If the request fails
         """
-        transport = httpx.HTTPTransport(uds=str(self.socket_path))
-        with httpx.Client(
-            transport=transport, timeout=10.0
-        ) as client:  # Longer timeout for restart
-            response = client.post(f"{self.base_url}/actions/restart")
+        with httpx.Client(timeout=10.0) as client:
+            response = client.post(self._management_url("/actions/restart"))
             response.raise_for_status()
             return ActionResponse.model_validate(response.json())
 
@@ -101,10 +134,23 @@ class DevServerClient:
         Raises:
             httpx.HTTPError: If the request fails
         """
-        with httpx.Client(transport=self.transport, timeout=self.timeout) as client:
-            response = client.get(f"{self.base_url}/status")
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.get(self._management_url("/status"))
             response.raise_for_status()
             return StatusResponse.model_validate(response.json())
+
+    def is_running(self) -> bool:
+        """Check if the dev server is running and responding.
+
+        Returns:
+            True if the server is running and responding, False otherwise
+        """
+        try:
+            with httpx.Client(timeout=2.0) as client:
+                response = client.get(self._management_url("/"))
+                return response.status_code == 200
+        except Exception:
+            return False
 
     @contextmanager
     def stream_logs(
@@ -133,7 +179,7 @@ class DevServerClient:
             httpx.HTTPError: If the request fails
 
         Example:
-            >>> client = DevServerClient("http://localhost:8040")
+            >>> client = DevServerClient(port=7000)
             >>> with client.stream_logs() as log_stream:
             ...     for item in log_stream:
             ...         if isinstance(item, LogEntry):
@@ -145,10 +191,9 @@ class DevServerClient:
         if duration is not None:
             params["duration"] = str(duration)
 
-        transport = httpx.HTTPTransport(uds=str(self.socket_path))
-        with httpx.Client(transport=transport, timeout=None) as client:
+        with httpx.Client(timeout=None) as client:
             with client.stream(
-                "GET", f"{self.base_url}/logs", params=params
+                "GET", self._management_url("/logs"), params=params
             ) as response:
                 response.raise_for_status()
 
@@ -168,7 +213,6 @@ class DevServerClient:
 
                         # Parse SSE data lines
                         if line.startswith("data: "):
-                            # Skip the data line that comes after buffered_done event
                             if skip_next_data:
                                 skip_next_data = False
                                 continue
@@ -202,10 +246,9 @@ class DevServerClient:
         if duration is not None:
             params["duration"] = str(duration)
 
-        transport = httpx.AsyncHTTPTransport(uds=str(self.socket_path))
-        async with httpx.AsyncClient(transport=transport, timeout=None) as client:
+        async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(
-                "GET", f"{self.base_url}/logs", params=params
+                "GET", self._management_url("/logs"), params=params
             ) as response:
                 response.raise_for_status()
 
@@ -215,22 +258,18 @@ class DevServerClient:
                     if not line:
                         continue
 
-                    # Check for sentinel event marking end of buffered logs
                     if line.startswith("event: buffered_done"):
                         skip_next_data = True
                         yield StreamEvent.BUFFERED_DONE
                         continue
 
-                    # Parse SSE data lines
                     if line.startswith("data: "):
-                        # Skip the data line that comes after buffered_done event
                         if skip_next_data:
                             skip_next_data = False
                             continue
 
-                        data_str = line[6:]  # Remove "data: " prefix
+                        data_str = line[6:]
                         try:
                             yield LogEntry.model_validate(json.loads(data_str))
                         except ValidationError:
-                            # Skip malformed log entries
                             continue

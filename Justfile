@@ -1,3 +1,5 @@
+
+
 fmt:
     uv run ruff format .
     bun x prettier --write .
@@ -23,3 +25,12 @@ pm message:
 
 get-version:
     uvx uv-dynamic-versioning
+
+
+
+# Generate a sample project in /tmp/sample using apx from current directory
+gen-sample:
+    rm -rf /tmp/sample
+    uv run apx init /tmp/sample -p fe-az -a cursor -l basic -t essential -n sample \
+        --apx-package="{{justfile_directory()}}" \
+        --apx-editable

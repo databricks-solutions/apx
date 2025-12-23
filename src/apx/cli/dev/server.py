@@ -1,53 +1,54 @@
-"""Centralized FastAPI dev server for managing frontend, backend, and OpenAPI watcher.
+"""Centralized FastAPI dev server with reverse proxy for frontend and backend.
 
 Architecture:
-- Runs as a Unix domain socket server
-- Manages three background tasks: frontend (Node.js/Bun), backend (Python), OpenAPI watcher
-- Uses process groups (start_new_session=True) to enable killing all child processes
-- Explicit process cleanup on stop/restart to prevent orphaned processes
-- Cleanup of orphaned processes on start for bulletproof operation
+- Runs as a TCP server on localhost:7000-7999
+- Reverse proxies requests:
+  - `/__apx__/*` -> Internal management endpoints
+  - `/<api_prefix>/*` -> Backend server (in-process uvicorn)
+  - `/*` -> Frontend server (vite/bun dev server)
+- Manages frontend as subprocess, backend runs in-process
+- Supports WebSocket proxying for HMR and real-time features
 
 Key Features:
-1. Process Group Killing: Uses os.killpg() to kill entire process trees
-2. Graceful Shutdown: SIGTERM first, then SIGKILL after timeout
-3. Orphan Cleanup: Scans for and kills orphaned bun/node/vite processes on start
-4. State Tracking: Maintains references to subprocess objects for explicit cleanup
-5. Port Cleanup: Kills processes holding onto ports before starting new servers
+1. Single entry point for all development traffic
+2. Reverse proxy with WebSocket support
+3. In-memory log streaming via SSE
+4. Graceful shutdown with connection draining
 """
 
 import asyncio
-from collections.abc import AsyncGenerator
+import datetime
+import json
 import logging
 import os
 import signal
-
+import sys
+from collections import deque
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, Query
-from fastapi.responses import StreamingResponse
+import time
 
+import uvicorn
+from fastapi import BackgroundTasks, FastAPI, Query, WebSocket
+from fastapi.responses import Response, StreamingResponse
+from starlette.requests import Request
+
+from apx.cli.dev.logging import (
+    LogBuffer,
+    LoggerWriter,
+    setup_buffered_logging,
+)
 from apx.cli.dev.manager import (
     is_port_available,
     run_backend,
     run_frontend_with_logging,
     run_openapi_with_logging,
 )
-from apx.cli.dev.models import (
-    ActionRequest,
-    ActionResponse,
-    LogEntry,
-    PortsResponse,
-    StatusResponse,
-)
-from apx.cli.dev.logging import (
-    LogBuffer,
-    LoggerWriter,
-    setup_buffered_logging,
-)
 from apx.cli.dev.process_control import (
-    TrackedProcess,
+    kill_process_group,
     find_listeners_for_port,
     kill_pids,
     pids_belong_to_app,
@@ -56,15 +57,34 @@ from apx.cli.dev.process_control import (
     wait_for_no_descendants,
     wait_for_port_free,
 )
+from apx.cli.dev.proxy import ProxyManager
+from apx.constants import DEFAULT_HOST
+from apx.models import (
+    ActionRequest,
+    ActionResponse,
+    BrowserLogPayload,
+    DevServerConfig,
+    LogEntry,
+    OpenApiStatusResponse,
+    PortsConfig,
+    PortsResponse,
+    ProcessRunningStatus,
+    ProjectMetadata,
+    StatusResponse,
+    TrackedProcess,
+)
+
+logger = logging.getLogger("apx.server")
 
 
 # Global state for background tasks
 class ServerState:
-    """Global state for the dev server."""
+    """Global state for the dev server.
+
+    Uses DevServerConfig as the single source of configuration.
+    """
 
     def __init__(self) -> None:
-        from collections import deque
-
         self.frontend_task: asyncio.Task[None] | None = None
         self.backend_task: asyncio.Task[None] | None = None
         self.openapi_task: asyncio.Task[None] | None = None
@@ -72,59 +92,97 @@ class ServerState:
         self.frontend_tracked: TrackedProcess | None = None
         self.log_buffer: LogBuffer = deque(maxlen=10000)
         self.app_dir: Path | None = None
-        self.frontend_port: int = 5173
-        self.backend_port: int = 8000
-        self.host: str = "localhost"
-        self.obo: bool = True
-        self.openapi_enabled: bool = True
-        self.max_retries: int = 10
+        self.config: DevServerConfig = DevServerConfig()
+        self.proxy: ProxyManager | None = None
+        # OpenAPI regeneration timestamps
+        self.openapi_schema_last_updated: datetime.datetime | None = None
+        self.api_ts_last_updated: datetime.datetime | None = None
+
+    # Convenience properties for backwards compatibility
+    @property
+    def dev_server_port(self) -> int:
+        return self.config.dev_server_port
+
+    @property
+    def frontend_port(self) -> int:
+        return self.config.frontend_port
+
+    @property
+    def backend_port(self) -> int:
+        return self.config.backend_port
+
+    @property
+    def host(self) -> str:
+        return self.config.host
+
+    @property
+    def api_prefix(self) -> str:
+        return self.config.api_prefix
+
+    @property
+    def obo(self) -> bool:
+        return self.config.obo
+
+    @property
+    def openapi_enabled(self) -> bool:
+        return self.config.openapi
+
+    @property
+    def max_retries(self) -> int:
+        return self.config.max_retries
+
+    def update_config(self, config: DevServerConfig) -> None:
+        """Update the server configuration."""
+        self.config = config
+
+    def update_ports(self, ports: PortsConfig) -> None:
+        """Update only the ports in the configuration."""
+        self.config = DevServerConfig(
+            ports=ports,
+            host=self.config.host,
+            api_prefix=self.config.api_prefix,
+            obo=self.config.obo,
+            openapi=self.config.openapi,
+            max_retries=self.config.max_retries,
+            watch=self.config.watch,
+        )
 
 
 state = ServerState()
 
 
+# === Proxy Management ===
+
+
+def _create_proxy() -> ProxyManager:
+    """Create a ProxyManager with current configuration."""
+    frontend_url = f"http://{state.host}:{state.frontend_port}"
+    backend_url = f"http://{state.host}:{state.backend_port}"
+    return ProxyManager(
+        frontend_url=frontend_url,
+        backend_url=backend_url,
+        api_prefix=state.api_prefix,
+    )
+
+
 # === Process Cleanup ===
-# Process lifecycle is handled by `apx.cli.dev.process_control` and stored in `.apx/project.json`.
-
-
-def _project_json_path() -> Path | None:
-    if not state.app_dir:
-        return None
-    return state.app_dir / ".apx" / "project.json"
-
-
-def _update_project_frontend_process(tp: TrackedProcess | None) -> None:
-    """Persist frontend process metadata to `.apx/project.json` (best-effort)."""
-    path = _project_json_path()
-    if path is None:
-        return
-    from apx.cli.dev.manager import read_project_config, write_project_config
-    from apx.cli.dev.models import DevProcessInfo, ProjectConfig
-
-    try:
-        config = read_project_config(path) if path.exists() else ProjectConfig()
-    except Exception:
-        config = ProjectConfig()
-
-    config.dev.frontend_port = state.frontend_port
-    config.dev.backend_port = state.backend_port
-    config.dev.host = state.host
-    if tp is None:
-        config.dev.frontend_process = None
-    else:
-        config.dev.frontend_process = DevProcessInfo(
-            pid=tp.pid,
-            create_time=tp.create_time,
-            pgid=tp.pgid,
-        )
-    write_project_config(path, config)
 
 
 async def stop_children(*, verify_ports: bool = True) -> list[str]:
-    """Stop frontend/backend/openapi tasks and ensure frontend process tree is gone."""
+    """Stop frontend/backend/openapi tasks and ensure frontend process tree is gone.
+
+    Shutdown sequence (per user specification):
+    1. Stop WebSocket connections (handled by proxy.shutdown before this)
+    2. Stop proxying HTTP requests (handled by proxy.shutdown before this)
+    3. Stop frontend process - with aggressive SIGTERM -> SIGKILL
+    4. Stop backend process
+    """
     stopped: list[str] = []
 
-    # Frontend: cancel task, then stop tracked process tree/group.
+    # Capture PGID before we start stopping - needed for orphan cleanup
+    frontend_pgid = state.frontend_tracked.pgid if state.frontend_tracked else None
+
+    # === Step 1: Stop frontend task ===
     if state.frontend_task and not state.frontend_task.done():
         state.frontend_task.cancel()
         try:
@@ -133,15 +191,67 @@ async def stop_children(*, verify_ports: bool = True) -> list[str]:
             pass
         state.frontend_task = None
 
-    if state.frontend_process is not None:
-        tp = state.frontend_tracked or track_process(state.frontend_process.pid)
+    # === Step 2: Kill frontend process tree/group ===
+    if state.frontend_process is not None or frontend_pgid is not None:
+        tp = state.frontend_tracked or (
+            track_process(state.frontend_process.pid)
+            if state.frontend_process is not None
+            else None
+        )
+
+        # Primary: use process group killing (handles vite/esbuild orphans)
+        if frontend_pgid is not None:
+            logger.info(f"Killing frontend process group pgid={frontend_pgid}")
+            kill_process_group(
+                frontend_pgid,
+                sigterm_timeout=1.0,
+                sigkill_timeout=1.0,
+            )
+
+        # Secondary: also try tracked process tree for belt-and-suspenders
         if tp is not None:
-            stop_tracked_process(tp, name="frontend")
-            wait_for_no_descendants(tp, timeout=5.0, poll=0.1)
+            stop_tracked_process(
+                tp, name="frontend", sigterm_timeout=1.0, sigkill_timeout=1.0
+            )
+            wait_for_no_descendants(tp, timeout=2.0, poll=0.1)
+
         state.frontend_process = None
         state.frontend_tracked = None
         stopped.append("frontend")
 
+    # === Step 3: Safety net - kill any orphaned processes on frontend port ===
+    # This catches processes that somehow escaped the process group
+    if state.frontend_port:
+        # Brief wait for port to free naturally
+        await asyncio.sleep(0.2)
+
+        orphan_pids = find_listeners_for_port(state.frontend_port)
+        if orphan_pids:
+            logger.warning(
+                f"Found orphaned processes on frontend port {state.frontend_port}: {orphan_pids}"
+            )
+            # Filter to app-related processes if possible
+            if state.app_dir is not None:
+                app_pids = pids_belong_to_app(
+                    orphan_pids, app_dir=state.app_dir, expected_pgid=frontend_pgid
+                )
+                if app_pids:
+                    logger.info(f"Killing orphaned frontend processes: {app_pids}")
+                    kill_pids(app_pids, name="orphaned-frontend", sig=signal.SIGTERM)
+                    await asyncio.sleep(0.5)
+                    # Check again and SIGKILL stragglers
+                    remaining = find_listeners_for_port(state.frontend_port)
+                    if remaining:
+                        kill_pids(
+                            remaining, name="orphaned-frontend", sig=signal.SIGKILL
+                        )
+                        await asyncio.sleep(0.3)
+            else:
+                # No app_dir, just kill them all
+                kill_pids(orphan_pids, name="orphaned-frontend", sig=signal.SIGKILL)
+                await asyncio.sleep(0.3)
+
+    # === Step 4: Stop backend task ===
     if state.backend_task and not state.backend_task.done():
         state.backend_task.cancel()
         try:
@@ -151,6 +261,27 @@ async def stop_children(*, verify_ports: bool = True) -> list[str]:
         state.backend_task = None
         stopped.append("backend")
 
+    # === Step 4.5: Safety net - kill any orphaned processes on backend port ===
+    # This catches uvicorn/backend processes that didn't release the socket cleanly
+    if state.backend_port:
+        # Brief wait for port to free naturally after task cancellation
+        await asyncio.sleep(0.2)
+
+        orphan_pids = find_listeners_for_port(state.backend_port)
+        if orphan_pids:
+            logger.warning(
+                f"Found orphaned processes on backend port {state.backend_port}: {orphan_pids}"
+            )
+            logger.info(f"Killing orphaned backend processes: {orphan_pids}")
+            kill_pids(orphan_pids, name="orphaned-backend", sig=signal.SIGTERM)
+            await asyncio.sleep(0.5)
+            # Check again and SIGKILL stragglers
+            remaining = find_listeners_for_port(state.backend_port)
+            if remaining:
+                kill_pids(remaining, name="orphaned-backend", sig=signal.SIGKILL)
+                await asyncio.sleep(0.3)
+
+    # === Step 5: Stop openapi task ===
     if state.openapi_task and not state.openapi_task.done():
         state.openapi_task.cancel()
         try:
@@ -160,11 +291,9 @@ async def stop_children(*, verify_ports: bool = True) -> list[str]:
         state.openapi_task = None
         stopped.append("openapi")
 
-    # Persist cleared frontend pid.
-    _update_project_frontend_process(None)
-
+    # === Step 6: Verify ports are free (optional) ===
     if verify_ports:
-        # Verify frontend+backend ports are free (best-effort; backend is in-process)
+        # Verify frontend port is free
         if state.frontend_port:
             if not wait_for_port_free(
                 is_port_available_fn=is_port_available,
@@ -172,44 +301,62 @@ async def stop_children(*, verify_ports: bool = True) -> list[str]:
                 timeout=2.0,
                 poll=0.1,
             ):
-                # Try to kill remaining listeners that belong to this app (fast, scoped).
                 pids = find_listeners_for_port(state.frontend_port)
-                if state.app_dir is not None and pids:
-                    expected_pgid = (
-                        state.frontend_tracked.pgid if state.frontend_tracked else None
+                if pids:
+                    logger.error(
+                        f"Frontend port {state.frontend_port} still in use after cleanup: {pids}"
                     )
-                    to_kill = pids_belong_to_app(
-                        pids, app_dir=state.app_dir, expected_pgid=expected_pgid
-                    )
-                    if to_kill:
-                        kill_pids(to_kill, name="frontend-listener", sig=signal.SIGKILL)
-                if not wait_for_port_free(
-                    is_port_available_fn=is_port_available,
-                    port=state.frontend_port,
-                    timeout=1.5,
-                    poll=0.1,
-                ):
-                    pids2 = find_listeners_for_port(state.frontend_port)
-                    raise RuntimeError(
-                        f"Frontend port {state.frontend_port} still in use (listening PIDs: {pids2})"
-                    )
+                    # Last resort: SIGKILL everything on the port
+                    kill_pids(pids, name="frontend-port-hog", sig=signal.SIGKILL)
+                    if not wait_for_port_free(
+                        is_port_available_fn=is_port_available,
+                        port=state.frontend_port,
+                        timeout=1.0,
+                        poll=0.1,
+                    ):
+                        pids2 = find_listeners_for_port(state.frontend_port)
+                        raise RuntimeError(
+                            f"Frontend port {state.frontend_port} still in use (PIDs: {pids2})"
+                        )
+
+        # Backend port check - kill any remaining processes if port not free
         if state.backend_port:
             if not wait_for_port_free(
                 is_port_available_fn=is_port_available,
                 port=state.backend_port,
-                timeout=8.0,
+                timeout=2.0,
                 poll=0.1,
             ):
                 pids = find_listeners_for_port(state.backend_port)
-                raise RuntimeError(
-                    f"Backend port {state.backend_port} still in use (listening PIDs: {pids})"
-                )
+                if pids:
+                    logger.error(
+                        f"Backend port {state.backend_port} still in use after cleanup: {pids}"
+                    )
+                    # Last resort: SIGKILL everything on the port
+                    kill_pids(pids, name="backend-port-hog", sig=signal.SIGKILL)
+                    if not wait_for_port_free(
+                        is_port_available_fn=is_port_available,
+                        port=state.backend_port,
+                        timeout=1.0,
+                        poll=0.1,
+                    ):
+                        pids2 = find_listeners_for_port(state.backend_port)
+                        raise RuntimeError(
+                            f"Backend port {state.backend_port} still in use (PIDs: {pids2})"
+                        )
 
     return stopped
 
 
-def request_dev_server_shutdown() -> None:
-    """Terminate the dev server process (used by /actions/stop only)."""
+def request_dev_server_shutdown(delay: float = 0.0) -> None:
+    """Terminate the dev server process (used by stop endpoint).
+
+    Args:
+        delay: Optional delay in seconds before sending SIGTERM.
+               Used to allow HTTP response to be sent before shutdown.
+    """
+    if delay > 0:
+        time.sleep(delay)
     os.kill(os.getpid(), signal.SIGTERM)
 
 
@@ -221,11 +368,10 @@ async def run_frontend_task(app_dir: Path, port: int, max_retries: int):
     try:
         await run_frontend_with_logging(app_dir, port, max_retries, state)
     except asyncio.CancelledError:
-        # Frontend process cleanup is handled by stop_children()
         raise
     except Exception as e:
-        logger = logging.getLogger("apx.frontend")
-        logger.error(f"Frontend task failed: {e}")
+        frontend_logger = logging.getLogger("apx.frontend")
+        frontend_logger.error(f"Frontend task failed: {e}")
         if state.frontend_process:
             tp = track_process(state.frontend_process.pid)
             if tp is not None:
@@ -248,8 +394,8 @@ async def run_backend_task(
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        logger = logging.getLogger("apx.backend")
-        logger.error(f"Backend task failed: {e}")
+        backend_logger = logging.getLogger("apx.backend")
+        backend_logger.error(f"Backend task failed: {e}")
 
 
 async def run_openapi_task(app_dir: Path, max_retries: int):
@@ -259,8 +405,8 @@ async def run_openapi_task(app_dir: Path, max_retries: int):
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        logger = logging.getLogger("apx.openapi")
-        logger.error(f"OpenAPI watcher task failed: {e}")
+        openapi_logger = logging.getLogger("apx.openapi")
+        openapi_logger.error(f"OpenAPI watcher task failed: {e}")
 
 
 # === Lifecycle Management ===
@@ -269,14 +415,11 @@ async def run_openapi_task(app_dir: Path, max_retries: int):
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context manager for the FastAPI app."""
-    # Setup in-memory logging (no files needed)
+    # Setup in-memory logging
     for process_name in ["frontend", "backend", "openapi"]:
         setup_buffered_logging(state.log_buffer, process_name)
 
-    # Redirect stdout/stderr to backend logger BEFORE any tasks start
-    # This ensures app imports capture logs correctly
-    import sys
-
+    # Redirect stdout/stderr to backend logger
     original_stdout = sys.stdout
     original_stderr = sys.stderr
 
@@ -292,11 +435,12 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         sys.stdout = original_stdout
         sys.stderr = original_stderr
 
-        # Stop children deterministically; do not kill-by-name unrelated processes.
-        await stop_children(verify_ports=False)
+        # Shutdown proxy first (graceful WebSocket close)
+        if state.proxy:
+            await state.proxy.shutdown(timeout=5.0)
 
-        # Ensure project.json doesn't keep stale frontend process metadata.
-        _update_project_frontend_process(None)
+        # Stop children
+        await stop_children(verify_ports=False)
 
 
 # === FastAPI App ===
@@ -313,47 +457,56 @@ def create_dev_server(app_dir: Path) -> FastAPI:
     """
     app = FastAPI(
         title="APX Dev Server",
-        description="Centralized development server for APX projects",
+        description="Centralized development server with reverse proxy for APX projects",
         version="1.0.0",
         lifespan=lifespan,
     )
 
     state.app_dir = app_dir
 
-    @app.get("/")
-    async def root():
-        """Root endpoint."""
+    # === Management Routes (/__apx__/*) ===
+
+    @app.get("/__apx__/")
+    async def apx_root():
+        """Root endpoint for APX management."""
         return {"message": "APX Dev Server", "status": "running"}
 
-    @app.get("/status", response_model=StatusResponse)
+    @app.get("/__apx__/status", response_model=StatusResponse)
     async def get_status():
         """Get the status of all running processes."""
-        return StatusResponse(
+        running_status = ProcessRunningStatus(
             frontend_running=state.frontend_task is not None
             and not state.frontend_task.done(),
             backend_running=state.backend_task is not None
             and not state.backend_task.done(),
             openapi_running=state.openapi_task is not None
             and not state.openapi_task.done(),
-            frontend_port=state.frontend_port,
-            backend_port=state.backend_port,
         )
+        return StatusResponse.from_config(state.config, running_status)
 
-    @app.get("/ports", response_model=PortsResponse)
+    @app.get("/__apx__/ports", response_model=PortsResponse)
     async def get_ports():
-        """Get the frontend and backend ports."""
-        return PortsResponse(
-            frontend_port=state.frontend_port,
-            backend_port=state.backend_port,
-            host=state.host,
+        """Get the port configuration."""
+        return PortsResponse.from_config(state.config)
+
+    @app.post("/__apx__/browser-logs", status_code=204)
+    async def receive_browser_logs(payload: BrowserLogPayload) -> Response:
+        """Receive browser logs from the frontend dev tools."""
+        log_entry = LogEntry(
+            timestamp=datetime.datetime.fromtimestamp(
+                payload.timestamp / 1000
+            ).strftime("%Y-%m-%d %H:%M:%S"),
+            level=payload.level.upper(),
+            process_name="browser",
+            content=f"{payload.source} | {payload.message}"
+            + (f"\n{payload.stack}" if payload.stack else ""),
         )
+        state.log_buffer.append(log_entry)
+        return Response(status_code=204)
 
-    @app.post("/actions/start", response_model=ActionResponse)
+    @app.post("/__apx__/actions/start", response_model=ActionResponse)
     async def start_servers(request: ActionRequest) -> ActionResponse:
-        """Start all development servers.
-
-        Ensures cleanup before starting to prevent duplicate frontend servers.
-        """
+        """Start all development servers."""
         # Check if already running
         if (
             state.frontend_task
@@ -365,51 +518,33 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         ):
             return ActionResponse(status="error", message="Servers are already running")
 
-        # If project.json has stale frontend process metadata, attempt pgid-based cleanup.
-        if state.app_dir:
-            from apx.cli.dev.manager import read_project_config
+        # Store configuration from request
+        state.update_config(request.to_config())
 
-            path = _project_json_path()
-            if path and path.exists():
-                try:
-                    cfg = read_project_config(path)
-                    info = cfg.dev.frontend_process
-                    if info is not None:
-                        tp = TrackedProcess(
-                            pid=info.pid, create_time=info.create_time, pgid=info.pgid
-                        )
-                        stop_tracked_process(tp, name="frontend")
-                        wait_for_no_descendants(tp, timeout=5.0, poll=0.1)
-                except Exception:
-                    pass
-
-        # Store configuration
-        state.frontend_port = request.frontend_port
-        state.backend_port = request.backend_port
-        state.host = request.host
-        state.obo = request.obo
-        state.openapi_enabled = request.openapi
-        state.max_retries = request.max_retries
+        # Create proxy manager
+        state.proxy = _create_proxy()
 
         # Get app module name
         if state.app_dir:
-            from apx.utils import get_project_metadata, ProjectMetadata
+            from apx.utils import get_project_metadata
 
             metadata: ProjectMetadata = get_project_metadata()
             app_module_name: str = metadata.app_module
         else:
             return ActionResponse(status="error", message="App directory not set")
 
+        config = state.config
+
         # Start frontend
         if state.app_dir:
             state.frontend_task = asyncio.create_task(
                 run_frontend_task(
                     state.app_dir,
-                    request.frontend_port,
-                    request.max_retries,
+                    config.frontend_port,
+                    config.max_retries,
                 )
             )
-            # Wait briefly for the bun process to be created and tracked, then persist.
+            # Wait briefly for the bun process to be created and tracked
             for _ in range(20):
                 if (
                     state.frontend_tracked is not None
@@ -419,8 +554,6 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 await asyncio.sleep(0.05)
             if state.frontend_tracked is None and state.frontend_process is not None:
                 state.frontend_tracked = track_process(state.frontend_process.pid)
-            if state.frontend_tracked is not None:
-                _update_project_frontend_process(state.frontend_tracked)
 
         # Start backend
         if state.app_dir:
@@ -428,66 +561,65 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 run_backend_task(
                     state.app_dir,
                     app_module_name,
-                    request.host,
-                    request.backend_port,
-                    request.obo,
-                    request.max_retries,
+                    config.host,
+                    config.backend_port,
+                    config.obo,
+                    config.max_retries,
                 )
             )
-            # Backend is in-process; nothing to persist beyond ports/host.
 
         # Start OpenAPI watcher
-        if request.openapi and state.app_dir:
+        if config.openapi and state.app_dir:
             state.openapi_task = asyncio.create_task(
-                run_openapi_task(state.app_dir, request.max_retries)
+                run_openapi_task(state.app_dir, config.max_retries)
             )
-            # No additional process metadata to persist.
 
         return ActionResponse(status="success", message="Servers started successfully")
 
-    @app.post("/actions/stop", response_model=ActionResponse)
-    async def stop_servers() -> ActionResponse:
-        """Stop all development servers.
-
-        Explicitly kills all vite, bun, node, esbuild processes to ensure clean shutdown.
-        """
+    @app.post("/__apx__/actions/stop", response_model=ActionResponse)
+    async def stop_servers(background_tasks: BackgroundTasks) -> ActionResponse:
+        """Stop all development servers with graceful shutdown."""
         try:
-            # For "stop", we terminate the dev-server process immediately after stopping
-            # children. Port verification can be flaky on some platforms and is redundant
-            # because the dev-server process (which owns the backend listener) is about to exit.
+            # Shutdown proxy first (close WebSocket connections)
+            if state.proxy:
+                await state.proxy.shutdown(timeout=5.0)
+                state.proxy = None
+
+            # Stop children
             stopped = await stop_children(verify_ports=False)
         except Exception as e:
             return ActionResponse(status="error", message=str(e))
+
         if not stopped:
             return ActionResponse(status="error", message="No servers were running")
-        request_dev_server_shutdown()
+
+        # Schedule shutdown AFTER the response is sent.
+        # The delay ensures the HTTP response is fully transmitted before SIGTERM.
+        background_tasks.add_task(request_dev_server_shutdown, delay=0.1)
         return ActionResponse(
             status="success",
             message=f"Stopped servers: {', '.join(stopped)}",
         )
 
-    @app.post("/actions/restart", response_model=ActionResponse)
+    @app.post("/__apx__/actions/restart", response_model=ActionResponse)
     async def restart_servers() -> ActionResponse:
         """Restart all development servers."""
-        # Stop children only (do NOT terminate dev server process).
+        # Shutdown proxy
+        if state.proxy:
+            await state.proxy.shutdown(timeout=5.0)
+            state.proxy = None
+
+        # Stop children
         try:
             await stop_children(verify_ports=True)
         except Exception as e:
             return ActionResponse(status="error", message=str(e))
 
         # Start with stored configuration
-        request = ActionRequest(
-            frontend_port=state.frontend_port,
-            backend_port=state.backend_port,
-            host=state.host,
-            obo=state.obo,
-            openapi=state.openapi_enabled,
-            max_retries=state.max_retries,
-        )
+        request = ActionRequest.from_config(state.config)
 
         start_response = await start_servers(request)
 
-        # Combine messages
         if start_response.status == "success":
             return ActionResponse(
                 status="success", message="Servers restarted successfully"
@@ -495,7 +627,86 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         else:
             return start_response
 
-    @app.get("/logs")
+    @app.post("/__apx__/actions/refresh-openapi", response_model=ActionResponse)
+    async def refresh_openapi() -> ActionResponse:
+        """Trigger OpenAPI schema and api.ts client regeneration."""
+        from apx.openapi import (
+            _generate_openapi_schema,
+            _run_orval,
+            _ensure_orval_config,
+        )
+        from apx.utils import get_project_metadata
+
+        if state.app_dir is None:
+            return ActionResponse(status="error", message="App directory not set")
+
+        try:
+            metadata = get_project_metadata()
+            app_module_name = metadata.app_module
+            app_slug = metadata.app_slug
+        except Exception as e:
+            return ActionResponse(
+                status="error", message=f"Failed to read project metadata: {e}"
+            )
+
+        openapi_logger = logging.getLogger("apx.openapi")
+
+        try:
+            # Generate OpenAPI schema
+            openapi_path, _schema_changed = _generate_openapi_schema(
+                state.app_dir, app_module_name, logger=openapi_logger
+            )
+            state.openapi_schema_last_updated = datetime.datetime.now()
+
+            # Ensure orval config exists
+            orval_config_path = _ensure_orval_config(state.app_dir, app_slug)
+
+            # Always regenerate client on manual refresh (force=True equivalent)
+            _run_orval(state.app_dir, openapi_path, orval_config_path)
+            state.api_ts_last_updated = datetime.datetime.now()
+
+            openapi_logger.info("OpenAPI schema and api.ts refreshed successfully")
+            return ActionResponse(
+                status="success",
+                message="OpenAPI schema and api.ts regenerated successfully",
+            )
+        except Exception as e:
+            openapi_logger.error(f"Failed to refresh OpenAPI: {e}")
+            return ActionResponse(
+                status="error", message=f"Failed to refresh OpenAPI: {e}"
+            )
+
+    @app.get("/__apx__/openapi-status", response_model=OpenApiStatusResponse)
+    async def get_openapi_status() -> OpenApiStatusResponse:
+        """Get OpenAPI regeneration status and timestamps."""
+        from apx.utils import get_project_metadata
+
+        openapi_schema_path: str | None = None
+        api_ts_path: str | None = None
+
+        if state.app_dir is not None:
+            openapi_json = state.app_dir / ".apx" / "openapi.json"
+            if openapi_json.exists():
+                openapi_schema_path = str(openapi_json)
+
+            try:
+                metadata = get_project_metadata()
+                api_ts = (
+                    state.app_dir / "src" / metadata.app_slug / "ui" / "lib" / "api.ts"
+                )
+                if api_ts.exists():
+                    api_ts_path = str(api_ts)
+            except Exception:
+                pass
+
+        return OpenApiStatusResponse(
+            openapi_schema_path=openapi_schema_path,
+            api_ts_path=api_ts_path,
+            openapi_schema_last_updated=state.openapi_schema_last_updated,
+            api_ts_last_updated=state.api_ts_last_updated,
+        )
+
+    @app.get("/__apx__/logs")
     async def stream_logs(
         duration: Annotated[
             int | None, Query(description="Show logs from last N seconds")
@@ -509,10 +720,6 @@ def create_dev_server(app_dir: Path) -> FastAPI:
 
         async def event_generator() -> AsyncGenerator[str, None]:
             """Generate SSE events for log streaming."""
-            import datetime
-            import json
-
-            # Send initial buffered logs
             cutoff_time: datetime.datetime | None = None
             if duration:
                 cutoff_time = datetime.datetime.now() - datetime.timedelta(
@@ -522,11 +729,9 @@ def create_dev_server(app_dir: Path) -> FastAPI:
             # Send existing logs
             buffered_logs: list[LogEntry] = list(state.log_buffer)
             for log in buffered_logs:
-                # Filter by process if specified
                 if process != "all" and log.process_name != process:
                     continue
 
-                # Filter by time if specified
                 if cutoff_time:
                     try:
                         log_time = datetime.datetime.strptime(
@@ -537,31 +742,24 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                     except Exception:
                         pass
 
-                # Format SSE event (use model_dump for JSON serialization)
                 yield f"data: {json.dumps(log.model_dump())}\n\n"
 
-            # Send a sentinel event to mark end of buffered logs
+            # Send sentinel for end of buffered logs
             yield "event: buffered_done\ndata: {}\n\n"
 
-            # Stream new logs as they arrive
+            # Stream new logs
             last_index = len(state.log_buffer) - 1
 
             while True:
-                await asyncio.sleep(0.1)  # Check every 100ms
+                await asyncio.sleep(0.1)
 
-                # Check for new logs
                 current_index = len(state.log_buffer) - 1
                 if current_index > last_index:
-                    # Get new logs
                     new_logs: list[LogEntry] = list(state.log_buffer)[last_index + 1 :]
                     for log in new_logs:
-                        # Filter by process if specified
                         if process != "all" and log.process_name != process:
                             continue
-
-                        # Format SSE event (use model_dump for JSON serialization)
                         yield f"data: {json.dumps(log.model_dump())}\n\n"
-
                     last_index = current_index
 
         return StreamingResponse(
@@ -574,40 +772,74 @@ def create_dev_server(app_dir: Path) -> FastAPI:
             },
         )
 
+    # === Proxy Routes ===
+
+    @app.websocket("/{path:path}")
+    async def websocket_proxy(websocket: WebSocket, _path: str):
+        """Proxy WebSocket connections to frontend or backend."""
+        if state.proxy is None:
+            await websocket.close(code=1001, reason="Proxy not initialized")
+            return
+        await state.proxy.proxy_websocket(websocket)
+
+    @app.api_route(
+        "/{path:path}",
+        methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+    )
+    async def http_proxy(request: Request, _path: str) -> Response:
+        """Proxy HTTP requests to frontend or backend."""
+        # Don't proxy /__apx__/* routes - they're handled above
+        if request.url.path.startswith("/__apx__"):
+            return Response(status_code=404, content="Not found")
+
+        if state.proxy is None:
+            return Response(
+                status_code=503,
+                content="Proxy not initialized. Start servers first.",
+                media_type="text/plain",
+            )
+
+        # Use streaming for SSE endpoints
+        accept = request.headers.get("accept", "")
+        if "text/event-stream" in accept:
+            return await state.proxy.proxy_http_streaming(request)
+
+        return await state.proxy.proxy_http(request)
+
     return app
 
 
-def run_dev_server(app_dir: Path, socket_path: Path | str):
-    """Run the dev server on a Unix domain socket.
+def run_dev_server(
+    app_dir: Path,
+    port: int,
+    host: str = DEFAULT_HOST,
+):
+    """Run the dev server on a TCP port.
 
     Args:
         app_dir: Application directory
-        socket_path: Path to Unix domain socket
+        port: TCP port to listen on
+        host: Host to bind to
     """
-    import os
-    import uvicorn
-
     # Change to app directory so get_project_metadata() works correctly
     os.chdir(app_dir)
 
-    # Ensure socket path is a Path object
-    if isinstance(socket_path, str):
-        socket_path = Path(socket_path)
-
-    # Remove old socket file if it exists
-    if socket_path.exists():
-        socket_path.unlink()
-
-    # Ensure parent directory exists
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
+    # Initialize state with partial config (ports will be fully set by start request)
+    state.update_config(
+        DevServerConfig(
+            ports=PortsConfig(dev_server_port=port),
+            host=host,
+        )
+    )
 
     app = create_dev_server(app_dir)
 
-    config = uvicorn.Config(
+    uvicorn_config = uvicorn.Config(
         app=app,
-        uds=str(socket_path),
+        host=host,
+        port=port,
         log_level="info",
     )
 
-    server = uvicorn.Server(config)
+    server = uvicorn.Server(uvicorn_config)
     asyncio.run(server.serve())

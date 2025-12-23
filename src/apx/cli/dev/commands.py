@@ -15,10 +15,12 @@ from apx.cli.dev.manager import (
     DevManager,
     validate_databricks_credentials,
     delete_token_from_keyring,
+    is_port_available,
     save_token_id,
 )
 from apx.cli.dev.logging import suppress_output_and_logs
 from apx.cli.version import with_version
+from apx.models import DevServerConfig, PortsConfig
 from apx.utils import (
     console,
     is_bun_installed,
@@ -36,10 +38,11 @@ dev_app = Typer(name="dev", help="Manage development servers")
 )
 def _run_server(
     app_dir: Path = Argument(..., help="App directory"),
-    socket_path: Path = Argument(..., help="Socket path"),
+    dev_server_port: int = Argument(..., help="Dev server port"),
     frontend_port: int = Argument(..., help="Frontend port"),
     backend_port: int = Argument(..., help="Backend port"),
     host: str = Argument(..., help="Host for servers"),
+    api_prefix: str = Argument(..., help="API prefix (e.g., /api)"),
     obo: str = Argument(..., help="Enable OBO (true/false)"),
     openapi: str = Argument(..., help="Enable OpenAPI (true/false)"),
     max_retries: int = Argument(10, help="Maximum retry attempts"),
@@ -47,7 +50,7 @@ def _run_server(
     """Internal command to run dev server. Not meant for direct use."""
     from apx.cli.dev.server import run_dev_server
 
-    run_dev_server(app_dir, socket_path)
+    run_dev_server(app_dir, dev_server_port, host)
 
 
 @dev_app.command(name="start", help="Start development servers in detached mode")
@@ -59,22 +62,22 @@ def dev_start(
             help="The path to the app. If not provided, current working directory will be used"
         ),
     ] = None,
-    frontend_port: Annotated[
-        int, Option(help="Port for the frontend development server")
-    ] = 5173,
-    backend_port: Annotated[int, Option(help="Port for the backend server")] = 8000,
     host: Annotated[
-        str, Option(help="Host for dev, frontend, and backend servers")
-    ] = "localhost",
+        str | None, Option(help="Host for dev, frontend, and backend servers")
+    ] = None,
+    api_prefix: Annotated[
+        str | None, Option("--api-prefix", help="URL prefix for API routes")
+    ] = None,
     obo: Annotated[
-        bool, Option(help="Whether to add On-Behalf-Of header to the backend server")
-    ] = True,
+        bool | None,
+        Option(help="Whether to add On-Behalf-Of header to the backend server"),
+    ] = None,
     openapi: Annotated[
-        bool, Option(help="Whether to start OpenAPI watcher process")
-    ] = True,
+        bool | None, Option(help="Whether to start OpenAPI watcher process")
+    ] = None,
     max_retries: Annotated[
-        int, Option(help="Maximum number of retry attempts for processes")
-    ] = 10,
+        int | None, Option(help="Maximum number of retry attempts for processes")
+    ] = None,
     watch: Annotated[
         bool,
         Option(
@@ -95,8 +98,21 @@ def dev_start(
     if app_dir is None:
         app_dir = Path.cwd()
 
+    # Build config from CLI options (use defaults from DevServerConfig if not specified)
+    default_config = DevServerConfig()
+    config = DevServerConfig(
+        host=host if host is not None else default_config.host,
+        api_prefix=api_prefix if api_prefix is not None else default_config.api_prefix,
+        obo=obo if obo is not None else default_config.obo,
+        openapi=openapi if openapi is not None else default_config.openapi,
+        max_retries=max_retries
+        if max_retries is not None
+        else default_config.max_retries,
+        watch=watch,
+    )
+
     # Validate Databricks credentials if OBO is enabled
-    if obo:
+    if config.obo:
         console.print("[cyan]🔐 Validating Databricks credentials...[/cyan]")
 
         dotenv_path = app_dir / ".env"
@@ -151,17 +167,9 @@ def dev_start(
         console.print("[green]✓[/green] Databricks credentials validated")
         console.print()
 
-    # Use DevManager to start servers
+    # Use DevManager to start servers with the config
     manager = DevManager(app_dir)
-    manager.start(
-        frontend_port=frontend_port,
-        backend_port=backend_port,
-        host=host,
-        obo=obo,
-        openapi=openapi,
-        max_retries=max_retries,
-        watch=watch,
-    )
+    manager.start(config=config)
 
     # If watch mode is enabled, stream logs until Ctrl+C
     if watch:
@@ -241,14 +249,44 @@ def dev_restart(
     manager = DevManager(app_dir)
 
     if not manager.is_dev_server_running():
-        console.print("[yellow]No development server found.[/yellow]")
-        console.print("[dim]Run 'apx dev start' to start the server.[/dim]")
-        raise Exit(code=1)
+        console.print("[yellow]No development server found. Starting...[/yellow]")
+        manager.start()
+        console.print(
+            "[bold green]✨ Development servers started successfully![/bold green]"
+        )
+        return
 
     console.print("[bold yellow]🔄 Restarting development servers...[/bold yellow]")
 
+    # Capture current port configuration before stopping
+    project_config = manager.get_or_create_config()
+    old_dev_port = project_config.dev.dev_server_port
+
+    # Stop the server
     manager.stop()
-    manager.start()
+
+    # Check if the dev server port is available for reuse.
+    # Use allow_reuse=True to match uvicorn's SO_REUSEADDR behavior,
+    # which allows binding to ports in TIME_WAIT state.
+    if old_dev_port is not None:
+        # Check with allow_reuse=True since uvicorn uses SO_REUSEADDR
+        if is_port_available(old_dev_port, allow_reuse=True):
+            console.print(
+                f"[green]✓[/green] Port {old_dev_port} is available for reuse"
+            )
+        else:
+            console.print(
+                f"[yellow]⚠️  Port {old_dev_port} still in use, will find new port[/yellow]"
+            )
+            old_dev_port = None  # Clear so we don't try to reuse it
+
+    # Build preferred ports from old configuration (if available)
+    preferred_ports: PortsConfig | None = None
+    if old_dev_port is not None:
+        preferred_ports = PortsConfig(dev_server_port=old_dev_port)
+
+    # Start with preferred ports
+    manager.start(preferred_ports=preferred_ports)
 
     console.print(
         "[bold green]✨ Development servers restarted successfully![/bold green]"
