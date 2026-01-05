@@ -8,7 +8,7 @@ from typing import Annotated
 from typer import Argument, Exit, Option
 
 from apx.cli.version import with_version
-from apx.openapi import run_openapi
+from apx.cli.openapi import run_openapi
 from apx.utils import (
     console,
     ensure_dir,
@@ -65,7 +65,7 @@ def build(
     # Generate the _metadata.py file
     generate_metadata_file(app_path)
 
-    # Generate the openapi schema and orval client
+    # Generate the openapi schema and API client
     run_openapi(app_path, watch=False)
 
     # === PHASE 1: Building UI ===

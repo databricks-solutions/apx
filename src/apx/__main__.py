@@ -32,7 +32,7 @@ app.command(name="build", help="Build the project (frontend + Python wheel)")(
     build_command
 )
 
-app.command(name="openapi", help="Generate OpenAPI schema and orval client")(
+app.command(name="openapi", help="Generate OpenAPI schema and API client")(
     openapi_command
 )
 

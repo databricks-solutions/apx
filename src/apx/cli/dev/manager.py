@@ -7,6 +7,7 @@ import signal
 import socket
 import subprocess
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Literal
 
@@ -17,6 +18,7 @@ import watchfiles
 from databricks.sdk import WorkspaceClient
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from rich.table import Table
 from starlette.middleware.base import BaseHTTPMiddleware
 from tenacity import (
@@ -35,6 +37,8 @@ from apx.cli.dev.logging import (
     get_logger,
     log_channel,
     print_log_entry,
+    reset_log_channel,
+    set_log_channel,
     suppress_output_and_logs,
 )
 from apx.cli.dev.process_control import (
@@ -60,6 +64,7 @@ from apx.models import (
     ActionRequest,
     DevServerConfig,
     FrontendProcessState,
+    LogChannel,
     LogEntry,
     PortsConfig,
     ProjectConfig,
@@ -572,6 +577,41 @@ async def run_backend(
                         BaseHTTPMiddleware, dispatch=obo_middleware
                     )
 
+                # Add catch-all exception handler to log exceptions before
+                # ServerErrorMiddleware swallows them. Exception handlers are
+                # called BEFORE ServerErrorMiddleware, so we can log the full
+                # traceback before it's converted to a 500 response.
+                async def _dev_exception_handler(
+                    request: Request, exc: Exception
+                ) -> JSONResponse:
+                    # Print to stderr which is captured by ContextualStreamWriter
+                    # and routed to the [app] channel based on the context.
+                    import sys
+
+                    traceback.print_exception(
+                        type(exc), exc, exc.__traceback__, file=sys.stderr
+                    )
+                    return JSONResponse(
+                        status_code=500, content={"detail": "Internal Server Error"}
+                    )
+
+                app_instance.add_exception_handler(Exception, _dev_exception_handler)
+
+                # Add context middleware to set LogChannel.APP per-request.
+                # This ensures the context variable is set correctly for each
+                # request, regardless of how uvicorn spawns request handlers.
+                # Added LAST so it runs FIRST (outermost layer).
+                async def channel_context_middleware(request: Request, call_next):
+                    token = set_log_channel(LogChannel.APP)
+                    try:
+                        return await call_next(request)
+                    finally:
+                        reset_log_channel(token)
+
+                app_instance.add_middleware(
+                    BaseHTTPMiddleware, dispatch=channel_context_middleware
+                )
+
                 if first_run:
                     console.print()
 
@@ -579,7 +619,7 @@ async def run_backend(
                     "app": app_instance,
                     "host": host,
                     "port": backend_port,
-                    "log_level": "info",
+                    "log_level": "debug",
                 }
                 if use_memory:
                     # Disable uvicorn's default log config in dev-server mode.
@@ -903,7 +943,7 @@ async def run_openapi_with_logging(app_dir: Path, max_retries: int = 10):
         app_dir: Application directory
         max_retries: Maximum number of retry attempts
     """
-    from apx.openapi import _openapi_watch
+    from apx.cli.openapi import create_api_generator
 
     logger = get_logger(DevLogComponent.OPENAPI)
 
@@ -927,8 +967,8 @@ async def run_openapi_with_logging(app_dir: Path, max_retries: int = 10):
         # Note: We don't redirect stdout/stderr here because the backend process
         # already handles that. The OpenAPI watcher uses the logger directly.
         try:
-            # Run the OpenAPI watcher with logger
-            await _openapi_watch(app_dir, logger=logger)
+            generator = create_api_generator(app_dir, logger=logger)
+            await generator.watch()
         except Exception as e:
             logger.error(f"OpenAPI watcher failed: {e}")
             raise

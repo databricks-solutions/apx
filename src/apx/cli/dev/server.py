@@ -627,39 +627,23 @@ def create_dev_server(app_dir: Path) -> FastAPI:
     @app.post("/__apx__/actions/refresh-openapi", response_model=ActionResponse)
     async def refresh_openapi() -> ActionResponse:
         """Trigger OpenAPI schema and api.ts client regeneration."""
-        from apx.openapi import (
-            _generate_openapi_schema,
-            _run_orval,
-            _ensure_orval_config,
-        )
-        from apx.utils import get_project_metadata
+        from apx.cli.openapi import create_api_generator
 
         if state.app_dir is None:
             return ActionResponse(status="error", message="App directory not set")
 
-        try:
-            metadata = get_project_metadata()
-            app_module_name = metadata.app_module
-            app_slug = metadata.app_slug
-        except Exception as e:
-            return ActionResponse(
-                status="error", message=f"Failed to read project metadata: {e}"
-            )
-
         openapi_logger = get_logger(DevLogComponent.OPENAPI)
 
         try:
+            generator = create_api_generator(state.app_dir, logger=openapi_logger)
+
             # Generate OpenAPI schema
-            openapi_path, _schema_changed = _generate_openapi_schema(
-                state.app_dir, app_module_name, logger=openapi_logger
-            )
+            generator.ensure_config()
+            _schema_path, _schema_changed = generator.generate_schema()
             state.openapi_schema_last_updated = datetime.datetime.now()
 
-            # Ensure orval config exists
-            orval_config_path = _ensure_orval_config(state.app_dir, app_slug)
-
             # Always regenerate client on manual refresh (force=True equivalent)
-            _run_orval(state.app_dir, openapi_path, orval_config_path)
+            generator.generate_client()
             state.api_ts_last_updated = datetime.datetime.now()
 
             openapi_logger.info("OpenAPI schema and api.ts refreshed successfully")

@@ -60,13 +60,27 @@ _CURRENT_CHANNEL: contextvars.ContextVar[LogChannel] = contextvars.ContextVar(
 
 
 @contextlib.contextmanager
-def log_channel(channel: LogChannel):
+def log_channel(channel: LogChannel) -> Generator[None, None, None]:
     """Context manager to route uvicorn/stdout logs to a specific channel."""
     token = _CURRENT_CHANNEL.set(channel)
     try:
         yield
     finally:
         _CURRENT_CHANNEL.reset(token)
+
+
+def set_log_channel(channel: LogChannel) -> contextvars.Token[LogChannel]:
+    """Set the current log channel and return a token to reset it.
+
+    Use this for per-request context setting in middleware.
+    Call reset_log_channel(token) to restore the previous value.
+    """
+    return _CURRENT_CHANNEL.set(channel)
+
+
+def reset_log_channel(token: contextvars.Token[LogChannel]) -> None:
+    """Reset the log channel to its previous value using the token."""
+    _CURRENT_CHANNEL.reset(token)
 
 
 class _DevLogState(BaseModel):
@@ -154,6 +168,12 @@ class _UvicornRoutingHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             channel = _CURRENT_CHANNEL.get()
+
+            # Filter out DEBUG logs from dev server (APX channel) to reduce noise.
+            # Only user app (APP channel) gets DEBUG-level uvicorn logs.
+            if record.levelno <= logging.DEBUG and channel != LogChannel.APP:
+                return
+
             component = (
                 DevLogComponent.BACKEND_UVICORN
                 if channel == LogChannel.APP
@@ -187,9 +207,10 @@ def configure_dev_logging(*, buffer: LogBuffer) -> None:
 
     # Uvicorn loggers are shared between the dev server and the user backend.
     # Route them via a contextvar set by the caller before running uvicorn.
+    # Set to DEBUG to capture verbose logs from user app (filtered for dev server).
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         uv = logging.getLogger(name)
-        uv.setLevel(logging.INFO)
+        uv.setLevel(logging.DEBUG)
         uv.handlers.clear()
         if name == "uvicorn.access":
             uv.addFilter(_DevServerAccessLogFilter())
@@ -197,6 +218,22 @@ def configure_dev_logging(*, buffer: LogBuffer) -> None:
         h.setFormatter(logging.Formatter("%(message)s"))
         uv.addHandler(h)
         uv.propagate = False
+
+    # Starlette and FastAPI loggers - route to [app] channel via context.
+    # This captures ServerErrorMiddleware exception logging and other framework logs.
+    for name in (
+        "starlette",
+        "starlette.middleware",
+        "starlette.middleware.errors",
+        "fastapi",
+    ):
+        framework_logger = logging.getLogger(name)
+        framework_logger.setLevel(logging.INFO)
+        framework_logger.handlers.clear()
+        h = _UvicornRoutingHandler()  # Reuse routing handler for context-aware routing
+        h.setFormatter(logging.Formatter("%(message)s"))
+        framework_logger.addHandler(h)
+        framework_logger.propagate = False
 
     _STATE.configured = True
 
@@ -310,7 +347,9 @@ def suppress_output_and_logs() -> Generator[None, None, None]:
 
 
 def print_log_entry(
-    entry: LogEntry | dict[str, Any], *, raw_output: bool = False # pyright: ignore[reportExplicitAny]
+    entry: LogEntry | dict[str, Any],
+    *,
+    raw_output: bool = False,  # pyright: ignore[reportExplicitAny]
 ) -> None:
     """Print a single log entry with `[apx]`/`[app]`/`[ui]` prefixes."""
     if isinstance(entry, dict):
