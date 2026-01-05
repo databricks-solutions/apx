@@ -42,14 +42,14 @@ class ProxyManager:
         backend_url: str,
         api_prefix: str = DEFAULT_API_PREFIX,
     ) -> None:
-        self.frontend_url = frontend_url.rstrip("/")
-        self.backend_url = backend_url.rstrip("/")
-        self.api_prefix = api_prefix.rstrip("/")
-        self.accepting_connections = True
+        self.frontend_url: str = frontend_url.rstrip("/")
+        self.backend_url: str = backend_url.rstrip("/")
+        self.api_prefix: str = api_prefix.rstrip("/")
+        self.accepting_connections: bool = True
 
         # Track active WebSocket connections for graceful shutdown
         self._active_websockets: set[asyncio.Task[None]] = set()
-        self._ws_lock = asyncio.Lock()
+        self._ws_lock: asyncio.Lock = asyncio.Lock()
 
         # HTTP client with connection pooling
         self._http_client: httpx.AsyncClient | None = None
