@@ -9,8 +9,6 @@ Design goals:
 """
 
 from __future__ import annotations
-
-import logging
 import os
 import signal
 import time
@@ -20,8 +18,9 @@ from typing import Callable
 import psutil
 
 from apx.models import TrackedProcess
+from apx.cli.dev.logging import DevLogComponent, get_logger
 
-logger = logging.getLogger("apx.process_control")
+logger = get_logger(DevLogComponent.PROCESS_CONTROL)
 
 
 def _get_pgid_safe(pid: int) -> int | None:
@@ -536,7 +535,5 @@ def cleanup_dev_server_processes(app_dir: Path, silent: bool = False) -> int:
             continue
 
     if killed and not silent:
-        logging.getLogger("apx.process_control").info(
-            f"Cleaned up {killed} dev-server process(es) for {app_dir_str}"
-        )
+        logger.info(f"Cleaned up {killed} dev-server process(es) for {app_dir_str}")
     return killed

@@ -19,7 +19,6 @@ Key Features:
 import asyncio
 import datetime
 import json
-import logging
 import os
 import signal
 import sys
@@ -37,9 +36,12 @@ from fastapi.responses import Response, StreamingResponse
 from starlette.requests import Request
 
 from apx.cli.dev.logging import (
+    ContextualStreamWriter,
+    DevLogComponent,
     LogBuffer,
-    LoggerWriter,
-    setup_buffered_logging,
+    configure_dev_logging,
+    get_logger,
+    log_channel,
 )
 from apx.cli.dev.manager import (
     is_port_available,
@@ -64,6 +66,7 @@ from apx.models import (
     ActionResponse,
     BrowserLogPayload,
     DevServerConfig,
+    LogChannel,
     LogEntry,
     OpenApiStatusResponse,
     PortsConfig,
@@ -74,7 +77,7 @@ from apx.models import (
     TrackedProcess,
 )
 
-logger = logging.getLogger("apx.server")
+logger = get_logger(DevLogComponent.SERVER)
 
 
 # Global state for background tasks
@@ -370,8 +373,7 @@ async def run_frontend_task(app_dir: Path, port: int, max_retries: int):
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        frontend_logger = logging.getLogger("apx.frontend")
-        frontend_logger.error(f"Frontend task failed: {e}")
+        get_logger(DevLogComponent.UI).error(f"Frontend task failed: {e}")
         if state.frontend_process:
             tp = track_process(state.frontend_process.pid)
             if tp is not None:
@@ -394,8 +396,7 @@ async def run_backend_task(
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        backend_logger = logging.getLogger("apx.backend")
-        backend_logger.error(f"Backend task failed: {e}")
+        get_logger(DevLogComponent.BACKEND).error(f"Backend task failed: {e}")
 
 
 async def run_openapi_task(app_dir: Path, max_retries: int):
@@ -405,8 +406,7 @@ async def run_openapi_task(app_dir: Path, max_retries: int):
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        openapi_logger = logging.getLogger("apx.openapi")
-        openapi_logger.error(f"OpenAPI watcher task failed: {e}")
+        get_logger(DevLogComponent.OPENAPI).error(f"OpenAPI watcher task failed: {e}")
 
 
 # === Lifecycle Management ===
@@ -415,18 +415,14 @@ async def run_openapi_task(app_dir: Path, max_retries: int):
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context manager for the FastAPI app."""
-    # Setup in-memory logging
-    for process_name in ["frontend", "backend", "openapi"]:
-        setup_buffered_logging(state.log_buffer, process_name)
+    # Configure unified in-memory logging (including uvicorn routing)
+    configure_dev_logging(buffer=state.log_buffer)
 
-    # Redirect stdout/stderr to backend logger
+    # Redirect stdout/stderr into the in-memory buffer.
     original_stdout = sys.stdout
     original_stderr = sys.stderr
-
-    backend_logger = logging.getLogger("apx.backend")
-
-    sys.stdout = LoggerWriter(backend_logger, logging.INFO, "APP")
-    sys.stderr = LoggerWriter(backend_logger, logging.ERROR, "APP")
+    sys.stdout = ContextualStreamWriter(level_name="INFO")
+    sys.stderr = ContextualStreamWriter(level_name="ERROR")
 
     try:
         yield
@@ -497,7 +493,8 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 payload.timestamp / 1000
             ).strftime("%Y-%m-%d %H:%M:%S"),
             level=payload.level.upper(),
-            process_name="browser",
+            channel=LogChannel.UI,
+            component="browser",
             content=f"{payload.source} | {payload.message}"
             + (f"\n{payload.stack}" if payload.stack else ""),
         )
@@ -649,7 +646,7 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 status="error", message=f"Failed to read project metadata: {e}"
             )
 
-        openapi_logger = logging.getLogger("apx.openapi")
+        openapi_logger = get_logger(DevLogComponent.OPENAPI)
 
         try:
             # Generate OpenAPI schema
@@ -706,17 +703,115 @@ def create_dev_server(app_dir: Path) -> FastAPI:
             api_ts_last_updated=state.api_ts_last_updated,
         )
 
+    @app.get("/__apx__/logs/snapshot", response_model=list[LogEntry])
+    async def get_logs_snapshot(
+        duration: Annotated[
+            int | None, Query(description="Show logs from last N seconds")
+        ] = None,
+        channel: Annotated[
+            Literal["app", "ui", "apx", "all"] | None,
+            Query(description="Filter by log channel"),
+        ] = "all",
+        component: Annotated[
+            str | None,
+            Query(description="Filter by component (e.g. backend, openapi, ui)"),
+        ] = None,
+        include_system: Annotated[
+            bool, Query(description="Include system [apx] logs in results")
+        ] = False,
+        limit: Annotated[
+            int, Query(description="Maximum number of log entries to return")
+        ] = 500,
+    ) -> list[LogEntry]:
+        """Return a bounded snapshot of logs (non-streaming)."""
+
+        def _matches(log: LogEntry) -> bool:
+            # Channel gating: system logs are excluded unless explicitly requested.
+            if channel == "apx":
+                if log.channel.value != "apx":
+                    return False
+            elif channel == "app":
+                if log.channel.value != "app":
+                    return False
+            elif channel == "ui":
+                if log.channel.value != "ui":
+                    return False
+            else:
+                # channel == "all"
+                if (not include_system) and log.channel.value == "apx":
+                    return False
+
+            if component is not None and log.component != component:
+                return False
+
+            return True
+
+        cutoff_time: datetime.datetime | None = None
+        if duration:
+            cutoff_time = datetime.datetime.now() - datetime.timedelta(seconds=duration)
+
+        capped = max(0, min(int(limit), 5000))
+        result_rev: list[LogEntry] = []
+
+        for log in reversed(state.log_buffer):
+            if not _matches(log):
+                continue
+
+            if cutoff_time:
+                try:
+                    log_time = datetime.datetime.strptime(
+                        log.timestamp, "%Y-%m-%d %H:%M:%S"
+                    )
+                    if log_time < cutoff_time:
+                        continue
+                except Exception:
+                    pass
+
+            result_rev.append(log)
+            if capped and len(result_rev) >= capped:
+                break
+
+        return list(reversed(result_rev))
+
     @app.get("/__apx__/logs")
     async def stream_logs(
         duration: Annotated[
             int | None, Query(description="Show logs from last N seconds")
         ] = None,
-        process: Annotated[
-            Literal["frontend", "backend", "openapi", "all"] | None,
-            Query(description="Filter by process name"),
+        channel: Annotated[
+            Literal["app", "ui", "apx", "all"] | None,
+            Query(description="Filter by log channel"),
         ] = "all",
+        component: Annotated[
+            str | None,
+            Query(description="Filter by component (e.g. backend, openapi, ui)"),
+        ] = None,
+        include_system: Annotated[
+            bool, Query(description="Include system [apx] logs in results")
+        ] = False,
     ) -> StreamingResponse:
         """Stream logs using Server-Sent Events (SSE)."""
+
+        def _matches(log: LogEntry) -> bool:
+            # Channel gating: system logs are excluded unless explicitly requested.
+            if channel == "apx":
+                if log.channel.value != "apx":
+                    return False
+            elif channel == "app":
+                if log.channel.value != "app":
+                    return False
+            elif channel == "ui":
+                if log.channel.value != "ui":
+                    return False
+            else:
+                # channel == "all"
+                if (not include_system) and log.channel.value == "apx":
+                    return False
+
+            if component is not None and log.component != component:
+                return False
+
+            return True
 
         async def event_generator() -> AsyncGenerator[str, None]:
             """Generate SSE events for log streaming."""
@@ -729,7 +824,7 @@ def create_dev_server(app_dir: Path) -> FastAPI:
             # Send existing logs
             buffered_logs: list[LogEntry] = list(state.log_buffer)
             for log in buffered_logs:
-                if process != "all" and log.process_name != process:
+                if not _matches(log):
                     continue
 
                 if cutoff_time:
@@ -757,7 +852,7 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 if current_index > last_index:
                     new_logs: list[LogEntry] = list(state.log_buffer)[last_index + 1 :]
                     for log in new_logs:
-                        if process != "all" and log.process_name != process:
+                        if not _matches(log):
                             continue
                         yield f"data: {json.dumps(log.model_dump())}\n\n"
                     last_index = current_index
@@ -775,7 +870,10 @@ def create_dev_server(app_dir: Path) -> FastAPI:
     # === Proxy Routes ===
 
     @app.websocket("/{path:path}")
-    async def websocket_proxy(websocket: WebSocket, _path: str):
+    async def websocket_proxy(
+        websocket: WebSocket,
+        path: str,  # pyright: ignore[reportUnusedParameter]
+    ) -> None:
         """Proxy WebSocket connections to frontend or backend."""
         if state.proxy is None:
             await websocket.close(code=1001, reason="Proxy not initialized")
@@ -786,7 +884,10 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         "/{path:path}",
         methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
     )
-    async def http_proxy(request: Request, _path: str) -> Response:
+    async def http_proxy(
+        request: Request,
+        path: str,  # pyright: ignore[reportUnusedParameter]
+    ) -> Response:
         """Proxy HTTP requests to frontend or backend."""
         # Don't proxy /__apx__/* routes - they're handled above
         if request.url.path.startswith("/__apx__"):
@@ -832,6 +933,9 @@ def run_dev_server(
         )
     )
 
+    # Configure logging early so uvicorn startup logs are buffered and routed to [apx].
+    configure_dev_logging(buffer=state.log_buffer)
+
     app = create_dev_server(app_dir)
 
     uvicorn_config = uvicorn.Config(
@@ -842,4 +946,5 @@ def run_dev_server(
     )
 
     server = uvicorn.Server(uvicorn_config)
-    asyncio.run(server.serve())
+    with log_channel(LogChannel.APX):
+        asyncio.run(server.serve())

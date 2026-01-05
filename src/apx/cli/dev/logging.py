@@ -1,191 +1,290 @@
-"""Logging utilities for APX dev server."""
+"""Centralized logging for `apx dev` (buffering, routing, and CLI formatting)."""
+
+from __future__ import annotations
 
 import contextlib
+import contextvars
 import io
 import logging
 import sys
 import time
 from collections import deque
-from typing import Any, TypeAlias
+from enum import Enum
+from typing import Any, ClassVar, Literal, TypeAlias
+from collections.abc import Generator
 
+from pydantic import BaseModel, ConfigDict
+from rich.text import Text
 from typing_extensions import override
 
-from apx.models import LogEntry
-from apx.utils import console, PrefixedLogHandler
-
+from apx.models import LogChannel, LogEntry
+from apx.utils import console
 
 LogBuffer: TypeAlias = deque[LogEntry]
 
 
-# === Log Handlers ===
+class DevLogComponent(str, Enum):
+    """Where a log originated (used for fine-grained filtering)."""
+
+    SERVER = "server"
+    SERVER_UVICORN = "server_uvicorn"
+    BACKEND = "backend"
+    BACKEND_UVICORN = "backend_uvicorn"
+    APP = "app"
+    UI = "ui"
+    BROWSER = "browser"
+    OPENAPI = "openapi"
+    PROXY = "proxy"
+    PROCESS_CONTROL = "process_control"
+    RETRY = "retry"
 
 
-class BufferedLogHandler(logging.Handler):
-    """Custom log handler that stores logs in memory buffer."""
+_COMPONENT_DEFAULT_CHANNEL: dict[DevLogComponent, LogChannel] = {
+    DevLogComponent.SERVER: LogChannel.APX,
+    DevLogComponent.SERVER_UVICORN: LogChannel.APX,
+    DevLogComponent.OPENAPI: LogChannel.APX,
+    DevLogComponent.PROXY: LogChannel.APX,
+    DevLogComponent.PROCESS_CONTROL: LogChannel.APX,
+    DevLogComponent.RETRY: LogChannel.APX,
+    DevLogComponent.BACKEND: LogChannel.APP,
+    DevLogComponent.BACKEND_UVICORN: LogChannel.APP,
+    DevLogComponent.APP: LogChannel.APP,
+    DevLogComponent.UI: LogChannel.UI,
+    DevLogComponent.BROWSER: LogChannel.UI,
+}
 
-    buffer: LogBuffer
-    process_name: str
 
-    def __init__(self, buffer: LogBuffer, process_name: str):
+_CURRENT_CHANNEL: contextvars.ContextVar[LogChannel] = contextvars.ContextVar(
+    "apx_dev_log_channel", default=LogChannel.APX
+)
+
+
+@contextlib.contextmanager
+def log_channel(channel: LogChannel):
+    """Context manager to route uvicorn/stdout logs to a specific channel."""
+    token = _CURRENT_CHANNEL.set(channel)
+    try:
+        yield
+    finally:
+        _CURRENT_CHANNEL.reset(token)
+
+
+class _DevLogState(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(arbitrary_types_allowed=True)
+
+    buffer: LogBuffer | None = None
+    configured: bool = False
+
+
+_STATE = _DevLogState()
+
+
+def _now_timestamp(created: float | None = None) -> str:
+    t = time.localtime(created if created is not None else time.time())
+    return time.strftime("%Y-%m-%d %H:%M:%S", t)
+
+
+def _append_entry(
+    *,
+    channel: LogChannel,
+    component: DevLogComponent,
+    level: str,
+    content: str,
+    created: float | None = None,
+) -> None:
+    if _STATE.buffer is None:
+        return
+    _STATE.buffer.append(
+        LogEntry(
+            timestamp=_now_timestamp(created),
+            level=level,
+            channel=channel,
+            component=component.value,
+            content=content,
+        )
+    )
+
+
+class _BufferedLogHandler(logging.Handler):
+    buffer_component: DevLogComponent
+    buffer_channel: LogChannel
+
+    def __init__(self, *, channel: LogChannel, component: DevLogComponent):
         super().__init__()
-        self.buffer = buffer
-        self.process_name = process_name
+        self.buffer_channel = channel
+        self.buffer_component = component
 
     @override
     def emit(self, record: logging.LogRecord) -> None:
-        """Emit a log record to the buffer."""
         try:
-            log_entry = LogEntry(
-                timestamp=time.strftime(
-                    "%Y-%m-%d %H:%M:%S", time.localtime(record.created)
-                ),
+            _append_entry(
+                channel=self.buffer_channel,
+                component=self.buffer_component,
                 level=record.levelname,
-                process_name=self.process_name,
                 content=self.format(record),
+                created=record.created,
             )
-            self.buffer.append(log_entry)
         except Exception:
             self.handleError(record)
 
 
-class LoggerWriter:
-    """Logger writer for redirecting stdout/stderr to the backend logger."""
+class _DevServerAccessLogFilter(logging.Filter):
+    """Filter noisy access logs for dev-server internal endpoints."""
 
-    def __init__(self, logger: logging.Logger, level: int, prefix: str):
-        self.logger: logging.Logger = logger
-        self.level: int = level
-        self.prefix: str = prefix
-        self.buffer: str = ""
+    _internal_paths: tuple[str, ...] = (
+        "/__apx__/logs",
+        "/__apx__/status",
+        "/__apx__/ports",
+        "/__apx__/actions/start",
+        "/__apx__/actions/stop",
+        "/__apx__/actions/restart",
+        "/__apx__/openapi-status",
+    )
+
+    @override
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not any(p in msg for p in self._internal_paths)
+
+
+class _UvicornRoutingHandler(logging.Handler):
+    """Route uvicorn loggers to [apx] vs [app] based on the active context."""
+
+    @override
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            channel = _CURRENT_CHANNEL.get()
+            component = (
+                DevLogComponent.BACKEND_UVICORN
+                if channel == LogChannel.APP
+                else DevLogComponent.SERVER_UVICORN
+            )
+            _append_entry(
+                channel=channel,
+                component=component,
+                level=record.levelname,
+                content=self.format(record),
+                created=record.created,
+            )
+        except Exception:
+            self.handleError(record)
+
+
+def configure_dev_logging(*, buffer: LogBuffer) -> None:
+    """Configure all dev loggers to write into the shared in-memory buffer."""
+    _STATE.buffer = buffer
+
+    # Component loggers used by our code (everything else should call get_logger()).
+    for component in DevLogComponent:
+        channel = _COMPONENT_DEFAULT_CHANNEL.get(component, LogChannel.APX)
+        logger = logging.getLogger(f"apx.dev.{component.value}")
+        logger.setLevel(logging.INFO)
+        logger.handlers.clear()
+        handler = _BufferedLogHandler(channel=channel, component=component)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+        logger.propagate = False
+
+    # Uvicorn loggers are shared between the dev server and the user backend.
+    # Route them via a contextvar set by the caller before running uvicorn.
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        uv = logging.getLogger(name)
+        uv.setLevel(logging.INFO)
+        uv.handlers.clear()
+        if name == "uvicorn.access":
+            uv.addFilter(_DevServerAccessLogFilter())
+        h = _UvicornRoutingHandler()
+        h.setFormatter(logging.Formatter("%(message)s"))
+        uv.addHandler(h)
+        uv.propagate = False
+
+    _STATE.configured = True
+
+
+def get_logger(component: DevLogComponent) -> logging.Logger:
+    """Get a dev logger for a component (do not call stdlib logging directly)."""
+    logger = logging.getLogger(f"apx.dev.{component.value}")
+    if not _STATE.configured:
+        # Avoid \"No handlers could be found\" warnings in contexts that don't configure dev logging.
+        if not logger.handlers:
+            logger.addHandler(logging.NullHandler())
+        logger.propagate = False
+    return logger
+
+
+class ContextualStreamWriter:
+    """Context-aware stdout/stderr writer that buffers into dev log channels."""
+
+    def __init__(
+        self,
+        *,
+        level_name: Literal["INFO", "ERROR"],
+    ) -> None:
+        self._level_name: Literal["INFO", "ERROR"] = level_name
+        self._buffer: str = ""
 
     def write(self, message: str | None) -> None:
         if not message:
             return
-        self.buffer += message
-        lines = self.buffer.split("\n")
-        self.buffer = lines[-1]
+        self._buffer += message
+        lines = self._buffer.split("\n")
+        self._buffer = lines[-1]
         for line in lines[:-1]:
-            if line:
-                self.logger.log(self.level, f"{self.prefix} | {line}")
+            if not line:
+                continue
+            channel = _CURRENT_CHANNEL.get()
+            component = (
+                DevLogComponent.APP
+                if channel == LogChannel.APP
+                else (
+                    DevLogComponent.SERVER
+                    if channel == LogChannel.APX
+                    else DevLogComponent.UI
+                )
+            )
+            _append_entry(
+                channel=channel,
+                component=component,
+                level=self._level_name,
+                content=line,
+                created=None,
+            )
 
-    def flush(self):
-        if self.buffer:
-            self.logger.log(self.level, f"{self.prefix} | {self.buffer}")
-            self.buffer = ""
+    def flush(self) -> None:
+        if not self._buffer:
+            return
+        channel = _CURRENT_CHANNEL.get()
+        component = (
+            DevLogComponent.APP
+            if channel == LogChannel.APP
+            else (
+                DevLogComponent.SERVER
+                if channel == LogChannel.APX
+                else DevLogComponent.UI
+            )
+        )
+        _append_entry(
+            channel=channel,
+            component=component,
+            level=self._level_name,
+            content=self._buffer,
+            created=None,
+        )
+        self._buffer = ""
 
-    def isatty(self):
+    def isatty(self) -> bool:
         return False
 
 
-class DevServerAccessLogFilter(logging.Filter):
-    """Filter to exclude dev server internal API logs from access logs."""
-
-    @override
-    def filter(self, record: logging.LogRecord) -> bool:
-        """Return False for dev server internal endpoints to exclude them from logs."""
-        message = record.getMessage()
-        # Exclude logs for dev server internal endpoints
-        internal_paths = ["/logs", "/status", "/start", "/stop", "/restart", "/ports"]
-        for path in internal_paths:
-            if f'"{path}' in message or f"'{path}" in message:
-                return False
-        return True
-
-
-# === Setup Functions ===
-
-
-def setup_buffered_logging(buffer: LogBuffer, process_name: str):
-    """Setup logging that writes to in-memory buffer only.
-
-    Args:
-        buffer: The log buffer to write to
-        process_name: Name of the process (frontend, backend, openapi)
-    """
-    logger = logging.getLogger(f"apx.{process_name}")
-    logger.setLevel(logging.INFO)
-    logger.handlers.clear()
-
-    # Buffer handler (in-memory only)
-    buffer_handler = BufferedLogHandler(buffer, process_name)
-    buffer_formatter = logging.Formatter("%(message)s")
-    buffer_handler.setFormatter(buffer_formatter)
-    logger.addHandler(buffer_handler)
-
-    logger.propagate = False
-
-
-def setup_uvicorn_logging(use_memory: bool = False):
-    """Configure uvicorn loggers to use in-memory buffer or console.
-
-    Args:
-        use_memory: If True, use the in-memory logger (set up by dev_server)
-                    If False, use console logging (for standalone mode)
-    """
-    # Configure ONLY uvicorn loggers
-    for logger_name in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
-        logger = logging.getLogger(logger_name)
-        logger.handlers.clear()
-
-        # Add filter to uvicorn.access to exclude dev server internal API logs
-        if logger_name == "uvicorn.access":
-            logger.addFilter(DevServerAccessLogFilter())
-
-        if use_memory:
-            # Use the backend logger that's already configured by dev_server
-            backend_logger = logging.getLogger("apx.backend")
-            if backend_logger.handlers:
-                # Create a wrapper handler that adds "BE | " prefix
-                class PrefixedHandler(logging.Handler):
-                    def __init__(self, base_handler: logging.Handler, prefix: str):
-                        super().__init__()
-                        self.base_handler: logging.Handler = base_handler
-                        self.prefix: str = prefix
-
-                    @override
-                    def emit(self, record: logging.LogRecord) -> None:
-                        # Add prefix to the message
-                        original_msg = record.getMessage()
-                        record.msg = f"{self.prefix} | {original_msg}"
-                        record.args = ()
-                        self.base_handler.emit(record)
-
-                # Add the prefixed handler
-                for base_handler in backend_logger.handlers:
-                    prefixed_handler = PrefixedHandler(base_handler, "BE")
-                    logger.addHandler(prefixed_handler)
-            else:
-                # Fallback to console if no handlers found
-                handler: logging.Handler = PrefixedLogHandler(
-                    prefix="[backend]", color="aquamarine1"
-                )
-                formatter = logging.Formatter("%(message)s")
-                handler.setFormatter(formatter)
-                logger.addHandler(handler)
-        else:
-            # Console logging (no buffering needed)
-            handler = PrefixedLogHandler(prefix="[backend]", color="aquamarine1")
-            formatter = logging.Formatter("%(message)s")
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-
-        logger.setLevel(logging.INFO)
-        logger.propagate = False
-
-
-# === Utility Functions ===
-
-
 @contextlib.contextmanager
-def suppress_output_and_logs():
+def suppress_output_and_logs() -> Generator[None, None, None]:
     """Suppress stdout, stderr and logging output temporarily."""
-    # Save original stdout/stderr
     old_stdout = sys.stdout
     old_stderr = sys.stderr
 
-    # Save original log level for root logger and all existing loggers
     root_logger = logging.getLogger()
     original_root_level = root_logger.level
-    original_levels = {}
+    original_levels: dict[str, int] = {}
 
     for name in logging.Logger.manager.loggerDict:
         logger = logging.getLogger(name)
@@ -193,89 +292,44 @@ def suppress_output_and_logs():
             original_levels[name] = logger.level
 
     try:
-        # Redirect stdout/stderr to devnull
         sys.stdout = io.StringIO()
         sys.stderr = io.StringIO()
 
-        # Set all loggers to CRITICAL to suppress INFO/WARNING logs
         root_logger.setLevel(logging.CRITICAL)
         for name in original_levels:
             logging.getLogger(name).setLevel(logging.CRITICAL)
 
         yield
     finally:
-        # Restore stdout/stderr
         sys.stdout = old_stdout
         sys.stderr = old_stderr
 
-        # Restore log levels
         root_logger.setLevel(original_root_level)
         for name, level in original_levels.items():
             logging.getLogger(name).setLevel(level)
 
 
-def print_log_entry(log: dict[str, Any], raw_output: bool = False):
-    """Print a single log entry with formatting.
+def print_log_entry(
+    entry: LogEntry | dict[str, Any], *, raw_output: bool = False # pyright: ignore[reportExplicitAny]
+) -> None:
+    """Print a single log entry with `[apx]`/`[app]`/`[ui]` prefixes."""
+    if isinstance(entry, dict):
+        entry = LogEntry.model_validate(entry)
 
-    Args:
-        log: Log entry dict with keys: process_name, content, timestamp
-        raw_output: If True, print raw log content without prefix formatting
-    """
-    content = log.get("content", "")
-    timestamp = log.get("timestamp", log.get("created_at", ""))
-
-    # For raw output, strip the internal prefix and print without color/formatting
     if raw_output:
-        # For backend logs, strip the "BE | " or "APP | " prefix
-        if log["process_name"] == "backend" and " | " in content:
-            stream_prefix, message = content.split(" | ", 1)
-            if stream_prefix in ["BE", "APP"]:
-                content = message
-        # For browser logs, strip the source prefix (console | window | promise)
-        elif log["process_name"] == "browser" and " | " in content:
-            _, message = content.split(" | ", 1)
-            content = message
-        # Print without rich formatting
-        print(f"{content}")
+        print(entry.content)
         return
 
-    # For backend logs, parse the stream prefix (BE or APP)
-    if log["process_name"] == "backend":
-        # Content format is "BE | message" or "APP | message"
-        if " | " in content:
-            stream_prefix, message = content.split(" | ", 1)
-            if stream_prefix == "BE":
-                prefix_color = "green"
-                prefix = "[BE] "
-                content = message
-            elif stream_prefix == "APP":
-                prefix_color = "yellow"
-                prefix = "[APP]"
-                content = message
-            else:
-                # Fallback if unknown stream
-                prefix_color = "green"
-                prefix = "[BE] "
-        else:
-            # No stream prefix found, default to BE
-            prefix_color = "green"
-            prefix = "[BE] "
-    elif log["process_name"] == "frontend":
-        prefix_color = "cyan"
-        prefix = "[UI] "
-    elif log["process_name"] == "openapi":
-        # OpenAPI watcher logs come directly from the logger (no stream prefix)
-        prefix_color = "magenta"
-        prefix = "[GEN]"
-    elif log["process_name"] == "browser":
-        # Browser logs from frontend dev tools
-        prefix_color = "red"
-        prefix = "[BRW]"
-    else:
-        # Default fallback
-        prefix_color = "white"
-        prefix = f"[{log['process_name'].upper()}]".ljust(5)
-
-    console.print(
-        f"[dim]{timestamp}[/dim] | [{prefix_color}]{prefix}[/{prefix_color}] | {content}"
+    prefix_style = (
+        "bright_blue"
+        if entry.channel == LogChannel.APX
+        else "yellow"
+        if entry.channel == LogChannel.APP
+        else "cyan"
     )
+
+    ts = Text(entry.timestamp, style="dim")
+    sep = Text(" | ")
+    prefix = Text(f"[{entry.channel.value}]", style=prefix_style)
+    content = Text(entry.content)
+    console.print(ts + sep + prefix + sep + content)

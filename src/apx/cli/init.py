@@ -522,5 +522,5 @@ def init(
         f"[bold green]✨ Project {app_name} initialized successfully! [/bold green]"
     )
     console.print(
-        f"[bold green]🚀 Run `cd {app_path.resolve()} && uv run apx dev` to get started![/bold green]"
+        f"[bold green]🚀 Run `cd {app_path.resolve()} && uv run apx dev start` to get started![/bold green]"
     )

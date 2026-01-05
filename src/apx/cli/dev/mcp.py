@@ -23,6 +23,7 @@ from apx.models import (
     JsonObject,
     McpActionResponse,
     McpDatabricksAppsLogsResponse,
+    McpDevLogsResponse,
     McpDevCheckResponse,
     McpErrorResponse,
     McpMetadataResponse,
@@ -578,6 +579,41 @@ async def status() -> McpSimpleStatusResponse:
             result.dev_server_url = f"http://localhost:{port}"
 
     return result
+
+
+@mcp.tool()
+async def dev_logs(
+    duration_seconds: int | None = None,
+    channel: Literal["app", "ui", "apx", "all"] = "all",
+    component: str | None = None,
+    include_system: bool = False,
+    limit: int = 500,
+) -> McpDevLogsResponse | McpErrorResponse:
+    """Fetch a bounded snapshot of dev logs.
+
+    Notes:
+    - By default, system logs ([apx]) are excluded.
+    - Set include_system=True to include [apx] logs in addition to app/ui logs.
+    - If channel='apx', only [apx] logs are returned regardless of include_system.
+    """
+    client = _get_dev_server_client()
+    if client is None:
+        return McpErrorResponse(error="Dev server is not running")
+
+    def fetch() -> McpDevLogsResponse:
+        logs = client.get_logs_snapshot(
+            duration=duration_seconds,
+            channel=channel,
+            component=component,
+            include_system=include_system,
+            limit=limit,
+        )
+        return McpDevLogsResponse(logs=logs)
+
+    try:
+        return await asyncio.to_thread(fetch)
+    except Exception as e:
+        return McpErrorResponse(error=f"Failed to fetch dev logs: {str(e)}")
 
 
 @mcp.tool()

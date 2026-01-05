@@ -333,6 +333,13 @@ def dev_logs(
         bool,
         Option("--app", help="Show only application logs (from your app code)"),
     ] = False,
+    system: Annotated[
+        bool,
+        Option(
+            "--system",
+            help="Show only system logs from the apx dev server ([apx])",
+        ),
+    ] = False,
     raw: Annotated[
         bool,
         Option("--raw", help="Show raw log output without prefix formatting"),
@@ -350,6 +357,7 @@ def dev_logs(
         backend_only=backend,
         openapi_only=openapi,
         app_only=app,
+        system_only=system,
         raw_output=raw,
         follow=follow,
     )

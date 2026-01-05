@@ -219,12 +219,21 @@ class ProjectConfig(BaseModel):
 # === Log Models ===
 
 
+class LogChannel(str, Enum):
+    """Logical log channel for dev logging."""
+
+    APX = "apx"
+    APP = "app"
+    UI = "ui"
+
+
 class LogEntry(BaseModel):
     """Strongly typed log entry model for streaming logs."""
 
     timestamp: str
     level: str
-    process_name: str
+    channel: LogChannel
+    component: str
     content: str
 
 
@@ -463,6 +472,12 @@ class McpUrlResponse(BaseModel):
     """MCP response model for the frontend URL."""
 
     url: str
+
+
+class McpDevLogsResponse(BaseModel):
+    """MCP response model for dev logs snapshot."""
+
+    logs: list[LogEntry]
 
 
 class OpenApiStatusResponse(BaseModel):

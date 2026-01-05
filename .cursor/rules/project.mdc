@@ -13,7 +13,7 @@ Rules:
 - be explicit with the types and type hints.
 - when reaching out to an API or performing any external calls, consider potential errors and handle them gracefully.
 - avoid using same constant multiple times, e.g. instead each function definition. 
-- prefer passing objects instead of multiple arguments to functions.
+- prefer passing pydantic models instead of multiple arguments to functions.
 - prefer using enums if there are a limited number of values or a set of defined strings.
 - most of the logic could be placed in the following way:
   - if it's something that purely depends on the model, make it a property of the model

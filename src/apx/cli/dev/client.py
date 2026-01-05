@@ -152,11 +152,39 @@ class DevServerClient:
         except Exception:
             return False
 
+    def get_logs_snapshot(
+        self,
+        *,
+        duration: int | None = None,
+        channel: Literal["app", "ui", "apx", "all"] = "all",
+        component: str | None = None,
+        include_system: bool = False,
+        limit: int = 500,
+    ) -> list[LogEntry]:
+        """Fetch a bounded snapshot of dev logs (non-streaming)."""
+        params: dict[str, str] = {"channel": channel, "limit": str(limit)}
+        if duration is not None:
+            params["duration"] = str(duration)
+        if component is not None and component.strip():
+            params["component"] = component.strip()
+        if include_system:
+            params["include_system"] = "true"
+
+        with httpx.Client(timeout=self.timeout) as client:
+            resp = client.get(self._management_url("/logs/snapshot"), params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, list):
+                raise ValueError("Expected a JSON list of log entries")
+            return [LogEntry.model_validate(item) for item in data]
+
     @contextmanager
     def stream_logs(
         self,
         duration: int | None = None,
-        process: Literal["frontend", "backend", "openapi", "all"] = "all",
+        channel: Literal["app", "ui", "apx", "all"] = "all",
+        component: str | None = None,
+        include_system: bool = False,
     ) -> Iterator[Iterator[LogEntry | StreamEvent]]:
         """Stream logs from the dev server using Server-Sent Events.
 
@@ -170,7 +198,9 @@ class DevServerClient:
 
         Args:
             duration: Show logs from last N seconds (None = all logs from buffer)
-            process: Filter by process name
+            channel: Filter by log channel
+            component: Filter by component (optional)
+            include_system: Include system [apx] logs (only applies when channel=all)
 
         Yields:
             Iterator of LogEntry objects and StreamEvent markers from the SSE stream
@@ -187,9 +217,13 @@ class DevServerClient:
             ...         elif item == StreamEvent.BUFFERED_DONE:
             ...             break  # Stop after buffered logs
         """
-        params: dict[str, str] = {"process": process}
+        params: dict[str, str] = {"channel": channel}
         if duration is not None:
             params["duration"] = str(duration)
+        if component is not None and component.strip():
+            params["component"] = component.strip()
+        if include_system:
+            params["include_system"] = "true"
 
         with httpx.Client(timeout=None) as client:
             with client.stream(
@@ -228,13 +262,17 @@ class DevServerClient:
     async def stream_logs_async(
         self,
         duration: int | None = None,
-        process: Literal["frontend", "backend", "openapi", "all"] = "all",
+        channel: Literal["app", "ui", "apx", "all"] = "all",
+        component: str | None = None,
+        include_system: bool = False,
     ) -> AsyncIterator[LogEntry | StreamEvent]:
         """Async version of stream_logs for use in async contexts.
 
         Args:
             duration: Show logs from last N seconds (None = all logs from buffer)
-            process: Filter by process name
+            channel: Filter by log channel
+            component: Filter by component (optional)
+            include_system: Include system [apx] logs (only applies when channel=all)
 
         Yields:
             LogEntry objects and StreamEvent markers from the SSE stream
@@ -242,9 +280,13 @@ class DevServerClient:
         Raises:
             httpx.HTTPError: If the request fails
         """
-        params: dict[str, str] = {"process": process}
+        params: dict[str, str] = {"channel": channel}
         if duration is not None:
             params["duration"] = str(duration)
+        if component is not None and component.strip():
+            params["component"] = component.strip()
+        if include_system:
+            params["include_system"] = "true"
 
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(

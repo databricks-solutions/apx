@@ -39,7 +39,8 @@ uvx git+https://github.com/databricks-solutions/apx.git init
 3. Start providing prompts to build an app, e.g.:
 
 ```text
-Use apx mcp server to start development server, then create a nice application for order management. Use shadcn mcp to add new components, make sure style is consistent and data is properly fetched from the backend. Start with mocking the backend data (yet use pydantic models), then implement the actual backend.
+Use apx mcp server to start development server, then create a nice application for order management.
+Use shadcn mcp to add new components, make sure style is consistent and data is properly fetched from the backend. Start with mocking the backend data (yet use pydantic models), then implement the actual backend.
 ```
 
 4. Deploy whenever ready via Databricks CLI:
@@ -77,7 +78,12 @@ This will launch an interactive prompt that will guide you through:
 - 🔧 Selecting a Databricks profile (if you have any configured)
 - 🤖 Setting up AI assistant rules (cursor/vscode/codex/claude)
 
-The app will be created in the current working directory by default.
+The app will be created in the current working directory by default. You can specify a different path via:
+
+````
+```bash
+uvx git+https://github.com/databricks-solutions/apx.git init /path/to/your/app
+````
 
 ### ⚙️ Non-Interactive Mode
 

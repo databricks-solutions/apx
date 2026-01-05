@@ -10,7 +10,6 @@ It supports both HTTP and WebSocket proxying with graceful shutdown.
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import TYPE_CHECKING
 
 import httpx
@@ -18,12 +17,13 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from apx.cli.dev.logging import DevLogComponent, get_logger
 from apx.constants import APX_DEV_PROXY_HEADER, DEFAULT_API_PREFIX
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-logger = logging.getLogger("apx.proxy")
+logger = get_logger(DevLogComponent.PROXY)
 
 
 class ProxyManager:

@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import logging
 import os
 import signal
 import socket
@@ -32,8 +31,10 @@ from typer import Exit
 from apx import __version__
 from apx.cli.dev.client import DevServerClient
 from apx.cli.dev.logging import (
+    DevLogComponent,
+    get_logger,
+    log_channel,
     print_log_entry,
-    setup_uvicorn_logging,
     suppress_output_and_logs,
 )
 from apx.cli.dev.process_control import (
@@ -217,24 +218,6 @@ def find_available_port(start: int, end: int, host: str = "127.0.0.1") -> int | 
         if is_port_available(port, host):
             return port
     return None
-
-
-# === Retry Helpers ===
-
-
-def log_retry_attempt(retry_state: RetryCallState) -> None:
-    """Log retry attempts to the appropriate logger.
-
-    Args:
-        retry_state: Tenacity retry state
-    """
-    attempt_number = retry_state.attempt_number
-    if retry_state.outcome and retry_state.outcome.failed:
-        exception = retry_state.outcome.exception()
-        logger = logging.getLogger("apx.retry")
-        logger.error(
-            f"Attempt {attempt_number} failed with error: {exception}. Retrying..."
-        )
 
 
 # === Project Configuration Utilities ===
@@ -468,42 +451,27 @@ async def run_backend(
         max_retries: Maximum number of retry attempts
     """
 
-    # Setup uvicorn logging once at the start
-    # If log_file is None, we're in dev_server mode and use memory logging
     use_memory = log_file is None
-    setup_uvicorn_logging(use_memory=use_memory)
-
-    # Setup retry logger
-    retry_logger = logging.getLogger("apx.retry")
-    retry_logger.setLevel(logging.INFO)
-    retry_logger.handlers.clear()
-
-    if use_memory:
-        # Use the backend logger that's already configured
-        backend_logger = logging.getLogger("apx.backend")
-        if backend_logger.handlers:
-            retry_logger.addHandler(backend_logger.handlers[0])
-    else:
-        # Console mode - use uvicorn handler
-        uvicorn_logger = logging.getLogger("uvicorn")
-        if uvicorn_logger.handlers:
-            retry_logger.addHandler(uvicorn_logger.handlers[0])
-
-    retry_logger.propagate = False
+    backend_logger = get_logger(DevLogComponent.BACKEND)
 
     # Note: stdout/stderr redirection is handled in dev_server.py lifespan
     # before any tasks start, so we don't need to do it here.
 
+    def _log_retry_backend(retry_state: RetryCallState) -> None:
+        if retry_state.outcome and retry_state.outcome.failed:
+            exception = retry_state.outcome.exception()
+            backend_logger.error(
+                f"Attempt {retry_state.attempt_number} failed with error: {exception}. Retrying..."
+            )
+
     @retry(
         stop=stop_after_attempt(max_retries),
         wait=wait_exponential(multiplier=1, min=2, max=60),
-        before_sleep=log_retry_attempt,
+        before_sleep=_log_retry_backend,
         reraise=True,
     )
-    async def run_backend_with_retry():
+    async def run_backend_with_retry() -> None:
         """Backend runner with retry logic."""
-        backend_logger = logging.getLogger("uvicorn")
-
         if use_memory:
             backend_logger.info(f"Starting backend server on {host}:{backend_port}")
         else:
@@ -607,13 +575,18 @@ async def run_backend(
                 if first_run:
                     console.print()
 
-                config = uvicorn.Config(
-                    app=app_instance,
-                    host=host,
-                    port=backend_port,
-                    log_level="info",
-                    log_config=None,  # Disable uvicorn's default log config
-                )
+                config_kwargs: dict[str, Any] = {
+                    "app": app_instance,
+                    "host": host,
+                    "port": backend_port,
+                    "log_level": "info",
+                }
+                if use_memory:
+                    # Disable uvicorn's default log config in dev-server mode.
+                    # The dev server configures routing for uvicorn.* loggers.
+                    config_kwargs["log_config"] = None
+
+                config = uvicorn.Config(**config_kwargs)
 
                 server = uvicorn.Server(config)
                 first_run = False
@@ -621,7 +594,13 @@ async def run_backend(
                 # Start server in a background task
                 async def serve(server_instance: uvicorn.Server):
                     try:
-                        await server_instance.serve()
+                        if use_memory:
+                            from apx.models import LogChannel
+
+                            with log_channel(LogChannel.APP):
+                                await server_instance.serve()
+                        else:
+                            await server_instance.serve()
                     except asyncio.CancelledError:
                         pass
 
@@ -827,21 +806,19 @@ async def run_frontend_with_logging(
         max_retries: Maximum number of retry attempts
         state: Optional ServerState object to store process reference
     """
-    # Use the already-configured logger (set up by dev_server)
-    logger = logging.getLogger("apx.frontend")
+    logger = get_logger(DevLogComponent.UI)
 
-    # Setup retry logger to use same handler
-    retry_logger = logging.getLogger("apx.retry")
-    retry_logger.setLevel(logging.INFO)
-    retry_logger.handlers.clear()
-    if logger.handlers:
-        retry_logger.addHandler(logger.handlers[0])
-    retry_logger.propagate = False
+    def _log_retry_frontend(retry_state: RetryCallState) -> None:
+        if retry_state.outcome and retry_state.outcome.failed:
+            exception = retry_state.outcome.exception()
+            logger.error(
+                f"Attempt {retry_state.attempt_number} failed with error: {exception}. Retrying..."
+            )
 
     @retry(
         stop=stop_after_attempt(max_retries),
         wait=wait_exponential(multiplier=1, min=2, max=60),
-        before_sleep=log_retry_attempt,
+        before_sleep=_log_retry_frontend,
         retry=retry_if_not_exception_type(RuntimeError),
         reraise=True,
     )
@@ -928,21 +905,19 @@ async def run_openapi_with_logging(app_dir: Path, max_retries: int = 10):
     """
     from apx.openapi import _openapi_watch
 
-    # Use the already-configured logger (set up by dev_server)
-    logger = logging.getLogger("apx.openapi")
+    logger = get_logger(DevLogComponent.OPENAPI)
 
-    # Setup retry logger to use same handler
-    retry_logger = logging.getLogger("apx.retry")
-    retry_logger.setLevel(logging.INFO)
-    retry_logger.handlers.clear()
-    if logger.handlers:
-        retry_logger.addHandler(logger.handlers[0])
-    retry_logger.propagate = False
+    def _log_retry_openapi(retry_state: RetryCallState) -> None:
+        if retry_state.outcome and retry_state.outcome.failed:
+            exception = retry_state.outcome.exception()
+            logger.error(
+                f"Attempt {retry_state.attempt_number} failed with error: {exception}. Retrying..."
+            )
 
     @retry(
         stop=stop_after_attempt(max_retries),
         wait=wait_exponential(multiplier=1, min=2, max=60),
-        before_sleep=log_retry_attempt,
+        before_sleep=_log_retry_openapi,
         reraise=True,
     )
     async def run_with_retry():
@@ -1395,6 +1370,7 @@ class DevManager:
         backend_only: bool = False,
         openapi_only: bool = False,
         app_only: bool = False,
+        system_only: bool = False,
         raw_output: bool = False,
         follow: bool = False,
         timeout_seconds: int | None = None,
@@ -1405,8 +1381,9 @@ class DevManager:
             duration_seconds: Show logs from last N seconds (None = all logs from buffer)
             ui_only: Only show frontend logs
             backend_only: Only show backend logs
-            openapi_only: Only show OpenAPI logs
+            openapi_only: Only show OpenAPI logs (subset of system logs)
             app_only: Only show application logs (from your app code)
+            system_only: Only show system logs ([apx])
             raw_output: Show raw log output without prefix formatting
             follow: Continue streaming new logs (like tail -f). If False, exits after initial logs.
             timeout_seconds: Stop streaming after N seconds (None = indefinite)
@@ -1418,16 +1395,23 @@ class DevManager:
             console.print("[yellow]No development server found.[/yellow]")
             return
 
-        # Determine process filter
-        process_filter: Literal["frontend", "backend", "openapi", "all"] = "all"
-        if ui_only and not backend_only and not openapi_only and not app_only:
-            process_filter = "frontend"
-        elif backend_only and not ui_only and not openapi_only and not app_only:
-            process_filter = "backend"
-        elif openapi_only and not ui_only and not backend_only and not app_only:
-            process_filter = "openapi"
-        elif app_only and not ui_only and not backend_only and not openapi_only:
-            process_filter = "backend"
+        channel_filter: Literal["app", "ui", "apx", "all"] = "all"
+        component_filter: str | None = None
+        include_system = False
+
+        # `--system` (or system_only) means show only [apx].
+        if system_only:
+            channel_filter = "apx"
+        elif openapi_only:
+            channel_filter = "apx"
+            component_filter = "openapi"
+        elif ui_only:
+            channel_filter = "ui"
+        elif backend_only:
+            channel_filter = "app"
+        elif app_only:
+            channel_filter = "app"
+            component_filter = "app"
 
         # Connect to SSE endpoint using the client
         client = DevServerClient(port=port)
@@ -1437,7 +1421,9 @@ class DevManager:
         try:
             with client.stream_logs(
                 duration=duration_seconds,
-                process=process_filter,
+                channel=channel_filter,
+                component=component_filter,
+                include_system=include_system,
             ) as log_stream:
                 start_time = time.time()
 
@@ -1460,13 +1446,7 @@ class DevManager:
                     if not isinstance(item, LogEntry):
                         continue
 
-                    if app_only:
-                        if item.process_name != "backend":
-                            continue
-                        if not item.content.startswith("APP | "):
-                            continue
-
-                    print_log_entry(item.model_dump(), raw_output=raw_output)
+                    print_log_entry(item, raw_output=raw_output)
                     log_count += 1
 
         except KeyboardInterrupt:
