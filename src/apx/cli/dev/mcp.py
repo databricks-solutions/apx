@@ -31,6 +31,7 @@ from apx.models import (
     McpRouteCallResponse,
     McpRoutesResponse,
     OpenApiStatusResponse,
+    PortsConfig,
     PortsResponse,
     RouteInfo,
 )
@@ -433,16 +434,37 @@ async def restart() -> McpActionResponse:
             message="Development server is not running. Run 'start' first.",
         )
 
-    def restart_suppressed():
+    # Capture current ports before stopping to make them sticky.
+    # We do this before calling stop() because stop() clears these values from project.json.
+    preferred_ports: PortsConfig | None = None
+    try:
+        config = manager.get_or_create_config()
+        if config.dev.dev_server_port:
+            # Try to get currently used ports from the running server API
+            client = DevServerClient(port=config.dev.dev_server_port, timeout=2.0)
+            try:
+                ports_data = await asyncio.to_thread(_get_ports, client=client)
+                preferred_ports = ports_data.ports
+            except Exception:
+                # Fallback to just the dev server port from config if API is not responding
+                preferred_ports = PortsConfig(
+                    dev_server_port=config.dev.dev_server_port
+                )
+    except Exception:
+        pass
+
+    def restart_suppressed(ports: PortsConfig | None) -> None:
         """Restart servers with suppressed console output."""
         with suppress_output_and_logs():
             manager.stop()
+            # Small delay to allow OS to release ports
             time.sleep(1)
-            manager.start()
+            # Pass preferred ports to maintain stickiness
+            manager.start(preferred_ports=ports)
 
     try:
-        # Run sync operation in thread pool with suppressed output
-        await asyncio.to_thread(restart_suppressed)
+        # Run sync operation in thread pool with suppressed output and preferred ports
+        await asyncio.to_thread(restart_suppressed, preferred_ports)
         return McpActionResponse(
             status="success", message="Development servers restarted successfully"
         )
