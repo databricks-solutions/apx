@@ -1,4 +1,5 @@
 from importlib import resources
+from typing import ClassVar
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from pydantic import Field, BaseModel
@@ -23,7 +24,7 @@ class DatabaseConfig(BaseModel):
 
 
 class AppConfig(BaseSettings):
-    model_config = SettingsConfigDict(
+    model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
         env_file=env_file,
         env_prefix=f"{app_slug.upper()}_",
         extra="ignore",

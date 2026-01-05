@@ -34,3 +34,4 @@ gen-sample:
     uv run apx init /tmp/sample -p fe-az -a cursor -l basic -t essential -n sample \
         --apx-package="{{justfile_directory()}}" \
         --apx-editable
+    cd /tmp/sample && uv run apx dev check

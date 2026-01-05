@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 import keyring
 import psutil
+from rich.status import Status
 import uvicorn
 import watchfiles
 from databricks.sdk import WorkspaceClient
@@ -348,7 +349,7 @@ def prepare_obo_token(
     cwd: Path,
     app_module_name: str,
     token_lifetime_seconds: int = 60 * 60 * 4,
-    status_context=None,
+    status_context: Status | None = None,
 ) -> str:
     """Prepare the On-Behalf-Of token for the backend server.
 
