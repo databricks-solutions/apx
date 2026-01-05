@@ -35,3 +35,11 @@ gen-sample:
         --apx-package="{{justfile_directory()}}" \
         --apx-editable
     cd /tmp/sample && uv run apx dev check
+
+gen folder profile *args:
+    rm -rf /tmp/{{folder}}
+    uv run apx init /tmp/{{folder}} -p {{profile}} \
+        --apx-package="{{justfile_directory()}}" \
+        --apx-editable \
+        {{args}}
+    cd /tmp/{{folder}} && uv run apx dev check

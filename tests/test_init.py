@@ -5,6 +5,7 @@ from typer.testing import CliRunner
 
 from apx.__main__ import app
 from apx.models import Template, Layout
+from apx.utils import in_path
 
 runner: CliRunner = CliRunner()
 apx_source_dir: str = str(Path(str(resources.files("apx"))).parent.parent)
@@ -88,3 +89,14 @@ def test_init_e2e(tmp_path: Path) -> None:
 
     # make sure .env is in .gitignore
     assert ".env" in (tmp_path / ".gitignore").read_text()
+
+    # make sure `dev check` command succeeds
+    with in_path(tmp_path):
+        result = runner.invoke(
+            app,
+            ["dev", "check"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, (
+            f"Failed to check project. \n output:{result.output} \n error:{result.exception} \n stderr:{result.stderr}"
+        )

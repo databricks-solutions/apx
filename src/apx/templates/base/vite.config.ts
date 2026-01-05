@@ -97,13 +97,25 @@ export function getPortConfig(): { frontendPort: number; host: string } {
 }
 
 // Use sync config since we read from env vars
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
   const { appName: APP_NAME, appSlug: APP_SLUG } =
     readMetadata() as ApxMetadata;
-  const { frontendPort: FRONTEND_PORT, host: HOST } = getPortConfig();
 
   const APP_UI_PATH = `./src/${APP_SLUG}/ui`;
   const OUT_DIR = `../__dist__`; // relative to APP_UI_PATH!
+
+  // Port config is only needed for dev server, not for production build
+  const isDevServer = command === "serve";
+  const serverConfig = isDevServer
+    ? (() => {
+        const { frontendPort, host } = getPortConfig();
+        return {
+          host,
+          port: frontendPort,
+          strictPort: true,
+        };
+      })()
+    : undefined;
 
   return {
     root: APP_UI_PATH,
@@ -117,13 +129,10 @@ export default defineConfig(() => {
       }),
       react(),
       tailwindcss(),
-      apxDevProxyGuard(),
+      // Only add the proxy guard plugin in dev mode
+      ...(isDevServer ? [apxDevProxyGuard()] : []),
     ],
-    server: {
-      host: HOST,
-      port: FRONTEND_PORT,
-      strictPort: true,
-    },
+    server: serverConfig,
     resolve: {
       alias: {
         "@": resolve(__dirname, APP_UI_PATH),

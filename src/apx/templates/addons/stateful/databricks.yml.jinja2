@@ -10,6 +10,10 @@ artifacts:
     build: uv run apx build
 
 resources:
+  database_instances:
+    {{app_name}}-db:
+      name: "{{app_name}}"
+      capacity: "CU_1"
   apps:
     {{app_name}}-app:
       name: "{{app_name}}"
@@ -22,10 +26,7 @@ resources:
             instance_name: "{{app_name}}"
             permission: "CAN_CONNECT_AND_CREATE"
 
-  database_instances:
-    {{app_name}}-db:
-      name: "{{app_name}}"
-      capacity: "CU_1"
+
 
 
 

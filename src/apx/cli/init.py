@@ -488,13 +488,21 @@ def init(
 
     if not skip_build:
         with progress_spinner("🔧 Building project...", "✅ Project built"):
-            subprocess.run(
+            result = subprocess.run(
                 ["uv", "run", "apx", "build"],
                 cwd=app_path,
                 capture_output=True,
                 text=True,
                 env=os.environ,
             )
+
+            if result.returncode != 0:
+                console.print("[red]❌ Failed to build project[/red]")
+                if result.stderr:
+                    console.print(f"[red]{result.stderr}[/red]")
+                if result.stdout:
+                    console.print(f"[red]{result.stdout}[/red]")
+                raise Exit(code=1)
 
     # === PHASE 7: Setting up assistant rules ===
     if assistant:
