@@ -7,10 +7,10 @@ import json
 import logging
 import subprocess
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, ClassVar
 
 import watchfiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typer import Argument, Exit, Option
 
 from apx.cli.version import with_version
@@ -30,8 +30,7 @@ class ApiGeneratorConfig(BaseModel):
     app_slug: str
     app_module_name: str
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config: ClassVar[ConfigDict] = ConfigDict(arbitrary_types_allowed=True)
 
     @classmethod
     def from_app_dir(cls, app_dir: Path) -> ApiGeneratorConfig:
@@ -55,9 +54,9 @@ class ApiGenerator:
     - Watching for changes and regenerating automatically
     """
 
-    CONFIG_FILENAME = "orval.config.ts"
-    SCHEMA_FILENAME = "openapi.json"
-    APX_DIR_NAME = ".apx"
+    CONFIG_FILENAME: str = "orval.config.ts"
+    SCHEMA_FILENAME: str = "openapi.json"
+    APX_DIR_NAME: str = ".apx"
 
     def __init__(
         self, config: ApiGeneratorConfig, logger: logging.Logger | None = None
@@ -68,8 +67,8 @@ class ApiGenerator:
             config: Configuration for the generator
             logger: Optional logger for output. If None, uses console.print()
         """
-        self._config = config
-        self._logger = logger
+        self._config: ApiGeneratorConfig = config
+        self._logger: logging.Logger | None = logger
 
     @property
     def app_dir(self) -> Path:
