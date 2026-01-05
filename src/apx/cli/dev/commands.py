@@ -1,6 +1,7 @@
 """Dev commands for the apx CLI."""
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Annotated
@@ -408,7 +409,19 @@ def dev_check(
         capture_output=True,
         text=True,
     )
+
+    # basedpyright may return non-zero exit code even for warnings only
+    # we need to parse the output to check for actual errors
+    has_errors = False
     if result.returncode != 0:
+        # look for the summary line like "X errors, Y warnings, Z notes"
+        for line in result.stdout.splitlines():
+            match = re.search(r"(\d+)\s+errors?", line)
+            if match and int(match.group(1)) > 0:
+                has_errors = True
+                break
+
+    if has_errors:
         console.print("[red]❌ Pyright found errors, errors provided below[/]")
         for line in result.stdout.splitlines():
             console.print(f"[red]{line}[/red]")
