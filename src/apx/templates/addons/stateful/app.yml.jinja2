@@ -1,4 +1,1 @@
 command: ["uvicorn", "{{app_slug}}.backend.app:app", "--workers", "2"]
-env:
-    - name: {{ app_slug.upper() }}_DB__INSTANCE_NAME
-      value: {{app_name}}

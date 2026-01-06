@@ -726,8 +726,11 @@ async def run_backend(
                         pass
 
                 raise
-            except Exception as e:
-                console.print(f"[red][server][/red] Error: {e}")
+            except Exception:
+                # Log full traceback so errors are visible in dev logs
+                backend_logger.error(
+                    f"Backend initialization error:\n{traceback.format_exc()}"
+                )
 
                 # Clean up tasks
                 if server:

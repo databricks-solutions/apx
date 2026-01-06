@@ -9,7 +9,7 @@ from .logger import logger
 
 
 class Runtime:
-    def __init__(self):
+    def __init__(self) -> None:
         self.config: AppConfig = conf
 
     @cached_property

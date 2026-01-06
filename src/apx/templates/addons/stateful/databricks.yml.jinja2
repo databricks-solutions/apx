@@ -23,7 +23,7 @@ resources:
         - name: "db"
           database:
             database_name: "databricks_postgres"
-            instance_name: "{{app_name}}"
+            instance_name: ${resources.database_instances.{{app_name}}-db.name}
             permission: "CAN_CONNECT_AND_CREATE"
 
 

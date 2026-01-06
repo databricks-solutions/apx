@@ -6,12 +6,12 @@ issues with SQLModel and other libraries that don't handle multiple imports well
 
 import importlib
 import sys
+import traceback
 from typing import Any
 
 from fastapi import FastAPI
-from typer import Exit
 
-from apx.utils import console
+from apx.cli.dev.logging import DevLogComponent, get_logger
 
 
 def _clear_sqlmodel_registry() -> None:
@@ -62,7 +62,10 @@ class AppReloader:
             on each reload to help callers detect when a reload occurred
 
         Raises:
-            Exit: If app loading fails
+            ValueError: If app module format is invalid
+            ImportError: If module cannot be imported
+            AttributeError: If module doesn't have the specified attribute
+            TypeError: If attribute is not a FastAPI instance
         """
         # If we have a cached app and not forcing reload, return it
         if (
@@ -72,12 +75,13 @@ class AppReloader:
         ):
             return self._app_instance, self._reload_count
 
+        logger = get_logger(DevLogComponent.BACKEND)
+
         # Parse module name
         if ":" not in app_module_name:
-            console.print(
-                "[red]❌ Invalid app module format. Expected format: some.package.file:app[/red]"
-            )
-            raise Exit(code=1)
+            error_msg = f"Invalid app module format '{app_module_name}'. Expected format: some.package.file:app"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
 
         module_path, attribute_name = app_module_name.split(":", 1)
 
@@ -99,24 +103,26 @@ class AppReloader:
         # Import the module
         try:
             module = importlib.import_module(module_path)
-        except ImportError as e:
-            console.print(f"[red]❌ Failed to import module {module_path}: {e}[/red]")
-            raise Exit(code=1)
+        except Exception:
+            logger.error(
+                f"Failed to import module {module_path}:\n{traceback.format_exc()}"
+            )
+            raise
 
         # Get the app attribute from the module
         try:
             app_instance: Any = getattr(module, attribute_name)
         except AttributeError:
-            console.print(
-                f"[red]❌ Module {module_path} does not have attribute '{attribute_name}'[/red]"
+            error_msg = (
+                f"Module {module_path} does not have attribute '{attribute_name}'"
             )
-            raise Exit(code=1)
+            logger.error(error_msg)
+            raise
 
         if not isinstance(app_instance, FastAPI):
-            console.print(
-                f"[red]❌ '{attribute_name}' is not a FastAPI app instance.[/red]"
-            )
-            raise Exit(code=1)
+            error_msg = f"'{attribute_name}' is not a FastAPI app instance"
+            logger.error(error_msg)
+            raise TypeError(error_msg)
 
         # Cache the app
         self._app_instance = app_instance
@@ -162,7 +168,10 @@ def load_app(app_module_name: str, reload: bool = False) -> tuple[FastAPI, int]:
         on each reload
 
     Raises:
-        Exit: If app loading fails
+        ValueError: If app module format is invalid
+        ImportError: If module cannot be imported
+        AttributeError: If module doesn't have the specified attribute
+        TypeError: If attribute is not a FastAPI instance
     """
     return _dev_reloader.load_app(app_module_name, reload=reload)
 
