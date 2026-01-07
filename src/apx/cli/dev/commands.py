@@ -12,6 +12,7 @@ from typer import Argument, Exit, Option, Typer
 from databricks.sdk import WorkspaceClient
 
 from apx import __version__ as apx_lib_version
+from apx.cli.dev.apply import apply as apply_command
 from apx.cli.dev.manager import (
     DevManager,
     validate_databricks_credentials,
@@ -446,3 +447,9 @@ def dev_mcp():
     from apx.cli.dev.mcp import run_mcp_server
 
     run_mcp_server()
+
+
+# Register apply command
+dev_app.command(name="apply", help="Apply an addon to an existing project")(
+    apply_command
+)
