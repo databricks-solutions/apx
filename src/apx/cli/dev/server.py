@@ -366,10 +366,14 @@ def request_dev_server_shutdown(delay: float = 0.0) -> None:
 # === Background Task Runners ===
 
 
-async def run_frontend_task(app_dir: Path, port: int, max_retries: int):
+async def run_frontend_task(
+    app_dir: Path, port: int, max_retries: int, dev_server_port: int
+):
     """Run frontend as a background task."""
     try:
-        await run_frontend_with_logging(app_dir, port, max_retries, state)
+        await run_frontend_with_logging(
+            app_dir, port, max_retries, state, dev_server_port
+        )
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -539,6 +543,7 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                     state.app_dir,
                     config.frontend_port,
                     config.max_retries,
+                    config.dev_server_port,
                 )
             )
             # Wait briefly for the bun process to be created and tracked

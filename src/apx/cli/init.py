@@ -30,22 +30,14 @@ from apx.utils import (
 )
 
 
-def bun_add(
-    packages: list[str],
-    cwd: Path,
-    dev: bool = False,
-    error_msg: str = "Failed to install packages",
-) -> None:
+def bun_install(cwd: Path) -> None:
     """
-    Run bun add command with optional cache directory support.
+    Run bun install command with optional cache directory support.
 
     Args:
-        packages: List of package names to install
         cwd: Current working directory for the command
-        dev: Whether to install as dev dependencies (-D flag)
-        error_msg: Error message to display if command fails
     """
-    cmd = ["bun", "add"]
+    cmd = ["bun", "install"]
 
     # Check if BUN_CACHE_DIR is set and add cache directory flag
     bun_cache_dir = os.environ.get("BUN_CACHE_DIR")
@@ -53,64 +45,7 @@ def bun_add(
         cache_path = Path(bun_cache_dir).resolve()
         cmd.extend(["--cache-dir", str(cache_path)])
 
-    # Add dev flag if needed
-    if dev:
-        cmd.append("-D")
-
-    # Add packages
-    cmd.extend(packages)
-    run_subprocess(cmd, cwd=cwd, error_msg=error_msg)
-
-
-def add_bun_dependencies(cwd: Path) -> None:
-    """
-    Add basic bun dependencies to the project.
-    """
-    bun_add(
-        [
-            "react-error-boundary",
-            "axios",
-            "react",
-            "react-dom",
-            "class-variance-authority",
-            "clsx",
-            "tailwind-merge",
-            "lucide-react",
-            "tw-animate-css",
-            "@tanstack/react-router",
-            "@tanstack/react-query",
-            "sonner",
-            "@radix-ui/react-slot",
-            "motion",  # for animated elements
-        ],
-        cwd=cwd,
-        error_msg="Failed to install main dependencies",
-    )
-
-
-def add_bun_dev_dependencies(cwd: Path) -> None:
-    """
-    Add basic bun dev dependencies to the project.
-    """
-
-    bun_add(
-        [
-            "smol-toml",
-            "orval",
-            "vite",
-            "typescript",
-            "@types/node",
-            "@types/react",
-            "@types/react-dom",
-            "@vitejs/plugin-react",
-            "@tailwindcss/vite",
-            "@tanstack/router-plugin",
-            "@tanstack/react-router-devtools",
-        ],
-        cwd=cwd,
-        dev=True,
-        error_msg="Failed to install dev dependencies",
-    )
+    run_subprocess(cmd, cwd=cwd, error_msg="Failed to install dependencies")
 
 
 def add_shadcn_components(
@@ -361,11 +296,8 @@ def init(
             "📦 Installing frontend dependencies...",
             "✅ Frontend dependencies installed",
         ):
-            # Install bun main dependencies
-            add_bun_dependencies(app_path)
-
-            # Install bun dev dependencies
-            add_bun_dev_dependencies(app_path)
+            # Install all dependencies from package.json
+            bun_install(app_path)
 
     # === PHASE 3: Bootstrapping shadcn ===
     if not skip_frontend_dependencies:

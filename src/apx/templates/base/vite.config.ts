@@ -38,12 +38,22 @@ function apxDevProxyGuard(): Plugin {
           // Check for the APX dev proxy header
           const hasProxyHeader = req.headers[APX_DEV_PROXY_HEADER] === "true";
           if (!hasProxyHeader) {
-            res.statusCode = 403;
-            res.setHeader("Content-Type", "text/plain");
-            res.end(
-              "Direct access to Vite dev server is not allowed. " +
-                "Please access through the APX dev server proxy.",
-            );
+            // Redirect to APX dev server instead of returning 403
+            const devServerPort = process.env.APX_DEV_SERVER_PORT;
+            if (devServerPort) {
+              const redirectUrl = `http://localhost:${devServerPort}${url}`;
+              res.statusCode = 302;
+              res.setHeader("Location", redirectUrl);
+              res.end();
+            } else {
+              // Fallback to 403 if dev server port is not set
+              res.statusCode = 403;
+              res.setHeader("Content-Type", "text/plain");
+              res.end(
+                "Direct access to Vite dev server is not allowed. " +
+                  "Please access through the APX dev server proxy.",
+              );
+            }
             return;
           }
 

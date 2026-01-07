@@ -841,6 +841,7 @@ async def run_frontend_with_logging(
     port: int,
     max_retries: int = 10,
     state: FrontendProcessState | None = None,
+    dev_server_port: int | None = None,
 ) -> None:
     """Run frontend dev server and capture output to in-memory buffer.
 
@@ -849,6 +850,7 @@ async def run_frontend_with_logging(
         port: Frontend port
         max_retries: Maximum number of retry attempts
         state: Optional ServerState object to store process reference
+        dev_server_port: Optional dev server port for redirects
     """
     logger = get_logger(DevLogComponent.UI)
 
@@ -881,6 +883,8 @@ async def run_frontend_with_logging(
         # Pass port configuration via environment variables for Vite
         env = os.environ.copy()
         env["APX_FRONTEND_PORT"] = str(port)
+        if dev_server_port is not None:
+            env["APX_DEV_SERVER_PORT"] = str(dev_server_port)
 
         process = await asyncio.create_subprocess_exec(
             "bun",
