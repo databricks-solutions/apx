@@ -60,7 +60,6 @@ dev = [
     "pytest-cov>=7.0.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.14.0",
-    "sphinx>=9.0.4",
     "sqlmodel>=0.0.27",
     "types-cachetools>=6.2.0.20251022",
     "types-cffi>=1.17.0.20250915",
