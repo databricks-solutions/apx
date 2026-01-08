@@ -18,6 +18,7 @@ dependencies = [
     "python-dotenv>=1.1.1",
     "pyyaml>=6.0.3",
     "rich>=14.2.0",
+    "sqlmodel>=0.0.27",
     "tenacity>=9.1.2",
     "typer>=0.19.2",
     "typing-extensions>=4.12.0",

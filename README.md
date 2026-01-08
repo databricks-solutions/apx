@@ -128,6 +128,26 @@ my-app
 
 📦 The `__dist__` directory is the directory where the frontend bundle is stored, so it can be served by the backend.
 
+## 📚 Databricks SDK Documentation
+
+The Databricks SDK documentation is available via MCP server. You can search for methods and models using the following command:
+
+```bash
+uv run apx mcp sdk search <query>
+```
+
+This will return a list of methods and models that match the query.
+
+## ⬆️ Upgrading `apx`
+
+To upgrade `apx`, you can use the following command:
+
+```bash
+uv sync --upgrade-package apx
+```
+
+This will pull the latest changes from the main branch and update the `apx` package.
+
 ## 🎮 Commands
 
 ### 🚀 `init`

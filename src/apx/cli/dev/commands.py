@@ -444,7 +444,7 @@ def dev_mcp():
 
     This command should be run from the project root directory.
     """
-    from apx.cli.dev.mcp import run_mcp_server
+    from apx.mcp import run_mcp_server
 
     run_mcp_server()
 

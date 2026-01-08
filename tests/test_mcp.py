@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from apx.cli.dev.mcp import (
+from apx.mcp.common import (
     McpSimpleStatusResponse,
     databricks_apps_logs,
     get_metadata,
@@ -76,7 +76,7 @@ def mock_client(mock_status_response):
 async def test_start_success(mock_manager):
     """Test the start tool with successful server startup."""
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common._get_manager", return_value=mock_manager),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await start(
@@ -101,7 +101,7 @@ async def test_start_failure(mock_manager):
     mock_manager.start.side_effect = Exception("Port already in use")
 
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common._get_manager", return_value=mock_manager),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await start()
@@ -115,7 +115,7 @@ async def test_start_failure(mock_manager):
 async def test_restart_success(mock_manager):
     """Test the restart tool with successful restart."""
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common._get_manager", return_value=mock_manager),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await restart()
@@ -137,7 +137,7 @@ async def test_restart_no_server():
     manager.socket_path = Path("/test/project/.apx/dev.sock")
 
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=manager),
+        patch("apx.mcp.common._get_manager", return_value=manager),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await restart()
@@ -155,7 +155,7 @@ async def test_restart_server_not_running():
     manager.socket_path = Path("/test/project/.apx/dev.sock")
 
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=manager),
+        patch("apx.mcp.common._get_manager", return_value=manager),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await restart()
@@ -171,7 +171,7 @@ async def test_restart_failure(mock_manager):
     mock_manager.start.side_effect = Exception("Connection refused")
 
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common._get_manager", return_value=mock_manager),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await restart()
@@ -185,7 +185,7 @@ async def test_restart_failure(mock_manager):
 async def test_stop_success(mock_manager):
     """Test the stop tool with successful stop."""
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common._get_manager", return_value=mock_manager),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await stop()
@@ -204,7 +204,7 @@ async def test_stop_failure(mock_manager):
     mock_manager.stop.side_effect = Exception("Permission denied")
 
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common._get_manager", return_value=mock_manager),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await stop()
@@ -235,9 +235,9 @@ async def test_status_all_running(mock_manager, mock_client, mock_status_respons
     mock_manager.get_or_create_config = Mock(return_value=mock_config)
 
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
-        patch("apx.cli.dev.mcp.DevServerClient", return_value=mock_client),
-        patch("apx.cli.dev.mcp._get_ports", side_effect=mock_get_ports),
+        patch("apx.mcp.common._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common.DevServerClient", return_value=mock_client),
+        patch("apx.mcp.common._get_ports", side_effect=mock_get_ports),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await status()
@@ -261,7 +261,7 @@ async def test_status_no_server():
     manager.is_dev_server_running = Mock(return_value=False)
 
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=manager),
+        patch("apx.mcp.common._get_manager", return_value=manager),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await status()
@@ -281,7 +281,7 @@ async def test_status_server_not_running(mock_manager):
     mock_manager.is_dev_server_running.return_value = False
 
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common._get_manager", return_value=mock_manager),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await status()
@@ -307,9 +307,9 @@ async def test_status_client_error(mock_manager, mock_client):
     mock_manager.get_or_create_config = Mock(return_value=mock_config)
 
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
-        patch("apx.cli.dev.mcp.DevServerClient", return_value=mock_client),
-        patch("apx.cli.dev.mcp._get_ports", side_effect=mock_get_ports_fail),
+        patch("apx.mcp.common._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common.DevServerClient", return_value=mock_client),
+        patch("apx.mcp.common._get_ports", side_effect=mock_get_ports_fail),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await status()
@@ -337,8 +337,8 @@ async def test_get_metadata_success():
     )
 
     with (
-        patch("apx.cli.dev.mcp.get_project_metadata", return_value=mock_metadata),
-        patch("apx.cli.dev.mcp.apx_version", "1.0.0"),
+        patch("apx.mcp.common.get_project_metadata", return_value=mock_metadata),
+        patch("apx.mcp.common.apx_version", "1.0.0"),
     ):
         result = await get_metadata()
 
@@ -354,7 +354,7 @@ async def test_get_metadata_failure():
     """Test the get_metadata tool when metadata retrieval fails."""
     with (
         patch(
-            "apx.cli.dev.mcp.get_project_metadata",
+            "apx.mcp.common.get_project_metadata",
             side_effect=Exception("pyproject.toml not found"),
         ),
     ):
@@ -397,9 +397,9 @@ async def test_status_with_mocked_response(mock_manager, mock_status_response):
     mock_manager.get_or_create_config = Mock(return_value=mock_config)
 
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
-        patch("apx.cli.dev.mcp.DevServerClient", return_value=client),
-        patch("apx.cli.dev.mcp._get_ports", side_effect=mock_get_ports),
+        patch("apx.mcp.common._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common.DevServerClient", return_value=client),
+        patch("apx.mcp.common._get_ports", side_effect=mock_get_ports),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await status()
@@ -423,7 +423,7 @@ async def test_start_suppresses_console_output(mock_manager):
         sys.stdout = captured_output
 
         with (
-            patch("apx.cli.dev.mcp._get_manager", return_value=mock_manager),
+            patch("apx.mcp.common._get_manager", return_value=mock_manager),
             patch("pathlib.Path.cwd", return_value=Path("/test/project")),
         ):
             result = await start()
@@ -484,12 +484,12 @@ async def test_mcp_tool_responses_are_valid_models():
         )
 
     with (
-        patch("apx.cli.dev.mcp._get_manager", return_value=manager),
-        patch("apx.cli.dev.mcp.DevServerClient", return_value=client),
-        patch("apx.cli.dev.mcp._get_ports", side_effect=mock_get_ports),
+        patch("apx.mcp.common._get_manager", return_value=manager),
+        patch("apx.mcp.common.DevServerClient", return_value=client),
+        patch("apx.mcp.common._get_ports", side_effect=mock_get_ports),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
         patch(
-            "apx.cli.dev.mcp.get_project_metadata",
+            "apx.mcp.common.get_project_metadata",
             return_value=ProjectMetadata(
                 **{
                     "app-name": "Test App",
@@ -498,7 +498,7 @@ async def test_mcp_tool_responses_are_valid_models():
                 }
             ),
         ),
-        patch("apx.cli.dev.mcp.apx_version", "1.0.0"),
+        patch("apx.mcp.common.apx_version", "1.0.0"),
     ):
         # Test start response
         start_result = await start()
@@ -544,7 +544,7 @@ async def test_databricks_apps_logs_with_explicit_app_name(
         return FakeProc()
 
     monkeypatch.setattr(
-        "apx.cli.dev.mcp.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+        "apx.mcp.common.asyncio.create_subprocess_exec", fake_create_subprocess_exec
     )
 
     result = await databricks_apps_logs(app_name="my-app", tail_lines=10)
@@ -583,9 +583,9 @@ resources:
         return FakeProc()
 
     monkeypatch.setattr(
-        "apx.cli.dev.mcp.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+        "apx.mcp.common.asyncio.create_subprocess_exec", fake_create_subprocess_exec
     )
-    monkeypatch.setattr("apx.cli.dev.mcp.Path.cwd", lambda: tmp_path)
+    monkeypatch.setattr("apx.mcp.common.Path.cwd", lambda: tmp_path)
 
     result = await databricks_apps_logs(app_name=None)
     assert isinstance(result, McpDatabricksAppsLogsResponse)
@@ -609,7 +609,7 @@ resources:
 """.lstrip()
     )
 
-    monkeypatch.setattr("apx.cli.dev.mcp.Path.cwd", lambda: tmp_path)
+    monkeypatch.setattr("apx.mcp.common.Path.cwd", lambda: tmp_path)
 
     result = await databricks_apps_logs(app_name=None)
     assert isinstance(result, McpErrorResponse)
@@ -620,7 +620,7 @@ resources:
 async def test_databricks_apps_logs_errors_when_databricks_yml_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setattr("apx.cli.dev.mcp.Path.cwd", lambda: tmp_path)
+    monkeypatch.setattr("apx.mcp.common.Path.cwd", lambda: tmp_path)
     result = await databricks_apps_logs(app_name=None)
     assert isinstance(result, McpErrorResponse)
     assert "databricks.yml was not found" in result.error
@@ -644,7 +644,7 @@ async def test_databricks_apps_logs_logs_subcommand_not_found_upgrade_message(
         return FakeProc()
 
     monkeypatch.setattr(
-        "apx.cli.dev.mcp.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+        "apx.mcp.common.asyncio.create_subprocess_exec", fake_create_subprocess_exec
     )
 
     result = await databricks_apps_logs(app_name="my-app")
@@ -670,7 +670,7 @@ async def test_databricks_apps_logs_forwards_other_cli_errors(
         return FakeProc()
 
     monkeypatch.setattr(
-        "apx.cli.dev.mcp.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+        "apx.mcp.common.asyncio.create_subprocess_exec", fake_create_subprocess_exec
     )
 
     result = await databricks_apps_logs(app_name="my-app")
@@ -687,7 +687,7 @@ async def test_databricks_apps_logs_errors_when_databricks_cli_missing(
         raise FileNotFoundError("databricks")
 
     monkeypatch.setattr(
-        "apx.cli.dev.mcp.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+        "apx.mcp.common.asyncio.create_subprocess_exec", fake_create_subprocess_exec
     )
 
     result = await databricks_apps_logs(app_name="my-app")
@@ -700,7 +700,7 @@ async def test_databricks_apps_logs_loads_dotenv_when_present(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     (tmp_path / ".env").write_text("DATABRICKS_CONFIG_PROFILE=DEFAULT\n")
-    monkeypatch.setattr("apx.cli.dev.mcp.Path.cwd", lambda: tmp_path)
+    monkeypatch.setattr("apx.mcp.common.Path.cwd", lambda: tmp_path)
 
     called = {"val": False}
 
@@ -723,9 +723,9 @@ async def test_databricks_apps_logs_loads_dotenv_when_present(
     async def fake_create_subprocess_exec(*args, **kwargs):
         return FakeProc()
 
-    monkeypatch.setattr("apx.cli.dev.mcp.load_dotenv", fake_load_dotenv)
+    monkeypatch.setattr("apx.mcp.common.load_dotenv", fake_load_dotenv)
     monkeypatch.setattr(
-        "apx.cli.dev.mcp.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+        "apx.mcp.common.asyncio.create_subprocess_exec", fake_create_subprocess_exec
     )
 
     result = await databricks_apps_logs(app_name="my-app")
