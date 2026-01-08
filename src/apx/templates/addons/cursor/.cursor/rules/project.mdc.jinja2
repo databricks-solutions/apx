@@ -12,6 +12,7 @@ alwaysApply: true
 - Run apx dev check command (via CLI or via mcp) to check for errors in the project code after making changes.
 - If agent has access to native browser tool, use it to verify changes on the frontend. If such tool is not present or is not working, use playwright mcp to automate browser actions (e.g. screenshots, clicks, etc.).
 - Avoid unnecessary restarts of the development servers
+- **Databricks SDK:** Use the apx MCP tools (`search_databricks_sdk`, `get_method_spec`, `get_model_spec`) to look up Databricks SDK methods and models instead of guessing or hallucinating API signatures.
 
 ## Package Management
 - **Frontend:** Always use `bun` (never `npm`)
