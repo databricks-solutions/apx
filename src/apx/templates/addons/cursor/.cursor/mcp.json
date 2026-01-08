@@ -7,10 +7,6 @@
     "apx": {
       "command": "uv",
       "args": ["run", "apx", "dev", "mcp"]
-    },
-    "playwright": {
-      "command": "bun",
-      "args": ["x", "--bun", "@playwright/mcp@latest"]
     }
   }
 }

@@ -32,6 +32,12 @@ class SDKMethodSpec(BaseModel):
     full_name: str = Field(description="Full name, e.g., 'clusters.create'")
     signature: str = Field(description="Full method signature")
     docstring: str | None = Field(default=None, description="Method documentation")
+    rst_docs: str | None = Field(
+        default=None, description="RST documentation from docs/ folder"
+    )
+    has_rst: bool = Field(
+        default=False, description="Whether RST documentation is available"
+    )
     parameters: list[SDKParameterInfo] = Field(
         default_factory=list, description="List of parameter specifications"
     )
@@ -70,6 +76,9 @@ class SDKSearchResult(BaseModel):
         description="Total number of methods in the index"
     )
     total_models_indexed: int = Field(description="Total number of models in the index")
+    rst_coverage: float = Field(
+        default=0.0, description="Percentage of methods with RST documentation"
+    )
 
 
 class SDKMethodSpecResponse(BaseModel):
@@ -90,6 +99,18 @@ class SDKModelSpecResponse(BaseModel):
     error: str | None = Field(default=None, description="Error message if not found")
 
 
+class SDKUsageInstructions(BaseModel):
+    """Usage instructions for the Databricks SDK."""
+
+    pagination_guide: str = Field(description="Guide for handling paginated responses")
+    long_running_operations_guide: str = Field(
+        description="Guide for handling long-running operations"
+    )
+    custom_instructions: str = Field(
+        default="", description="Additional custom usage instructions"
+    )
+
+
 # ============================================================================
 # Database Table Models (SQLModel) - Used for SQLite storage
 # ============================================================================
@@ -107,6 +128,8 @@ class SDKMethodTable(SQLModel, table=True):
     full_name: str = SQLField(index=True)
     signature: str
     docstring: str | None = None
+    rst_docs: str | None = None
+    has_rst: bool = SQLField(default=False, index=True)
     parameters_json: str = SQLField(
         default="[]", description="JSON-serialized list of SDKParameterInfo"
     )
@@ -125,6 +148,8 @@ class SDKMethodTable(SQLModel, table=True):
             full_name=self.full_name,
             signature=self.signature,
             docstring=self.docstring,
+            rst_docs=self.rst_docs,
+            has_rst=self.has_rst,
             parameters=parameters,
         )
 
@@ -143,6 +168,8 @@ class SDKMethodTable(SQLModel, table=True):
             full_name=spec.full_name,
             signature=spec.signature,
             docstring=spec.docstring,
+            rst_docs=spec.rst_docs,
+            has_rst=spec.has_rst,
             parameters_json=json.dumps([p.model_dump() for p in spec.parameters]),
         )
 

@@ -8,6 +8,7 @@ requires-python = ">=3.11"
 dependencies = [
     "basedpyright>=1.32.1",
     "databricks-sdk>=0.74.0",
+    "docutils>=0.22.4",
     "fastapi>=0.119.0",
     "hatchling>=1.27.0",
     "httpx>=0.28.1",
@@ -50,6 +51,7 @@ format-jinja = "{{version}}"
 dev = [
     "basedpyright>=1.32.1",
     "databricks-sdk>=0.74.0",
+    "docutils>=0.22.4",
     "fastapi>=0.119.0",
     "mypy>=1.18.2",
     "pydantic-settings>=2.11.0",
@@ -58,6 +60,7 @@ dev = [
     "pytest-cov>=7.0.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.14.0",
+    "sphinx>=9.0.4",
     "sqlmodel>=0.0.27",
     "types-cachetools>=6.2.0.20251022",
     "types-cffi>=1.17.0.20250915",
@@ -83,14 +86,14 @@ version = "{version}"
 '''
 
 [tool.basedpyright]
-exclude = ["src/apx/templates", "**/node_modules", "**/__pycache__", "**/.*"]
+exclude = ["src/apx/templates", "**/node_modules", "**/__pycache__", "**/.*", "experiments"]
 reportUnusedCallResult = false
 reportCallInDefaultInitializer = false
 reportUnusedFunction = false
 
 
 [tool.mypy]
-exclude = ['venv', '.venv', 'src/apx/templates', 'node_modules']
+exclude = ['venv', '.venv', 'src/apx/templates', 'node_modules', 'experiments']
 
 [tool.coverage.run]
 parallel = true
@@ -101,5 +104,6 @@ omit = [
     "**/node_modules",
     "**/__pycache__",
     "**/.*",
-    "**/.jinja2"
+    "**/.jinja2",
+    "experiments"
 ]
