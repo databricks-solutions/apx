@@ -14,10 +14,10 @@ from pydantic import BaseModel, ConfigDict
 from typer import Argument, Exit, Option
 
 from apx.cli.version import with_version
+from apx.models import ProjectMetadata
 from apx.utils import (
     console,
     ensure_dir,
-    get_project_metadata,
     in_path,
     progress_spinner,
 )
@@ -36,7 +36,7 @@ class ApiGeneratorConfig(BaseModel):
     def from_app_dir(cls, app_dir: Path) -> ApiGeneratorConfig:
         """Create config from app directory by reading project metadata."""
         with in_path(app_dir):
-            metadata = get_project_metadata()
+            metadata = ProjectMetadata.read()
             return cls(
                 app_dir=app_dir,
                 app_slug=metadata.app_slug,

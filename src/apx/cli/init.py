@@ -14,12 +14,11 @@ from rich.prompt import Confirm, Prompt
 from typer import Argument, Exit, Option
 
 from apx.cli.version import with_version
-from apx.models import Assistant, Layout, Template
+from apx.models import Assistant, Layout, ProjectMetadata, Template
 from apx.utils import (
     console,
     ensure_dir,
     format_elapsed_ms,
-    generate_metadata_file,
     is_bun_installed,
     is_uv_installed,
     list_profiles,
@@ -354,7 +353,8 @@ def init(
             task = progress.add_task("🐍 Setting up project...", total=None)
 
             # Generate the _metadata.py file
-            generate_metadata_file(app_path)
+            metadata = ProjectMetadata.read(app_path)
+            metadata.generate_metadata_file(app_path)
             # add apx package:
             if apx_package:
                 base_cmd = ["uv", "add", "--dev"]

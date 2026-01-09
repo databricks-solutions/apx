@@ -6,11 +6,9 @@ import random
 import shutil
 import subprocess
 import time
-import tomllib
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 
 import jinja2
 from rich.console import Console
@@ -18,8 +16,6 @@ from rich.markup import escape
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from typer import Exit
 from typing_extensions import override
-
-from apx.models import ProjectMetadata
 
 console = Console()
 
@@ -299,18 +295,6 @@ def run_subprocess(cmd: list[str], cwd: Path, error_msg: str) -> None:
         raise Exit(code=1)
 
 
-def get_project_metadata() -> ProjectMetadata:
-    """Read the project metadata from pyproject.toml."""
-    pyproject_path = Path.cwd() / "pyproject.toml"
-    if not pyproject_path.exists():
-        console.print("[red]❌ pyproject.toml not found in current directory[/red]")
-        raise Exit(code=1)
-    with open(pyproject_path, "rb") as f:
-        data = tomllib.load(f)
-
-    return ProjectMetadata.model_validate(data["tool"]["apx"]["metadata"])
-
-
 async def run_frontend(frontend_port: int):
     """Run the frontend development server."""
     proc = await asyncio.create_subprocess_exec(
@@ -338,27 +322,6 @@ async def run_frontend(frontend_port: int):
 
     await read_stdout()
     await proc.wait()
-
-
-def generate_metadata_file(app_path: Path):
-    pyproject_path = app_path / "pyproject.toml"
-    pyproject: dict[str, Any] = tomllib.loads(pyproject_path.read_text())
-    metadata: dict[str, str] = pyproject["tool"]["apx"]["metadata"]
-    metadata_path = app_path / metadata["metadata-path"]
-
-    # Use /api as default if api-prefix is not specified
-    api_prefix = metadata.get("api-prefix", "/api")
-
-    metadata_path.write_text(
-        "\n".join(
-            [
-                f'app_name = "{metadata["app-name"]}"',
-                f'app_module = "{metadata["app-module"]}"',
-                f'app_slug = "{metadata["app-slug"]}"',
-                f'api_prefix = "{api_prefix}"',
-            ]
-        )
-    )
 
 
 def list_profiles() -> list[str]:

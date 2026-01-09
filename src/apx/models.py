@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import tomllib
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import ClassVar, Literal, Protocol, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -195,6 +197,55 @@ class ProjectMetadata(BaseModel):
         description="URL prefix for API routes.",
         alias="api-prefix",
     )
+
+    @classmethod
+    def read(cls, src_dir: Path | None = None) -> ProjectMetadata:
+        """Read project metadata from pyproject.toml.
+
+        Args:
+            src_dir: Directory containing pyproject.toml. If None, uses Path.cwd().
+
+        Returns:
+            ProjectMetadata instance
+
+        Raises:
+            FileNotFoundError: If pyproject.toml doesn't exist
+            KeyError: If required metadata is missing
+        """
+        if src_dir is None:
+            src_dir = Path.cwd()
+
+        pyproject_path = src_dir / "pyproject.toml"
+        if not pyproject_path.exists():
+            raise FileNotFoundError(f"pyproject.toml not found at {pyproject_path}")
+
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+
+        return cls.model_validate(data["tool"]["apx"]["metadata"])
+
+    def generate_metadata_file(self, app_path: Path) -> None:
+        """Generate the _metadata.py file for the project.
+
+        Args:
+            app_path: Path to the application directory
+        """
+        # Read metadata-path from pyproject.toml (not part of ProjectMetadata model)
+        pyproject_path = app_path / "pyproject.toml"
+        pyproject_data = tomllib.loads(pyproject_path.read_text())
+        metadata_path_str: str = pyproject_data["tool"]["apx"]["metadata"]["metadata-path"]
+        metadata_path = app_path / metadata_path_str
+
+        metadata_path.write_text(
+            "\n".join(
+                [
+                    f'app_name = "{self.app_name}"',
+                    f'app_module = "{self.app_module}"',
+                    f'app_slug = "{self.app_slug}"',
+                    f'api_prefix = "{self.api_prefix}"',
+                ]
+            )
+        )
 
 
 class DevConfig(BaseModel):

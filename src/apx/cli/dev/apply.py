@@ -9,8 +9,8 @@ from rich.prompt import Confirm
 from typer import Argument, Exit, Option
 
 from apx.cli.version import with_version
-from apx.models import Assistant, Layout, Template
-from apx.utils import console, get_project_metadata, process_template_directory
+from apx.models import Assistant, Layout, ProjectMetadata, Template
+from apx.utils import console, process_template_directory
 
 
 def get_all_addon_names() -> list[str]:
@@ -150,7 +150,7 @@ def apply(
 
     # Get project metadata
     try:
-        metadata = get_project_metadata()
+        metadata = ProjectMetadata.read()
         app_name = metadata.app_name
         app_slug = metadata.app_slug
     except Exception as e:

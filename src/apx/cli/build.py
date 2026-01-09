@@ -9,11 +9,11 @@ from typer import Argument, Exit, Option
 
 from apx.cli.version import with_version
 from apx.cli.openapi import run_openapi
+from apx.models import ProjectMetadata
 from apx.utils import (
     console,
     ensure_dir,
     format_elapsed_ms,
-    generate_metadata_file,
     progress_spinner,
 )
 
@@ -62,8 +62,15 @@ def build(
     # add a .build/.gitignore file
     (build_dir / ".gitignore").write_text("*\n")
 
-    # Generate the _metadata.py file
-    generate_metadata_file(app_path)
+    # Read project metadata and generate the _metadata.py file
+    metadata = ProjectMetadata.read(app_path)
+    metadata.generate_metadata_file(app_path)
+
+    # Ensure __dist__ directory exists before loading app
+    # (needed because app imports StaticFiles pointing to __dist__)
+    dist_dir = app_path / "src" / metadata.app_slug / "__dist__"
+    ensure_dir(dist_dir)
+    (dist_dir / ".gitignore").write_text("*\n")
 
     # Generate the openapi schema and API client
     run_openapi(app_path, watch=False)

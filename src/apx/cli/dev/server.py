@@ -72,7 +72,6 @@ from apx.models import (
     PortsConfig,
     PortsResponse,
     ProcessRunningStatus,
-    ProjectMetadata,
     StatusResponse,
     TrackedProcess,
 )
@@ -527,9 +526,9 @@ def create_dev_server(app_dir: Path) -> FastAPI:
 
         # Get app module name
         if state.app_dir:
-            from apx.utils import get_project_metadata
+            from apx.models import ProjectMetadata
 
-            metadata: ProjectMetadata = get_project_metadata()
+            metadata: ProjectMetadata = ProjectMetadata.read()
             app_module_name: str = metadata.app_module
         else:
             return ActionResponse(status="error", message="App directory not set")
@@ -665,7 +664,7 @@ def create_dev_server(app_dir: Path) -> FastAPI:
     @app.get("/__apx__/openapi-status", response_model=OpenApiStatusResponse)
     async def get_openapi_status() -> OpenApiStatusResponse:
         """Get OpenAPI regeneration status and timestamps."""
-        from apx.utils import get_project_metadata
+        from apx.models import ProjectMetadata
 
         openapi_schema_path: str | None = None
         api_ts_path: str | None = None
@@ -676,7 +675,7 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 openapi_schema_path = str(openapi_json)
 
             try:
-                metadata = get_project_metadata()
+                metadata = ProjectMetadata.read()
                 api_ts = (
                     state.app_dir / "src" / metadata.app_slug / "ui" / "lib" / "api.ts"
                 )
@@ -911,7 +910,7 @@ def run_dev_server(
         port: TCP port to listen on
         host: Host to bind to
     """
-    # Change to app directory so get_project_metadata() works correctly
+    # Change to app directory so ProjectMetadata.read() works correctly
     os.chdir(app_dir)
 
     # Initialize state with partial config (ports will be fully set by start request)

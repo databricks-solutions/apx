@@ -337,7 +337,7 @@ async def test_get_metadata_success():
     )
 
     with (
-        patch("apx.mcp.common.get_project_metadata", return_value=mock_metadata),
+        patch("apx.mcp.common.ProjectMetadata.read", return_value=mock_metadata),
         patch("apx.mcp.common.apx_version", "1.0.0"),
     ):
         result = await get_metadata()
@@ -354,7 +354,7 @@ async def test_get_metadata_failure():
     """Test the get_metadata tool when metadata retrieval fails."""
     with (
         patch(
-            "apx.mcp.common.get_project_metadata",
+            "apx.mcp.common.ProjectMetadata.read",
             side_effect=Exception("pyproject.toml not found"),
         ),
     ):
@@ -489,7 +489,7 @@ async def test_mcp_tool_responses_are_valid_models():
         patch("apx.mcp.common._get_ports", side_effect=mock_get_ports),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
         patch(
-            "apx.mcp.common.get_project_metadata",
+            "apx.mcp.common.ProjectMetadata.read",
             return_value=ProjectMetadata(
                 **{
                     "app-name": "Test App",

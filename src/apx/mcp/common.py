@@ -33,9 +33,9 @@ from apx.models import (
     OpenApiStatusResponse,
     PortsConfig,
     PortsResponse,
+    ProjectMetadata,
     RouteInfo,
 )
-from apx.utils import get_project_metadata
 
 
 class McpSimpleStatusResponse(BaseModel):
@@ -654,7 +654,7 @@ async def get_metadata() -> McpMetadataResponse | McpErrorResponse:
         Or McpErrorResponse if metadata retrieval fails
     """
     try:
-        metadata = await asyncio.to_thread(get_project_metadata)
+        metadata = await asyncio.to_thread(ProjectMetadata.read)
         return McpMetadataResponse(
             app_name=metadata.app_name,
             app_module=metadata.app_module,
