@@ -233,7 +233,9 @@ class ProjectMetadata(BaseModel):
         # Read metadata-path from pyproject.toml (not part of ProjectMetadata model)
         pyproject_path = app_path / "pyproject.toml"
         pyproject_data = tomllib.loads(pyproject_path.read_text())
-        metadata_path_str: str = pyproject_data["tool"]["apx"]["metadata"]["metadata-path"]
+        metadata_path_str: str = pyproject_data["tool"]["apx"]["metadata"][
+            "metadata-path"
+        ]
         metadata_path = app_path / metadata_path_str
 
         metadata_path.write_text(
