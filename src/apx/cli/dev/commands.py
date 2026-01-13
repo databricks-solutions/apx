@@ -20,6 +20,7 @@ from apx.cli.version import with_version
 from apx.models import DevServerConfig
 from apx.utils import (
     console,
+    ensure_apx_plugin,
     is_bun_installed,
 )
 
@@ -135,6 +136,9 @@ def dev_start(
 
     if app_dir is None:
         app_dir = Path.cwd()
+
+    # Ensure .apx/plugin.ts exists
+    ensure_apx_plugin(app_dir)
 
     # Build config from CLI options (use defaults from DevServerConfig if not specified)
     default_config = DevServerConfig()
@@ -279,6 +283,9 @@ def dev_restart(
     """Restart development servers using the dev server API."""
     if app_dir is None:
         app_dir = Path.cwd()
+
+    # Ensure .apx/plugin.ts exists
+    ensure_apx_plugin(app_dir)
 
     core = DevCore(app_dir)
     core.restart()

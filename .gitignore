@@ -34,3 +34,4 @@ htmlcov/
 .apx/
 
 experiments/
+!src/apx/templates/base/.apx/plugin.ts

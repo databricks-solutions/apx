@@ -18,6 +18,7 @@ from apx.cli.version import with_version
 from apx.models import ProjectMetadata
 from apx.utils import (
     console,
+    ensure_apx_plugin,
     ensure_dir,
     in_path,
     progress_spinner,
@@ -371,5 +372,8 @@ def openapi(
     """Generate OpenAPI schema from FastAPI app and generate TypeScript API client."""
     if app_dir is None:
         app_dir = Path.cwd()
+
+    # Ensure .apx/plugin.ts exists
+    ensure_apx_plugin(app_dir)
 
     run_openapi(app_dir, force=force)

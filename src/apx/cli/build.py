@@ -12,6 +12,7 @@ from apx.cli.openapi import run_openapi
 from apx.models import ProjectMetadata
 from apx.utils import (
     console,
+    ensure_apx_plugin,
     ensure_dir,
     format_elapsed_ms,
     progress_spinner,
@@ -50,6 +51,9 @@ def build(
     # ensure .apx directory exists
     apx_dir = app_path / ".apx"
     ensure_dir(apx_dir)
+
+    # ensure .apx/plugin.ts exists
+    ensure_apx_plugin(app_path)
 
     start_time_perf = time.perf_counter()
     # Clean up the build directory if it exists
