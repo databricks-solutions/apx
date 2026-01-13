@@ -1,6 +1,9 @@
+import sys
+
 from rich import print
 from typer import Typer
 
+from apx._core import run_cli
 from apx._version import version as apx_version
 from apx.cli.build import build as build_command
 from apx.cli.dev.commands import dev_app
@@ -16,7 +19,7 @@ app = Typer(
 
 @app.callback()
 @with_version
-def main():
+def cli():
     """Project quickstarter CLI."""
     pass
 
@@ -40,9 +43,11 @@ app.command(name="openapi", help="Generate OpenAPI schema and API client")(
 app.add_typer(dev_app, name="dev")
 
 
-def entrypoint():
+def deprecated_main():
     app()
 
+def main():
+    raise SystemExit(run_cli(sys.argv))
 
 if __name__ == "__main__":
-    entrypoint()
+    main()

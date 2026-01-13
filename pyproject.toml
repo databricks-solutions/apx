@@ -36,17 +36,6 @@ classifiers = [
     "Framework :: Hatch",
 ]
 
-[build-system]
-requires = ["hatchling", "uv-dynamic-versioning>=0.7.0"]
-build-backend = "hatchling.build"
-
-[tool.hatch.version]
-source = "uv-dynamic-versioning"
-
-[tool.uv-dynamic-versioning]
-vcs = "git"
-format-jinja = "{{version}}"
-
 [dependency-groups]
 dev = [
     "basedpyright>=1.32.1",
@@ -75,14 +64,6 @@ dev = [
     "types-ujson>=5.10.0.20250822",
 ]
 
-[project.scripts]
-apx = "apx.__main__:entrypoint"
-
-[tool.hatch.build.hooks.version]
-path = "src/apx/_version.py"
-template = '''
-version = "{version}"
-'''
 
 [tool.basedpyright]
 exclude = ["src/apx/templates", "**/node_modules", "**/__pycache__", "**/.*", "experiments"]
@@ -106,3 +87,19 @@ omit = [
     "**/.jinja2",
     "experiments"
 ]
+
+[project.scripts]
+apx-old = "apx.__main__:deprecated_main"
+apx = "apx.__main__:main"
+
+[tool.maturin]
+module-name = "apx._core"
+python-packages = ["apx"]
+python-source = "src"
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
