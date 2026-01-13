@@ -1,7 +1,5 @@
 """Tests for the MCP server implementation."""
 
-import io
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -44,21 +42,19 @@ def mock_status_response():
         frontend_running=True,
         backend_running=True,
         openapi_running=True,
-        dev_server_port=7000,
+        dev_server_port=9000,
         frontend_port=5000,
         backend_port=8000,
     )
 
 
 @pytest.fixture
-def mock_manager(mock_project_config):
-    """Create a mock DevManager."""
-    manager = MagicMock()
-    manager.socket_path = Path("/test/project/.apx/dev.sock")
-    manager.is_dev_server_running = Mock(return_value=True)
-    manager.start = Mock()
-    manager.stop = Mock()
-    return manager
+def mock_core(mock_project_config):
+    """Create a mock DevCore."""
+    core = MagicMock()
+    core.is_running = Mock(return_value=True)
+    core.get_or_create_config = Mock(return_value=mock_project_config)
+    return core
 
 
 @pytest.fixture
@@ -72,11 +68,29 @@ def mock_client(mock_status_response):
     return client
 
 
+# Helper to create a fake subprocess for testing CLI-based MCP tools
+class FakeProcess:
+    def __init__(self, returncode: int = 0, stdout: bytes = b"", stderr: bytes = b""):
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+
+    async def communicate(self):
+        return self._stdout, self._stderr
+
+
 @pytest.mark.asyncio
-async def test_start_success(mock_manager):
-    """Test the start tool with successful server startup."""
+async def test_start_success():
+    """Test the start tool with successful server startup via subprocess."""
+
+    async def mock_create_subprocess_exec(*args, **kwargs):
+        return FakeProcess(returncode=0, stdout=b"Started successfully")
+
     with (
-        patch("apx.mcp.common._get_manager", return_value=mock_manager),
+        patch(
+            "apx.mcp.common.asyncio.create_subprocess_exec",
+            side_effect=mock_create_subprocess_exec,
+        ),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await start(
@@ -91,17 +105,19 @@ async def test_start_success(mock_manager):
         assert result.status == "success"
         assert "Development servers started successfully" in result.message
 
-        # Verify manager.start was called
-        mock_manager.start.assert_called_once()
-
 
 @pytest.mark.asyncio
-async def test_start_failure(mock_manager):
-    """Test the start tool when server startup fails."""
-    mock_manager.start.side_effect = Exception("Port already in use")
+async def test_start_failure():
+    """Test the start tool when server startup fails via subprocess."""
+
+    async def mock_create_subprocess_exec(*args, **kwargs):
+        return FakeProcess(returncode=1, stdout=b"", stderr=b"Port already in use")
 
     with (
-        patch("apx.mcp.common._get_manager", return_value=mock_manager),
+        patch(
+            "apx.mcp.common.asyncio.create_subprocess_exec",
+            side_effect=mock_create_subprocess_exec,
+        ),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await start()
@@ -112,10 +128,17 @@ async def test_start_failure(mock_manager):
 
 
 @pytest.mark.asyncio
-async def test_restart_success(mock_manager):
-    """Test the restart tool with successful restart."""
+async def test_restart_success():
+    """Test the restart tool with successful restart via subprocess."""
+
+    async def mock_create_subprocess_exec(*args, **kwargs):
+        return FakeProcess(returncode=0, stdout=b"Restarted successfully")
+
     with (
-        patch("apx.mcp.common._get_manager", return_value=mock_manager),
+        patch(
+            "apx.mcp.common.asyncio.create_subprocess_exec",
+            side_effect=mock_create_subprocess_exec,
+        ),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await restart()
@@ -124,54 +147,19 @@ async def test_restart_success(mock_manager):
         assert result.status == "success"
         assert "Development servers restarted successfully" in result.message
 
-        # Verify manager methods were called
-        mock_manager.stop.assert_called_once()
-        mock_manager.start.assert_called_once()
-
 
 @pytest.mark.asyncio
-async def test_restart_no_server():
-    """Test the restart tool when no server is running."""
-    manager = MagicMock()
-    manager.is_dev_server_running = Mock(return_value=False)
-    manager.socket_path = Path("/test/project/.apx/dev.sock")
+async def test_restart_failure():
+    """Test the restart tool when restart fails via subprocess."""
+
+    async def mock_create_subprocess_exec(*args, **kwargs):
+        return FakeProcess(returncode=1, stderr=b"Connection refused")
 
     with (
-        patch("apx.mcp.common._get_manager", return_value=manager),
-        patch("pathlib.Path.cwd", return_value=Path("/test/project")),
-    ):
-        result = await restart()
-
-        assert isinstance(result, McpActionResponse)
-        assert result.status == "error"
-        assert "Development server is not running" in result.message
-
-
-@pytest.mark.asyncio
-async def test_restart_server_not_running():
-    """Test the restart tool when server is not running."""
-    manager = MagicMock()
-    manager.is_dev_server_running = Mock(return_value=False)
-    manager.socket_path = Path("/test/project/.apx/dev.sock")
-
-    with (
-        patch("apx.mcp.common._get_manager", return_value=manager),
-        patch("pathlib.Path.cwd", return_value=Path("/test/project")),
-    ):
-        result = await restart()
-
-        assert isinstance(result, McpActionResponse)
-        assert result.status == "error"
-        assert "Development server is not running" in result.message
-
-
-@pytest.mark.asyncio
-async def test_restart_failure(mock_manager):
-    """Test the restart tool when restart fails."""
-    mock_manager.start.side_effect = Exception("Connection refused")
-
-    with (
-        patch("apx.mcp.common._get_manager", return_value=mock_manager),
+        patch(
+            "apx.mcp.common.asyncio.create_subprocess_exec",
+            side_effect=mock_create_subprocess_exec,
+        ),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await restart()
@@ -182,10 +170,17 @@ async def test_restart_failure(mock_manager):
 
 
 @pytest.mark.asyncio
-async def test_stop_success(mock_manager):
-    """Test the stop tool with successful stop."""
+async def test_stop_success():
+    """Test the stop tool with successful stop via subprocess."""
+
+    async def mock_create_subprocess_exec(*args, **kwargs):
+        return FakeProcess(returncode=0, stdout=b"Stopped successfully")
+
     with (
-        patch("apx.mcp.common._get_manager", return_value=mock_manager),
+        patch(
+            "apx.mcp.common.asyncio.create_subprocess_exec",
+            side_effect=mock_create_subprocess_exec,
+        ),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await stop()
@@ -194,17 +189,19 @@ async def test_stop_success(mock_manager):
         assert result.status == "success"
         assert "Development servers stopped successfully" in result.message
 
-        # Verify manager.stop was called
-        mock_manager.stop.assert_called_once()
-
 
 @pytest.mark.asyncio
-async def test_stop_failure(mock_manager):
-    """Test the stop tool when stop fails."""
-    mock_manager.stop.side_effect = Exception("Permission denied")
+async def test_stop_failure():
+    """Test the stop tool when stop fails via subprocess."""
+
+    async def mock_create_subprocess_exec(*args, **kwargs):
+        return FakeProcess(returncode=1, stderr=b"Permission denied")
 
     with (
-        patch("apx.mcp.common._get_manager", return_value=mock_manager),
+        patch(
+            "apx.mcp.common.asyncio.create_subprocess_exec",
+            side_effect=mock_create_subprocess_exec,
+        ),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await stop()
@@ -215,14 +212,14 @@ async def test_stop_failure(mock_manager):
 
 
 @pytest.mark.asyncio
-async def test_status_all_running(mock_manager, mock_client, mock_status_response):
+async def test_status_all_running(mock_core, mock_client, mock_status_response):
     """Test the status tool when all servers are running."""
     # Mock _get_ports to return PortsResponse
     from apx.models import PortsResponse
 
     def mock_get_ports(client):
         return PortsResponse(
-            dev_server_port=7000,
+            dev_server_port=9000,
             frontend_port=5173,
             backend_port=8000,
             host="localhost",
@@ -231,11 +228,11 @@ async def test_status_all_running(mock_manager, mock_client, mock_status_respons
 
     # Get config with dev_server_port set
     mock_config = ProjectConfig()
-    mock_config.dev.dev_server_port = 7000
-    mock_manager.get_or_create_config = Mock(return_value=mock_config)
+    mock_config.dev.dev_server_port = 9000
+    mock_core.get_or_create_config = Mock(return_value=mock_config)
 
     with (
-        patch("apx.mcp.common._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common._get_core", return_value=mock_core),
         patch("apx.mcp.common.DevServerClient", return_value=mock_client),
         patch("apx.mcp.common._get_ports", side_effect=mock_get_ports),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
@@ -244,7 +241,7 @@ async def test_status_all_running(mock_manager, mock_client, mock_status_respons
 
         assert isinstance(result, McpSimpleStatusResponse)
         assert result.dev_server_running is True
-        assert result.dev_server_url == "http://localhost:7000"
+        assert result.dev_server_url == "http://localhost:9000"
         assert result.api_prefix == "/api"
         assert result.frontend_running is True
         assert result.backend_running is True
@@ -257,11 +254,11 @@ async def test_status_all_running(mock_manager, mock_client, mock_status_respons
 @pytest.mark.asyncio
 async def test_status_no_server():
     """Test the status tool when no server is configured."""
-    manager = MagicMock()
-    manager.is_dev_server_running = Mock(return_value=False)
+    core = MagicMock()
+    core.is_running = Mock(return_value=False)
 
     with (
-        patch("apx.mcp.common._get_manager", return_value=manager),
+        patch("apx.mcp.common._get_core", return_value=core),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await status()
@@ -276,12 +273,12 @@ async def test_status_no_server():
 
 
 @pytest.mark.asyncio
-async def test_status_server_not_running(mock_manager):
+async def test_status_server_not_running(mock_core):
     """Test the status tool when server process is not running."""
-    mock_manager.is_dev_server_running.return_value = False
+    mock_core.is_running.return_value = False
 
     with (
-        patch("apx.mcp.common._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common._get_core", return_value=mock_core),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
     ):
         result = await status()
@@ -294,7 +291,7 @@ async def test_status_server_not_running(mock_manager):
 
 
 @pytest.mark.asyncio
-async def test_status_client_error(mock_manager, mock_client):
+async def test_status_client_error(mock_core, mock_client):
     """Test the status tool when client connection fails."""
 
     # Mock _get_ports to fail
@@ -303,11 +300,11 @@ async def test_status_client_error(mock_manager, mock_client):
 
     # Get config with dev_server_port set
     mock_config = ProjectConfig()
-    mock_config.dev.dev_server_port = 7000
-    mock_manager.get_or_create_config = Mock(return_value=mock_config)
+    mock_config.dev.dev_server_port = 9000
+    mock_core.get_or_create_config = Mock(return_value=mock_config)
 
     with (
-        patch("apx.mcp.common._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common._get_core", return_value=mock_core),
         patch("apx.mcp.common.DevServerClient", return_value=mock_client),
         patch("apx.mcp.common._get_ports", side_effect=mock_get_ports_fail),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
@@ -317,7 +314,7 @@ async def test_status_client_error(mock_manager, mock_client):
         # Should still return server info even if client fails
         assert isinstance(result, McpSimpleStatusResponse)
         assert result.dev_server_running is True
-        assert result.dev_server_url == "http://localhost:7000"
+        assert result.dev_server_url == "http://localhost:9000"
         # But process statuses should be False
         assert result.frontend_running is False
         assert result.backend_running is False
@@ -365,7 +362,7 @@ async def test_get_metadata_failure():
 
 
 @pytest.mark.asyncio
-async def test_status_with_mocked_response(mock_manager, mock_status_response):
+async def test_status_with_mocked_response(mock_core, mock_status_response):
     """Test status tool with a specific mocked status response."""
     from apx.models import PortsResponse
 
@@ -374,7 +371,7 @@ async def test_status_with_mocked_response(mock_manager, mock_status_response):
         frontend_running=False,
         backend_running=True,
         openapi_running=False,
-        dev_server_port=7000,
+        dev_server_port=9000,
         frontend_port=3000,
         backend_port=8080,
     )
@@ -384,7 +381,7 @@ async def test_status_with_mocked_response(mock_manager, mock_status_response):
 
     def mock_get_ports(client):
         return PortsResponse(
-            dev_server_port=7000,
+            dev_server_port=9000,
             frontend_port=3000,
             backend_port=8080,
             host="localhost",
@@ -393,11 +390,11 @@ async def test_status_with_mocked_response(mock_manager, mock_status_response):
 
     # Get config with dev_server_port set
     mock_config = ProjectConfig()
-    mock_config.dev.dev_server_port = 7000
-    mock_manager.get_or_create_config = Mock(return_value=mock_config)
+    mock_config.dev.dev_server_port = 9000
+    mock_core.get_or_create_config = Mock(return_value=mock_config)
 
     with (
-        patch("apx.mcp.common._get_manager", return_value=mock_manager),
+        patch("apx.mcp.common._get_core", return_value=mock_core),
         patch("apx.mcp.common.DevServerClient", return_value=client),
         patch("apx.mcp.common._get_ports", side_effect=mock_get_ports),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
@@ -409,55 +406,19 @@ async def test_status_with_mocked_response(mock_manager, mock_status_response):
         assert result.frontend_running is False
         assert result.backend_running is True
         assert result.openapi_running is False
-        assert result.dev_server_url == "http://localhost:7000"
+        assert result.dev_server_url == "http://localhost:9000"
         assert result.api_prefix == "/api"
 
 
 @pytest.mark.asyncio
-async def test_start_suppresses_console_output(mock_manager):
-    """Test that start tool suppresses console output when called."""
-    original_stdout = sys.stdout
-    captured_output = io.StringIO()
-
-    try:
-        sys.stdout = captured_output
-
-        with (
-            patch("apx.mcp.common._get_manager", return_value=mock_manager),
-            patch("pathlib.Path.cwd", return_value=Path("/test/project")),
-        ):
-            result = await start()
-
-            # Verify the result is successful
-            assert isinstance(result, McpActionResponse)
-            assert result.status == "success"
-
-            # Verify that console output was suppressed
-            # The captured output should be empty or minimal
-            output = captured_output.getvalue()
-            # Console.print statements from manager.start() should not appear
-            assert "🔍 Finding" not in output
-            assert "✓ Found available ports" not in output
-            assert "🚀 Starting" not in output
-            assert "Dev Server:" not in output
-    finally:
-        sys.stdout = original_stdout
-
-
-@pytest.mark.asyncio
-async def test_mcp_tool_responses_are_valid_models():
+async def test_mcp_tool_responses_are_valid_models(mock_core):
     """Test that MCP tool responses are valid Pydantic models."""
     from apx.models import PortsResponse
 
-    manager = MagicMock()
-    manager.is_dev_server_running = Mock(return_value=True)
-    manager.start = Mock()
-    manager.stop = Mock()
-
     # Get config with dev_server_port set
     mock_config = ProjectConfig()
-    mock_config.dev.dev_server_port = 7000
-    manager.get_or_create_config = Mock(return_value=mock_config)
+    mock_config.dev.dev_server_port = 9000
+    mock_core.get_or_create_config = Mock(return_value=mock_config)
 
     client = MagicMock()
     client.status = Mock(
@@ -465,7 +426,7 @@ async def test_mcp_tool_responses_are_valid_models():
             frontend_running=True,
             backend_running=True,
             openapi_running=True,
-            dev_server_port=7000,
+            dev_server_port=9000,
             frontend_port=5000,
             backend_port=8000,
         )
@@ -476,15 +437,18 @@ async def test_mcp_tool_responses_are_valid_models():
 
     def mock_get_ports(client):
         return PortsResponse(
-            dev_server_port=7000,
+            dev_server_port=9000,
             frontend_port=5000,
             backend_port=8000,
             host="localhost",
             api_prefix="/api",
         )
 
+    async def mock_subprocess_success(*args, **kwargs):
+        return FakeProcess(returncode=0)
+
     with (
-        patch("apx.mcp.common._get_manager", return_value=manager),
+        patch("apx.mcp.common._get_core", return_value=mock_core),
         patch("apx.mcp.common.DevServerClient", return_value=client),
         patch("apx.mcp.common._get_ports", side_effect=mock_get_ports),
         patch("pathlib.Path.cwd", return_value=Path("/test/project")),
@@ -499,6 +463,10 @@ async def test_mcp_tool_responses_are_valid_models():
             ),
         ),
         patch("apx.mcp.common.apx_version", "1.0.0"),
+        patch(
+            "apx.mcp.common.asyncio.create_subprocess_exec",
+            side_effect=mock_subprocess_success,
+        ),
     ):
         # Test start response
         start_result = await start()

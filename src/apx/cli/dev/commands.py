@@ -9,20 +9,15 @@ from typing import Annotated
 from dotenv import load_dotenv
 from typer import Argument, Exit, Option, Typer
 
-from databricks.sdk import WorkspaceClient
-
-from apx import __version__ as apx_lib_version
 from apx.cli.dev.apply import apply as apply_command
-from apx.cli.dev.manager import (
-    DevManager,
+from apx.cli.dev.core import (
+    DevCore,
     validate_databricks_credentials,
     delete_token_from_keyring,
-    is_port_available,
     save_token_id,
 )
-from apx.cli.dev.logging import suppress_output_and_logs
 from apx.cli.version import with_version
-from apx.models import DevServerConfig, PortsConfig
+from apx.models import DevServerConfig
 from apx.utils import (
     console,
     is_bun_installed,
@@ -53,6 +48,47 @@ def _run_server(
     from apx.cli.dev.server import run_dev_server
 
     run_dev_server(app_dir, dev_server_port, host)
+
+
+@dev_app.command(
+    name="_run_backend",
+    hidden=True,
+    help="Internal: Run backend server with hot reload",
+)
+def _run_backend(
+    app_dir: Path = Argument(..., help="App directory"),
+    backend_port: int = Argument(..., help="Backend port"),
+    host: str = Argument(..., help="Host for backend server"),
+    obo: str = Argument(..., help="Enable OBO (true/false)"),
+):
+    """Internal command to run backend server. Not meant for direct use.
+
+    This command is spawned as a subprocess by the dev server.
+    It handles hot-reload internally using watchfiles.
+    """
+    import os
+
+    from apx.cli.dev.core import run_backend_server
+    from apx.models import ProjectMetadata
+
+    # Change to app directory so ProjectMetadata.read() works correctly
+    os.chdir(app_dir)
+
+    # Get app module name from pyproject.toml
+    metadata: ProjectMetadata = ProjectMetadata.read()
+    app_module_name: str = metadata.app_module
+
+    # Parse OBO flag
+    obo_enabled = obo.lower() == "true"
+
+    # Run the backend server (blocking with hot reload)
+    run_backend_server(
+        cwd=app_dir,
+        app_module_name=app_module_name,
+        host=host,
+        backend_port=backend_port,
+        obo=obo_enabled,
+    )
 
 
 @dev_app.command(name="start", help="Start development servers in detached mode")
@@ -123,55 +159,54 @@ def dev_start(
             load_dotenv(dotenv_path)
 
         try:
-            with suppress_output_and_logs():
-                ws = WorkspaceClient(product="apx/dev", product_version=apx_lib_version)
+            if not validate_databricks_credentials():
+                # Clear any cached OBO tokens since they were created with invalid credentials
+                keyring_id = str(app_dir.resolve())
+                console.print(
+                    "[yellow]⚠️  Invalid Databricks credentials detected. Clearing cached tokens...[/yellow]"
+                )
+                delete_token_from_keyring(keyring_id)
+                save_token_id(app_dir, token_id="")  # Clear the token_id
+
+                # Raise error and don't start the server
+                console.print(
+                    "[red]❌ Failed to authenticate with Databricks. Cannot start server with --obo flag.[/red]"
+                )
+                console.print(
+                    "[yellow]💡 Please check your Databricks credentials and try again.[/yellow]"
+                )
+
+                # If using a specific profile, show re-authentication command
+                profile_name = os.environ.get("DATABRICKS_CONFIG_PROFILE")
+                if profile_name:
+                    console.print()
+                    console.print(
+                        "[cyan]Use Databricks CLI to re-authenticate with identified profile:[/cyan]"
+                    )
+                    console.print()
+                    console.print(
+                        f"  [bold]> databricks auth login -p {profile_name}[/bold]"
+                    )
+                    console.print()
+
+                raise Exit(code=1)
+        except Exit:
+            raise
         except Exception as e:
             console.print(
-                f"[red]❌ Failed to initialize Databricks client for OBO token generation: {e}[/red]"
+                f"[red]❌ Failed to validate Databricks credentials: {e}[/red]"
             )
             console.print(
                 "[yellow]💡 Make sure you have Databricks credentials configured.[/yellow]"
             )
             raise Exit(code=1)
 
-        if not validate_databricks_credentials(ws):
-            # Clear any cached OBO tokens since they were created with invalid credentials
-            keyring_id = str(app_dir.resolve())
-            console.print(
-                "[yellow]⚠️  Invalid Databricks credentials detected. Clearing cached tokens...[/yellow]"
-            )
-            delete_token_from_keyring(keyring_id)
-            save_token_id(app_dir, token_id="")  # Clear the token_id
-
-            # Raise error and don't start the server
-            console.print(
-                "[red]❌ Failed to authenticate with Databricks. Cannot start server with --obo flag.[/red]"
-            )
-            console.print(
-                "[yellow]💡 Please check your Databricks credentials and try again.[/yellow]"
-            )
-
-            # If using a specific profile, show re-authentication command
-            profile_name = os.environ.get("DATABRICKS_CONFIG_PROFILE")
-            if profile_name:
-                console.print()
-                console.print(
-                    "[cyan]Use Databricks CLI to re-authenticate with identified profile:[/cyan]"
-                )
-                console.print()
-                console.print(
-                    f"  [bold]> databricks auth login -p {profile_name}[/bold]"
-                )
-                console.print()
-
-            raise Exit(code=1)
-
         console.print("[green]✓[/green] Databricks credentials validated")
         console.print()
 
-    # Use DevManager to start servers with the config
-    manager = DevManager(app_dir)
-    manager.start(config=config)
+    # Use DevCore to start servers with the config
+    core = DevCore(app_dir)
+    core.start(config=config)
 
     # If watch mode is enabled, stream logs until Ctrl+C
     if watch:
@@ -182,7 +217,7 @@ def dev_start(
         console.print()
         # stream_logs catches KeyboardInterrupt internally, so it returns normally
         # After it returns (for any reason), we should stop the servers
-        manager.stream_logs(
+        core.stream_logs(
             duration_seconds=None,
             ui_only=False,
             backend_only=False,
@@ -193,7 +228,7 @@ def dev_start(
         )
         console.print()
         console.print("[bold yellow]🛑 Stopping development servers...[/bold yellow]")
-        manager.stop()
+        core.stop()
 
 
 @dev_app.command(name="status", help="Check the status of development servers")
@@ -210,9 +245,8 @@ def dev_status(
     if app_dir is None:
         app_dir = Path.cwd()
 
-    # Use DevManager to check status
-    manager = DevManager(app_dir)
-    manager.status()
+    core = DevCore(app_dir)
+    core.status()
 
 
 @dev_app.command(name="stop", help="Stop development servers")
@@ -229,9 +263,8 @@ def dev_stop(
     if app_dir is None:
         app_dir = Path.cwd()
 
-    # Use DevManager to stop servers
-    manager = DevManager(app_dir)
-    manager.stop()
+    core = DevCore(app_dir)
+    core.stop()
 
 
 @dev_app.command(name="restart", help="Restart development servers")
@@ -247,52 +280,8 @@ def dev_restart(
     if app_dir is None:
         app_dir = Path.cwd()
 
-    # Use DevManager to restart servers
-    manager = DevManager(app_dir)
-
-    if not manager.is_dev_server_running():
-        console.print("[yellow]No development server found. Starting...[/yellow]")
-        manager.start()
-        console.print(
-            "[bold green]✨ Development servers started successfully![/bold green]"
-        )
-        return
-
-    console.print("[bold yellow]🔄 Restarting development servers...[/bold yellow]")
-
-    # Capture current port configuration before stopping
-    project_config = manager.get_or_create_config()
-    old_dev_port = project_config.dev.dev_server_port
-
-    # Stop the server
-    manager.stop()
-
-    # Check if the dev server port is available for reuse.
-    # Use allow_reuse=True to match uvicorn's SO_REUSEADDR behavior,
-    # which allows binding to ports in TIME_WAIT state.
-    if old_dev_port is not None:
-        # Check with allow_reuse=True since uvicorn uses SO_REUSEADDR
-        if is_port_available(old_dev_port, allow_reuse=True):
-            console.print(
-                f"[green]✓[/green] Port {old_dev_port} is available for reuse"
-            )
-        else:
-            console.print(
-                f"[yellow]⚠️  Port {old_dev_port} still in use, will find new port[/yellow]"
-            )
-            old_dev_port = None  # Clear so we don't try to reuse it
-
-    # Build preferred ports from old configuration (if available)
-    preferred_ports: PortsConfig | None = None
-    if old_dev_port is not None:
-        preferred_ports = PortsConfig(dev_server_port=old_dev_port)
-
-    # Start with preferred ports
-    manager.start(preferred_ports=preferred_ports)
-
-    console.print(
-        "[bold green]✨ Development servers restarted successfully![/bold green]"
-    )
+    core = DevCore(app_dir)
+    core.restart()
 
 
 @dev_app.command(name="logs", help="Display logs from development servers")
@@ -351,9 +340,8 @@ def dev_logs(
     if app_dir is None:
         app_dir = Path.cwd()
 
-    # Use DevManager to stream logs
-    manager = DevManager(app_dir)
-    manager.stream_logs(
+    core = DevCore(app_dir)
+    core.stream_logs(
         duration_seconds=duration,
         ui_only=ui,
         backend_only=backend,

@@ -1,19 +1,19 @@
 """Centralized FastAPI dev server with reverse proxy for frontend and backend.
 
 Architecture:
-- Runs as a TCP server on localhost:7000-7999
+- Runs as a TCP server on localhost:9000-9999
 - Reverse proxies requests:
   - `/__apx__/*` -> Internal management endpoints
-  - `/<api_prefix>/*` -> Backend server (in-process uvicorn)
-  - `/*` -> Frontend server (vite/bun dev server)
-- Manages frontend as subprocess, backend runs in-process
+  - `/<api_prefix>/*` -> Backend server (subprocess)
+  - `/*` -> Frontend server (vite/bun subprocess)
+- Manages both frontend and backend as subprocesses for clean shutdown
 - Supports WebSocket proxying for HMR and real-time features
 
 Key Features:
 1. Single entry point for all development traffic
 2. Reverse proxy with WebSocket support
 3. In-memory log streaming via SSE
-4. Graceful shutdown with connection draining
+4. Graceful shutdown with SIGTERM to subprocesses
 """
 
 import asyncio
@@ -21,7 +21,7 @@ import datetime
 import json
 import os
 import signal
-import sys
+import subprocess
 from collections import deque
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -36,23 +36,18 @@ from fastapi.responses import Response, StreamingResponse
 from starlette.requests import Request
 
 from apx.cli.dev.logging import (
-    ContextualStreamWriter,
     DevLogComponent,
     LogBuffer,
+    collect_subprocess_output,
     configure_dev_logging,
     get_logger,
     log_channel,
 )
-from apx.cli.dev.manager import (
+from apx.cli.dev.core import (
     is_port_available,
-    run_backend,
-    run_frontend_with_logging,
-    run_openapi_with_logging,
-)
-from apx.cli.dev.process_control import (
-    kill_process_group,
     find_listeners_for_port,
     kill_pids,
+    kill_process_group,
     pids_belong_to_app,
     stop_tracked_process,
     track_process,
@@ -66,6 +61,7 @@ from apx.models import (
     ActionResponse,
     BrowserLogPayload,
     DevServerConfig,
+    FrontendProcessState,
     LogChannel,
     LogEntry,
     OpenApiStatusResponse,
@@ -80,18 +76,25 @@ logger = get_logger(DevLogComponent.SERVER)
 
 
 # Global state for background tasks
-class ServerState:
+class ServerState(FrontendProcessState):
     """Global state for the dev server.
 
     Uses DevServerConfig as the single source of configuration.
+    Both frontend and backend are managed as subprocesses.
     """
 
     def __init__(self) -> None:
+        # Frontend subprocess (bun run dev)
         self.frontend_task: asyncio.Task[None] | None = None
-        self.backend_task: asyncio.Task[None] | None = None
-        self.openapi_task: asyncio.Task[None] | None = None
         self.frontend_process: asyncio.subprocess.Process | None = None
         self.frontend_tracked: TrackedProcess | None = None
+        # Backend subprocess (apx dev _run_backend)
+        self.backend_task: asyncio.Task[None] | None = None
+        self.backend_process: asyncio.subprocess.Process | None = None
+        self.backend_tracked: TrackedProcess | None = None
+        # OpenAPI watcher (in-process async task)
+        self.openapi_task: asyncio.Task[None] | None = None
+        # Shared state
         self.log_buffer: LogBuffer = deque(maxlen=10000)
         self.app_dir: Path | None = None
         self.config: DevServerConfig = DevServerConfig()
@@ -171,18 +174,20 @@ def _create_proxy() -> ProxyManager:
 
 
 async def stop_children(*, verify_ports: bool = True) -> list[str]:
-    """Stop frontend/backend/openapi tasks and ensure frontend process tree is gone.
+    """Stop frontend/backend/openapi processes and ensure clean shutdown.
 
-    Shutdown sequence (per user specification):
+    Shutdown sequence:
     1. Stop WebSocket connections (handled by proxy.shutdown before this)
     2. Stop proxying HTTP requests (handled by proxy.shutdown before this)
-    3. Stop frontend process - with aggressive SIGTERM -> SIGKILL
-    4. Stop backend process
+    3. Stop frontend subprocess - with SIGTERM -> SIGKILL
+    4. Stop backend subprocess - with SIGTERM -> SIGKILL
+    5. Stop OpenAPI task
     """
     stopped: list[str] = []
 
-    # Capture PGID before we start stopping - needed for orphan cleanup
+    # Capture PGIDs before we start stopping
     frontend_pgid = state.frontend_tracked.pgid if state.frontend_tracked else None
+    backend_pgid = state.backend_tracked.pgid if state.backend_tracked else None
 
     # === Step 1: Stop frontend task ===
     if state.frontend_task and not state.frontend_task.done():
@@ -201,7 +206,6 @@ async def stop_children(*, verify_ports: bool = True) -> list[str]:
             else None
         )
 
-        # Primary: use process group killing (handles vite/esbuild orphans)
         if frontend_pgid is not None:
             logger.info(f"Killing frontend process group pgid={frontend_pgid}")
             kill_process_group(
@@ -210,7 +214,6 @@ async def stop_children(*, verify_ports: bool = True) -> list[str]:
                 sigkill_timeout=1.0,
             )
 
-        # Secondary: also try tracked process tree for belt-and-suspenders
         if tp is not None:
             stop_tracked_process(
                 tp, name="frontend", sigterm_timeout=1.0, sigkill_timeout=1.0
@@ -221,27 +224,21 @@ async def stop_children(*, verify_ports: bool = True) -> list[str]:
         state.frontend_tracked = None
         stopped.append("frontend")
 
-    # === Step 3: Safety net - kill any orphaned processes on frontend port ===
-    # This catches processes that somehow escaped the process group
+    # === Step 3: Safety net - kill orphaned frontend processes ===
     if state.frontend_port:
-        # Brief wait for port to free naturally
         await asyncio.sleep(0.2)
-
         orphan_pids = find_listeners_for_port(state.frontend_port)
         if orphan_pids:
             logger.warning(
                 f"Found orphaned processes on frontend port {state.frontend_port}: {orphan_pids}"
             )
-            # Filter to app-related processes if possible
             if state.app_dir is not None:
                 app_pids = pids_belong_to_app(
                     orphan_pids, app_dir=state.app_dir, expected_pgid=frontend_pgid
                 )
                 if app_pids:
-                    logger.info(f"Killing orphaned frontend processes: {app_pids}")
                     kill_pids(app_pids, name="orphaned-frontend", sig=signal.SIGTERM)
                     await asyncio.sleep(0.5)
-                    # Check again and SIGKILL stragglers
                     remaining = find_listeners_for_port(state.frontend_port)
                     if remaining:
                         kill_pids(
@@ -249,7 +246,6 @@ async def stop_children(*, verify_ports: bool = True) -> list[str]:
                         )
                         await asyncio.sleep(0.3)
             else:
-                # No app_dir, just kill them all
                 kill_pids(orphan_pids, name="orphaned-frontend", sig=signal.SIGKILL)
                 await asyncio.sleep(0.3)
 
@@ -261,29 +257,49 @@ async def stop_children(*, verify_ports: bool = True) -> list[str]:
         except asyncio.CancelledError:
             pass
         state.backend_task = None
+
+    # === Step 5: Kill backend process tree/group ===
+    if state.backend_process is not None or backend_pgid is not None:
+        tp = state.backend_tracked or (
+            track_process(state.backend_process.pid)
+            if state.backend_process is not None
+            else None
+        )
+
+        if backend_pgid is not None:
+            logger.info(f"Killing backend process group pgid={backend_pgid}")
+            kill_process_group(
+                backend_pgid,
+                sigterm_timeout=1.0,
+                sigkill_timeout=1.0,
+            )
+
+        if tp is not None:
+            stop_tracked_process(
+                tp, name="backend", sigterm_timeout=1.0, sigkill_timeout=1.0
+            )
+            wait_for_no_descendants(tp, timeout=2.0, poll=0.1)
+
+        state.backend_process = None
+        state.backend_tracked = None
         stopped.append("backend")
 
-    # === Step 4.5: Safety net - kill any orphaned processes on backend port ===
-    # This catches uvicorn/backend processes that didn't release the socket cleanly
+    # === Step 6: Safety net - kill orphaned backend processes ===
     if state.backend_port:
-        # Brief wait for port to free naturally after task cancellation
         await asyncio.sleep(0.2)
-
         orphan_pids = find_listeners_for_port(state.backend_port)
         if orphan_pids:
             logger.warning(
                 f"Found orphaned processes on backend port {state.backend_port}: {orphan_pids}"
             )
-            logger.info(f"Killing orphaned backend processes: {orphan_pids}")
             kill_pids(orphan_pids, name="orphaned-backend", sig=signal.SIGTERM)
             await asyncio.sleep(0.5)
-            # Check again and SIGKILL stragglers
             remaining = find_listeners_for_port(state.backend_port)
             if remaining:
                 kill_pids(remaining, name="orphaned-backend", sig=signal.SIGKILL)
                 await asyncio.sleep(0.3)
 
-    # === Step 5: Stop openapi task ===
+    # === Step 7: Stop openapi task ===
     if state.openapi_task and not state.openapi_task.done():
         state.openapi_task.cancel()
         try:
@@ -293,58 +309,33 @@ async def stop_children(*, verify_ports: bool = True) -> list[str]:
         state.openapi_task = None
         stopped.append("openapi")
 
-    # === Step 6: Verify ports are free (optional) ===
+    # === Step 8: Verify ports are free (optional) ===
     if verify_ports:
-        # Verify frontend port is free
-        if state.frontend_port:
+        for port_name, port in [
+            ("frontend", state.frontend_port),
+            ("backend", state.backend_port),
+        ]:
+            if not port:
+                continue
             if not wait_for_port_free(
                 is_port_available_fn=is_port_available,
-                port=state.frontend_port,
+                port=port,
                 timeout=2.0,
                 poll=0.1,
             ):
-                pids = find_listeners_for_port(state.frontend_port)
+                pids = find_listeners_for_port(port)
                 if pids:
-                    logger.error(
-                        f"Frontend port {state.frontend_port} still in use after cleanup: {pids}"
-                    )
-                    # Last resort: SIGKILL everything on the port
-                    kill_pids(pids, name="frontend-port-hog", sig=signal.SIGKILL)
+                    logger.error(f"{port_name} port {port} still in use: {pids}")
+                    kill_pids(pids, name=f"{port_name}-port-hog", sig=signal.SIGKILL)
                     if not wait_for_port_free(
                         is_port_available_fn=is_port_available,
-                        port=state.frontend_port,
+                        port=port,
                         timeout=1.0,
                         poll=0.1,
                     ):
-                        pids2 = find_listeners_for_port(state.frontend_port)
+                        pids2 = find_listeners_for_port(port)
                         raise RuntimeError(
-                            f"Frontend port {state.frontend_port} still in use (PIDs: {pids2})"
-                        )
-
-        # Backend port check - kill any remaining processes if port not free
-        if state.backend_port:
-            if not wait_for_port_free(
-                is_port_available_fn=is_port_available,
-                port=state.backend_port,
-                timeout=2.0,
-                poll=0.1,
-            ):
-                pids = find_listeners_for_port(state.backend_port)
-                if pids:
-                    logger.error(
-                        f"Backend port {state.backend_port} still in use after cleanup: {pids}"
-                    )
-                    # Last resort: SIGKILL everything on the port
-                    kill_pids(pids, name="backend-port-hog", sig=signal.SIGKILL)
-                    if not wait_for_port_free(
-                        is_port_available_fn=is_port_available,
-                        port=state.backend_port,
-                        timeout=1.0,
-                        poll=0.1,
-                    ):
-                        pids2 = find_listeners_for_port(state.backend_port)
-                        raise RuntimeError(
-                            f"Backend port {state.backend_port} still in use (PIDs: {pids2})"
+                            f"{port_name} port {port} still in use (PIDs: {pids2})"
                         )
 
     return stopped
@@ -367,16 +358,56 @@ def request_dev_server_shutdown(delay: float = 0.0) -> None:
 
 async def run_frontend_task(
     app_dir: Path, port: int, max_retries: int, dev_server_port: int
-):
-    """Run frontend as a background task."""
+) -> None:
+    """Run frontend as a subprocess and capture logs."""
+    ui_logger = get_logger(DevLogComponent.UI)
+    ui_logger.info(f"Starting frontend server on port {port}")
+
+    # Create process group/session for clean shutdown
+    creationflags = 0
+    start_new_session = False
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+    else:
+        start_new_session = True
+
+    # Pass port configuration via environment
+    env = os.environ.copy()
+    env["APX_FRONTEND_PORT"] = str(port)
+    env["APX_DEV_SERVER_PORT"] = str(dev_server_port)
+
     try:
-        await run_frontend_with_logging(
-            app_dir, port, max_retries, state, dev_server_port
+        process = await asyncio.create_subprocess_exec(
+            "bun",
+            "run",
+            "dev",
+            cwd=app_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=start_new_session,
+            creationflags=creationflags,
+            env=env,
         )
+
+        state.frontend_process = process
+        state.frontend_tracked = track_process(process.pid)
+
+        # Use centralized log collector
+        await collect_subprocess_output(
+            process,
+            channel=LogChannel.UI,
+            component=DevLogComponent.UI,
+        )
+
+        await process.wait()
+
+        if process.returncode != 0:
+            ui_logger.error(f"Frontend process exited with code {process.returncode}")
+
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        get_logger(DevLogComponent.UI).error(f"Frontend task failed: {e}")
+        ui_logger.error(f"Frontend task failed: {e}")
         if state.frontend_process:
             tp = track_process(state.frontend_process.pid)
             if tp is not None:
@@ -385,31 +416,107 @@ async def run_frontend_task(
 
 async def run_backend_task(
     app_dir: Path,
-    app_module_name: str,
     host: str,
     port: int,
     obo: bool,
-    max_retries: int,
-):
-    """Run backend as a background task."""
+) -> None:
+    """Run backend as a subprocess and capture logs."""
+    backend_logger = get_logger(DevLogComponent.BACKEND)
+    backend_logger.info(f"Starting backend server on {host}:{port}")
+
+    # Create process group/session for clean shutdown
+    creationflags = 0
+    start_new_session = False
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+    else:
+        start_new_session = True
+
     try:
-        await run_backend(
-            app_dir, app_module_name, host, port, obo, max_retries=max_retries
+        process = await asyncio.create_subprocess_exec(
+            "uv",
+            "run",
+            "apx",
+            "dev",
+            "_run_backend",
+            str(app_dir),
+            str(port),
+            host,
+            str(obo).lower(),
+            cwd=app_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=start_new_session,
+            creationflags=creationflags,
         )
+
+        state.backend_process = process
+        state.backend_tracked = track_process(process.pid)
+
+        # Use centralized log collector
+        await collect_subprocess_output(
+            process,
+            channel=LogChannel.APP,
+            component=DevLogComponent.BACKEND,
+        )
+
+        await process.wait()
+
+        if process.returncode != 0:
+            backend_logger.error(
+                f"Backend process exited with code {process.returncode}"
+            )
+
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        get_logger(DevLogComponent.BACKEND).error(f"Backend task failed: {e}")
+        backend_logger.error(f"Backend task failed: {e}")
+        if state.backend_process:
+            tp = track_process(state.backend_process.pid)
+            if tp is not None:
+                stop_tracked_process(tp, name="backend")
 
 
-async def run_openapi_task(app_dir: Path, max_retries: int):
-    """Run OpenAPI watcher as a background task."""
+async def run_openapi_task(app_dir: Path, max_retries: int) -> None:
+    """Run OpenAPI watcher as an in-process async task."""
+    from apx.cli.openapi import create_api_generator
+    from tenacity import (
+        retry,
+        stop_after_attempt,
+        wait_exponential,
+        RetryCallState,
+    )
+
+    openapi_logger = get_logger(DevLogComponent.OPENAPI)
+
+    def _log_retry_openapi(retry_state: RetryCallState) -> None:
+        if retry_state.outcome and retry_state.outcome.failed:
+            exception = retry_state.outcome.exception()
+            openapi_logger.error(
+                f"Attempt {retry_state.attempt_number} failed: {exception}. Retrying..."
+            )
+
+    @retry(
+        stop=stop_after_attempt(max_retries),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        before_sleep=_log_retry_openapi,
+        reraise=True,
+    )
+    async def run_with_retry():
+        openapi_logger.info("Starting OpenAPI watcher")
+        try:
+            generator = create_api_generator(app_dir, logger=openapi_logger)
+            await generator.watch()
+        except Exception as e:
+            openapi_logger.error(f"OpenAPI watcher failed: {e}")
+            raise
+
     try:
-        await run_openapi_with_logging(app_dir, max_retries)
+        await run_with_retry()
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        get_logger(DevLogComponent.OPENAPI).error(f"OpenAPI watcher task failed: {e}")
+        openapi_logger.error(f"OpenAPI watcher task failed: {e}")
 
 
 # === Lifecycle Management ===
@@ -418,22 +525,12 @@ async def run_openapi_task(app_dir: Path, max_retries: int):
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context manager for the FastAPI app."""
-    # Configure unified in-memory logging (including uvicorn routing)
+    # Configure logging to write to shared in-memory buffer
     configure_dev_logging(buffer=state.log_buffer)
-
-    # Redirect stdout/stderr into the in-memory buffer.
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
-    sys.stdout = ContextualStreamWriter(level_name="INFO")
-    sys.stderr = ContextualStreamWriter(level_name="ERROR")
 
     try:
         yield
     finally:
-        # Restore stdout/stderr
-        sys.stdout = original_stdout
-        sys.stderr = original_stderr
-
         # Shutdown proxy first (graceful WebSocket close)
         if state.proxy:
             await state.proxy.shutdown(timeout=5.0)
@@ -524,50 +621,44 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         # Create proxy manager
         state.proxy = _create_proxy()
 
-        # Get app module name
-        if state.app_dir:
-            from apx.models import ProjectMetadata
-
-            metadata: ProjectMetadata = ProjectMetadata.read()
-            app_module_name: str = metadata.app_module
-        else:
+        if not state.app_dir:
             return ActionResponse(status="error", message="App directory not set")
 
         config = state.config
 
-        # Start frontend
-        if state.app_dir:
-            state.frontend_task = asyncio.create_task(
-                run_frontend_task(
-                    state.app_dir,
-                    config.frontend_port,
-                    config.max_retries,
-                    config.dev_server_port,
-                )
+        # Start frontend subprocess
+        state.frontend_task = asyncio.create_task(
+            run_frontend_task(
+                state.app_dir,
+                config.frontend_port,
+                config.max_retries,
+                config.dev_server_port,
             )
-            # Wait briefly for the bun process to be created and tracked
-            for _ in range(20):
-                if (
-                    state.frontend_tracked is not None
-                    or state.frontend_process is not None
-                ):
-                    break
-                await asyncio.sleep(0.05)
-            if state.frontend_tracked is None and state.frontend_process is not None:
-                state.frontend_tracked = track_process(state.frontend_process.pid)
+        )
+        # Wait briefly for the bun process to be created and tracked
+        for _ in range(20):
+            if state.frontend_tracked is not None or state.frontend_process is not None:
+                break
+            await asyncio.sleep(0.05)
+        if state.frontend_tracked is None and state.frontend_process is not None:
+            state.frontend_tracked = track_process(state.frontend_process.pid)
 
-        # Start backend
-        if state.app_dir:
-            state.backend_task = asyncio.create_task(
-                run_backend_task(
-                    state.app_dir,
-                    app_module_name,
-                    config.host,
-                    config.backend_port,
-                    config.obo,
-                    config.max_retries,
-                )
+        # Start backend subprocess
+        state.backend_task = asyncio.create_task(
+            run_backend_task(
+                state.app_dir,
+                config.host,
+                config.backend_port,
+                config.obo,
             )
+        )
+        # Wait briefly for the backend process to be created and tracked
+        for _ in range(20):
+            if state.backend_tracked is not None or state.backend_process is not None:
+                break
+            await asyncio.sleep(0.05)
+        if state.backend_tracked is None and state.backend_process is not None:
+            state.backend_tracked = track_process(state.backend_process.pid)
 
         # Start OpenAPI watcher
         if config.openapi and state.app_dir:
@@ -714,8 +805,10 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         """Return a bounded snapshot of logs (non-streaming)."""
 
         def _matches(log: LogEntry) -> bool:
-            # Channel gating: system logs are excluded unless explicitly requested.
+            # Channel gating with special handling for proxy logs.
+            # Proxy logs are in [apx] channel but visible by default.
             if channel == "apx":
+                # Explicitly requesting [apx] channel - show all system logs
                 if log.channel.value != "apx":
                     return False
             elif channel == "app":
@@ -725,9 +818,12 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 if log.channel.value != "ui":
                     return False
             else:
-                # channel == "all"
-                if (not include_system) and log.channel.value == "apx":
-                    return False
+                # channel == "all" (default)
+                # Show [app], [ui], and proxy logs from [apx]
+                # Hide other [apx] logs unless include_system is set
+                if log.channel.value == "apx":
+                    if not include_system and log.component != "proxy":
+                        return False
 
             if component is not None and log.component != component:
                 return False
@@ -781,8 +877,10 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         """Stream logs using Server-Sent Events (SSE)."""
 
         def _matches(log: LogEntry) -> bool:
-            # Channel gating: system logs are excluded unless explicitly requested.
+            # Channel gating with special handling for proxy logs.
+            # Proxy logs are in [apx] channel but visible by default.
             if channel == "apx":
+                # Explicitly requesting [apx] channel - show all system logs
                 if log.channel.value != "apx":
                     return False
             elif channel == "app":
@@ -792,9 +890,12 @@ def create_dev_server(app_dir: Path) -> FastAPI:
                 if log.channel.value != "ui":
                     return False
             else:
-                # channel == "all"
-                if (not include_system) and log.channel.value == "apx":
-                    return False
+                # channel == "all" (default)
+                # Show [app], [ui], and proxy logs from [apx]
+                # Hide other [apx] logs unless include_system is set
+                if log.channel.value == "apx":
+                    if not include_system and log.component != "proxy":
+                        return False
 
             if component is not None and log.component != component:
                 return False

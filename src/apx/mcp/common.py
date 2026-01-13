@@ -1,4 +1,8 @@
-"""Common MCP tools for apx dev server management."""
+"""Common MCP tools for apx dev server management.
+
+MCP tools call CLI commands via subprocess to ensure identical behavior
+between CLI and MCP interfaces.
+"""
 
 import asyncio
 import os
@@ -14,12 +18,10 @@ from pydantic import BaseModel, JsonValue, TypeAdapter
 
 from apx import __version__ as apx_version
 from apx.cli.dev.client import DevServerClient
-from apx.cli.dev.logging import suppress_output_and_logs
-from apx.cli.dev.manager import DevManager
+from apx.cli.dev.core import DevCore
 from apx.mcp.server import mcp
 from apx.models import (
     CheckCommandResult,
-    DevServerConfig,
     JsonObject,
     McpActionResponse,
     McpDatabricksAppsLogsResponse,
@@ -31,7 +33,6 @@ from apx.models import (
     McpRouteCallResponse,
     McpRoutesResponse,
     OpenApiStatusResponse,
-    PortsConfig,
     PortsResponse,
     ProjectMetadata,
     RouteInfo,
@@ -49,18 +50,18 @@ class McpSimpleStatusResponse(BaseModel):
     openapi_running: bool = False
 
 
-def _get_manager() -> DevManager:
-    """Get DevManager instance for the current project directory."""
-    return DevManager(Path.cwd())
+def _get_core() -> DevCore:
+    """Get DevCore instance for the current project directory."""
+    return DevCore(Path.cwd())
 
 
 def _get_dev_server_client() -> DevServerClient | None:
     """Get DevServerClient if dev server is running, None otherwise."""
-    manager = _get_manager()
-    config = manager.get_or_create_config()
+    core = _get_core()
+    config = core.get_or_create_config()
     port = config.dev.dev_server_port
 
-    if port is None or not manager.is_dev_server_running():
+    if port is None or not core.is_running():
         return None
 
     return DevServerClient(port=port)
@@ -192,13 +193,13 @@ def _get_backend_base_url(*, client: DevServerClient) -> str:
 
 
 def _get_backend_base_url_safe(
-    *, manager: DevManager
+    *, core: DevCore
 ) -> tuple[str | None, McpErrorResponse | None]:
     """Get backend base URL or return a typed error response."""
-    config = manager.get_or_create_config()
+    config = core.get_or_create_config()
     port = config.dev.dev_server_port
 
-    if port is None or not manager.is_dev_server_running():
+    if port is None or not core.is_running():
         return None, McpErrorResponse(error="Dev server is not running")
 
     client = DevServerClient(port=port)
@@ -215,17 +216,17 @@ def _get_backend_base_url_safe(
 
 
 def _get_dev_server_url_safe(
-    *, manager: DevManager
+    *, core: DevCore
 ) -> tuple[str | None, str | None, McpErrorResponse | None]:
     """Get dev server URL and api_prefix, or return a typed error response.
 
     Returns:
         Tuple of (dev_server_url, api_prefix, error).
     """
-    config = manager.get_or_create_config()
+    config = core.get_or_create_config()
     port = config.dev.dev_server_port
 
-    if port is None or not manager.is_dev_server_running():
+    if port is None or not core.is_running():
         return None, None, McpErrorResponse(error="Dev server is not running")
 
     client = DevServerClient(port=port)
@@ -315,10 +316,8 @@ Use these tools to interact with your apx project during development."""
 @mcp.resource("apx://backend/openapi")
 async def backend_openapi() -> McpOpenApiSchemaResponse | McpErrorResponse:
     """Return the backend FastAPI OpenAPI schema as a structured object."""
-    manager = _get_manager()
-    backend_url, err = await asyncio.to_thread(
-        _get_backend_base_url_safe, manager=manager
-    )
+    core = _get_core()
+    backend_url, err = await asyncio.to_thread(_get_backend_base_url_safe, core=core)
     if err is not None or backend_url is None:
         return err or McpErrorResponse(error="Failed to determine backend URL")
 
@@ -338,9 +337,9 @@ async def openapi_status() -> OpenApiStatusResponse | McpErrorResponse:
     Returns information about the OpenAPI schema and api.ts client files,
     including their paths and last regeneration timestamps.
     """
-    manager = _get_manager()
+    core = _get_core()
     dev_server_url, _, err = await asyncio.to_thread(
-        _get_dev_server_url_safe, manager=manager
+        _get_dev_server_url_safe, core=core
     )
     if err is not None or dev_server_url is None:
         return err or McpErrorResponse(error="Dev server is not running")
@@ -368,7 +367,7 @@ async def start(
     """Start development servers (frontend, backend, and optionally OpenAPI watcher).
 
     The dev server will find available ports automatically:
-    - Dev server (reverse proxy): 7000-7999
+    - Dev server (reverse proxy): 9000-9999
     - Frontend: 5000-5999
     - Backend: 8000-8999
 
@@ -383,32 +382,42 @@ async def start(
     Returns:
         McpActionResponse with status and message indicating success or failure
     """
-    manager = _get_manager()
+    # Build CLI command with arguments
+    cmd: list[str] = ["uv", "run", "apx", "dev", "start"]
 
-    # Build config from tool arguments, using defaults from DevServerConfig
-    default_config = DevServerConfig()
-    config = DevServerConfig(
-        host=host if host is not None else default_config.host,
-        api_prefix=api_prefix if api_prefix is not None else default_config.api_prefix,
-        obo=obo if obo is not None else default_config.obo,
-        openapi=openapi if openapi is not None else default_config.openapi,
-        max_retries=max_retries
-        if max_retries is not None
-        else default_config.max_retries,
-        watch=False,  # MCP tools always run in detached mode
-    )
-
-    def start_suppressed() -> None:
-        """Start servers with suppressed console output."""
-        with suppress_output_and_logs():
-            manager.start(config=config)
+    if host is not None:
+        cmd.extend(["--host", host])
+    if api_prefix is not None:
+        cmd.extend(["--api-prefix", api_prefix])
+    if obo is not None:
+        cmd.append(f"--{'obo' if obo else 'no-obo'}")
+    if openapi is not None:
+        cmd.append(f"--{'openapi' if openapi else 'no-openapi'}")
+    if max_retries is not None:
+        cmd.extend(["--max-retries", str(max_retries)])
 
     try:
-        # Run sync operation in thread pool with suppressed output
-        await asyncio.to_thread(start_suppressed)
-        return McpActionResponse(
-            status="success", message="Development servers started successfully"
+        # Run CLI command via subprocess
+        result = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=Path.cwd(),
         )
+        stdout, stderr = await result.communicate()
+
+        if result.returncode == 0:
+            return McpActionResponse(
+                status="success", message="Development servers started successfully"
+            )
+        else:
+            error_msg = stderr.decode("utf-8", errors="replace").strip()
+            if not error_msg:
+                error_msg = stdout.decode("utf-8", errors="replace").strip()
+            return McpActionResponse(
+                status="error",
+                message=f"Failed to start servers: {error_msg or 'Unknown error'}",
+            )
     except Exception as e:
         return McpActionResponse(
             status="error", message=f"Failed to start servers: {str(e)}"
@@ -425,49 +434,30 @@ async def restart() -> McpActionResponse:
     Returns:
         McpActionResponse with status and message indicating success or failure
     """
-    manager = _get_manager()
-
-    is_running = await asyncio.to_thread(manager.is_dev_server_running)
-    if not is_running:
-        return McpActionResponse(
-            status="error",
-            message="Development server is not running. Run 'start' first.",
-        )
-
-    # Capture current ports before stopping to make them sticky.
-    # We do this before calling stop() because stop() clears these values from project.json.
-    preferred_ports: PortsConfig | None = None
-    try:
-        config = manager.get_or_create_config()
-        if config.dev.dev_server_port:
-            # Try to get currently used ports from the running server API
-            client = DevServerClient(port=config.dev.dev_server_port, timeout=2.0)
-            try:
-                ports_data = await asyncio.to_thread(_get_ports, client=client)
-                preferred_ports = ports_data.ports
-            except Exception:
-                # Fallback to just the dev server port from config if API is not responding
-                preferred_ports = PortsConfig(
-                    dev_server_port=config.dev.dev_server_port
-                )
-    except Exception:
-        pass
-
-    def restart_suppressed(ports: PortsConfig | None) -> None:
-        """Restart servers with suppressed console output."""
-        with suppress_output_and_logs():
-            manager.stop()
-            # Small delay to allow OS to release ports
-            time.sleep(1)
-            # Pass preferred ports to maintain stickiness
-            manager.start(preferred_ports=ports)
+    # Run CLI command via subprocess
+    cmd = ["uv", "run", "apx", "dev", "restart"]
 
     try:
-        # Run sync operation in thread pool with suppressed output and preferred ports
-        await asyncio.to_thread(restart_suppressed, preferred_ports)
-        return McpActionResponse(
-            status="success", message="Development servers restarted successfully"
+        result = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=Path.cwd(),
         )
+        stdout, stderr = await result.communicate()
+
+        if result.returncode == 0:
+            return McpActionResponse(
+                status="success", message="Development servers restarted successfully"
+            )
+        else:
+            error_msg = stderr.decode("utf-8", errors="replace").strip()
+            if not error_msg:
+                error_msg = stdout.decode("utf-8", errors="replace").strip()
+            return McpActionResponse(
+                status="error",
+                message=f"Failed to restart servers: {error_msg or 'Unknown error'}",
+            )
     except Exception as e:
         return McpActionResponse(
             status="error", message=f"Failed to restart servers: {str(e)}"
@@ -483,19 +473,30 @@ async def stop() -> McpActionResponse:
     Returns:
         McpActionResponse with status and message indicating success or failure
     """
-    manager = _get_manager()
-
-    def stop_suppressed() -> None:
-        """Stop servers with suppressed console output."""
-        with suppress_output_and_logs():
-            manager.stop()
+    # Run CLI command via subprocess
+    cmd = ["uv", "run", "apx", "dev", "stop"]
 
     try:
-        # Run sync operation in thread pool with suppressed output
-        await asyncio.to_thread(stop_suppressed)
-        return McpActionResponse(
-            status="success", message="Development servers stopped successfully"
+        result = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=Path.cwd(),
         )
+        stdout, stderr = await result.communicate()
+
+        if result.returncode == 0:
+            return McpActionResponse(
+                status="success", message="Development servers stopped successfully"
+            )
+        else:
+            error_msg = stderr.decode("utf-8", errors="replace").strip()
+            if not error_msg:
+                error_msg = stdout.decode("utf-8", errors="replace").strip()
+            return McpActionResponse(
+                status="error",
+                message=f"Failed to stop servers: {error_msg or 'Unknown error'}",
+            )
     except Exception as e:
         return McpActionResponse(
             status="error", message=f"Failed to stop servers: {str(e)}"
@@ -516,9 +517,9 @@ async def refresh_openapi() -> McpActionResponse:
     Returns:
         McpActionResponse with status and message indicating success or failure
     """
-    manager = _get_manager()
+    core = _get_core()
     dev_server_url, _, err = await asyncio.to_thread(
-        _get_dev_server_url_safe, manager=manager
+        _get_dev_server_url_safe, core=core
     )
     if err is not None or dev_server_url is None:
         return McpActionResponse(
@@ -557,13 +558,13 @@ async def status() -> McpSimpleStatusResponse:
     Returns:
         McpSimpleStatusResponse with status information including:
         - dev_server_running: Whether the dev server is running
-        - dev_server_url: The URL of the dev server (e.g., http://localhost:7000)
+        - dev_server_url: The URL of the dev server (e.g., http://localhost:9000)
         - api_prefix: The API prefix used for backend routes (e.g., /api)
         - frontend_running: Whether the frontend server is running
         - backend_running: Whether the backend server is running
         - openapi_running: Whether the OpenAPI watcher is running
     """
-    manager = _get_manager()
+    core = _get_core()
 
     # Initialize with default values
     result = McpSimpleStatusResponse(
@@ -575,11 +576,11 @@ async def status() -> McpSimpleStatusResponse:
         openapi_running=False,
     )
 
-    is_running = await asyncio.to_thread(manager.is_dev_server_running)
+    is_running = await asyncio.to_thread(core.is_running)
     if not is_running:
         return result
 
-    config = manager.get_or_create_config()
+    config = core.get_or_create_config()
     port = config.dev.dev_server_port
 
     result.dev_server_running = True
@@ -699,9 +700,9 @@ async def call_route(
         text_body: Text body (alternative to json_body)
         timeout_seconds: Request timeout in seconds
     """
-    manager = _get_manager()
+    core = _get_core()
     dev_server_url, _api_prefix, err = await asyncio.to_thread(
-        _get_dev_server_url_safe, manager=manager
+        _get_dev_server_url_safe, core=core
     )
     if err is not None or dev_server_url is None:
         return err or McpErrorResponse(error="Dev server is not running")
@@ -752,16 +753,16 @@ async def list_routes() -> McpRoutesResponse | McpErrorResponse:
     Returns:
         McpRoutesResponse with the list of available routes
     """
-    manager = _get_manager()
+    core = _get_core()
     dev_server_url, _api_prefix, err = await asyncio.to_thread(
-        _get_dev_server_url_safe, manager=manager
+        _get_dev_server_url_safe, core=core
     )
     if err is not None or dev_server_url is None:
         return err or McpErrorResponse(error="Dev server is not running")
 
     # Need backend URL for fetching OpenAPI schema
     backend_url, backend_err = await asyncio.to_thread(
-        _get_backend_base_url_safe, manager=manager
+        _get_backend_base_url_safe, core=core
     )
     if backend_err is not None or backend_url is None:
         return backend_err or McpErrorResponse(error="Backend is not running")
