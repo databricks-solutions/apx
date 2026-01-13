@@ -342,9 +342,7 @@ def init(
 
     # === PHASE 4: Initializing git ===
     if is_in_git_repo(app_path):
-        console.print(
-            "[dim]⏭️  Skipping git init (already in a git repository)[/dim]"
-        )
+        console.print("[dim]⏭️  Skipping git init (already in a git repository)[/dim]")
     else:
         with progress_spinner(
             "🔧 Initializing git repository...", "✅ Git repository initialized"

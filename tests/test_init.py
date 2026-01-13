@@ -130,7 +130,9 @@ def test_init_skips_git_init_when_already_in_repo(tmp_path: Path) -> None:
     # Initialize git repo first
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
     subprocess.run(
-        ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test User"], cwd=tmp_path, capture_output=True
@@ -169,7 +171,9 @@ def test_init_skips_git_init_when_in_parent_repo(tmp_path: Path) -> None:
     # Initialize git repo in parent directory
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
     subprocess.run(
-        ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test User"], cwd=tmp_path, capture_output=True

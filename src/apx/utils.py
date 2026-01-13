@@ -364,7 +364,9 @@ def ensure_apx_plugin(app_dir: Path) -> None:
     ensure_dir(app_dir / ".apx")
 
     # Copy the plugin.ts file from the template
-    template_plugin_path = Path(str(resources.files("apx"))) / "templates" / "base" / ".apx" / "plugin.ts"
+    template_plugin_path = (
+        Path(str(resources.files("apx"))) / "templates" / "base" / ".apx" / "plugin.ts"
+    )
 
     if not template_plugin_path.exists():
         console.print(
