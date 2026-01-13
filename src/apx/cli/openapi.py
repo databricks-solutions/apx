@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import subprocess
 from pathlib import Path
 from typing import Annotated, ClassVar
 
-import watchfiles
 from pydantic import BaseModel, ConfigDict
 from typer import Argument, Exit, Option
 
@@ -152,21 +150,29 @@ export default defineConfig({{
 
         return self.config_path
 
+    @property
+    def full_app_module_path(self) -> str:
+        """Get the full app module path in format 'module.backend.app:app'."""
+        return f"{self.app_module_name}.backend.app:app"
+
     def generate_schema(self) -> tuple[Path, bool]:
         """Generate the OpenAPI schema JSON file.
+
+        Always loads the app module fresh to ensure the latest schema.
 
         Returns:
             Tuple of (schema_path, schema_changed) where schema_changed indicates
             if the schema differs from the previous version
         """
-        # Use the centralized reloader to get the app instance
-        from apx.cli.dev.reloader import get_app, load_app
+        import importlib
 
-        app_instance = get_app()
+        # Always load the app fresh - parse module path
+        module_path, attr_name = self.full_app_module_path.split(":", 1)
 
-        if app_instance is None:
-            # Fall back to loading it ourselves (shouldn't happen in practice)
-            app_instance, _ = load_app(self.app_module_name, reload=False)
+        # Import/reimport the module
+        module = importlib.import_module(module_path)
+        module = importlib.reload(module)
+        app_instance = getattr(module, attr_name)
 
         # Generate OpenAPI spec
         spec = app_instance.openapi()
@@ -249,46 +255,6 @@ export default defineConfig({{
             console.print("[dim]⏭️  Schema unchanged, skipping client generation[/dim]")
             console.print("[bold green]✨ OpenAPI schema is up to date![/bold green]")
 
-    async def watch(self) -> None:
-        """Watch for Python file changes and regenerate OpenAPI schema and client."""
-        self._log(f"Watching for changes in {self.app_dir}/**/*.py")
-
-        # Ensure config exists (do this once before generating)
-        self.ensure_config()
-
-        # Generate once at startup
-        try:
-            schema_path, schema_changed = self.generate_schema()
-            if schema_changed:
-                self.generate_client()
-                self._log("Initial generation complete")
-            else:
-                self._log("Schema unchanged, skipping client generation")
-        except Exception as e:
-            self._log_error(f"Initial generation failed: {e}")
-
-        # Watch for changes
-        try:
-            async for changes in watchfiles.awatch(
-                self.app_dir,
-                watch_filter=watchfiles.PythonFilter(),
-            ):
-                self._log(
-                    f"Detected changes in {len(changes)} file(s), regenerating..."
-                )
-
-                try:
-                    schema_path, schema_changed = self.generate_schema()
-                    if schema_changed:
-                        self.generate_client()
-                        self._log("Regeneration complete")
-                    else:
-                        self._log("Schema unchanged, skipping client generation")
-                except Exception as e:
-                    self._log_error(f"Regeneration failed: {e}")
-        except KeyboardInterrupt:
-            self._log("Stopped watching for changes.")
-
 
 def create_api_generator(
     app_dir: Path, logger: logging.Logger | None = None
@@ -317,27 +283,15 @@ def create_api_generator(
     return ApiGenerator(config, logger=logger)
 
 
-def run_openapi(app_dir: Path, watch: bool = False, force: bool = False) -> None:
+def run_openapi(app_dir: Path, force: bool = False) -> None:
     """Generate OpenAPI schema and API client.
 
     Args:
         app_dir: The path to the app directory
-        watch: Whether to watch for changes and regenerate
         force: If True, always regenerate client even if schema hasn't changed
-
-    Raises:
-        ValueError: If both watch and force are True
     """
-    if watch and force:
-        console.print("[red]❌ Cannot use --force with --watch[/red]")
-        raise ValueError("Cannot use --force with --watch")
-
     generator = create_api_generator(app_dir)
-
-    if watch:
-        asyncio.run(generator.watch())
-    else:
-        generator.run(force=force)
+    generator.run(force=force)
 
 
 @with_version
@@ -348,10 +302,6 @@ def openapi(
             help="The path to the app. If not provided, current working directory will be used"
         ),
     ] = None,
-    watch: Annotated[
-        bool,
-        Option("--watch", "-w", help="Watch for changes and regenerate"),
-    ] = False,
     force: Annotated[
         bool,
         Option(
@@ -363,4 +313,4 @@ def openapi(
     if app_dir is None:
         app_dir = Path.cwd()
 
-    run_openapi(app_dir, watch=watch, force=force)
+    run_openapi(app_dir, force=force)

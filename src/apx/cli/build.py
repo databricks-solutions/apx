@@ -73,7 +73,7 @@ def build(
     (dist_dir / ".gitignore").write_text("*\n")
 
     # Generate the openapi schema and API client
-    run_openapi(app_path, watch=False)
+    run_openapi(app_path)
 
     # === PHASE 1: Building UI ===
     if not skip_ui_build:

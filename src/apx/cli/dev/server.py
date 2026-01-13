@@ -526,41 +526,49 @@ async def run_backend_task(
 
 
 async def run_openapi_task(app_dir: Path, max_retries: int) -> None:
-    """Run OpenAPI watcher as an in-process async task."""
+    """Run OpenAPI watcher as an in-process async task.
+
+    Watches for Python file changes and regenerates OpenAPI schema and client.
+    Uses caching to skip regeneration if schema hasn't changed.
+    """
+    import watchfiles
     from apx.cli.openapi import create_api_generator
-    from tenacity import (
-        retry,
-        stop_after_attempt,
-        wait_exponential,
-        RetryCallState,
-    )
 
     openapi_logger = get_logger(DevLogComponent.OPENAPI)
+    openapi_logger.info(f"Starting OpenAPI watcher for {app_dir}/**/*.py")
 
-    def _log_retry_openapi(retry_state: RetryCallState) -> None:
-        if retry_state.outcome and retry_state.outcome.failed:
-            exception = retry_state.outcome.exception()
-            openapi_logger.error(
-                f"Attempt {retry_state.attempt_number} failed: {exception}. Retrying..."
-            )
+    generator = create_api_generator(app_dir, logger=openapi_logger)
+    generator.ensure_config()
 
-    @retry(
-        stop=stop_after_attempt(max_retries),
-        wait=wait_exponential(multiplier=1, min=2, max=60),
-        before_sleep=_log_retry_openapi,
-        reraise=True,
-    )
-    async def run_with_retry():
-        openapi_logger.info("Starting OpenAPI watcher")
-        try:
-            generator = create_api_generator(app_dir, logger=openapi_logger)
-            await generator.watch()
-        except Exception as e:
-            openapi_logger.error(f"OpenAPI watcher failed: {e}")
-            raise
-
+    # Generate once at startup
     try:
-        await run_with_retry()
+        _schema_path, schema_changed = generator.generate_schema()
+        if schema_changed:
+            generator.generate_client()
+            openapi_logger.info("Initial OpenAPI generation complete")
+        else:
+            openapi_logger.info("Schema unchanged, skipping initial client generation")
+    except Exception as e:
+        openapi_logger.error(f"Initial OpenAPI generation failed: {e}")
+
+    # Watch for changes
+    try:
+        async for changes in watchfiles.awatch(
+            app_dir,
+            watch_filter=watchfiles.PythonFilter(),
+        ):
+            openapi_logger.info(
+                f"Detected changes in {len(changes)} file(s), regenerating..."
+            )
+            try:
+                _schema_path, schema_changed = generator.generate_schema()
+                if schema_changed:
+                    generator.generate_client()
+                    openapi_logger.info("OpenAPI regeneration complete")
+                else:
+                    openapi_logger.info("Schema unchanged, skipping client generation")
+            except Exception as e:
+                openapi_logger.error(f"OpenAPI regeneration failed: {e}")
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -816,31 +824,44 @@ def create_dev_server(app_dir: Path) -> FastAPI:
 
     @app.post("/__apx__/actions/refresh-openapi", response_model=ActionResponse)
     async def refresh_openapi() -> ActionResponse:
-        """Trigger OpenAPI schema and api.ts client regeneration."""
-        from apx.cli.openapi import create_api_generator
+        """Trigger OpenAPI schema and api.ts client regeneration.
 
+        Calls CLI command `apx openapi --force` to ensure fresh app load
+        and forced client regeneration.
+        """
         if state.app_dir is None:
             return ActionResponse(status="error", message="App directory not set")
 
         openapi_logger = get_logger(DevLogComponent.OPENAPI)
 
         try:
-            generator = create_api_generator(state.app_dir, logger=openapi_logger)
-
-            # Generate OpenAPI schema
-            generator.ensure_config()
-            _schema_path, _schema_changed = generator.generate_schema()
-            state.openapi_schema_last_updated = datetime.datetime.now()
-
-            # Always regenerate client on manual refresh (force=True equivalent)
-            generator.generate_client()
-            state.api_ts_last_updated = datetime.datetime.now()
-
-            openapi_logger.info("OpenAPI schema and api.ts refreshed successfully")
-            return ActionResponse(
-                status="success",
-                message="OpenAPI schema and api.ts regenerated successfully",
+            # Run CLI command with --force to ensure full regeneration
+            cmd = ["uv", "run", "apx", "openapi", "--force"]
+            result = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=state.app_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            stdout, stderr = await result.communicate()
+
+            if result.returncode == 0:
+                state.openapi_schema_last_updated = datetime.datetime.now()
+                state.api_ts_last_updated = datetime.datetime.now()
+                openapi_logger.info("OpenAPI schema and api.ts refreshed successfully")
+                return ActionResponse(
+                    status="success",
+                    message=f"OpenAPI schema and api.ts regenerated at {state.openapi_schema_last_updated}",
+                )
+            else:
+                error_msg = stderr.decode("utf-8", errors="replace").strip()
+                if not error_msg:
+                    error_msg = stdout.decode("utf-8", errors="replace").strip()
+                openapi_logger.error(f"Failed to refresh OpenAPI: {error_msg}")
+                return ActionResponse(
+                    status="error",
+                    message=f"Failed to refresh OpenAPI: {error_msg or 'Unknown error'}",
+                )
         except Exception as e:
             openapi_logger.error(f"Failed to refresh OpenAPI: {e}")
             return ActionResponse(
