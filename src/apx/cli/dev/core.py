@@ -960,6 +960,14 @@ def run_backend_server(
                 app_module_name, reload=not first_run
             )
 
+            # Regenerate OpenAPI schema and client if the schema changed
+            from apx.cli.openapi import regenerate_openapi_if_changed
+
+            try:
+                regenerate_openapi_if_changed(app_instance, cwd, logger=backend_logger)
+            except Exception as e:
+                backend_logger.warning(f"OpenAPI regeneration failed: {e}")
+
             ws = WorkspaceClient(product="apx/dev", product_version=__version__)
             user_id = ws.current_user.me().id
             assert user_id is not None, "User ID is not set"

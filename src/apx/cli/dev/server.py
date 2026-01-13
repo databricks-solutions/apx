@@ -94,8 +94,6 @@ class ServerState(FrontendProcessState):
         self.backend_process: asyncio.subprocess.Process | None = None
         self.backend_tracked: TrackedProcess | None = None
         self.backend_exit_code: int | None = None
-        # OpenAPI watcher (in-process async task)
-        self.openapi_task: asyncio.Task[None] | None = None
         # Shared state
         self.log_buffer: LogBuffer = deque(maxlen=10000)
         self.app_dir: Path | None = None
@@ -303,17 +301,7 @@ async def stop_children(*, verify_ports: bool = True) -> list[str]:
                 kill_pids(remaining, name="orphaned-backend", sig=signal.SIGKILL)
                 await asyncio.sleep(0.3)
 
-    # === Step 7: Stop openapi task ===
-    if state.openapi_task and not state.openapi_task.done():
-        state.openapi_task.cancel()
-        try:
-            await state.openapi_task
-        except asyncio.CancelledError:
-            pass
-        state.openapi_task = None
-        stopped.append("openapi")
-
-    # === Step 8: Verify ports are free (optional) ===
+    # === Step 7: Verify ports are free (optional) ===
     if verify_ports:
         for port_name, port in [
             ("frontend", state.frontend_port),
@@ -525,56 +513,6 @@ async def run_backend_task(
                 stop_tracked_process(tp, name="backend")
 
 
-async def run_openapi_task(app_dir: Path, max_retries: int) -> None:
-    """Run OpenAPI watcher as an in-process async task.
-
-    Watches for Python file changes and regenerates OpenAPI schema and client.
-    Uses caching to skip regeneration if schema hasn't changed.
-    """
-    import watchfiles
-    from apx.cli.openapi import create_api_generator
-
-    openapi_logger = get_logger(DevLogComponent.OPENAPI)
-    openapi_logger.info(f"Starting OpenAPI watcher for {app_dir}/**/*.py")
-
-    generator = create_api_generator(app_dir, logger=openapi_logger)
-    generator.ensure_config()
-
-    # Generate once at startup
-    try:
-        _schema_path, schema_changed = generator.generate_schema()
-        if schema_changed:
-            generator.generate_client()
-            openapi_logger.info("Initial OpenAPI generation complete")
-        else:
-            openapi_logger.info("Schema unchanged, skipping initial client generation")
-    except Exception as e:
-        openapi_logger.error(f"Initial OpenAPI generation failed: {e}")
-
-    # Watch for changes
-    try:
-        async for changes in watchfiles.awatch(
-            app_dir,
-            watch_filter=watchfiles.PythonFilter(),
-        ):
-            openapi_logger.info(
-                f"Detected changes in {len(changes)} file(s), regenerating..."
-            )
-            try:
-                _schema_path, schema_changed = generator.generate_schema()
-                if schema_changed:
-                    generator.generate_client()
-                    openapi_logger.info("OpenAPI regeneration complete")
-                else:
-                    openapi_logger.info("Schema unchanged, skipping client generation")
-            except Exception as e:
-                openapi_logger.error(f"OpenAPI regeneration failed: {e}")
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        openapi_logger.error(f"OpenAPI watcher task failed: {e}")
-
-
 # === Lifecycle Management ===
 
 
@@ -638,8 +576,7 @@ def create_dev_server(app_dir: Path) -> FastAPI:
             and not state.frontend_task.done(),
             backend_running=state.backend_task is not None
             and not state.backend_task.done(),
-            openapi_running=state.openapi_task is not None
-            and not state.openapi_task.done(),
+            openapi_running=False,  # OpenAPI regeneration is triggered on-demand, not a task
             frontend_exit_code=state.frontend_exit_code,
             backend_exit_code=state.backend_exit_code,
         )
@@ -703,8 +640,6 @@ def create_dev_server(app_dir: Path) -> FastAPI:
             and not state.frontend_task.done()
             or state.backend_task
             and not state.backend_task.done()
-            or state.openapi_task
-            and not state.openapi_task.done()
         ):
             return ActionResponse(status="error", message="Servers are already running")
 
@@ -756,12 +691,6 @@ def create_dev_server(app_dir: Path) -> FastAPI:
             await asyncio.sleep(0.05)
         if state.backend_tracked is None and state.backend_process is not None:
             state.backend_tracked = track_process(state.backend_process.pid)
-
-        # Start OpenAPI watcher
-        if config.openapi and state.app_dir:
-            state.openapi_task = asyncio.create_task(
-                run_openapi_task(state.app_dir, config.max_retries)
-            )
 
         return ActionResponse(status="success", message="Servers started successfully")
 

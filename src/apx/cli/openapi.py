@@ -6,10 +6,13 @@ import json
 import logging
 import subprocess
 from pathlib import Path
-from typing import Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict
 from typer import Argument, Exit, Option
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 from apx.cli.version import with_version
 from apx.models import ProjectMetadata
@@ -150,11 +153,6 @@ export default defineConfig({{
 
         return self.config_path
 
-    @property
-    def full_app_module_path(self) -> str:
-        """Get the full app module path in format 'module.backend.app:app'."""
-        return f"{self.app_module_name}.backend.app:app"
-
     def generate_schema(self) -> tuple[Path, bool]:
         """Generate the OpenAPI schema JSON file.
 
@@ -164,15 +162,9 @@ export default defineConfig({{
             Tuple of (schema_path, schema_changed) where schema_changed indicates
             if the schema differs from the previous version
         """
-        import importlib
-
-        # Always load the app fresh - parse module path
-        module_path, attr_name = self.full_app_module_path.split(":", 1)
-
-        # Import/reimport the module
-        module = importlib.import_module(module_path)
-        module = importlib.reload(module)
-        app_instance = getattr(module, attr_name)
+        # Load the app instance fresh
+        metadata = ProjectMetadata.read(self.app_dir)
+        app_instance = metadata.get_app_instance(reload=True)
 
         # Generate OpenAPI spec
         spec = app_instance.openapi()
@@ -292,6 +284,73 @@ def run_openapi(app_dir: Path, force: bool = False) -> None:
     """
     generator = create_api_generator(app_dir)
     generator.run(force=force)
+
+
+def regenerate_openapi_if_changed(
+    app: "FastAPI",
+    app_dir: Path,
+    logger: logging.Logger | None = None,
+) -> bool:
+    """Regenerate OpenAPI schema and client if the app's schema has changed.
+
+    This is a simple function meant to be called after the app is reloaded.
+    It compares the app's current OpenAPI schema with the existing .apx/openapi.json
+    and regenerates if different.
+
+    Args:
+        app: The FastAPI application instance (already loaded)
+        app_dir: The application directory
+        logger: Optional logger for output
+
+    Returns:
+        True if schema was regenerated, False if unchanged
+    """
+    from fastapi import FastAPI
+
+    if not isinstance(app, FastAPI):
+        raise TypeError(f"Expected FastAPI instance, got {type(app)}")
+
+    apx_dir = app_dir / ".apx"
+    schema_path = apx_dir / "openapi.json"
+
+    # Generate current schema from app
+    spec = app.openapi()
+    new_spec_json = json.dumps(spec, indent=2)
+
+    # Check if schema has changed
+    schema_changed = True
+    if schema_path.exists():
+        existing_spec = schema_path.read_text()
+        if existing_spec == new_spec_json:
+            schema_changed = False
+
+    if not schema_changed:
+        if logger:
+            logger.info("OpenAPI schema unchanged, skipping regeneration")
+        return False
+
+    # Write new schema
+    ensure_dir(apx_dir)
+    schema_path.write_text(new_spec_json)
+
+    if logger:
+        logger.info("OpenAPI schema changed, regenerating client...")
+
+    # Generate client using orval
+    try:
+        config = ApiGeneratorConfig.from_app_dir(app_dir)
+        generator = ApiGenerator(config, logger=logger)
+        generator.ensure_config()
+        generator.generate_client()
+        if logger:
+            logger.info("OpenAPI client regenerated successfully")
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to regenerate OpenAPI client: {e}")
+        else:
+            console.print(f"[red]Failed to regenerate OpenAPI client: {e}[/red]")
+
+    return True
 
 
 @with_version

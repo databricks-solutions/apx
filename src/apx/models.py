@@ -7,9 +7,12 @@ import tomllib
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import ClassVar, Literal, Protocol, TypeAlias
+from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 from apx.constants import (
     BACKEND_PORT_START,
@@ -251,6 +254,47 @@ class ProjectMetadata(BaseModel):
                 ]
             )
         )
+
+    def get_app_instance(self, *, reload: bool = False) -> "FastAPI":
+        """Get the FastAPI app instance from the app_module.
+
+        Parses app_module (e.g., "jview.backend.app:app") and imports the app.
+
+        Args:
+            reload: If True, reload the module before getting the app instance.
+
+        Returns:
+            The FastAPI application instance.
+
+        Raises:
+            ValueError: If app_module format is invalid.
+            ImportError: If module cannot be imported.
+            AttributeError: If module doesn't have the specified attribute.
+        """
+        import importlib
+
+        from fastapi import FastAPI
+
+        if ":" not in self.app_module:
+            raise ValueError(
+                f"Invalid app_module format '{self.app_module}'. "
+                "Expected format: 'module.path:app_instance'"
+            )
+
+        module_path, attr_name = self.app_module.split(":", 1)
+
+        module = importlib.import_module(module_path)
+        if reload:
+            module = importlib.reload(module)
+
+        app_instance = getattr(module, attr_name)
+
+        if not isinstance(app_instance, FastAPI):
+            raise TypeError(
+                f"'{attr_name}' in {module_path} is not a FastAPI instance"
+            )
+
+        return app_instance
 
 
 class DevConfig(BaseModel):
