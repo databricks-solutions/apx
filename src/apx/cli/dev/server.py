@@ -586,12 +586,40 @@ def create_dev_server(app_dir: Path) -> FastAPI:
         return PortsResponse.from_config(state.config)
 
     @app.post("/__apx__/browser-logs", status_code=204)
-    async def receive_browser_logs(payload: BrowserLogPayload) -> Response:
-        """Receive browser logs from the frontend dev tools."""
+    async def receive_browser_logs(request: Request) -> Response:
+        """Receive browser logs from the frontend dev tools.
+
+        The UI may send logs using `navigator.sendBeacon`, which frequently arrives as a
+        raw JSON string without an `application/json` content-type. Accept both:
+        - JSON object body
+        - JSON string body
+        """
+        try:
+            body = await request.body()
+            if not body:
+                return Response(status_code=204)
+
+            payload_obj: object
+            try:
+                # Fast path: proper JSON content-type or parseable JSON bytes
+                payload_obj = json.loads(body)
+            except Exception:
+                # Fallback: decode to text and try again (covers odd encodings)
+                payload_obj = json.loads(body.decode("utf-8", errors="ignore"))
+
+            # If the client sent a JSON string (double-encoded), decode once more.
+            if isinstance(payload_obj, str):
+                payload_obj = json.loads(payload_obj)
+
+            payload = BrowserLogPayload.model_validate(payload_obj)
+        except Exception:
+            # Never fail the dev server due to browser log ingestion.
+            return Response(status_code=204)
+
         log_entry = LogEntry(
-            timestamp=datetime.datetime.fromtimestamp(
-                payload.timestamp / 1000
-            ).strftime("%Y-%m-%d %H:%M:%S"),
+            timestamp=datetime.datetime.fromtimestamp(payload.timestamp / 1000).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
             level=payload.level.upper(),
             channel=LogChannel.UI,
             component="browser",

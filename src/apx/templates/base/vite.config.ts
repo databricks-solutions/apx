@@ -35,6 +35,16 @@ function apxDevProxyGuard(): Plugin {
             return;
           }
 
+          // Allow WebSocket upgrade requests (HMR connections from the proxy)
+          const upgradeHeader = req.headers["upgrade"];
+          if (
+            upgradeHeader &&
+            upgradeHeader.toLowerCase().includes("websocket")
+          ) {
+            next();
+            return;
+          }
+
           // Check for the APX dev proxy header
           const hasProxyHeader = req.headers[APX_DEV_PROXY_HEADER] === "true";
           if (!hasProxyHeader) {
@@ -123,6 +133,14 @@ export default defineConfig(({ command }) => {
           host,
           port: frontendPort,
           strictPort: true,
+          // Configure HMR to connect directly to Vite instead of through the APX proxy.
+          // This avoids WebSocket proxy issues and makes HMR more reliable.
+          hmr: {
+            host: "localhost",
+            port: frontendPort,
+            // clientPort tells the browser to connect directly to Vite's port
+            clientPort: frontendPort,
+          },
         };
       })()
     : undefined;

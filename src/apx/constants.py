@@ -29,4 +29,4 @@ DEFAULT_MAX_RETRIES = 10
 # Used by the dev reverse proxy when connecting to the internal frontend (Vite/bun)
 # WebSocket endpoint (e.g. Vite HMR). If the frontend server is still starting up
 # or momentarily busy, the default `websockets` open timeout can be too aggressive.
-DEFAULT_WS_OPEN_TIMEOUT_SECONDS = 30.0
+DEFAULT_WS_OPEN_TIMEOUT_SECONDS = 4.0

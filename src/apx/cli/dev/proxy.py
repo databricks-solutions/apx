@@ -497,8 +497,24 @@ class ProxyManager:
                 except asyncio.CancelledError:
                     pass
 
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"WS {path} -> {target_name} | connection timeout after {self.ws_open_timeout_seconds}s to {target_url}"
+            )
+        except ConnectionRefusedError:
+            logger.warning(
+                f"WS {path} -> {target_name} | connection refused to {target_url} (target server not listening?)"
+            )
+        except OSError as e:
+            logger.warning(
+                f"WS {path} -> {target_name} | OS error connecting to {target_url}: {e}"
+            )
         except Exception as e:
-            logger.warning(f"WS {path} -> {target_name} | error: {e}")
+            # Log full exception type for debugging
+            exc_type = type(e).__module__ + "." + type(e).__name__
+            logger.warning(
+                f"WS {path} -> {target_name} | error ({exc_type}): {e} | target={target_url}"
+            )
         finally:
             # Log WebSocket closed
             logger.info(f"WS {path} -> {target_name} | closed")
