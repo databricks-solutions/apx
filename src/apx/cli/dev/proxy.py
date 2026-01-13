@@ -83,27 +83,53 @@ class ProxyManager:
         """Check if path is an API route."""
         return path.startswith(self.api_prefix)
 
+    def _is_file_path(self, path: str) -> bool:
+        """Check if path looks like a file request (has extension like .js, .css, .png).
+
+        Returns True for paths like:
+        - /assets/logo.png
+        - /node_modules/react/index.js
+        - /@fs/path/to/file.tsx
+
+        Returns False for paths like:
+        - /api/users
+        - /@vite/client
+        - /some-route
+        """
+        # Get the last segment of the path
+        last_segment = path.rstrip("/").split("/")[-1] if "/" in path else path
+        # Check if it has a file extension (contains a dot followed by alphanumeric chars)
+        if "." in last_segment:
+            # Get the part after the last dot
+            ext = last_segment.rsplit(".", 1)[-1]
+            # Common file extensions to consider as files
+            return ext.isalnum() and len(ext) <= 10
+        return False
+
     def _get_target_name(self, path: str) -> str:
         """Get human-readable target name for logging."""
         return "api" if self._is_api_route(path) else "ui"
 
     def _format_path_fixed(self, path: str) -> str:
-        """Format a request path as a fixed-width field (max 30 chars)."""
-        fixed_width = 30
+        """Format a request path as a fixed-width field (max 50 chars)."""
+        fixed_width = 50
         if len(path) > fixed_width:
-            path = f"{path[: fixed_width - 3]}..."
+            # Truncate and add ... at the end, ensuring total width is exactly fixed_width
+            truncated = path[: fixed_width - 3] + "..."
+            return truncated
         return f"{path:<{fixed_width}}"
 
     def _format_target_fixed(self, target: str) -> str:
         """Format target as fixed-width 3 chars ('ui' or 'api')."""
         return f"{target:<3}"[:3]
 
+    def _format_method_fixed(self, method: str) -> str:
+        """Format HTTP method as fixed-width 7 chars (longest is OPTIONS)."""
+        return f"{method:<7}"
+
     def _format_duration_ms_fixed(self, duration_ms: int) -> str:
         """Format duration as fixed-width field, max 5 chars preferred (e.g. ' 16ms')."""
-        if duration_ms < 1000:
-            return f"{duration_ms:>3}ms"
-        # Prefer correctness over strict width for slow requests.
-        return f"{duration_ms}ms"
+        return f"{duration_ms:>10}ms"
 
     def _log_request(
         self,
@@ -114,18 +140,21 @@ class ProxyManager:
     ) -> None:
         """Log an HTTP request with timing.
 
-        Format: GET /api/users -> api | 200 | 45ms
+        Format: GET     /api/users                                -> api | 200 | 45ms
+
+        Skips UI file requests (e.g., .js, .css, .png) to reduce noise.
         """
         target = self._get_target_name(path)
-        # Don't show UI HTTP requests (too noisy); keep WebSocket logs separate.
-        if target == "ui":
+        # Skip UI file requests (too noisy), but show UI route requests
+        if target == "ui" and self._is_file_path(path):
             return
 
+        method_fixed = self._format_method_fixed(method)
         path_fixed = self._format_path_fixed(path)
         target_fixed = self._format_target_fixed(target)
         code_fixed = f"{status_code:>3}"
         ms_fixed = self._format_duration_ms_fixed(duration_ms)
-        logger.info(f"{method} {path_fixed} -> {target_fixed} | {code_fixed} | {ms_fixed}")
+        logger.info(f"{method_fixed} {path_fixed} -> {target_fixed} | {code_fixed} | {ms_fixed}")
 
     def _log_request_error(
         self,
@@ -135,17 +164,22 @@ class ProxyManager:
         error: str,
         duration_ms: int,
     ) -> None:
-        """Log an HTTP request error with timing (same format as successes + error text)."""
+        """Log an HTTP request error with timing (same format as successes + error text).
+
+        Skips UI file requests (e.g., .js, .css, .png) to reduce noise.
+        """
         target = self._get_target_name(path)
-        if target == "ui":
+        # Skip UI file requests (too noisy), but show UI route requests
+        if target == "ui" and self._is_file_path(path):
             return
 
+        method_fixed = self._format_method_fixed(method)
         path_fixed = self._format_path_fixed(path)
         target_fixed = self._format_target_fixed(target)
         code_fixed = f"{status_code:>3}"
         ms_fixed = self._format_duration_ms_fixed(duration_ms)
         logger.warning(
-            f"{method} {path_fixed} -> {target_fixed} | {code_fixed} | {ms_fixed} | {error}"
+            f"{method_fixed} {path_fixed} -> {target_fixed} | {code_fixed} | {ms_fixed} | {error}"
         )
 
     async def proxy_http(self, request: Request) -> Response:
@@ -431,6 +465,8 @@ class ProxyManager:
         target_ws: ClientConnection | None = None
         forward_task: asyncio.Task[None] | None = None
         backward_task: asyncio.Task[None] | None = None
+        ws_close_code: int | None = None
+        ws_close_reason: str | None = None
 
         try:
             # Connect to target WebSocket server
@@ -441,35 +477,42 @@ class ProxyManager:
             # Store reference for nested functions
             active_target_ws = target_ws
 
-            # Log WebSocket opened
-            logger.info(f"WS {path} -> {target_name} | opened")
+            # Log WebSocket opened (only for UI connections)
+            if target_name == "ui":
+                logger.info(f"WS {path} -> {target_name} | connection opened")
 
             async def forward_to_target() -> None:
                 """Forward messages from client to target."""
+                nonlocal ws_close_code, ws_close_reason
                 try:
                     while True:
                         data = await websocket.receive()
                         if data["type"] == "websocket.disconnect":
+                            ws_close_code = data.get("code", 1000)
+                            ws_close_reason = data.get("reason", "")
                             break
                         if "text" in data:
                             await active_target_ws.send(data["text"])
                         elif "bytes" in data:
                             await active_target_ws.send(data["bytes"])
-                except WebSocketDisconnect:
-                    pass
+                except WebSocketDisconnect as e:
+                    ws_close_code = e.code
+                    ws_close_reason = getattr(e, "reason", "")
                 except Exception:
                     pass
 
             async def forward_to_client() -> None:
                 """Forward messages from target to client."""
+                nonlocal ws_close_code, ws_close_reason
                 try:
                     async for message in active_target_ws:
                         if isinstance(message, str):
                             await websocket.send_text(message)
                         else:
                             await websocket.send_bytes(message)
-                except websockets.exceptions.ConnectionClosed:
-                    pass
+                except websockets.exceptions.ConnectionClosed as e:
+                    ws_close_code = e.code
+                    ws_close_reason = e.reason or ""
                 except Exception:
                     pass
 
@@ -516,8 +559,24 @@ class ProxyManager:
                 f"WS {path} -> {target_name} | error ({exc_type}): {e} | target={target_url}"
             )
         finally:
-            # Log WebSocket closed
-            logger.info(f"WS {path} -> {target_name} | closed")
+            # Try to get close code from target WebSocket if not already captured
+            if ws_close_code is None and target_ws is not None:
+                ws_close_code = target_ws.close_code
+                ws_close_reason = target_ws.close_reason or ""
+
+            # Log WebSocket closed (only for UI connections)
+            if target_name == "ui":
+                if ws_close_code is None:
+                    logger.info(f"WS {path} -> {target_name} | connection closed")
+                elif ws_close_code == 1000:
+                    logger.info(
+                        f"WS {path} -> {target_name} | connection closed successfully"
+                    )
+                else:
+                    reason_suffix = f" ({ws_close_reason})" if ws_close_reason else ""
+                    logger.info(
+                        f"WS {path} -> {target_name} | connection closed with code {ws_close_code}{reason_suffix}"
+                    )
 
             # Unregister this connection
             current_task = asyncio.current_task()

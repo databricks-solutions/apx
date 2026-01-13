@@ -1374,22 +1374,24 @@ class DevCore:
                 str(status_data.dev_server_port),
             )
 
-            frontend_status = (
-                "[green]●[/green] Running"
-                if status_data.frontend_running
-                else "[red]●[/red] Stopped"
-            )
+            if status_data.frontend_running:
+                frontend_status = "[green]●[/green] Running"
+            elif status_data.frontend_exit_code is not None:
+                frontend_status = f"[red]●[/red] Exited ({status_data.frontend_exit_code})"
+            else:
+                frontend_status = "[red]●[/red] Stopped"
             table.add_row(
                 "Frontend",
                 frontend_status,
                 f"{status_data.frontend_port} (internal)",
             )
 
-            backend_status = (
-                "[green]●[/green] Running"
-                if status_data.backend_running
-                else "[red]●[/red] Stopped"
-            )
+            if status_data.backend_running:
+                backend_status = "[green]●[/green] Running"
+            elif status_data.backend_exit_code is not None:
+                backend_status = f"[red]●[/red] Exited ({status_data.backend_exit_code})"
+            else:
+                backend_status = "[red]●[/red] Stopped"
             table.add_row(
                 "Backend",
                 backend_status,

@@ -168,6 +168,8 @@ class ProcessRunningStatus(BaseModel):
     frontend_running: bool = False
     backend_running: bool = False
     openapi_running: bool = False
+    frontend_exit_code: int | None = None
+    backend_exit_code: int | None = None
 
 
 class CommandResult(BaseModel):
@@ -411,6 +413,8 @@ class StatusResponse(ProcessRunningStatus):
             frontend_running=status.frontend_running,
             backend_running=status.backend_running,
             openapi_running=status.openapi_running,
+            frontend_exit_code=status.frontend_exit_code,
+            backend_exit_code=status.backend_exit_code,
         )
 
 
@@ -481,6 +485,8 @@ class McpStatusResponse(ProcessRunningStatus):
             backend_running=status.backend_running,
             backend_port=status.backend_port,
             openapi_running=status.openapi_running,
+            frontend_exit_code=status.frontend_exit_code,
+            backend_exit_code=status.backend_exit_code,
         )
 
     @classmethod

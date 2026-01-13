@@ -88,10 +88,12 @@ class ServerState(FrontendProcessState):
         self.frontend_task: asyncio.Task[None] | None = None
         self.frontend_process: asyncio.subprocess.Process | None = None
         self.frontend_tracked: TrackedProcess | None = None
+        self.frontend_exit_code: int | None = None
         # Backend subprocess (apx dev _run_backend)
         self.backend_task: asyncio.Task[None] | None = None
         self.backend_process: asyncio.subprocess.Process | None = None
         self.backend_tracked: TrackedProcess | None = None
+        self.backend_exit_code: int | None = None
         # OpenAPI watcher (in-process async task)
         self.openapi_task: asyncio.Task[None] | None = None
         # Shared state
@@ -353,6 +355,38 @@ def request_dev_server_shutdown(delay: float = 0.0) -> None:
     os.kill(os.getpid(), signal.SIGTERM)
 
 
+# Exit code 143 = SIGTERM (128 + 15)
+SIGTERM_EXIT_CODE = 143
+
+
+async def _check_auto_shutdown() -> None:
+    """Check if both frontend and backend have exited with SIGTERM and trigger shutdown.
+
+    When both managed processes exit with code 143 (SIGTERM), the dev server
+    should automatically shut down since the user likely ran multiple stop commands.
+    """
+    # Both tasks must be done (completed or crashed)
+    frontend_done = state.frontend_task is None or state.frontend_task.done()
+    backend_done = state.backend_task is None or state.backend_task.done()
+
+    if not (frontend_done and backend_done):
+        return
+
+    # Both have exited - check if both due to SIGTERM (143)
+    both_sigterm = (
+        state.frontend_exit_code == SIGTERM_EXIT_CODE
+        and state.backend_exit_code == SIGTERM_EXIT_CODE
+    )
+    if both_sigterm:
+        logger.info(
+            "Both frontend and backend received SIGTERM (exit code 143), "
+            "shutting down dev server"
+        )
+        # Give a brief moment for logs to flush
+        await asyncio.sleep(0.5)
+        request_dev_server_shutdown(delay=0.1)
+
+
 # === Background Task Runners ===
 
 
@@ -401,8 +435,14 @@ async def run_frontend_task(
 
         await process.wait()
 
+        # Capture exit code for status tracking
+        state.frontend_exit_code = process.returncode
+
         if process.returncode != 0:
             ui_logger.error(f"Frontend process exited with code {process.returncode}")
+
+        # Check if we should auto-shutdown (both processes exited with SIGTERM)
+        await _check_auto_shutdown()
 
     except asyncio.CancelledError:
         raise
@@ -462,10 +502,16 @@ async def run_backend_task(
 
         await process.wait()
 
+        # Capture exit code for status tracking
+        state.backend_exit_code = process.returncode
+
         if process.returncode != 0:
             backend_logger.error(
                 f"Backend process exited with code {process.returncode}"
             )
+
+        # Check if we should auto-shutdown (both processes exited with SIGTERM)
+        await _check_auto_shutdown()
 
     except asyncio.CancelledError:
         raise
@@ -577,6 +623,8 @@ def create_dev_server(app_dir: Path) -> FastAPI:
             and not state.backend_task.done(),
             openapi_running=state.openapi_task is not None
             and not state.openapi_task.done(),
+            frontend_exit_code=state.frontend_exit_code,
+            backend_exit_code=state.backend_exit_code,
         )
         return StatusResponse.from_config(state.config, running_status)
 
@@ -645,6 +693,10 @@ def create_dev_server(app_dir: Path) -> FastAPI:
 
         # Store configuration from request
         state.update_config(request.to_config())
+
+        # Reset exit codes from any previous session
+        state.frontend_exit_code = None
+        state.backend_exit_code = None
 
         # Create proxy manager
         state.proxy = _create_proxy()
