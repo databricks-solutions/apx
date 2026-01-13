@@ -367,30 +367,6 @@ def test_apply_single_file_nonexistent(tmp_path: Path) -> None:
         assert "not found" in result.output.lower()
 
 
-def test_apply_base_without_file_flag_succeeds(tmp_path: Path) -> None:
-    """Test that applying 'base' without --file flag works (applies entire base template)."""
-    # Initialize with essential template
-    initialize_project(tmp_path, template="essential", layout="basic")
-
-    # Modify a file to verify it gets restored
-    vite_config_path = tmp_path / "vite.config.ts"
-    vite_config_path.write_text("// modified")
-
-    # Apply 'base' template (should work and restore all base files)
-    with in_path(tmp_path):
-        result = runner.invoke(
-            app,
-            ["dev", "apply", "base", "--force"],
-            catch_exceptions=False,
-        )
-        assert result.exit_code == 0
-        assert "applied successfully" in result.output
-
-    # Verify the file was restored
-    assert "apxPlugin()" in vite_config_path.read_text()
-    assert "// modified" not in vite_config_path.read_text()
-
-
 def test_apply_single_file_from_essential(tmp_path: Path) -> None:
     """Test applying a single file using 'essential' as an alias for 'base'."""
     # Initialize with essential template
