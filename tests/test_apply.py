@@ -374,7 +374,6 @@ def test_apply_base_without_file_flag_succeeds(tmp_path: Path) -> None:
 
     # Modify a file to verify it gets restored
     vite_config_path = tmp_path / "vite.config.ts"
-    original_content = vite_config_path.read_text()
     vite_config_path.write_text("// modified")
 
     # Apply 'base' template (should work and restore all base files)
@@ -433,11 +432,9 @@ def test_apply_essential_without_file_flag_succeeds(tmp_path: Path) -> None:
 
     # Modify multiple files to verify they get restored
     vite_config_path = tmp_path / "vite.config.ts"
-    original_vite_content = vite_config_path.read_text()
     vite_config_path.write_text("// modified vite")
 
     router_path = tmp_path / "src" / "test_app" / "backend" / "router.py"
-    original_router_content = router_path.read_text()
     router_path.write_text("# modified router")
 
     # Apply 'essential' template (should restore all base template files)
