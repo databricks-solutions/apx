@@ -290,9 +290,7 @@ class ProjectMetadata(BaseModel):
         app_instance = getattr(module, attr_name)
 
         if not isinstance(app_instance, FastAPI):
-            raise TypeError(
-                f"'{attr_name}' in {module_path} is not a FastAPI instance"
-            )
+            raise TypeError(f"'{attr_name}' in {module_path} is not a FastAPI instance")
 
         return app_instance
 
