@@ -104,6 +104,8 @@ class ServerState(FrontendProcessState):
         # OpenAPI regeneration timestamps
         self.openapi_schema_last_updated: datetime.datetime | None = None
         self.api_ts_last_updated: datetime.datetime | None = None
+        # Shutdown signaling for SSE connections
+        self.shutdown_event: asyncio.Event | None = None
 
     # Convenience properties for backwards compatibility
     @property
@@ -574,9 +576,16 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     # Configure logging to write to shared in-memory buffer
     configure_dev_logging(buffer=state.log_buffer)
 
+    # Initialize shutdown event for SSE connections
+    state.shutdown_event = asyncio.Event()
+
     try:
         yield
     finally:
+        # Signal SSE connections to close before other cleanup
+        if state.shutdown_event:
+            state.shutdown_event.set()
+
         # Shutdown proxy first (graceful WebSocket close)
         if state.proxy:
             await state.proxy.shutdown(timeout=5.0)
@@ -665,9 +674,9 @@ def create_dev_server(app_dir: Path) -> FastAPI:
             return Response(status_code=204)
 
         log_entry = LogEntry(
-            timestamp=datetime.datetime.fromtimestamp(payload.timestamp / 1000).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            ),
+            timestamp=datetime.datetime.fromtimestamp(
+                payload.timestamp / 1000
+            ).strftime("%Y-%m-%d %H:%M:%S"),
             level=payload.level.upper(),
             channel=LogChannel.UI,
             component="browser",
@@ -752,6 +761,12 @@ def create_dev_server(app_dir: Path) -> FastAPI:
     async def stop_servers(background_tasks: BackgroundTasks) -> ActionResponse:
         """Stop all development servers with graceful shutdown."""
         try:
+            # Signal SSE log streams to close before other cleanup
+            if state.shutdown_event:
+                state.shutdown_event.set()
+            # Give SSE connections a moment to receive the shutdown event
+            await asyncio.sleep(0.15)
+
             # Shutdown proxy first (close WebSocket connections)
             if state.proxy:
                 await state.proxy.shutdown(timeout=5.0)
@@ -1015,7 +1030,24 @@ def create_dev_server(app_dir: Path) -> FastAPI:
             last_index = len(state.log_buffer) - 1
 
             while True:
-                await asyncio.sleep(0.1)
+                # Check if server is shutting down
+                if state.shutdown_event and state.shutdown_event.is_set():
+                    # Send shutdown event to client before closing
+                    yield "event: server_shutdown\ndata: {}\n\n"
+                    return
+
+                # Wait for either 100ms OR shutdown event (whichever comes first)
+                if state.shutdown_event:
+                    try:
+                        await asyncio.wait_for(state.shutdown_event.wait(), timeout=0.1)
+                        # If we get here, shutdown was triggered
+                        yield "event: server_shutdown\ndata: {}\n\n"
+                        return
+                    except asyncio.TimeoutError:
+                        # Normal timeout, continue with log checking
+                        pass
+                else:
+                    await asyncio.sleep(0.1)
 
                 current_index = len(state.log_buffer) - 1
                 if current_index > last_index:

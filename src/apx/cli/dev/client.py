@@ -235,27 +235,41 @@ class DevServerClient:
                     """Parse SSE events and yield LogEntry objects and markers."""
                     skip_next_data = False
 
-                    for line in response.iter_lines():
-                        if not line:
-                            continue
-
-                        # Check for sentinel event marking end of buffered logs
-                        if line.startswith("event: buffered_done"):
-                            skip_next_data = True
-                            yield StreamEvent.BUFFERED_DONE
-                            continue
-
-                        # Parse SSE data lines
-                        if line.startswith("data: "):
-                            if skip_next_data:
-                                skip_next_data = False
+                    try:
+                        for line in response.iter_lines():
+                            if not line:
                                 continue
 
-                            data_str = line[6:]  # Remove "data: " prefix
-                            try:
-                                yield LogEntry.model_validate(json.loads(data_str))
-                            except ValidationError:
+                            # Check for server shutdown event
+                            if line.startswith("event: server_shutdown"):
+                                skip_next_data = True
+                                yield StreamEvent.SERVER_SHUTDOWN
+                                return  # Exit immediately on server shutdown
+
+                            # Check for sentinel event marking end of buffered logs
+                            if line.startswith("event: buffered_done"):
+                                skip_next_data = True
+                                yield StreamEvent.BUFFERED_DONE
                                 continue
+
+                            # Parse SSE data lines
+                            if line.startswith("data: "):
+                                if skip_next_data:
+                                    skip_next_data = False
+                                    continue
+
+                                data_str = line[6:]  # Remove "data: " prefix
+                                try:
+                                    yield LogEntry.model_validate(json.loads(data_str))
+                                except ValidationError:
+                                    continue
+                    except (
+                        httpx.RemoteProtocolError,
+                        httpx.ReadError,
+                        httpx.ConnectError,
+                    ):
+                        # Server shut down or connection was closed - exit gracefully
+                        return
 
                 yield log_iterator()
 
@@ -296,22 +310,32 @@ class DevServerClient:
 
                 skip_next_data = False
 
-                async for line in response.aiter_lines():
-                    if not line:
-                        continue
-
-                    if line.startswith("event: buffered_done"):
-                        skip_next_data = True
-                        yield StreamEvent.BUFFERED_DONE
-                        continue
-
-                    if line.startswith("data: "):
-                        if skip_next_data:
-                            skip_next_data = False
+                try:
+                    async for line in response.aiter_lines():
+                        if not line:
                             continue
 
-                        data_str = line[6:]
-                        try:
-                            yield LogEntry.model_validate(json.loads(data_str))
-                        except ValidationError:
+                        # Check for server shutdown event
+                        if line.startswith("event: server_shutdown"):
+                            skip_next_data = True
+                            yield StreamEvent.SERVER_SHUTDOWN
+                            return  # Exit immediately on server shutdown
+
+                        if line.startswith("event: buffered_done"):
+                            skip_next_data = True
+                            yield StreamEvent.BUFFERED_DONE
                             continue
+
+                        if line.startswith("data: "):
+                            if skip_next_data:
+                                skip_next_data = False
+                                continue
+
+                            data_str = line[6:]
+                            try:
+                                yield LogEntry.model_validate(json.loads(data_str))
+                            except ValidationError:
+                                continue
+                except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError):
+                    # Server shut down or connection was closed - exit gracefully
+                    return

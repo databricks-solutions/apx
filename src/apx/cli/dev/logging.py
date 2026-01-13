@@ -226,13 +226,19 @@ def get_logger(component: DevLogComponent) -> logging.Logger:
 
     Always use this instead of calling logging.getLogger() directly
     to ensure logs are routed to the shared buffer.
+
+    When logging is not configured (e.g., in subprocess contexts like _run_backend),
+    logs are written to stderr so they can be captured by collect_subprocess_output.
     """
     logger = logging.getLogger(f"apx.dev.{component.value}")
     if not _STATE.configured:
-        # Avoid "No handlers could be found" warnings in contexts
-        # that don't configure dev logging.
+        # In subprocess contexts (e.g., _run_backend), we need logs to go to stderr
+        # so they can be captured by the parent process via collect_subprocess_output.
         if not logger.handlers:
-            logger.addHandler(logging.NullHandler())
+            handler = logging.StreamHandler(sys.stderr)
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
         logger.propagate = False
     return logger
 

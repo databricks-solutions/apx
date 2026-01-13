@@ -154,7 +154,9 @@ class ProxyManager:
         target_fixed = self._format_target_fixed(target)
         code_fixed = f"{status_code:>3}"
         ms_fixed = self._format_duration_ms_fixed(duration_ms)
-        logger.info(f"{method_fixed} {path_fixed} -> {target_fixed} | {code_fixed} | {ms_fixed}")
+        logger.info(
+            f"{method_fixed} {path_fixed} -> {target_fixed} | {code_fixed} | {ms_fixed}"
+        )
 
     def _log_request_error(
         self,
@@ -197,7 +199,9 @@ class ProxyManager:
 
         if not self.accepting_connections:
             duration_ms = int((time.perf_counter() - start_time) * 1000)
-            self._log_request_error(method, path, 503, "Server shutting down", duration_ms)
+            self._log_request_error(
+                method, path, 503, "Server shutting down", duration_ms
+            )
             return Response(
                 content="Server is shutting down",
                 status_code=503,
@@ -315,7 +319,9 @@ class ProxyManager:
 
         if not self.accepting_connections:
             duration_ms = int((time.perf_counter() - start_time) * 1000)
-            self._log_request_error(method, path, 503, "Server shutting down", duration_ms)
+            self._log_request_error(
+                method, path, 503, "Server shutting down", duration_ms
+            )
             return StreamingResponse(
                 content=iter([b"Server is shutting down"]),
                 status_code=503,

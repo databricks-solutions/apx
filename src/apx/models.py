@@ -89,6 +89,7 @@ class StreamEvent(str, Enum):
     """Marker for special SSE events."""
 
     BUFFERED_DONE = "buffered_done"
+    SERVER_SHUTDOWN = "server_shutdown"
 
 
 # === Base Models (Building Blocks) ===

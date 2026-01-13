@@ -941,7 +941,7 @@ def run_backend_server(
         try:
             # Reload message
             if not first_run:
-                backend_logger.info("Reloading backend...")
+                backend_logger.info("Detected file changes, reloading backend...")
 
             # Reload .env file on every iteration
             dotenv_file = cwd / ".env"
@@ -1078,10 +1078,25 @@ def run_backend_server(
             break
 
         except Exception:
+            action = "load" if first_run else "reload"
             backend_logger.error(
-                f"Backend initialization error:\n{traceback.format_exc()}"
+                f"Failed to {action} app, waiting for file changes to retry...\n{traceback.format_exc()}"
             )
-            time.sleep(1)
+            # Wait for next file change before retrying instead of fixed 1 second
+            # This avoids spamming errors while the user is still editing
+            try:
+
+                async def wait_for_change() -> None:
+                    async for _changes in watchfiles.awatch(
+                        cwd, watch_filter=watchfiles.PythonFilter()
+                    ):
+                        return
+
+                asyncio.run(wait_for_change())
+                backend_logger.info("Detected file changes, retrying...")
+            except KeyboardInterrupt:
+                backend_logger.info("Backend received shutdown signal")
+                break
 
 
 # =============================================================================
@@ -1377,7 +1392,9 @@ class DevCore:
             if status_data.frontend_running:
                 frontend_status = "[green]●[/green] Running"
             elif status_data.frontend_exit_code is not None:
-                frontend_status = f"[red]●[/red] Exited ({status_data.frontend_exit_code})"
+                frontend_status = (
+                    f"[red]●[/red] Exited ({status_data.frontend_exit_code})"
+                )
             else:
                 frontend_status = "[red]●[/red] Stopped"
             table.add_row(
@@ -1389,7 +1406,9 @@ class DevCore:
             if status_data.backend_running:
                 backend_status = "[green]●[/green] Running"
             elif status_data.backend_exit_code is not None:
-                backend_status = f"[red]●[/red] Exited ({status_data.backend_exit_code})"
+                backend_status = (
+                    f"[red]●[/red] Exited ({status_data.backend_exit_code})"
+                )
             else:
                 backend_status = "[red]●[/red] Stopped"
             table.add_row(
@@ -1437,7 +1456,7 @@ class DevCore:
             if client.is_running():
                 response = client.stop()
                 if response.status == "success":
-                    console.print("[green]✓[/green] Stopped all servers via API")
+                    console.print("[green]✓[/green] Stopped all servers")
                 else:
                     raise RuntimeError(response.message)
             else:
@@ -1586,6 +1605,7 @@ class DevCore:
         client = DevServerClient(port=port)
 
         log_count = 0
+        server_disconnected = False
 
         try:
             with client.stream_logs(
@@ -1607,6 +1627,10 @@ class DevCore:
                             )
                         break
 
+                    if item == StreamEvent.SERVER_SHUTDOWN:
+                        server_disconnected = True
+                        break
+
                     if item == StreamEvent.BUFFERED_DONE:
                         if not follow:
                             break
@@ -1618,13 +1642,20 @@ class DevCore:
                     print_log_entry(item, raw_output=raw_output)
                     log_count += 1
 
+                # If we're following and the loop exits normally (without exception),
+                # it means the server closed the connection
+                if follow and not server_disconnected:
+                    server_disconnected = True
+
         except KeyboardInterrupt:
             if follow:
                 console.print("\n[dim]Stopped streaming logs.[/dim]")
         except Exception as e:
             console.print(f"\n[red]Error streaming logs: {e}[/red]")
 
-        if not follow:
+        if server_disconnected:
+            console.print("\n[dim]Development server stopped.[/dim]")
+        elif not follow:
             if log_count > 0:
                 console.print(f"\n[dim]Showed {log_count} log entries[/dim]")
             else:

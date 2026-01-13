@@ -14,14 +14,20 @@ if env_file.exists():
     load_dotenv(dotenv_path=env_file)
 
 
-
 class DatabaseConfig(BaseSettings):
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
         extra="ignore",
     )
-    port: int = Field(description="The port of the database", default=5432, validation_alias="PGPORT")
-    database_name: str = Field(description="The name of the database", default="databricks_postgres")
-    instance_name: str = Field(description="The name of the database instance", validation_alias="PGAPPNAME")
+    port: int = Field(
+        description="The port of the database", default=5432, validation_alias="PGPORT"
+    )
+    database_name: str = Field(
+        description="The name of the database", default="databricks_postgres"
+    )
+    instance_name: str = Field(
+        description="The name of the database instance", validation_alias="PGAPPNAME"
+    )
+
 
 class AppConfig(BaseSettings):
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
