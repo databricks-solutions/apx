@@ -50,7 +50,7 @@ def get_addon_template_dir(addon_name: str) -> Path:
         Exit: If the addon is not found
     """
     templates_dir: Path = Path(str(resources.files("apx"))).joinpath("templates")
-    
+
     # 'essential' and 'base' map to the base template directory
     if addon_name in ("essential", "base"):
         addon_dir = templates_dir / "base"
