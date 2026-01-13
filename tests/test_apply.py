@@ -367,17 +367,94 @@ def test_apply_single_file_nonexistent(tmp_path: Path) -> None:
         assert "not found" in result.output.lower()
 
 
-def test_apply_base_without_file_flag_fails(tmp_path: Path) -> None:
-    """Test that applying 'base' without --file flag fails (base is not an addon)."""
+def test_apply_base_without_file_flag_succeeds(tmp_path: Path) -> None:
+    """Test that applying 'base' without --file flag works (applies entire base template)."""
     # Initialize with essential template
     initialize_project(tmp_path, template="essential", layout="basic")
 
-    # Try to apply 'base' as an addon (should fail)
+    # Modify a file to verify it gets restored
+    vite_config_path = tmp_path / "vite.config.ts"
+    original_content = vite_config_path.read_text()
+    vite_config_path.write_text("// modified")
+
+    # Apply 'base' template (should work and restore all base files)
     with in_path(tmp_path):
         result = runner.invoke(
             app,
             ["dev", "apply", "base", "--force"],
             catch_exceptions=False,
         )
-        assert result.exit_code == 1
-        assert "Invalid addon" in result.output
+        assert result.exit_code == 0
+        assert "applied successfully" in result.output
+
+    # Verify the file was restored
+    assert "apxPlugin()" in vite_config_path.read_text()
+    assert "// modified" not in vite_config_path.read_text()
+
+
+def test_apply_single_file_from_essential(tmp_path: Path) -> None:
+    """Test applying a single file using 'essential' as an alias for 'base'."""
+    # Initialize with essential template
+    initialize_project(tmp_path, template="essential", layout="basic")
+
+    # Verify vite.config.ts exists
+    vite_config_path = tmp_path / "vite.config.ts"
+    assert vite_config_path.exists()
+
+    # Read original vite.config.ts content
+    original_content = vite_config_path.read_text()
+
+    # Modify the file
+    modified_content = original_content.replace("apxPlugin()", "// modified content")
+    vite_config_path.write_text(modified_content)
+
+    # Apply the single file from essential template (should work as alias for base)
+    with in_path(tmp_path):
+        result = runner.invoke(
+            app,
+            ["dev", "apply", "essential", "--file", "vite.config.ts", "--force"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, (
+            f"Failed to apply single file from essential. \n output:{result.output} \n error:{result.exception}"
+        )
+        assert "applied successfully" in result.output
+
+    # Verify the file was restored
+    restored_content = vite_config_path.read_text()
+    assert "apxPlugin()" in restored_content
+    assert "// modified content" not in restored_content
+
+
+def test_apply_essential_without_file_flag_succeeds(tmp_path: Path) -> None:
+    """Test that applying 'essential' without --file flag works (applies entire essential template)."""
+    # Initialize with essential template
+    initialize_project(tmp_path, template="essential", layout="basic")
+
+    # Modify multiple files to verify they get restored
+    vite_config_path = tmp_path / "vite.config.ts"
+    original_vite_content = vite_config_path.read_text()
+    vite_config_path.write_text("// modified vite")
+
+    router_path = tmp_path / "src" / "test_app" / "backend" / "router.py"
+    original_router_content = router_path.read_text()
+    router_path.write_text("# modified router")
+
+    # Apply 'essential' template (should restore all base template files)
+    with in_path(tmp_path):
+        result = runner.invoke(
+            app,
+            ["dev", "apply", "essential", "--force"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 0, (
+            f"Failed to apply essential template. \n output:{result.output} \n error:{result.exception}"
+        )
+        assert "applied successfully" in result.output
+
+    # Verify both files were restored
+    assert "apxPlugin()" in vite_config_path.read_text()
+    assert "// modified vite" not in vite_config_path.read_text()
+    assert "# modified router" not in router_path.read_text()
+    # Verify router has expected content
+    assert "APIRouter" in router_path.read_text()

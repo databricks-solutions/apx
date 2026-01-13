@@ -17,14 +17,13 @@ def get_all_addon_names() -> list[str]:
     """Get all available addon names from Template, Assistant, and Layout enums.
 
     Returns a list of addon names that can be applied to a project.
-    Only includes addons that are not the default/basic options.
+    Includes all templates (including 'essential'), assistants, and non-basic layouts.
     """
     addon_names: list[str] = []
 
-    # Get addons from Template enum (exclude 'essential' as it's the base)
+    # Get addons from Template enum (now includes 'essential' for full template reapplication)
     for template in Template:
-        if template != Template.essential:
-            addon_names.append(template.value)
+        addon_names.append(template.value)
 
     # Get addons from Assistant enum (all assistants are addons)
     for assistant in Assistant:
@@ -42,7 +41,7 @@ def get_addon_template_dir(addon_name: str) -> Path:
     """Get the template directory for an addon.
 
     Args:
-        addon_name: The name of the addon
+        addon_name: The name of the addon (or 'essential'/'base' for the base template)
 
     Returns:
         Path to the addon's template directory
@@ -51,7 +50,12 @@ def get_addon_template_dir(addon_name: str) -> Path:
         Exit: If the addon is not found
     """
     templates_dir: Path = Path(str(resources.files("apx"))).joinpath("templates")
-    addon_dir = templates_dir / "addons" / addon_name
+    
+    # 'essential' and 'base' map to the base template directory
+    if addon_name in ("essential", "base"):
+        addon_dir = templates_dir / "base"
+    else:
+        addon_dir = templates_dir / "addons" / addon_name
 
     if not addon_dir.exists():
         console.print(f"[red]❌ Addon '{addon_name}' not found in templates[/red]")
@@ -61,19 +65,19 @@ def get_addon_template_dir(addon_name: str) -> Path:
 
 
 def get_all_template_sources() -> list[str]:
-    """Get all template source names including 'base' and addons.
+    """Get all template source names including 'base', 'essential', and addons.
 
     Returns a list of all template sources that can be used with --file option.
-    Includes both the base template and all addon templates.
+    Includes the base template (and its 'essential' alias) and all addon templates.
     """
-    return ["base"] + get_all_addon_names()
+    return ["base", "essential"] + get_all_addon_names()
 
 
 def get_template_source_dir(source_name: str) -> Path:
-    """Get the template directory for a source (base or addon).
+    """Get the template directory for a source (base, essential, or addon).
 
     Args:
-        source_name: The name of the template source ('base' or an addon name)
+        source_name: The name of the template source ('base', 'essential', or an addon name)
 
     Returns:
         Path to the template source directory
@@ -83,7 +87,8 @@ def get_template_source_dir(source_name: str) -> Path:
     """
     templates_dir: Path = Path(str(resources.files("apx"))).joinpath("templates")
 
-    if source_name == "base":
+    # 'essential' is an alias for 'base' template
+    if source_name in ("base", "essential"):
         source_dir = templates_dir / "base"
     else:
         source_dir = templates_dir / "addons" / source_name
@@ -302,7 +307,7 @@ def apply(
 
     # Validate addon/template source name
     if file_path is not None:
-        # When --file is specified, allow 'base' and all addons
+        # When --file is specified, allow 'base', 'essential', and all addons
         available_sources = get_all_template_sources()
         if addon_name not in available_sources:
             console.print(f"[red]❌ Invalid template source: {addon_name}[/red]")
@@ -311,7 +316,7 @@ def apply(
             )
             raise Exit(code=1)
     else:
-        # When --file is not specified, only allow addons (not 'base')
+        # When --file is not specified, only allow addons (not 'base' or 'essential')
         available_addons = get_all_addon_names()
         if addon_name not in available_addons:
             console.print(f"[red]❌ Invalid addon: {addon_name}[/red]")
