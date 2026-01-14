@@ -160,9 +160,9 @@ class TestBuildE2E:
         assert len(wheel_files) == 1, f"Expected 1 wheel file, found {len(wheel_files)}"
 
         wheel_file = wheel_files[0]
-        assert WHEEL_FILENAME_PATTERN.match(
-            wheel_file.name
-        ), f"Wheel filename '{wheel_file.name}' doesn't match expected pattern"
+        assert WHEEL_FILENAME_PATTERN.match(wheel_file.name), (
+            f"Wheel filename '{wheel_file.name}' doesn't match expected pattern"
+        )
 
         # Check that requirements.txt references the wheel
         requirements_file = build_dir / "requirements.txt"
