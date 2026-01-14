@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import shutil
 import subprocess
@@ -17,6 +18,47 @@ from apx.utils import (
     format_elapsed_ms,
     progress_spinner,
 )
+
+DEFAULT_FALLBACK_VERSION = "0.0.0"
+
+
+def get_base_version(app_path: Path) -> str:
+    """
+    Get the base version using hatch version command.
+    Falls back to DEFAULT_FALLBACK_VERSION if the command fails.
+    """
+    try:
+        result = subprocess.run(
+            ["uv", "run", "hatch", "version"],
+            cwd=app_path,
+            capture_output=True,
+            text=True,
+            env=os.environ,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return DEFAULT_FALLBACK_VERSION
+
+
+def generate_build_version(base_version: str) -> str:
+    """
+    Generate a build version with timestamp suffix.
+
+    If base_version already has a local version identifier (contains '+'),
+    the timestamp is appended with '.' separator to comply with PEP 440.
+    Otherwise, '+' is used as the separator.
+
+    Examples:
+        - "1.2.3" -> "1.2.3+20260114120000"
+        - "0.0.0.post1.dev0+abc123" -> "0.0.0.post1.dev0+abc123.20260114120000"
+    """
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    if "+" in base_version:
+        # Already has a local version identifier, append with '.'
+        return f"{base_version}.{timestamp}"
+    return f"{base_version}+{timestamp}"
 
 
 @with_version
@@ -101,13 +143,21 @@ def build(
         console.print("[yellow]⏭️  Skipping UI build[/yellow]")
 
     # === PHASE 2: Building Python wheel ===
+    # Get base version and generate build version with timestamp
+    base_version = get_base_version(app_path)
+    build_version = generate_build_version(base_version)
+
+    # Prepare environment with UV_DYNAMIC_VERSIONING_BYPASS
+    build_env = os.environ.copy()
+    build_env["UV_DYNAMIC_VERSIONING_BYPASS"] = build_version
+
     with progress_spinner("🐍 Building Python wheel...", "✅ Python wheel built"):
         result = subprocess.run(
             ["uv", "build", "--wheel", "--out-dir", str(build_path)],
             cwd=app_path,
             capture_output=True,
             text=True,
-            env=os.environ,
+            env=build_env,
         )
 
         if result.returncode != 0:
@@ -128,19 +178,13 @@ def build(
             shutil.copy(app_file, build_dir / app_file_name)
             break
 
-    wheel_file = list(build_dir.glob("*.whl"))[0]
-
-    if not wheel_file:
+    wheel_files = list(build_dir.glob("*.whl"))
+    if not wheel_files:
         console.print("[red]❌ No wheel file found in build directory[/red]")
         raise Exit(code=1)
 
-    # postfix the wheel file name with the current UTC timestamp
-    # Use + separator for local version identifier (PEP 440 compliant)
-    timestamp = time.strftime("%Y%m%d%H%M%S")
-    # add ".post{timestamp}" before -py3
-    stemmed = wheel_file.stem.replace("-py3", f".post{timestamp}-py3")
-    wheel_file_name = f"{stemmed}.whl"
-    wheel_file.rename(build_dir / wheel_file_name)
+    wheel_file = wheel_files[0]
+    wheel_file_name = wheel_file.name
 
     # write requirements.txt with the wheel file name
     requirements_file = build_dir / "requirements.txt"
