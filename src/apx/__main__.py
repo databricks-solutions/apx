@@ -46,8 +46,10 @@ app.add_typer(dev_app, name="dev")
 def deprecated_main():
     app()
 
+
 def main():
     raise SystemExit(run_cli(sys.argv))
+
 
 if __name__ == "__main__":
     main()

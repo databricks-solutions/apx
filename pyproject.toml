@@ -50,6 +50,7 @@ dev = [
     "pytest-xdist>=3.8.0",
     "ruff>=0.14.0",
     "sqlmodel>=0.0.27",
+    "ty>=0.0.12",
     "types-cachetools>=6.2.0.20251022",
     "types-cffi>=1.17.0.20250915",
     "types-greenlet>=3.2.0.20250915",
@@ -96,6 +97,7 @@ apx = "apx.__main__:main"
 module-name = "apx._core"
 python-packages = ["apx"]
 python-source = "src"
+include = ["src/apx/binaries/*"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
@@ -103,3 +105,13 @@ cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "C
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
+
+[tool.ty.src]
+exclude = [
+    "src/apx/binaries/*",
+    "src/apx/templates/*",
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.jinja2",
+    "experiments"
+]

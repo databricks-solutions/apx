@@ -2,6 +2,7 @@
 name = "apx"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
 
 [lib]
 name = "_core"
@@ -13,3 +14,9 @@ crate-type = ["cdylib"]
 # "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
 pyo3 = { version = "0.27.1", features = ["extension-module", "abi3-py39"] }
 clap = { version = "4", features = ["derive"] }
+dialoguer = "0.11.0"
+indicatif = "0.17.9"
+rand = "0.8.5"
+tera = "1.20.0"
+toml = "0.8.20"
+walkdir = "2.5.0"

@@ -7,10 +7,12 @@ fmt:
 lint:
     uv run ruff check .
     bun x prettier --check .
+    
 
 types:
     uv run mypy .
-    uv run basedpyright --level error
+    cargo check
+    
 
 check: lint types
 

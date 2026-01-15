@@ -38,7 +38,7 @@ source = "uv-dynamic-versioning"
 
 [tool.uv-dynamic-versioning]
 vcs = "git"
-format-jinja = "{% raw %}{{version}}{% endraw %}"
+fallback-version = "0.0.0"
 
 [tool.hatch.build.hooks.version]
 path = "src/{{app_slug}}/_version.py"

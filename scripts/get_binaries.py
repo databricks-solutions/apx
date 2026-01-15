@@ -112,7 +112,9 @@ def main(
 
             try:
                 with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-                    member = pick_bun_member(zf, prefer_exe=(asset.platform == "windows"))
+                    member = pick_bun_member(
+                        zf, prefer_exe=(asset.platform == "windows")
+                    )
                     bun_bytes = zf.read(member)
             except (zipfile.BadZipFile, ValueError, KeyError) as exc:
                 raise typer.Exit(code=1) from exc
