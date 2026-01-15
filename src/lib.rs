@@ -1,8 +1,12 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use pyo3::prelude::*;
+use pyo3::exceptions::PyRuntimeError;
 use std::path::PathBuf;
 
+mod api_generator;
 mod cli;
+
+pub use api_generator::generate_openapi;
 
 #[cfg(target_os = "windows")]
 const BUN_FILENAME: &str = "bun.exe";
@@ -139,5 +143,12 @@ fn resolve_bun_binary_path(py: Python<'_>) -> PyResult<PathBuf> {
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_cli, m)?)?;
     m.add_function(wrap_pyfunction!(get_bun_binary_path, m)?)?;
+    m.add_function(wrap_pyfunction!(generate_openapi_py, m)?)?;
     Ok(())
+}
+
+#[pyfunction(name = "generate_openapi")]
+fn generate_openapi_py(project_root: PathBuf, force: bool) -> PyResult<bool> {
+    api_generator::generate_openapi(&project_root, force)
+        .map_err(|err| PyRuntimeError::new_err(err))
 }
