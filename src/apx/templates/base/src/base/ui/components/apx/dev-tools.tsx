@@ -11,13 +11,15 @@ type LogPayload = {
 };
 
 function sendLog(payload: LogPayload) {
-  const body = JSON.stringify(payload);
+  const bodyText = JSON.stringify(payload);
   if (navigator.sendBeacon) {
-    navigator.sendBeacon("/__apx__/browser-logs", body);
+    const blob = new Blob([bodyText], { type: "application/json" });
+    navigator.sendBeacon("/__apx__/browser-logs", blob);
   } else {
     fetch("/__apx__/browser-logs", {
       method: "POST",
-      body,
+      headers: { "content-type": "application/json" },
+      body: bodyText,
       keepalive: true,
     }).catch(() => {});
   }

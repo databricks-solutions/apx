@@ -32,6 +32,9 @@ htmlcov/
 # pytest
 .pytest_cache/
 .apx/
+!src/apx/templates/base/.apx/
+src/apx/templates/base/.apx/*
+!src/apx/templates/base/.apx/plugin.ts
 
 experiments/
 target/

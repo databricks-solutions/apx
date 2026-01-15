@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import subprocess
 from pathlib import Path
-from typing import Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
-import watchfiles
 from pydantic import BaseModel, ConfigDict
 from typer import Argument, Exit, Option
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 from apx.cli.version import with_version
 from apx.models import ProjectMetadata
 from apx.utils import (
     console,
+    ensure_apx_plugin,
     ensure_dir,
     in_path,
     progress_spinner,
@@ -155,18 +157,15 @@ export default defineConfig({{
     def generate_schema(self) -> tuple[Path, bool]:
         """Generate the OpenAPI schema JSON file.
 
+        Always loads the app module fresh to ensure the latest schema.
+
         Returns:
             Tuple of (schema_path, schema_changed) where schema_changed indicates
             if the schema differs from the previous version
         """
-        # Use the centralized reloader to get the app instance
-        from apx.cli.dev.reloader import get_app, load_app
-
-        app_instance = get_app()
-
-        if app_instance is None:
-            # Fall back to loading it ourselves (shouldn't happen in practice)
-            app_instance, _ = load_app(self.app_module_name, reload=False)
+        # Load the app instance fresh
+        metadata = ProjectMetadata.read(self.app_dir)
+        app_instance = metadata.get_app_instance(reload=True)
 
         # Generate OpenAPI spec
         spec = app_instance.openapi()
@@ -249,46 +248,6 @@ export default defineConfig({{
             console.print("[dim]⏭️  Schema unchanged, skipping client generation[/dim]")
             console.print("[bold green]✨ OpenAPI schema is up to date![/bold green]")
 
-    async def watch(self) -> None:
-        """Watch for Python file changes and regenerate OpenAPI schema and client."""
-        self._log(f"Watching for changes in {self.app_dir}/**/*.py")
-
-        # Ensure config exists (do this once before generating)
-        self.ensure_config()
-
-        # Generate once at startup
-        try:
-            schema_path, schema_changed = self.generate_schema()
-            if schema_changed:
-                self.generate_client()
-                self._log("Initial generation complete")
-            else:
-                self._log("Schema unchanged, skipping client generation")
-        except Exception as e:
-            self._log_error(f"Initial generation failed: {e}")
-
-        # Watch for changes
-        try:
-            async for changes in watchfiles.awatch(
-                self.app_dir,
-                watch_filter=watchfiles.PythonFilter(),
-            ):
-                self._log(
-                    f"Detected changes in {len(changes)} file(s), regenerating..."
-                )
-
-                try:
-                    schema_path, schema_changed = self.generate_schema()
-                    if schema_changed:
-                        self.generate_client()
-                        self._log("Regeneration complete")
-                    else:
-                        self._log("Schema unchanged, skipping client generation")
-                except Exception as e:
-                    self._log_error(f"Regeneration failed: {e}")
-        except KeyboardInterrupt:
-            self._log("Stopped watching for changes.")
-
 
 def create_api_generator(
     app_dir: Path, logger: logging.Logger | None = None
@@ -317,27 +276,82 @@ def create_api_generator(
     return ApiGenerator(config, logger=logger)
 
 
-def run_openapi(app_dir: Path, watch: bool = False, force: bool = False) -> None:
+def run_openapi(app_dir: Path, force: bool = False) -> None:
     """Generate OpenAPI schema and API client.
 
     Args:
         app_dir: The path to the app directory
-        watch: Whether to watch for changes and regenerate
         force: If True, always regenerate client even if schema hasn't changed
-
-    Raises:
-        ValueError: If both watch and force are True
     """
-    if watch and force:
-        console.print("[red]❌ Cannot use --force with --watch[/red]")
-        raise ValueError("Cannot use --force with --watch")
-
     generator = create_api_generator(app_dir)
+    generator.run(force=force)
 
-    if watch:
-        asyncio.run(generator.watch())
-    else:
-        generator.run(force=force)
+
+def regenerate_openapi_if_changed(
+    app: "FastAPI",
+    app_dir: Path,
+    logger: logging.Logger | None = None,
+) -> bool:
+    """Regenerate OpenAPI schema and client if the app's schema has changed.
+
+    This is a simple function meant to be called after the app is reloaded.
+    It compares the app's current OpenAPI schema with the existing .apx/openapi.json
+    and regenerates if different.
+
+    Args:
+        app: The FastAPI application instance (already loaded)
+        app_dir: The application directory
+        logger: Optional logger for output
+
+    Returns:
+        True if schema was regenerated, False if unchanged
+    """
+    from fastapi import FastAPI
+
+    if not isinstance(app, FastAPI):
+        raise TypeError(f"Expected FastAPI instance, got {type(app)}")
+
+    apx_dir = app_dir / ".apx"
+    schema_path = apx_dir / "openapi.json"
+
+    # Generate current schema from app
+    spec = app.openapi()
+    new_spec_json = json.dumps(spec, indent=2)
+
+    # Check if schema has changed
+    schema_changed = True
+    if schema_path.exists():
+        existing_spec = schema_path.read_text()
+        if existing_spec == new_spec_json:
+            schema_changed = False
+
+    if not schema_changed:
+        if logger:
+            logger.info("OpenAPI schema unchanged, skipping regeneration")
+        return False
+
+    # Write new schema
+    ensure_dir(apx_dir)
+    schema_path.write_text(new_spec_json)
+
+    if logger:
+        logger.info("OpenAPI schema changed, regenerating client...")
+
+    # Generate client using orval
+    try:
+        config = ApiGeneratorConfig.from_app_dir(app_dir)
+        generator = ApiGenerator(config, logger=logger)
+        generator.ensure_config()
+        generator.generate_client()
+        if logger:
+            logger.info("OpenAPI client regenerated successfully")
+    except Exception as e:
+        if logger:
+            logger.error(f"Failed to regenerate OpenAPI client: {e}")
+        else:
+            console.print(f"[red]Failed to regenerate OpenAPI client: {e}[/red]")
+
+    return True
 
 
 @with_version
@@ -348,10 +362,6 @@ def openapi(
             help="The path to the app. If not provided, current working directory will be used"
         ),
     ] = None,
-    watch: Annotated[
-        bool,
-        Option("--watch", "-w", help="Watch for changes and regenerate"),
-    ] = False,
     force: Annotated[
         bool,
         Option(
@@ -363,4 +373,7 @@ def openapi(
     if app_dir is None:
         app_dir = Path.cwd()
 
-    run_openapi(app_dir, watch=watch, force=force)
+    # Ensure .apx/plugin.ts exists
+    ensure_apx_plugin(app_dir)
+
+    run_openapi(app_dir, force=force)

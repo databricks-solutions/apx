@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import contextvars
 import io
@@ -9,9 +10,9 @@ import logging
 import sys
 import time
 from collections import deque
+from collections.abc import Generator
 from enum import Enum
 from typing import Any, ClassVar, Literal, TypeAlias
-from collections.abc import Generator
 
 from pydantic import BaseModel, ConfigDict
 from rich.text import Text
@@ -24,36 +25,47 @@ LogBuffer: TypeAlias = deque[LogEntry]
 
 
 class DevLogComponent(str, Enum):
-    """Where a log originated (used for fine-grained filtering)."""
+    """Where a log originated (used for fine-grained filtering).
+
+    Simplified to 6 essential components:
+    - SERVER: APX dev server internal operations
+    - BACKEND: User's backend application output
+    - UI: Frontend process output
+    - BROWSER: Browser console logs (errors/warnings)
+    - OPENAPI: OpenAPI schema watcher
+    - PROXY: Reverse proxy requests (special: visible by default in [apx] channel)
+    """
 
     SERVER = "server"
-    SERVER_UVICORN = "server_uvicorn"
     BACKEND = "backend"
-    BACKEND_UVICORN = "backend_uvicorn"
-    APP = "app"
     UI = "ui"
     BROWSER = "browser"
     OPENAPI = "openapi"
     PROXY = "proxy"
-    PROCESS_CONTROL = "process_control"
-    RETRY = "retry"
 
 
+# Map components to their default log channels
 _COMPONENT_DEFAULT_CHANNEL: dict[DevLogComponent, LogChannel] = {
     DevLogComponent.SERVER: LogChannel.APX,
-    DevLogComponent.SERVER_UVICORN: LogChannel.APX,
     DevLogComponent.OPENAPI: LogChannel.APX,
     DevLogComponent.PROXY: LogChannel.APX,
-    DevLogComponent.PROCESS_CONTROL: LogChannel.APX,
-    DevLogComponent.RETRY: LogChannel.APX,
     DevLogComponent.BACKEND: LogChannel.APP,
-    DevLogComponent.BACKEND_UVICORN: LogChannel.APP,
-    DevLogComponent.APP: LogChannel.APP,
     DevLogComponent.UI: LogChannel.UI,
     DevLogComponent.BROWSER: LogChannel.UI,
 }
 
 
+class _DevLogState(BaseModel):
+    model_config: ClassVar[ConfigDict] = ConfigDict(arbitrary_types_allowed=True)
+
+    buffer: LogBuffer | None = None
+    configured: bool = False
+
+
+_STATE = _DevLogState()
+
+
+# Context variable for routing logs to the correct channel in async contexts
 _CURRENT_CHANNEL: contextvars.ContextVar[LogChannel] = contextvars.ContextVar(
     "apx_dev_log_channel", default=LogChannel.APX
 )
@@ -61,7 +73,11 @@ _CURRENT_CHANNEL: contextvars.ContextVar[LogChannel] = contextvars.ContextVar(
 
 @contextlib.contextmanager
 def log_channel(channel: LogChannel) -> Generator[None, None, None]:
-    """Context manager to route uvicorn/stdout logs to a specific channel."""
+    """Context manager to set the log channel for the current context.
+
+    Used to route uvicorn/framework logs to the correct channel when running
+    the backend server.
+    """
     token = _CURRENT_CHANNEL.set(channel)
     try:
         yield
@@ -83,22 +99,12 @@ def reset_log_channel(token: contextvars.Token[LogChannel]) -> None:
     _CURRENT_CHANNEL.reset(token)
 
 
-class _DevLogState(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(arbitrary_types_allowed=True)
-
-    buffer: LogBuffer | None = None
-    configured: bool = False
-
-
-_STATE = _DevLogState()
-
-
 def _now_timestamp(created: float | None = None) -> str:
     t = time.localtime(created if created is not None else time.time())
     return time.strftime("%Y-%m-%d %H:%M:%S", t)
 
 
-def _append_entry(
+def append_log_entry(
     *,
     channel: LogChannel,
     component: DevLogComponent,
@@ -106,6 +112,10 @@ def _append_entry(
     content: str,
     created: float | None = None,
 ) -> None:
+    """Append a log entry to the shared buffer.
+
+    This is the primary way to add logs from anywhere in the dev server.
+    """
     if _STATE.buffer is None:
         return
     _STATE.buffer.append(
@@ -119,7 +129,13 @@ def _append_entry(
     )
 
 
+# Keep internal alias for backward compatibility within this module
+_append_entry = append_log_entry
+
+
 class _BufferedLogHandler(logging.Handler):
+    """Logging handler that writes to the shared in-memory buffer."""
+
     buffer_component: DevLogComponent
     buffer_channel: LogChannel
 
@@ -153,6 +169,7 @@ class _DevServerAccessLogFilter(logging.Filter):
         "/__apx__/actions/stop",
         "/__apx__/actions/restart",
         "/__apx__/openapi-status",
+        "/__apx__/browser-logs",
     )
 
     @override
@@ -161,40 +178,16 @@ class _DevServerAccessLogFilter(logging.Filter):
         return not any(p in msg for p in self._internal_paths)
 
 
-class _UvicornRoutingHandler(logging.Handler):
-    """Route uvicorn loggers to [apx] vs [app] based on the active context."""
-
-    @override
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            channel = _CURRENT_CHANNEL.get()
-
-            # Filter out DEBUG logs from dev server (APX channel) to reduce noise.
-            # Only user app (APP channel) gets DEBUG-level uvicorn logs.
-            if record.levelno <= logging.DEBUG and channel != LogChannel.APP:
-                return
-
-            component = (
-                DevLogComponent.BACKEND_UVICORN
-                if channel == LogChannel.APP
-                else DevLogComponent.SERVER_UVICORN
-            )
-            _append_entry(
-                channel=channel,
-                component=component,
-                level=record.levelname,
-                content=self.format(record),
-                created=record.created,
-            )
-        except Exception:
-            self.handleError(record)
-
-
 def configure_dev_logging(*, buffer: LogBuffer) -> None:
-    """Configure all dev loggers to write into the shared in-memory buffer."""
+    """Configure all dev loggers to write into the shared in-memory buffer.
+
+    This sets up:
+    1. Component loggers (apx.dev.<component>) for our code
+    2. Uvicorn access log filter to suppress internal endpoint noise
+    """
     _STATE.buffer = buffer
 
-    # Component loggers used by our code (everything else should call get_logger()).
+    # Configure component loggers
     for component in DevLogComponent:
         channel = _COMPONENT_DEFAULT_CHANNEL.get(component, LogChannel.APX)
         logger = logging.getLogger(f"apx.dev.{component.value}")
@@ -205,117 +198,103 @@ def configure_dev_logging(*, buffer: LogBuffer) -> None:
         logger.addHandler(handler)
         logger.propagate = False
 
-    # Uvicorn loggers are shared between the dev server and the user backend.
-    # Route them via a contextvar set by the caller before running uvicorn.
-    # Set to DEBUG to capture verbose logs from user app (filtered for dev server).
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
-        uv = logging.getLogger(name)
-        uv.setLevel(logging.DEBUG)
-        uv.handlers.clear()
-        if name == "uvicorn.access":
-            uv.addFilter(_DevServerAccessLogFilter())
-        h = _UvicornRoutingHandler()
-        h.setFormatter(logging.Formatter("%(message)s"))
-        uv.addHandler(h)
-        uv.propagate = False
+    # Configure uvicorn access logger with filter for internal endpoints
+    # Route to SERVER component (APX channel) since dev server uvicorn logs are internal
+    uvicorn_access = logging.getLogger("uvicorn.access")
+    uvicorn_access.setLevel(logging.INFO)
+    uvicorn_access.handlers.clear()
+    uvicorn_access.addFilter(_DevServerAccessLogFilter())
+    uvicorn_handler = _BufferedLogHandler(
+        channel=LogChannel.APX, component=DevLogComponent.SERVER
+    )
+    uvicorn_handler.setFormatter(logging.Formatter("%(message)s"))
+    uvicorn_access.addHandler(uvicorn_handler)
+    uvicorn_access.propagate = False
 
-    # Starlette and FastAPI loggers - route to [app] channel via context.
-    # This captures ServerErrorMiddleware exception logging and other framework logs.
-    for name in (
-        "starlette",
-        "starlette.middleware",
-        "starlette.middleware.errors",
-        "fastapi",
-    ):
-        framework_logger = logging.getLogger(name)
-        framework_logger.setLevel(logging.INFO)
-        framework_logger.handlers.clear()
-        h = _UvicornRoutingHandler()  # Reuse routing handler for context-aware routing
-        h.setFormatter(logging.Formatter("%(message)s"))
-        framework_logger.addHandler(h)
-        framework_logger.propagate = False
+    # Suppress uvicorn.error to avoid duplicate startup messages
+    uvicorn_error = logging.getLogger("uvicorn.error")
+    uvicorn_error.setLevel(logging.WARNING)
+    uvicorn_error.handlers.clear()
+    uvicorn_error.addHandler(logging.NullHandler())
+    uvicorn_error.propagate = False
 
     _STATE.configured = True
 
 
 def get_logger(component: DevLogComponent) -> logging.Logger:
-    """Get a dev logger for a component (do not call stdlib logging directly)."""
+    """Get a dev logger for a component.
+
+    Always use this instead of calling logging.getLogger() directly
+    to ensure logs are routed to the shared buffer.
+
+    When logging is not configured (e.g., in subprocess contexts like _run_backend),
+    logs are written to stderr so they can be captured by collect_subprocess_output.
+    """
     logger = logging.getLogger(f"apx.dev.{component.value}")
     if not _STATE.configured:
-        # Avoid \"No handlers could be found\" warnings in contexts that don't configure dev logging.
+        # In subprocess contexts (e.g., _run_backend), we need logs to go to stderr
+        # so they can be captured by the parent process via collect_subprocess_output.
         if not logger.handlers:
-            logger.addHandler(logging.NullHandler())
+            handler = logging.StreamHandler(sys.stderr)
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
         logger.propagate = False
     return logger
 
 
-class ContextualStreamWriter:
-    """Context-aware stdout/stderr writer that buffers into dev log channels."""
+async def collect_subprocess_output(
+    process: asyncio.subprocess.Process,
+    channel: LogChannel,
+    component: DevLogComponent,
+) -> None:
+    """Collect stdout/stderr from a subprocess and route to log buffer.
 
-    def __init__(
-        self,
-        *,
-        level_name: Literal["INFO", "ERROR"],
+    This is the unified way to capture output from frontend and backend
+    subprocesses. It reads both streams concurrently and appends each
+    line to the shared log buffer.
+
+    Args:
+        process: The subprocess to collect output from
+        channel: Log channel to route output to (APP, UI, or APX)
+        component: Component identifier for the log entry
+    """
+
+    async def read_stream(
+        stream: asyncio.StreamReader | None,
+        level: Literal["INFO", "ERROR"],
     ) -> None:
-        self._level_name: Literal["INFO", "ERROR"] = level_name
-        self._buffer: str = ""
-
-    def write(self, message: str | None) -> None:
-        if not message:
+        if stream is None:
             return
-        self._buffer += message
-        lines = self._buffer.split("\n")
-        self._buffer = lines[-1]
-        for line in lines[:-1]:
-            if not line:
-                continue
-            channel = _CURRENT_CHANNEL.get()
-            component = (
-                DevLogComponent.APP
-                if channel == LogChannel.APP
-                else (
-                    DevLogComponent.SERVER
-                    if channel == LogChannel.APX
-                    else DevLogComponent.UI
-                )
-            )
-            _append_entry(
-                channel=channel,
-                component=component,
-                level=self._level_name,
-                content=line,
-                created=None,
-            )
+        while True:
+            try:
+                line = await stream.readline()
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace").rstrip()
+                if decoded:
+                    _append_entry(
+                        channel=channel,
+                        component=component,
+                        level=level,
+                        content=decoded,
+                    )
+            except Exception:
+                break
+            await asyncio.sleep(0.01)
 
-    def flush(self) -> None:
-        if not self._buffer:
-            return
-        channel = _CURRENT_CHANNEL.get()
-        component = (
-            DevLogComponent.APP
-            if channel == LogChannel.APP
-            else (
-                DevLogComponent.SERVER
-                if channel == LogChannel.APX
-                else DevLogComponent.UI
-            )
-        )
-        _append_entry(
-            channel=channel,
-            component=component,
-            level=self._level_name,
-            content=self._buffer,
-            created=None,
-        )
-        self._buffer = ""
-
-    def isatty(self) -> bool:
-        return False
+    await asyncio.gather(
+        read_stream(process.stdout, "INFO"),
+        read_stream(process.stderr, "ERROR"),
+    )
 
 
 @contextlib.contextmanager
 def suppress_output_and_logs() -> Generator[None, None, None]:
-    """Suppress stdout, stderr and logging output temporarily."""
+    """Suppress stdout, stderr and logging output temporarily.
+
+    Used when making SDK calls that may produce unwanted output.
+    """
     old_stdout = sys.stdout
     old_stderr = sys.stderr
 

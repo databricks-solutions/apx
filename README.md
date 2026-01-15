@@ -153,10 +153,16 @@ This will pull the latest changes from the main branch and update the `apx` pack
 ### 🚀 `init`
 
 ```bash
-uvx git+https://github.com/databricks-solutions/apx.git init
+uvx git+https://github.com/databricks-solutions/apx.git init [APP_PATH]
 ```
 
 Initializes a new app project with interactive prompts for configuration. Supports optional flags to skip prompts:
+
+**Arguments:**
+
+- `APP_PATH`: The path to the app (optional, defaults to current working directory)
+
+**Options:**
 
 - `--name, -n`: Specify the app name
 - `--template, -t`: Choose a template (essential/stateful)
@@ -176,12 +182,16 @@ The `dev` command group manages development servers in detached mode:
 #### Start Development Servers
 
 ```bash
-uv run apx dev start
+uv run apx dev start [APP_DIR] [OPTIONS]
 ```
 
 Starts backend, frontend, and OpenAPI watcher in detached mode.
 
-Options:
+**Arguments:**
+
+- `APP_DIR`: The path to the app (optional, defaults to current working directory)
+
+**Options:**
 
 - `--host`: Host for dev, frontend, and backend servers (default: localhost)
 - `--api-prefix`: URL prefix for API routes (default: /api)
@@ -193,20 +203,28 @@ Options:
 #### Check Server Status
 
 ```bash
-uv run apx dev status
+uv run apx dev status [APP_DIR]
 ```
 
 Shows status of all running development servers (backend, frontend, OpenAPI watcher).
 
+**Arguments:**
+
+- `APP_DIR`: The path to the app (optional, defaults to current working directory)
+
 #### View Logs
 
 ```bash
-uv run apx dev logs
+uv run apx dev logs [APP_DIR] [OPTIONS]
 ```
 
 Displays historical logs from development servers.
 
-Options:
+**Arguments:**
+
+- `APP_DIR`: The path to the app (optional, defaults to current working directory)
+
+**Options:**
 
 - `--duration, -d`: Show logs from last N seconds
 - `--follow, -f`: Follow log output (like tail -f). Streams new logs continuously.
@@ -220,26 +238,38 @@ Options:
 #### Restart Development Servers
 
 ```bash
-uv run apx dev restart
+uv run apx dev restart [APP_DIR]
 ```
 
 Restarts all running development servers, attempting to reuse the same ports.
 
+**Arguments:**
+
+- `APP_DIR`: The path to the app (optional, defaults to current working directory)
+
 #### Stop Development Servers
 
 ```bash
-uv run apx dev stop
+uv run apx dev stop [APP_DIR]
 ```
 
 Stops all running development servers.
 
+**Arguments:**
+
+- `APP_DIR`: The path to the app (optional, defaults to current working directory)
+
 #### Check Project Code
 
 ```bash
-uv run apx dev check
+uv run apx dev check [APP_DIR]
 ```
 
 Checks the project code for errors using TypeScript compiler and basedpyright.
+
+**Arguments:**
+
+- `APP_DIR`: The path to the app (optional, defaults to current working directory)
 
 #### MCP Server
 
@@ -252,20 +282,54 @@ Starts MCP server that provides tools for managing development servers. The MCP 
 #### Apply Addon
 
 ```bash
-uv run apx dev apply
+uv run apx dev apply <addon_name> [OPTIONS]
 ```
 
-Applies an addon to an existing project.
+Applies an addon to an existing project. This command can be used to add new features, integrations, or templates.
+
+**Arguments:**
+
+- `addon_name`: The addon to apply (required). Available addons: essential, stateful, cursor, vscode, codex, claude, sidebar
+
+**Options:**
+
+- `--app-dir`: The path to the app (defaults to current working directory)
+- `--force, -f`: Apply addon without prompting for confirmation when files would be overwritten
+- `--file`: Apply a single file from the template (path relative to template root). When using this option, you can also use 'base' or 'essential' as the addon_name to apply files from the base template
+
+**Examples:**
+
+Apply the entire sidebar addon:
+
+```bash
+uv run apx dev apply sidebar
+```
+
+Apply a single file from the essential template:
+
+```bash
+uv run apx dev apply essential --file vite.config.ts
+```
+
+Force apply an addon without confirmation:
+
+```bash
+uv run apx dev apply stateful --force
+```
 
 ### 📦 `build`
 
 ```bash
-uv run apx build
+uv run apx build [APP_PATH] [OPTIONS]
 ```
 
 Prepares the app for deployment by building both frontend assets and Python wheel.
 
-Options:
+**Arguments:**
+
+- `APP_PATH`: The path to the app (optional, defaults to current working directory)
+
+**Options:**
 
 - `--build-path`: Path to the build directory where artifacts will be placed, relative to the app path (default: .build)
 - `--skip-ui-build`: Skip the UI build step
@@ -273,12 +337,16 @@ Options:
 ### 🔧 `openapi`
 
 ```bash
-uv run apx openapi
+uv run apx openapi [APP_PATH] [OPTIONS]
 ```
 
 Manually generates OpenAPI schema and orval client.
 
-Options:
+**Arguments:**
+
+- `APP_PATH`: The path to the app (optional, defaults to current working directory)
+
+**Options:**
 
 - `--watch, -w`: Watch for changes and regenerate automatically
 - `--force, -f`: Force regeneration even if schema hasn't changed
@@ -296,6 +364,18 @@ When the project is initialized, the following directories are added to the `sha
 We've carefully selected these repositories to ensure that the components are of high quality and are well-maintained.
 
 If you don't want to use these repositories, you can remove them from the `components.json` file.
+
+## 🔧 Troubleshooting
+
+### Missing `apxPlugin` in vite.config.ts
+
+If your `vite.config.ts` doesn't have a mention of `apxPlugin`, you should apply the essential template file:
+
+```bash
+uv run apx dev apply essential --file vite.config.ts
+```
+
+This will update your vite configuration with the required apx plugin that handles the development server integration.
 
 ## 📜 Project todos
 

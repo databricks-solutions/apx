@@ -29,6 +29,25 @@ from apx.utils import (
 )
 
 
+def is_in_git_repo(path: Path) -> bool:
+    """
+    Check if a path is inside a git repository (either itself or a parent directory).
+
+    Args:
+        path: The path to check
+
+    Returns:
+        True if the path is inside a git work tree, False otherwise
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
 def bun_install(cwd: Path) -> None:
     """
     Run bun install command with optional cache directory support.
@@ -322,24 +341,27 @@ def init(
                 )
 
     # === PHASE 4: Initializing git ===
-    with progress_spinner(
-        "🔧 Initializing git repository...", "✅ Git repository initialized"
-    ):
-        run_subprocess(
-            ["git", "init"],
-            cwd=app_path,
-            error_msg="Failed to initialize git repository",
-        )
-        run_subprocess(
-            ["git", "add", "."],
-            cwd=app_path,
-            error_msg="Failed to add files to git repository",
-        )
-        run_subprocess(
-            ["git", "commit", "-m", "init"],
-            cwd=app_path,
-            error_msg="Failed to commit files to git repository",
-        )
+    if is_in_git_repo(app_path):
+        console.print("[dim]⏭️  Skipping git init (already in a git repository)[/dim]")
+    else:
+        with progress_spinner(
+            "🔧 Initializing git repository...", "✅ Git repository initialized"
+        ):
+            run_subprocess(
+                ["git", "init"],
+                cwd=app_path,
+                error_msg="Failed to initialize git repository",
+            )
+            run_subprocess(
+                ["git", "add", "."],
+                cwd=app_path,
+                error_msg="Failed to add files to git repository",
+            )
+            run_subprocess(
+                ["git", "commit", "-m", "init"],
+                cwd=app_path,
+                error_msg="Failed to commit files to git repository",
+            )
 
     # === PHASE 5: Syncing project with uv ===
     if not skip_backend_dependencies:

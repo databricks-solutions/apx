@@ -342,3 +342,37 @@ def in_path(path: Path) -> Generator[None, None, None]:
         yield
     finally:
         os.chdir(current_dir)
+
+
+def ensure_apx_plugin(app_dir: Path) -> None:
+    """Ensure .apx/plugin.ts exists in the project directory.
+
+    If the file doesn't exist, copy it from the template directory.
+
+    Args:
+        app_dir: The application directory path
+    """
+    from importlib import resources
+
+    apx_plugin_path = app_dir / ".apx" / "plugin.ts"
+
+    # If the file already exists, no action needed
+    if apx_plugin_path.exists():
+        return
+
+    # Ensure .apx directory exists
+    ensure_dir(app_dir / ".apx")
+
+    # Copy the plugin.ts file from the template
+    template_plugin_path = (
+        Path(str(resources.files("apx"))) / "templates" / "base" / ".apx" / "plugin.ts"
+    )
+
+    if not template_plugin_path.exists():
+        console.print(
+            "[yellow]⚠️  Warning: Could not find template .apx/plugin.ts file[/yellow]"
+        )
+        return
+
+    shutil.copy(template_plugin_path, apx_plugin_path)
+    console.print("[green]✓[/green] Created .apx/plugin.ts from template")
