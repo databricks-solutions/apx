@@ -35,6 +35,7 @@ htmlcov/
 !src/apx/templates/base/.apx/
 src/apx/templates/base/.apx/*
 !src/apx/templates/base/.apx/plugin.ts
+src/apx/binaries/*
 
 experiments/
 target/
