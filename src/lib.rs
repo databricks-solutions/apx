@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 mod api_generator;
 mod cli;
+mod common;
 
 pub use api_generator::generate_openapi;
 
@@ -25,7 +26,7 @@ enum Commands {
     /// Initialize a new project
     Init(cli::init::InitArgs),
     /// Build the project
-    Build,
+    Build(cli::build::BuildArgs),
     /// Start the MCP server
     Mcp,
     /// Development server commands
@@ -56,10 +57,7 @@ fn run_cli(args: Vec<String>) -> i32 {
     match Cli::try_parse_from(args) {
         Ok(cli) => match cli.command {
             Some(Commands::Init(init_args)) => cli::init::run(init_args),
-            Some(Commands::Build) => {
-                println!("Building project...");
-                0
-            }
+            Some(Commands::Build(build_args)) => cli::build::run(build_args),
             Some(Commands::Mcp) => {
                 println!("Starting MCP server...");
                 0

@@ -13,6 +13,8 @@ use tera::Context;
 use walkdir::WalkDir;
 
 use crate::bun_binary_path;
+use crate::cli::run_cli;
+use crate::common::bun_install;
 
 const DEFAULT_APX_PACKAGE: &str = "https://github.com/databricks-solutions/apx.git";
 
@@ -110,13 +112,7 @@ pub struct InitArgs {
 }
 
 pub fn run(args: InitArgs) -> i32 {
-    match run_inner(args) {
-        Ok(()) => 0,
-        Err(err) => {
-            eprintln!("{err}");
-            1
-        }
-    }
+    run_cli(|| run_inner(args))
 }
 
 fn run_inner(mut args: InitArgs) -> Result<(), String> {
@@ -660,17 +656,6 @@ fn run_command(cmd: &mut Command, error_msg: &str) -> Result<(), String> {
         message.push_str(&format!("\n{stdout}"));
     }
     Err(message)
-}
-
-fn bun_install(app_path: &Path, bun_path: &Path) -> Result<(), String> {
-    let mut cmd = Command::new(bun_path);
-    cmd.arg("install");
-    if let Ok(cache_dir) = std::env::var("BUN_CACHE_DIR") {
-        let cache_path = PathBuf::from(cache_dir);
-        cmd.arg("--cache-dir").arg(cache_path);
-    }
-    cmd.current_dir(app_path);
-    run_command(&mut cmd, "Failed to install dependencies")
 }
 
 fn add_shadcn_components(app_path: &Path, bun_path: &Path, args: &[&str]) -> Result<(), String> {

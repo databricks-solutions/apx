@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::bun_binary_path;
+use crate::common::read_project_metadata;
 
 const APX_DIR_NAME: &str = ".apx";
 const SCHEMA_FILENAME: &str = "openapi.json";
@@ -13,28 +14,9 @@ const ORVAL_SCHEMA_INPUT: &str = ".apx/openapi.json";
 
 pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String> {
     let project_root_str = project_root.to_string_lossy().to_string();
-    let pyproject_path = project_root.join("pyproject.toml");
-    let pyproject_contents = fs::read_to_string(&pyproject_path)
-        .map_err(|err| format!("Failed to read pyproject.toml: {err}"))?;
-    let pyproject_value: toml::Value = pyproject_contents
-        .parse()
-        .map_err(|err| format!("Failed to parse pyproject.toml: {err}"))?;
-    let metadata = pyproject_value
-        .get("tool")
-        .and_then(|tool| tool.get("apx"))
-        .and_then(|apx| apx.get("metadata"))
-        .ok_or_else(|| "Missing tool.apx.metadata in pyproject.toml".to_string())?;
-
-    let app_slug = metadata
-        .get("app-slug")
-        .and_then(|val| val.as_str())
-        .ok_or_else(|| "Missing app-slug in pyproject.toml metadata".to_string())?
-        .to_string();
-    let app_module = metadata
-        .get("app-module")
-        .and_then(|val| val.as_str())
-        .ok_or_else(|| "Missing app-module in pyproject.toml metadata".to_string())?
-        .to_string();
+    let metadata = read_project_metadata(project_root)?;
+    let app_slug = metadata.app_slug;
+    let app_module = metadata.app_module;
 
     let (spec_json, app_slug) = Python::attach(|py| -> PyResult<(String, String)> {
         let sys = py.import("sys")?;
