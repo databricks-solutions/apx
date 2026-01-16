@@ -6,6 +6,8 @@ import type { Plugin } from "vite";
 
 // Header that the APX dev server adds to requests to verify they come from the proxy
 const APX_DEV_PROXY_HEADER = "x-apx-dev-proxy";
+const APX_DEV_TOKEN_HEADER = "x-apx-dev-token";
+const APX_SIGNAL_PATH = "/_apx/signal";
 
 type ApxMetadata = {
   appName: string;
@@ -63,8 +65,28 @@ function apxDevProxyGuard(): Plugin {
       // Add middleware at the start to check for the proxy header
       server.middlewares.use(
         (req: IncomingMessage, res: ServerResponse, next) => {
-          // Allow internal Vite requests (HMR, etc.)
           const url = req.url || "";
+          if (url.startsWith(APX_SIGNAL_PATH)) {
+            const devToken = process.env.APX_DEV_TOKEN;
+            const requestToken = req.headers[APX_DEV_TOKEN_HEADER] as
+              | string
+              | undefined;
+            if (!devToken || requestToken !== devToken) {
+              res.statusCode = 401;
+              res.setHeader("Content-Type", "text/plain");
+              res.end("Invalid APX dev token.");
+              return;
+            }
+
+            res.statusCode = 200;
+            res.end("ok");
+            setTimeout(() => {
+              process.exit(0);
+            }, 50);
+            return;
+          }
+
+          // Allow internal Vite requests (HMR, etc.)
           if (
             url.startsWith("/@") ||
             url.startsWith("/__vite") ||

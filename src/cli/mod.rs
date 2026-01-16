@@ -1,4 +1,5 @@
 pub mod build;
+pub mod dev;
 pub mod init;
 
 pub fn run_cli<F>(f: F) -> i32

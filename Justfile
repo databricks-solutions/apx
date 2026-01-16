@@ -7,7 +7,12 @@ fmt:
 lint:
     uv run ruff check .
     bun x prettier --check .
-    
+
+build *args:
+    uvx maturin build {{args}}
+
+develop *args:
+    uvx maturin develop {{args}}
 
 types:
     uv run mypy .
