@@ -7,9 +7,12 @@ use std::pin::Pin;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::SystemTime;
+use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Sleep};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+use walkdir::WalkDir;
 
 use crate::bun_binary_path;
 use crate::common::read_project_metadata;
@@ -21,6 +24,8 @@ const ORVAL_SCHEMA_INPUT: &str = ".apx/openapi.json";
 
 pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String> {
     let project_root_str = project_root.to_string_lossy().to_string();
+    let src_root = project_root.join("src");
+    let src_root_str = src_root.to_string_lossy().to_string();
     let metadata = read_project_metadata(project_root)?;
     let app_slug = metadata.app_slug;
     let app_module = metadata.app_module;
@@ -29,6 +34,9 @@ pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String
         let sys = py.import("sys")?;
         let path_any = sys.getattr("path")?;
         let path = path_any.cast::<PyList>()?;
+        if src_root.exists() && !path.contains(src_root_str.as_str())? {
+            path.insert(0, src_root_str.as_str())?;
+        }
         if !path.contains(project_root_str.as_str())? {
             path.insert(0, project_root_str.as_str())?;
         }
@@ -36,9 +44,9 @@ pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String
         let (module_path, attr_name) = app_module
             .split_once(':')
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Invalid app-module format"))?;
+
         let importlib = py.import("importlib")?;
         let module = importlib.call_method1("import_module", (module_path,))?;
-        let module = importlib.call_method1("reload", (module,))?;
         let app = module.getattr(attr_name)?;
         let spec = app.call_method0("openapi")?;
         let json = py.import("json")?;
@@ -53,6 +61,13 @@ pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String
     let apx_dir = project_root.join(APX_DIR_NAME);
     let schema_path = apx_dir.join(SCHEMA_FILENAME);
     let config_path = apx_dir.join(ORVAL_CONFIG_FILENAME);
+    debug!(
+        apx_dir = %apx_dir.display(),
+        schema_path = %schema_path.display(),
+        config_path = %config_path.display(),
+        spec_len = spec_json.len(),
+        "Resolved OpenAPI output paths."
+    );
 
     fs::create_dir_all(&apx_dir)
         .map_err(|err| format!("Failed to create .apx directory: {err}"))?;
@@ -61,17 +76,26 @@ pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String
     if schema_path.exists() {
         let existing = fs::read_to_string(&schema_path)
             .map_err(|err| format!("Failed to read existing schema: {err}"))?;
+        debug!(
+            existing_len = existing.len(),
+            spec_len = spec_json.len(),
+            "Loaded existing OpenAPI schema for comparison."
+        );
         if existing == spec_json {
             schema_changed = false;
         }
     }
 
     if schema_changed {
+        debug!("OpenAPI schema changed, writing new schema file.");
         fs::write(&schema_path, &spec_json)
             .map_err(|err| format!("Failed to write OpenAPI schema: {err}"))?;
+    } else {
+        debug!("OpenAPI schema unchanged; skipping schema write.");
     }
 
     if !config_path.exists() {
+        debug!("Orval config missing; writing new config.");
         let config_content = format!(
             r#"import {{ defineConfig }} from "orval";
 
@@ -100,10 +124,12 @@ export default defineConfig({{
     }
 
     if !schema_changed && !force {
+        debug!("OpenAPI schema unchanged and force=false; skipping orval.");
         return Ok(false);
     }
 
     let bun_path = bun_binary_path()?;
+    debug!(bun_path = %bun_path.display(), "Running orval for API generation.");
     let output = Command::new(bun_path)
         .arg("x")
         .arg("--bun")
@@ -119,21 +145,39 @@ export default defineConfig({{
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            status = %output.status,
+            stdout = %stdout,
+            stderr = %stderr,
+            "Orval failed."
+        );
         return Err(format!(
             "Orval failed with status {status}. Stdout: {stdout} Stderr: {stderr}",
             status = output.status
         ));
     }
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    debug!(
+        status = %output.status,
+        stdout = %stdout,
+        stderr = %stderr,
+        "Orval completed successfully."
+    );
     Ok(true)
 }
 
-const OPENAPI_WATCH_DEBOUNCE_MS: u64 = 300;
+const OPENAPI_WATCH_DEBOUNCE_MS: u64 = 100;
 
 pub fn start_openapi_watcher(
     app_dir: PathBuf,
     is_stopping: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    debug!(
+        app_dir = %app_dir.display(),
+        "Starting OpenAPI watcher."
+    );
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut watcher = notify::recommended_watcher(move |result| {
         let _ = tx.send(result);
@@ -143,26 +187,65 @@ pub fn start_openapi_watcher(
         .watch(&app_dir, RecursiveMode::Recursive)
         .map_err(|err| format!("Failed to watch app dir: {err}"))?;
 
+    let initial_mtime = latest_python_mtime(&app_dir);
+
     tokio::spawn(async move {
         let _watcher = watcher;
         let mut pending = false;
         let mut debounce: Option<Pin<Box<Sleep>>> = None;
+        let mut last_mtime = initial_mtime;
+        let mut poll_interval = tokio::time::interval(Duration::from_millis(200));
 
         loop {
             if is_stopping.load(Ordering::SeqCst) {
+                debug!("OpenAPI watcher stopping.");
                 break;
             }
 
             tokio::select! {
+                biased;
+
+                _ = poll_interval.tick() => {
+                    let latest = latest_python_mtime(&app_dir);
+                    let changed = latest.map_or(false, |modified| {
+                        last_mtime.map_or(true, |current| modified > current)
+                    });
+                    if changed {
+                        if !pending {
+                            info!("Python change detected, regenerating OpenAPI…");
+                        }
+                        pending = true;
+                        debounce = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+                            OPENAPI_WATCH_DEBOUNCE_MS,
+                        ))));
+                        last_mtime = latest;
+                    }
+                }
                 maybe = rx.recv() => {
-                    let Some(result) = maybe else { break; };
+                    let Some(result) = maybe else {
+                        debug!("OpenAPI watcher channel closed.");
+                        break;
+                    };
                     match result {
                         Ok(event) => {
-                            if event
-                                .paths
-                                .iter()
-                                .any(|path| !is_ignored_path(path) && is_python_path(path))
-                            {
+                            let mut has_python_change = false;
+                            for path in &event.paths {
+                                if is_ignored_path(path) || !is_python_path(path) {
+                                    continue;
+                                }
+                                has_python_change = true;
+                                if let Ok(metadata) = fs::metadata(path) {
+                                    if let Ok(modified) = metadata.modified() {
+                                        if last_mtime.map_or(true, |current| modified > current) {
+                                            last_mtime = Some(modified);
+                                        }
+                                    }
+                                }
+                            }
+                            if has_python_change {
+                                if !pending {
+                                    info!("Python change detected, regenerating OpenAPI…");
+                                }
                                 pending = true;
                                 debounce = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
                                     OPENAPI_WATCH_DEBOUNCE_MS,
@@ -174,21 +257,40 @@ pub fn start_openapi_watcher(
                         }
                     }
                 }
-                _ = debounce.as_mut().unwrap(), if debounce.is_some() => {
+                _ = async { debounce.as_mut().unwrap().await }, if debounce.is_some() => {
                     debounce = None;
                     if pending {
                         pending = false;
-                        info!("Python change detected, regenerating OpenAPI…");
-                        let app_dir = app_dir.clone();
-                        let result = tokio::task::spawn_blocking(move || {
-                            generate_openapi(&app_dir, false)
-                        })
-                        .await;
-                        match result {
-                            Ok(Ok(true)) => info!("OpenAPI regenerated"),
-                            Ok(Ok(false)) => info!("OpenAPI unchanged, skipped"),
-                            Ok(Err(err)) => warn!("OpenAPI regeneration failed: {err}"),
-                            Err(err) => warn!("OpenAPI regeneration task failed: {err}"),
+                        let output = TokioCommand::new("uv")
+                            .arg("run")
+                            .arg("apx")
+                            .arg("__generate_openapi")
+                            .arg("--app-dir")
+                            .arg(&app_dir)
+                            .current_dir(&app_dir)
+                            .output();
+                        let output = tokio::time::timeout(Duration::from_secs(30), output).await;
+                        match output {
+                            Ok(Ok(result)) if result.status.success() => {
+                                let stdout = String::from_utf8_lossy(&result.stdout);
+                                if stdout.contains("regenerated") {
+                                    info!("OpenAPI regenerated");
+                                } else {
+                                    info!("OpenAPI unchanged, skipped");
+                                }
+                            }
+                            Ok(Ok(result)) => {
+                                let stdout = String::from_utf8_lossy(&result.stdout);
+                                let stderr = String::from_utf8_lossy(&result.stderr);
+                                warn!(
+                                    status = %result.status,
+                                    stdout = %stdout,
+                                    stderr = %stderr,
+                                    "OpenAPI regeneration failed."
+                                );
+                            }
+                            Ok(Err(err)) => warn!("Failed to spawn OpenAPI generation: {err}"),
+                            Err(_) => warn!("OpenAPI regeneration timed out."),
                         }
                     }
                 }
@@ -229,4 +331,29 @@ fn is_ignored_path(path: &PathBuf) -> bool {
         };
         IGNORED_DIRS.iter().any(|ignored| ignored == &name)
     })
+}
+
+fn latest_python_mtime(root: &Path) -> Option<SystemTime> {
+    let mut latest = None;
+    for entry in WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|entry| !is_ignored_path(&entry.path().to_path_buf()))
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path().to_path_buf();
+        if !is_python_path(&path) {
+            continue;
+        }
+        if let Ok(metadata) = fs::metadata(&path) {
+            if let Ok(modified) = metadata.modified() {
+                if latest.map_or(true, |current| modified > current) {
+                    latest = Some(modified);
+                }
+            }
+        }
+    }
+    latest
 }

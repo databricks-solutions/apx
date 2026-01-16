@@ -247,7 +247,7 @@ async fn stop(State(state): State<AppState>) -> StatusCode {
     if state.shutdown_message_sent.load(Ordering::SeqCst) {
         debug!("Shutdown message sent, giving time for transmission.");
         // Give extra time for the message to be transmitted to clients
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     } else {
         debug!("Shutdown message was not sent within timeout.");
     }

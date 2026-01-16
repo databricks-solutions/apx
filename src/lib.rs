@@ -39,6 +39,9 @@ enum Commands {
     /// Development server commands
     #[command(subcommand)]
     Dev(DevCommands),
+    /// Internal: generate OpenAPI schema and client
+    #[command(name = "__generate_openapi", hide = true)]
+    GenerateOpenapi(cli::__generate_openapi::GenerateOpenapiArgs),
 }
 
 #[derive(Subcommand)]
@@ -94,6 +97,7 @@ fn run_cli(args: Vec<String>) -> i32 {
                 }
                 DevCommands::InternalRunServer(args) => cli::dev::__internal_run_server::run(args),
             },
+            Some(Commands::GenerateOpenapi(args)) => cli::__generate_openapi::run(args),
             None => {
                 let mut cmd = Cli::command();
                 let _ = cmd.print_help();
