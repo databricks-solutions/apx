@@ -1,8 +1,15 @@
+use notify::{RecursiveMode, Watcher};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::time::{Duration, Sleep};
+use tracing::{info, warn};
 
 use crate::bun_binary_path;
 use crate::common::read_project_metadata;
@@ -119,4 +126,107 @@ export default defineConfig({{
     }
 
     Ok(true)
+}
+
+const OPENAPI_WATCH_DEBOUNCE_MS: u64 = 300;
+
+pub fn start_openapi_watcher(
+    app_dir: PathBuf,
+    is_stopping: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut watcher = notify::recommended_watcher(move |result| {
+        let _ = tx.send(result);
+    })
+    .map_err(|err| format!("Failed to create file watcher: {err}"))?;
+    watcher
+        .watch(&app_dir, RecursiveMode::Recursive)
+        .map_err(|err| format!("Failed to watch app dir: {err}"))?;
+
+    tokio::spawn(async move {
+        let _watcher = watcher;
+        let mut pending = false;
+        let mut debounce: Option<Pin<Box<Sleep>>> = None;
+
+        loop {
+            if is_stopping.load(Ordering::SeqCst) {
+                break;
+            }
+
+            tokio::select! {
+                maybe = rx.recv() => {
+                    let Some(result) = maybe else { break; };
+                    match result {
+                        Ok(event) => {
+                            if event
+                                .paths
+                                .iter()
+                                .any(|path| !is_ignored_path(path) && is_python_path(path))
+                            {
+                                pending = true;
+                                debounce = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+                                    OPENAPI_WATCH_DEBOUNCE_MS,
+                                ))));
+                            }
+                        }
+                        Err(err) => {
+                            warn!("OpenAPI watcher error: {err}");
+                        }
+                    }
+                }
+                _ = debounce.as_mut().unwrap(), if debounce.is_some() => {
+                    debounce = None;
+                    if pending {
+                        pending = false;
+                        info!("Python change detected, regenerating OpenAPI…");
+                        let app_dir = app_dir.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            generate_openapi(&app_dir, false)
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(true)) => info!("OpenAPI regenerated"),
+                            Ok(Ok(false)) => info!("OpenAPI unchanged, skipped"),
+                            Ok(Err(err)) => warn!("OpenAPI regeneration failed: {err}"),
+                            Err(err) => warn!("OpenAPI regeneration task failed: {err}"),
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
+fn is_python_path(path: &PathBuf) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext == "py")
+}
+
+fn is_ignored_path(path: &PathBuf) -> bool {
+    const IGNORED_DIRS: [&str; 11] = [
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "venv",
+    ];
+
+    path.components().any(|component| {
+        let Component::Normal(name) = component else {
+            return false;
+        };
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        IGNORED_DIRS.iter().any(|ignored| ignored == &name)
+    })
 }

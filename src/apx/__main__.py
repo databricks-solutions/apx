@@ -48,7 +48,11 @@ def deprecated_main():
 
 
 def main():
-    raise SystemExit(run_cli(sys.argv))
+    try:
+        raise SystemExit(run_cli(sys.argv))
+    except KeyboardInterrupt:
+        # Gracefully handle Ctrl+C (e.g., from `apx dev logs -f`)
+        raise SystemExit(0)
 
 
 if __name__ == "__main__":

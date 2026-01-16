@@ -1,6 +1,7 @@
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
@@ -13,14 +14,15 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::dev::common::{lock_path, remove_lock};
 use crate::dev::logging::{
-    drain_log_queue, encode_log_payload, is_log_queue_empty, new_log_queue, set_apx_log_queue,
-    LogPayload, LogQueue, LogStreamName,
+    apx_log_queue, clear_log_queue, encode_log_payload, log_queue_since,
+    log_queue_since_timestamp, LogPayload, LogQueue, LogStreamName, APX_SHUTDOWN_MESSAGE,
 };
 use crate::dev::process::ProcessManager;
+use crate::api_generator::start_openapi_watcher;
 
 #[derive(Clone)]
 struct AppState {
@@ -38,6 +40,12 @@ struct HealthResponse {
     backend_status: String,
 }
 
+#[derive(serde::Deserialize)]
+struct LogsQuery {
+    since: Option<i64>,
+    follow: Option<bool>,
+}
+
 pub async fn run_server(
     app_dir: PathBuf,
     host: String,
@@ -45,6 +53,9 @@ pub async fn run_server(
     backend_port: u16,
     frontend_port: u16,
 ) -> Result<(), String> {
+    let apx_log_queue = apx_log_queue();
+    clear_log_queue(&apx_log_queue).await;
+
     debug!(
         app_dir = %app_dir.display(),
         host = %host,
@@ -56,10 +67,11 @@ pub async fn run_server(
     let process_manager = Arc::new(
         ProcessManager::start(&app_dir, &host, port, backend_port, frontend_port).await?,
     );
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let apx_log_queue = new_log_queue();
-    set_apx_log_queue(Arc::clone(&apx_log_queue));
     let is_stopping = Arc::new(AtomicBool::new(false));
+    if let Err(err) = start_openapi_watcher(app_dir.clone(), Arc::clone(&is_stopping)) {
+        warn!("Failed to start OpenAPI watcher: {err}");
+    }
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let state = AppState {
         shutdown_tx: Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx))),
         app_dir,
@@ -85,10 +97,11 @@ pub async fn run_server(
     let is_stopping_shutdown = Arc::clone(&is_stopping);
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            debug!("Dev server shutdown signal received.");
             is_stopping_shutdown.store(true, Ordering::SeqCst);
             let _ = shutdown_rx.await;
+            debug!("Stopping the server and its subprocesses.");
             process_manager.stop().await;
+            debug!("Server and subprocesses stopped.");
         })
         .await
         .map_err(|err| format!("Server error: {err}"))?;
@@ -107,38 +120,63 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRespon
     )
 }
 
-async fn logs(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+async fn logs(
+    State(state): State<AppState>,
+    Query(query): Query<LogsQuery>,
+) -> axum::response::Response {
+    let since = query.since.unwrap_or(0);
+    let follow = query.follow.unwrap_or(false);
     let (tx, rx) = mpsc::channel(200);
     let state = state.clone();
     tokio::spawn(async move {
+        let (mut app_len, initial_logs) = state.process_manager.logs_since_timestamp(since).await;
+        let (mut apx_len, initial_apx_logs) =
+            log_queue_since_timestamp(&state.apx_log_queue, since).await;
+        for entry in initial_logs {
+            if send_log_payload(&tx, entry).await.is_err() {
+                return;
+            }
+        }
+        for message in initial_apx_logs {
+            if send_log_payload(&tx, message).await.is_err() {
+                return;
+            }
+        }
+        if !follow {
+            return;
+        }
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         loop {
             interval.tick().await;
-            let logs = state.process_manager.drain_logs().await;
-            let apx_logs = drain_log_queue(&state.apx_log_queue).await;
+            let (next_app_len, logs) = state.process_manager.logs_since_index(app_len).await;
+            let (next_apx_len, apx_logs) = log_queue_since(&state.apx_log_queue, apx_len).await;
+            let mut sent_any = false;
             for entry in logs {
+                sent_any = true;
                 if send_log_payload(&tx, entry).await.is_err() {
                     return;
                 }
             }
             for message in apx_logs {
+                sent_any = true;
                 if send_log_payload(&tx, message).await.is_err() {
                     return;
                 }
             }
+            app_len = next_app_len;
+            apx_len = next_apx_len;
 
             if state.is_stopping.load(Ordering::SeqCst)
                 && state.process_manager.is_shutdown_complete().await
-                && state.process_manager.is_log_queue_empty().await
-                && is_log_queue_empty(&state.apx_log_queue).await
+                && !sent_any
             {
                 let _ = send_log_payload(
                     &tx,
-                    LogPayload {
-                        stream: LogStreamName::Apx,
-                        pipe: None,
-                        message: "Dev server shutdown complete.".to_string(),
-                    },
+                    LogPayload::new(
+                        LogStreamName::Apx,
+                        None,
+                        APX_SHUTDOWN_MESSAGE.to_string(),
+                    ),
                 )
                 .await;
                 return;
@@ -146,11 +184,17 @@ async fn logs(State(state): State<AppState>) -> impl axum::response::IntoRespons
         }
     });
 
-    Sse::new(ReceiverStream::new(rx)).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(10))
-            .text("keep-alive"),
-    )
+    if follow {
+        Sse::new(ReceiverStream::new(rx))
+            .keep_alive(
+                KeepAlive::new()
+                    .interval(Duration::from_secs(10))
+                    .text("keep-alive"),
+            )
+            .into_response()
+    } else {
+        Sse::new(ReceiverStream::new(rx)).into_response()
+    }
 }
 
 async fn stop(State(state): State<AppState>) -> StatusCode {
@@ -177,3 +221,4 @@ async fn send_log_payload(
     let data = encode_log_payload(&payload).map_err(|_| ())?;
     tx.send(Ok(Event::default().data(data))).await.map_err(|_| ())
 }
+

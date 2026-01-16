@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -14,7 +14,10 @@ use tracing::{debug, warn};
 
 use crate::bun_binary_path;
 use crate::common::read_project_metadata;
-use crate::dev::logging::{LogPayload, LogPipe, LogQueue, LogStreamName};
+use crate::dev::logging::{
+    log_queue_since, log_queue_since_timestamp, push_log, LogPayload, LogPipe, LogQueue,
+    LogStreamName,
+};
 
 #[derive(Debug, Clone, Copy)]
 enum LogSource {
@@ -68,7 +71,7 @@ impl ProcessManager {
 
         let dev_token = Self::generate_dev_token();
         let manager = Self {
-            log_queue: Arc::new(Mutex::new(VecDeque::new())),
+            log_queue: Arc::new(Mutex::new(Vec::new())),
             frontend_child: Arc::new(Mutex::new(None)),
             backend_child: Arc::new(Mutex::new(None)),
             backend_port,
@@ -189,25 +192,18 @@ impl ProcessManager {
         tokio::spawn(async move {
             let mut lines = BufReader::new(reader).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let entry = LogPayload {
-                    stream: LogStreamName::from(source),
-                    pipe: Some(pipe),
-                    message: line,
-                };
-                let mut queue = log_queue.lock().await;
-                queue.push_back(entry);
+                let entry = LogPayload::new(LogStreamName::from(source), Some(pipe), line);
+                push_log(&log_queue, entry).await;
             }
         });
     }
 
-    pub async fn drain_logs(&self) -> Vec<LogPayload> {
-        let mut guard = self.log_queue.lock().await;
-        guard.drain(..).collect()
+    pub async fn logs_since_index(&self, start_index: usize) -> (usize, Vec<LogPayload>) {
+        log_queue_since(&self.log_queue, start_index).await
     }
 
-    pub async fn is_log_queue_empty(&self) -> bool {
-        let guard = self.log_queue.lock().await;
-        guard.is_empty()
+    pub async fn logs_since_timestamp(&self, since: i64) -> (usize, Vec<LogPayload>) {
+        log_queue_since_timestamp(&self.log_queue, since).await
     }
 
     pub async fn is_shutdown_complete(&self) -> bool {

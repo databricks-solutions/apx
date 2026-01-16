@@ -1,5 +1,4 @@
 use reqwest::blocking::Client;
-use reqwest::blocking::Response;
 use reqwest::StatusCode;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -7,6 +6,19 @@ use tracing::{debug, warn};
 use crate::dev::common::DEFAULT_HOST;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 2;
+
+fn build_async_client() -> Result<reqwest::Client, String> {
+    debug!("Building async HTTP client.");
+    reqwest::Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .build()
+        .map_err(|err| {
+            warn!(error = %err, "Failed to build async HTTP client.");
+            format!("Failed to build HTTP client: {err}")
+        })
+}
 
 fn build_client() -> Result<Client, String> {
     debug!("Building dev HTTP client.");
@@ -18,19 +30,6 @@ fn build_client() -> Result<Client, String> {
         .build()
         .map_err(|err| {
             warn!(error = %err, "Failed to build dev HTTP client.");
-            format!("Failed to build HTTP client: {err}")
-        })
-}
-
-fn build_streaming_client() -> Result<Client, String> {
-    debug!("Building streaming HTTP client (no timeout).");
-    Client::builder()
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .build()
-        .map_err(|err| {
-            warn!(error = %err, "Failed to build streaming HTTP client.");
             format!("Failed to build HTTP client: {err}")
         })
 }
@@ -55,16 +54,37 @@ pub fn health(port: u16) -> Result<bool, String> {
     Ok(ok)
 }
 
-pub fn logs(port: u16) -> Result<Response, String> {
-    let client = build_streaming_client()?;
-    let url = build_url(DEFAULT_HOST, port, "/_apx/logs");
-    debug!(%url, "Opening dev server logs stream.");
+pub async fn logs_async(
+    port: u16,
+    since: Option<i64>,
+    follow: bool,
+) -> Result<reqwest::Response, String> {
+    let client = build_async_client()?;
+    let url = build_logs_url(port, since, follow);
+    debug!(%url, "Opening async dev server logs stream.");
     client
         .get(url)
         .header("Accept-Encoding", "identity")
         .send()
+        .await
         .map_err(|err| {
-            warn!(error = %err, "Logs request failed.");
+            warn!(error = %err, "Async logs request failed.");
             format!("Logs request failed: {err}")
         })
+}
+
+fn build_logs_url(port: u16, since: Option<i64>, follow: bool) -> String {
+    let mut url = build_url(DEFAULT_HOST, port, "/_apx/logs");
+    let mut params: Vec<String> = Vec::new();
+    if let Some(since) = since {
+        params.push(format!("since={since}"));
+    }
+    if follow {
+        params.push("follow=true".to_string());
+    }
+    if !params.is_empty() {
+        url.push('?');
+        url.push_str(&params.join("&"));
+    }
+    url
 }

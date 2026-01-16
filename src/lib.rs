@@ -128,8 +128,7 @@ pub(crate) fn init_tracing() {
         .with_file(true);
 
     tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt_layer)
+        .with(fmt_layer.with_filter(env_filter))
         .with(dev::logging::ApxLogLayer)
         .init();
 }

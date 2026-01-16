@@ -1,23 +1,25 @@
 use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
 use base64::Engine;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
-use tracing::{Event, Subscriber};
+use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::Layer;
 use tracing_subscriber::registry::LookupSpan;
 use tracing::field::Field;
 use tracing_subscriber::field::Visit;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LogStreamName {
     App,
     Ui,
     Apx,
 }
+
+pub const APX_SHUTDOWN_MESSAGE: &str = "Dev server shutdown complete.";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -31,28 +33,69 @@ pub struct LogPayload {
     pub stream: LogStreamName,
     pub pipe: Option<LogPipe>,
     pub message: String,
+    #[serde(default)]
+    pub timestamp: i64,
 }
 
-pub type LogQueue = Arc<Mutex<VecDeque<LogPayload>>>;
+impl LogPayload {
+    pub fn new(stream: LogStreamName, pipe: Option<LogPipe>, message: String) -> Self {
+        Self {
+            stream,
+            pipe,
+            message,
+            timestamp: Utc::now().timestamp_millis(),
+        }
+    }
+}
+
+pub type LogQueue = Arc<Mutex<Vec<LogPayload>>>;
 
 static APX_LOG_QUEUE: OnceLock<LogQueue> = OnceLock::new();
 
-pub fn new_log_queue() -> LogQueue {
-    Arc::new(Mutex::new(VecDeque::new()))
+fn new_log_queue() -> LogQueue {
+    Arc::new(Mutex::new(Vec::new()))
 }
 
-pub fn set_apx_log_queue(queue: LogQueue) {
-    let _ = APX_LOG_QUEUE.set(queue);
+pub fn apx_log_queue() -> LogQueue {
+    let queue = APX_LOG_QUEUE.get_or_init(new_log_queue);
+    Arc::clone(queue)
 }
 
-pub async fn drain_log_queue(queue: &LogQueue) -> Vec<LogPayload> {
+pub async fn clear_log_queue(queue: &LogQueue) {
     let mut guard = queue.lock().await;
-    guard.drain(..).collect()
+    guard.clear();
 }
 
-pub async fn is_log_queue_empty(queue: &LogQueue) -> bool {
+pub async fn push_log(queue: &LogQueue, payload: LogPayload) {
+    let mut guard = queue.lock().await;
+    guard.push(payload);
+}
+
+pub async fn log_queue_since(queue: &LogQueue, start_index: usize) -> (usize, Vec<LogPayload>) {
     let guard = queue.lock().await;
-    guard.is_empty()
+    let len = guard.len();
+    if start_index >= len {
+        return (len, Vec::new());
+    }
+    let logs = guard[start_index..len].to_vec();
+    (len, logs)
+}
+
+pub async fn log_queue_since_timestamp(
+    queue: &LogQueue,
+    since: i64,
+) -> (usize, Vec<LogPayload>) {
+    let guard = queue.lock().await;
+    let len = guard.len();
+    if since <= 0 {
+        return (len, guard.clone());
+    }
+    let logs = guard
+        .iter()
+        .filter(|entry| entry.timestamp >= since)
+        .cloned()
+        .collect();
+    (len, logs)
 }
 
 pub fn encode_log_payload(payload: &LogPayload) -> Result<String, String> {
@@ -75,22 +118,25 @@ where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        let queue = match APX_LOG_QUEUE.get() {
-            Some(queue) => Arc::clone(queue),
-            None => return,
-        };
+        if !matches!(
+            *event.metadata().level(),
+            Level::DEBUG | Level::INFO | Level::WARN | Level::ERROR
+        ) {
+            return;
+        }
+        let queue = apx_log_queue();
         let message = format_event(event);
-        let payload = LogPayload {
-            stream: LogStreamName::Apx,
-            pipe: None,
-            message,
-        };
+        let payload = LogPayload::new(LogStreamName::Apx, None, message);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                let mut guard = queue.lock().await;
-                guard.push_back(payload);
+                push_log(&queue, payload).await;
             });
+            return;
         }
+
+        // Fall back when no runtime is available (e.g. spawn_blocking or sync thread).
+        let mut guard = queue.blocking_lock();
+        guard.push(payload);
     }
 }
 

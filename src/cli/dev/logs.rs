@@ -1,12 +1,17 @@
+use chrono::Utc;
 use clap::Args;
-use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio_stream::StreamExt;
 use tracing::{debug, warn};
 
 use crate::cli::run_cli;
-use crate::dev::client::logs as logs_request;
+use crate::dev::client::logs_async;
 use crate::dev::common::{lock_path, read_lock};
-use crate::dev::logging::{decode_log_payload, LogPipe, LogStreamName};
+use crate::dev::logging::{decode_log_payload, LogPipe, LogStreamName, APX_SHUTDOWN_MESSAGE};
+
+const DEFAULT_LOG_DURATION: &str = "10m";
 
 #[derive(Args, Debug, Clone)]
 pub struct LogsArgs {
@@ -15,13 +20,27 @@ pub struct LogsArgs {
         help = "The path to the app. Defaults to current working directory"
     )]
     pub app_path: Option<PathBuf>,
+    #[arg(
+        short = 'd',
+        long = "duration",
+        default_value = DEFAULT_LOG_DURATION,
+        value_name = "DURATION",
+        help = "Duration to look back (e.g. 30s, 10m, 1h)"
+    )]
+    pub duration: String,
+    #[arg(short = 'f', long = "follow", help = "Follow logs until the server stops")]
+    pub follow: bool,
 }
 
 pub fn run(args: LogsArgs) -> i32 {
-    run_cli(|| run_inner(args))
+    run_cli(|| {
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|err| format!("Failed to create tokio runtime: {err}"))?;
+        runtime.block_on(run_async(args))
+    })
 }
 
-fn run_inner(args: LogsArgs) -> Result<(), String> {
+async fn run_async(args: LogsArgs) -> Result<(), String> {
     let app_dir = args
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -36,7 +55,9 @@ fn run_inner(args: LogsArgs) -> Result<(), String> {
 
     let lock = read_lock(&lock_path)?;
     debug!(port = lock.port, "Connecting to dev server logs.");
-    let response = logs_request(lock.port)?;
+    let duration = parse_duration(&args.duration)?;
+    let since = Some(since_timestamp_millis(duration));
+    let response = logs_async(lock.port, since, args.follow).await?;
     if !response.status().is_success() {
         return Err(format!(
             "Logs request failed with status {}",
@@ -44,44 +65,45 @@ fn run_inner(args: LogsArgs) -> Result<(), String> {
         ));
     }
 
+    stream_logs(response, args.follow).await
+}
+
+async fn stream_logs(response: reqwest::Response, follow: bool) -> Result<(), String> {
+    let stream = response.bytes_stream();
+    let reader = BufReader::new(tokio_util::io::StreamReader::new(
+        stream.map(|result| result.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))),
+    ));
+    let mut lines = reader.lines();
     let mut data_lines: Vec<String> = Vec::new();
-    let mut reader = BufReader::new(response);
-    let mut buffer = Vec::new();
+
     loop {
-        buffer.clear();
-        let bytes_read = reader
-            .read_until(b'\n', &mut buffer)
-            .map_err(|err| format!("Failed to read logs: {err}. Raw buffer: {:?}", String::from_utf8_lossy(&buffer)))?;
-        if bytes_read == 0 {
-            break;
-        }
-        while buffer.last().is_some_and(|byte| *byte == b'\n' || *byte == b'\r') {
-            buffer.pop();
-        }
-        if buffer.is_empty() {
-            if !data_lines.is_empty() {
-                let data = data_lines.join("\n");
-                data_lines.clear();
-                handle_log_payload(&data);
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                debug!("Received Ctrl+C, stopping logs stream.");
+                break;
             }
-            continue;
-        }
-        if buffer.starts_with(b"data:") {
-            let mut payload = &buffer[5..];
-            while payload.first().is_some_and(|byte| *byte == b' ') {
-                payload = &payload[1..];
+            line_result = lines.next_line() => {
+                match line_result {
+                    Ok(Some(line)) => {
+                        if let Some(should_exit) = process_line(&line, &mut data_lines, follow) {
+                            if should_exit {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        // Stream ended
+                        break;
+                    }
+                    Err(err) => {
+                        return Err(format!("Failed to read logs: {err}"));
+                    }
+                }
             }
-            if payload.is_empty() {
-                continue;
-            }
-            let payload_str = String::from_utf8_lossy(payload);
-            if payload_str == "keep-alive" {
-                continue;
-            }
-            data_lines.push(payload_str.to_string());
         }
     }
 
+    // Process any remaining data
     if !data_lines.is_empty() {
         let data = data_lines.join("\n");
         handle_log_payload(&data);
@@ -90,7 +112,38 @@ fn run_inner(args: LogsArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_log_payload(data: &str) {
+/// Process a line from the SSE stream.
+/// Returns Some(true) if we should exit, Some(false) to continue, None if line was just processed.
+fn process_line(line: &str, data_lines: &mut Vec<String>, follow: bool) -> Option<bool> {
+    let line = line.trim_end_matches(['\n', '\r']);
+
+    if line.is_empty() {
+        if !data_lines.is_empty() {
+            let data = data_lines.join("\n");
+            data_lines.clear();
+            if handle_log_payload(&data) && follow {
+                return Some(true);
+            }
+        }
+        return None;
+    }
+
+    if line.starts_with(':') {
+        return None;
+    }
+
+    if let Some(payload) = line.strip_prefix("data:") {
+        let payload = payload.trim_start();
+        if payload.is_empty() || payload == "keep-alive" {
+            return None;
+        }
+        data_lines.push(payload.to_string());
+    }
+
+    Some(false)
+}
+
+fn handle_log_payload(data: &str) -> bool {
     match decode_log_payload(data) {
         Ok(payload) => {
             let stream = match payload.stream {
@@ -104,9 +157,51 @@ fn handle_log_payload(data: &str) {
                 None => "",
             };
             println!("[{stream}] {pipe}{}", payload.message);
+            payload.stream == LogStreamName::Apx && payload.message == APX_SHUTDOWN_MESSAGE
         }
         Err(err) => {
             warn!(error = %err, raw = data, "Failed to parse log payload.");
+            false
         }
     }
+}
+
+fn parse_duration(input: &str) -> Result<Duration, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Duration cannot be empty.".to_string());
+    }
+    let (value_str, unit) = match trimmed.chars().last() {
+        Some(ch) if ch.is_ascii_digit() => (trimmed, 's'),
+        Some(ch) => (&trimmed[..trimmed.len() - ch.len_utf8()], ch),
+        None => return Err("Duration cannot be empty.".to_string()),
+    };
+    let value: u64 = value_str
+        .trim()
+        .parse()
+        .map_err(|_| format!("Invalid duration value: {input}"))?;
+    let seconds = match unit {
+        's' | 'S' => value,
+        'm' | 'M' => value
+            .checked_mul(60)
+            .ok_or_else(|| "Duration is too large.".to_string())?,
+        'h' | 'H' => value
+            .checked_mul(60 * 60)
+            .ok_or_else(|| "Duration is too large.".to_string())?,
+        'd' | 'D' => value
+            .checked_mul(60 * 60 * 24)
+            .ok_or_else(|| "Duration is too large.".to_string())?,
+        _ => {
+            return Err(
+                "Invalid duration unit. Use s, m, h, or d (e.g. 30s, 10m, 1h).".to_string(),
+            )
+        }
+    };
+    Ok(Duration::from_secs(seconds))
+}
+
+fn since_timestamp_millis(duration: Duration) -> i64 {
+    let now = Utc::now().timestamp_millis();
+    let millis: i64 = duration.as_millis().try_into().unwrap_or(i64::MAX);
+    now.saturating_sub(millis)
 }
