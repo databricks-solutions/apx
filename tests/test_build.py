@@ -115,9 +115,9 @@ class TestBuildE2E:
         assert len(wheel_files) == 1, f"Expected 1 wheel file, found {len(wheel_files)}"
 
         wheel_file = wheel_files[0]
-        assert WHEEL_FILENAME_PATTERN.match(
-            wheel_file.name
-        ), f"Wheel filename '{wheel_file.name}' doesn't match expected pattern"
+        assert WHEEL_FILENAME_PATTERN.match(wheel_file.name), (
+            f"Wheel filename '{wheel_file.name}' doesn't match expected pattern"
+        )
 
         # Check that requirements.txt references the wheel
         requirements_file = build_dir / "requirements.txt"
@@ -147,9 +147,9 @@ class TestBuildE2E:
         second_wheel_name = wheel_files2[0].name
 
         # Wheel names should be different (different timestamps)
-        assert (
-            first_wheel_name != second_wheel_name
-        ), f"Expected different wheel names, but both are '{first_wheel_name}'"
+        assert first_wheel_name != second_wheel_name, (
+            f"Expected different wheel names, but both are '{first_wheel_name}'"
+        )
 
         # Both should match the expected pattern
         assert WHEEL_FILENAME_PATTERN.match(first_wheel_name)

@@ -7,10 +7,12 @@ from apx._core import run_cli
 from _pytest.capture import CaptureFixture
 from pydantic import BaseModel
 
+
 class RunApxResult(BaseModel):
     code: int
     out: str
     err: str
+
 
 Args = list[str]
 
@@ -63,5 +65,6 @@ def run_apx(capfd: CaptureFixture[str]) -> Callable[[Args], RunApxResult]:
         return RunApxResult(code=code, out=out, err=err)
 
     return _run
+
 
 ApxFixture = Callable[[Args], RunApxResult]

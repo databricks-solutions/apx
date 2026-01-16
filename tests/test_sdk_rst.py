@@ -68,7 +68,7 @@ class TestRSTParser:
                         break
                 if file_pointer:
                     break
-        
+
         assert isinstance(file_pointer, Path), "File pointer should be a Path"
         sample_file: Path = file_pointer
         if sample_file is None or not sample_file.exists():

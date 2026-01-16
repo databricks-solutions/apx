@@ -949,7 +949,7 @@ def run_backend_server(
                 backend_logger.error(traceback.format_exc())
                 raise
 
-        app.router.lifespan_context = wrapped_lifespan 
+        app.router.lifespan_context = wrapped_lifespan
 
     # Track if this is the first run
     first_run = True
@@ -1004,7 +1004,7 @@ def run_backend_server(
                 request.headers.__dict__["_list"].append(user_id_header)
                 return await call_next(request)
 
-            app_instance.add_middleware(BaseHTTPMiddleware, dispatch=user_id_middleware) # type: ignore[invalid-argument-type]
+            app_instance.add_middleware(BaseHTTPMiddleware, dispatch=user_id_middleware)  # type: ignore[invalid-argument-type]
 
             # Add OBO middleware if enabled
             if obo and obo_token:
@@ -1018,7 +1018,7 @@ def run_backend_server(
                     request.headers.__dict__["_list"].append(token_header)
                     return await call_next(request)
 
-                app_instance.add_middleware(BaseHTTPMiddleware, dispatch=obo_middleware) # type: ignore[invalid-argument-type]
+                app_instance.add_middleware(BaseHTTPMiddleware, dispatch=obo_middleware)  # type: ignore[invalid-argument-type]
 
             # Add exception handler for better error reporting
             async def _dev_exception_handler(
@@ -1044,7 +1044,8 @@ def run_backend_server(
                     reset_log_channel(token)
 
             app_instance.add_middleware(
-                BaseHTTPMiddleware, dispatch=channel_context_middleware # type: ignore[invalid-argument-type]
+                BaseHTTPMiddleware,
+                dispatch=channel_context_middleware,  # type: ignore[invalid-argument-type]
             )
 
             uvicorn_config = uvicorn.Config(
