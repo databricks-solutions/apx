@@ -120,16 +120,20 @@ pub(crate) fn init_tracing() {
         Err(_) => format!("{crate_root}::=info"),
     };
 
-    let env_filter = EnvFilter::new(filter);
-
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(true) // keep on while debugging
         .with_line_number(true)
-        .with_file(true);
+        .with_file(true)
+        .with_filter(EnvFilter::new(filter));
+
+    let apx_layer = std::env::var("APX_COLLECT_LOGS").ok().map(|_| {
+        dev::logging::ApxLogLayer
+            .with_filter(EnvFilter::new(format!("{crate_root}::=debug")))
+    });
 
     tracing_subscriber::registry()
-        .with(fmt_layer.with_filter(env_filter))
-        .with(dev::logging::ApxLogLayer)
+        .with(fmt_layer)
+        .with(apx_layer)
         .init();
 }
 

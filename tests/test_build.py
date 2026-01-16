@@ -22,41 +22,6 @@ WHEEL_FILENAME_PATTERN = re.compile(
 )
 
 
-@pytest.fixture
-def e2e_init(tmp_path: Path) -> Path:
-    """
-    Initialize a full e2e project for testing (skipping initial build).
-    Returns the path to the initialized project.
-    """
-
-    exit_code = run_cli(
-        [
-            "apx",
-            "init",
-            str(tmp_path),
-            "--assistant",
-            "cursor",
-            "--layout",
-            "basic",
-            "--template",
-            "essential",
-            "--profile",
-            "DEFAULT",
-            "--name",
-            "test-app",
-            "--apx-package",
-            str(Path(apx_source_dir)),
-            "--apx-editable",
-            "--skip-build",
-        ]
-    )
-    assert exit_code == 0
-    import sys
-
-    sys.path.insert(0, str(tmp_path / "src"))
-    return tmp_path
-
-
 class TestGenerateBuildVersion:
     """Tests for the generate_build_version function."""
 
@@ -150,9 +115,9 @@ class TestBuildE2E:
         assert len(wheel_files) == 1, f"Expected 1 wheel file, found {len(wheel_files)}"
 
         wheel_file = wheel_files[0]
-        assert WHEEL_FILENAME_PATTERN.match(wheel_file.name), (
-            f"Wheel filename '{wheel_file.name}' doesn't match expected pattern"
-        )
+        assert WHEEL_FILENAME_PATTERN.match(
+            wheel_file.name
+        ), f"Wheel filename '{wheel_file.name}' doesn't match expected pattern"
 
         # Check that requirements.txt references the wheel
         requirements_file = build_dir / "requirements.txt"
@@ -182,9 +147,9 @@ class TestBuildE2E:
         second_wheel_name = wheel_files2[0].name
 
         # Wheel names should be different (different timestamps)
-        assert first_wheel_name != second_wheel_name, (
-            f"Expected different wheel names, but both are '{first_wheel_name}'"
-        )
+        assert (
+            first_wheel_name != second_wheel_name
+        ), f"Expected different wheel names, but both are '{first_wheel_name}'"
 
         # Both should match the expected pattern
         assert WHEEL_FILENAME_PATTERN.match(first_wheel_name)

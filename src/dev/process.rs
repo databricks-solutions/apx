@@ -81,11 +81,20 @@ impl ProcessManager {
             dev_token,
         };
 
+        debug!(
+            "Spawning bun dev process"
+        );
         manager.spawn_bun_dev(app_dir, bun_path).await?;
+        debug!(
+            "Spawning uvicorn process"
+        );
         manager
             .spawn_uvicorn(app_dir, metadata.app_module)
             .await?;
-
+        
+        debug!(
+            "Frontend and backend processes spawned"
+        );
         Ok(manager)
     }
 

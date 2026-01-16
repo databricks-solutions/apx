@@ -2,14 +2,14 @@ use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
 use base64::Engine;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tokio::sync::Mutex;
-use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::layer::Context;
-use tracing_subscriber::Layer;
-use tracing_subscriber::registry::LookupSpan;
 use tracing::field::Field;
+use tracing::{Event, Subscriber};
 use tracing_subscriber::field::Visit;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::Layer;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -48,29 +48,67 @@ impl LogPayload {
     }
 }
 
+/// Async-friendly log queue for subprocess logs (used by ProcessManager).
 pub type LogQueue = Arc<Mutex<Vec<LogPayload>>>;
 
-static APX_LOG_QUEUE: OnceLock<LogQueue> = OnceLock::new();
+/// Sync log queue for tracing layer logs (used by ApxLogLayer).
+pub type SyncLogQueue = Arc<StdMutex<Vec<LogPayload>>>;
 
-fn new_log_queue() -> LogQueue {
-    Arc::new(Mutex::new(Vec::new()))
+static APX_LOG_QUEUE: OnceLock<SyncLogQueue> = OnceLock::new();
+
+fn new_apx_log_queue() -> SyncLogQueue {
+    Arc::new(StdMutex::new(Vec::new()))
 }
 
-pub fn apx_log_queue() -> LogQueue {
-    let queue = APX_LOG_QUEUE.get_or_init(new_log_queue);
+pub fn apx_log_queue() -> SyncLogQueue {
+    let queue = APX_LOG_QUEUE.get_or_init(new_apx_log_queue);
     Arc::clone(queue)
 }
 
-pub async fn clear_log_queue(queue: &LogQueue) {
-    let mut guard = queue.lock().await;
+pub fn clear_apx_log_queue(queue: &SyncLogQueue) {
+    let mut guard = queue.lock().expect("log queue poisoned");
     guard.clear();
 }
 
+fn push_apx_log(queue: &SyncLogQueue, payload: LogPayload) {
+    let mut guard = queue.lock().expect("log queue poisoned");
+    guard.push(payload);
+}
+
+pub fn apx_log_queue_since(queue: &SyncLogQueue, start_index: usize) -> (usize, Vec<LogPayload>) {
+    let guard = queue.lock().expect("log queue poisoned");
+    let len = guard.len();
+    if start_index >= len {
+        return (len, Vec::new());
+    }
+    let logs = guard[start_index..len].to_vec();
+    (len, logs)
+}
+
+pub fn apx_log_queue_since_timestamp(
+    queue: &SyncLogQueue,
+    since: i64,
+) -> (usize, Vec<LogPayload>) {
+    let guard = queue.lock().expect("log queue poisoned");
+    let len = guard.len();
+    if since <= 0 {
+        return (len, guard.clone());
+    }
+    let logs = guard
+        .iter()
+        .filter(|entry| entry.timestamp >= since)
+        .cloned()
+        .collect();
+    (len, logs)
+}
+
+/// Async push for subprocess logs (ProcessManager).
 pub async fn push_log(queue: &LogQueue, payload: LogPayload) {
     let mut guard = queue.lock().await;
     guard.push(payload);
 }
 
+/// Async read for subprocess logs (ProcessManager).
 pub async fn log_queue_since(queue: &LogQueue, start_index: usize) -> (usize, Vec<LogPayload>) {
     let guard = queue.lock().await;
     let len = guard.len();
@@ -81,10 +119,8 @@ pub async fn log_queue_since(queue: &LogQueue, start_index: usize) -> (usize, Ve
     (len, logs)
 }
 
-pub async fn log_queue_since_timestamp(
-    queue: &LogQueue,
-    since: i64,
-) -> (usize, Vec<LogPayload>) {
+/// Async read for subprocess logs (ProcessManager).
+pub async fn log_queue_since_timestamp(queue: &LogQueue, since: i64) -> (usize, Vec<LogPayload>) {
     let guard = queue.lock().await;
     let len = guard.len();
     if since <= 0 {
@@ -118,25 +154,11 @@ where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        if !matches!(
-            *event.metadata().level(),
-            Level::DEBUG | Level::INFO | Level::WARN | Level::ERROR
-        ) {
-            return;
-        }
         let queue = apx_log_queue();
         let message = format_event(event);
         let payload = LogPayload::new(LogStreamName::Apx, None, message);
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                push_log(&queue, payload).await;
-            });
-            return;
-        }
-
-        // Fall back when no runtime is available (e.g. spawn_blocking or sync thread).
-        let mut guard = queue.blocking_lock();
-        guard.push(payload);
+        // Use synchronous push to ensure logs are captured immediately
+        push_apx_log(&queue, payload);
     }
 }
 
@@ -155,14 +177,41 @@ fn format_event(event: &Event<'_>) -> String {
     let metadata = event.metadata();
     let mut visitor = FieldVisitor::default();
     event.record(&mut visitor);
+    let target = metadata
+        .target()
+        .strip_prefix("_core::")
+        .unwrap_or(metadata.target());
     if visitor.fields.is_empty() {
-        format!("{} {}", metadata.level(), metadata.target())
-    } else {
-        format!(
-            "{} {} {}",
-            metadata.level(),
-            metadata.target(),
-            visitor.fields.join(" ")
-        )
+        return format!("{} {}", metadata.level(), target);
     }
+    let (message, other_fields) = split_message_fields(&visitor.fields);
+    match message {
+        Some(message) if other_fields.is_empty() => {
+            format!("{} {}: {}", metadata.level(), target, message)
+        }
+        Some(message) => {
+            format!(
+                "{} {}: {} {}",
+                metadata.level(),
+                target,
+                message,
+                other_fields.join(" ")
+            )
+        }
+        None => format!("{} {} {}", metadata.level(), target, visitor.fields.join(" ")),
+    }
+}
+
+fn split_message_fields(fields: &[String]) -> (Option<String>, Vec<String>) {
+    let mut message = None;
+    let mut others = Vec::new();
+    for field in fields {
+        if let Some(value) = field.strip_prefix("message=") {
+            let cleaned = value.trim().trim_matches('"').to_string();
+            message = Some(cleaned);
+        } else {
+            others.push(field.clone());
+        }
+    }
+    (message, others)
 }

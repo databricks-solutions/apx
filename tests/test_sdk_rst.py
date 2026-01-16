@@ -1,5 +1,6 @@
 """Tests for RST documentation parsing and SDK enrichment."""
 
+from pathlib import Path
 import pytest
 
 from apx.mcp.sdk import (
@@ -58,17 +59,19 @@ class TestRSTParser:
         docs_path = get_cache_path(sdk_version) / "docs" / "workspace"
 
         # Find a sample RST file
-        sample_file = None
+        file_pointer = None
         for service_dir in docs_path.iterdir():
             if service_dir.is_dir():
                 for rst_file in service_dir.glob("*.rst"):
                     if rst_file.stem != "index":
-                        sample_file = rst_file
+                        file_pointer = rst_file
                         break
-                if sample_file:
+                if file_pointer:
                     break
-
-        if sample_file is None:
+        
+        assert isinstance(file_pointer, Path), "File pointer should be a Path"
+        sample_file: Path = file_pointer
+        if sample_file is None or not sample_file.exists():
             pytest.skip("No RST files found")
 
         doc = parse_rst_file(sample_file)

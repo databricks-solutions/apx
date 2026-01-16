@@ -446,7 +446,7 @@ def _populate_index(engine) -> None:
 
         # Insert into FTS5 table for methods
         for i, spec in enumerate(enriched_methods):
-            session.execute(
+            session.execute( # type: ignore[deprecated]
                 text("""
                 INSERT INTO sdk_methods_fts(rowid, service_name, class_name, method_name,
                                             full_name, signature, docstring, rst_docs)
@@ -475,7 +475,7 @@ def _populate_index(engine) -> None:
         # Insert into FTS5 table for models
         for j, model_spec in enumerate(models):
             field_names = " ".join(f.name for f in model_spec.fields)
-            session.execute(
+            session.execute( # type: ignore[deprecated]
                 text("""
                 INSERT INTO sdk_models_fts(rowid, module_name, class_name, full_name,
                                            docstring, field_names)
@@ -514,7 +514,7 @@ def _search_methods(query: str, limit: int = 10) -> list[SDKMethodSpec]:
 
     with Session(engine) as session:
         # FTS5 search with join to get full data from SQLModel table
-        result = session.execute(
+        result = session.execute( # type: ignore[deprecated]
             text("""
             SELECT m.id
             FROM sdk_methods_fts fts
@@ -557,7 +557,7 @@ def _search_models(query: str, limit: int = 10) -> list[SDKModelSpec]:
 
     with Session(engine) as session:
         # FTS5 search with join
-        result = session.execute(
+        result = session.execute( # type: ignore[deprecated]
             text("""
             SELECT m.id
             FROM sdk_models_fts fts

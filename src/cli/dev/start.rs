@@ -71,6 +71,7 @@ fn run_inner(args: StartArgs) -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .env("APX_COLLECT_LOGS", "1")
         .spawn()
         .map_err(|err| format!("Failed to start dev server: {err}"))?;
 

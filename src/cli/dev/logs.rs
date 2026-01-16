@@ -96,6 +96,16 @@ async fn stream_logs(response: reqwest::Response, follow: bool) -> Result<(), St
                         break;
                     }
                     Err(err) => {
+                        if !data_lines.is_empty() {
+                            let data = data_lines.join("\n");
+                            data_lines.clear();
+                            handle_log_payload(&data);
+                        }
+                        if follow {
+                            // Treat connection errors during follow as graceful shutdowns.
+                            debug!(error = %err, "Logs stream ended during follow.");
+                            return Ok(());
+                        }
                         return Err(format!("Failed to read logs: {err}"));
                     }
                 }

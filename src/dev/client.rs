@@ -6,6 +6,7 @@ use tracing::{debug, warn};
 use crate::dev::common::DEFAULT_HOST;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 2;
+const STOP_TIMEOUT_SECS: u64 = 10;
 
 fn build_async_client() -> Result<reqwest::Client, String> {
     debug!("Building async HTTP client.");
@@ -34,6 +35,20 @@ fn build_client() -> Result<Client, String> {
         })
 }
 
+fn build_client_with_timeout(timeout_secs: u64) -> Result<Client, String> {
+    debug!("Building dev HTTP client with {timeout_secs}s timeout.");
+    Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .build()
+        .map_err(|err| {
+            warn!(error = %err, "Failed to build dev HTTP client.");
+            format!("Failed to build HTTP client: {err}")
+        })
+}
+
 fn build_url(host: &str, port: u16, path: &str) -> String {
     format!("http://{host}:{port}{path}")
 }
@@ -52,6 +67,28 @@ pub fn health(port: u16) -> Result<bool, String> {
     let ok = response.status() == StatusCode::OK;
     debug!(status = %response.status(), ok, "Received dev server health response.");
     Ok(ok)
+}
+
+/// Request the dev server to stop gracefully.
+/// Returns Ok(()) if the server acknowledged the stop request, Err otherwise.
+pub fn stop(port: u16) -> Result<(), String> {
+    let client = build_client_with_timeout(STOP_TIMEOUT_SECS)?;
+    let url = build_url(DEFAULT_HOST, port, "/_apx/stop");
+    debug!(%url, "Sending dev server stop request.");
+    let response = client.get(url).send().map_err(|err| {
+        warn!(error = %err, "Stop request failed.");
+        format!("Stop request failed: {err}")
+    })?;
+    if response.status() == StatusCode::OK {
+        debug!("Dev server stop request acknowledged.");
+        Ok(())
+    } else {
+        warn!(status = %response.status(), "Dev server stop request failed.");
+        Err(format!(
+            "Stop request failed with status {}",
+            response.status()
+        ))
+    }
 }
 
 pub async fn logs_async(

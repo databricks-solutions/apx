@@ -2,6 +2,7 @@ use clap::Args;
 use std::path::PathBuf;
 
 use crate::cli::run_cli;
+use crate::dev::client::stop as stop_server;
 use crate::dev::common::{lock_path, read_lock, remove_lock};
 use crate::dev::process::ProcessManager;
 use tracing::{debug, warn};
@@ -33,7 +34,21 @@ fn run_inner(args: StopArgs) -> Result<(), String> {
     }
 
     let lock = read_lock(&lock_path)?;
-    debug!(port = lock.port, "Loaded dev server lockfile.");
+    debug!(port = lock.port, pid = lock.pid, "Loaded dev server lockfile.");
+
+    // Try graceful shutdown first via HTTP request
+    match stop_server(lock.port) {
+        Ok(()) => {
+            debug!("Dev server stopped gracefully via HTTP.");
+            println!("Dev server stopped.");
+            return Ok(());
+        }
+        Err(err) => {
+            warn!(error = %err, "Graceful stop failed, falling back to process kill.");
+        }
+    }
+
+    // Fall back to killing the process tree if graceful stop failed
     let kill_result = ProcessManager::kill_process_tree(lock.pid, "dev-server");
     match kill_result {
         Ok(()) => {

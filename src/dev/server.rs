@@ -18,8 +18,8 @@ use tracing::{debug, warn};
 
 use crate::dev::common::{lock_path, remove_lock};
 use crate::dev::logging::{
-    apx_log_queue, clear_log_queue, encode_log_payload, log_queue_since,
-    log_queue_since_timestamp, LogPayload, LogQueue, LogStreamName, APX_SHUTDOWN_MESSAGE,
+    apx_log_queue, apx_log_queue_since, apx_log_queue_since_timestamp, clear_apx_log_queue,
+    encode_log_payload, LogPayload, LogStreamName, SyncLogQueue, APX_SHUTDOWN_MESSAGE,
 };
 use crate::dev::process::ProcessManager;
 use crate::api_generator::start_openapi_watcher;
@@ -29,8 +29,9 @@ struct AppState {
     shutdown_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<()>>>>,
     app_dir: PathBuf,
     process_manager: Arc<ProcessManager>,
-    apx_log_queue: LogQueue,
+    apx_log_queue: SyncLogQueue,
     is_stopping: Arc<AtomicBool>,
+    shutdown_message_sent: Arc<AtomicBool>,
 }
 
 #[derive(serde::Serialize)]
@@ -54,7 +55,7 @@ pub async fn run_server(
     frontend_port: u16,
 ) -> Result<(), String> {
     let apx_log_queue = apx_log_queue();
-    clear_log_queue(&apx_log_queue).await;
+    clear_apx_log_queue(&apx_log_queue);
 
     debug!(
         app_dir = %app_dir.display(),
@@ -68,6 +69,7 @@ pub async fn run_server(
         ProcessManager::start(&app_dir, &host, port, backend_port, frontend_port).await?,
     );
     let is_stopping = Arc::new(AtomicBool::new(false));
+    let shutdown_message_sent = Arc::new(AtomicBool::new(false));
     if let Err(err) = start_openapi_watcher(app_dir.clone(), Arc::clone(&is_stopping)) {
         warn!("Failed to start OpenAPI watcher: {err}");
     }
@@ -78,6 +80,7 @@ pub async fn run_server(
         process_manager: Arc::clone(&process_manager),
         apx_log_queue: Arc::clone(&apx_log_queue),
         is_stopping: Arc::clone(&is_stopping),
+        shutdown_message_sent: Arc::clone(&shutdown_message_sent),
     };
 
     let app = Router::new()
@@ -94,10 +97,9 @@ pub async fn run_server(
         .await
         .map_err(|err| format!("Failed to bind server: {err}"))?;
 
-    let is_stopping_shutdown = Arc::clone(&is_stopping);
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            is_stopping_shutdown.store(true, Ordering::SeqCst);
+            // Wait for the shutdown signal first - code after await doesn't run until signal received
             let _ = shutdown_rx.await;
             debug!("Stopping the server and its subprocesses.");
             process_manager.stop().await;
@@ -131,7 +133,7 @@ async fn logs(
     tokio::spawn(async move {
         let (mut app_len, initial_logs) = state.process_manager.logs_since_timestamp(since).await;
         let (mut apx_len, initial_apx_logs) =
-            log_queue_since_timestamp(&state.apx_log_queue, since).await;
+            apx_log_queue_since_timestamp(&state.apx_log_queue, since);
         for entry in initial_logs {
             if send_log_payload(&tx, entry).await.is_err() {
                 return;
@@ -145,20 +147,31 @@ async fn logs(
         if !follow {
             return;
         }
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        let mut shutdown_initiated = false;
         loop {
-            interval.tick().await;
+            // Poll more frequently when stopping to catch shutdown quickly
+            let poll_interval = if state.is_stopping.load(Ordering::SeqCst) {
+                Duration::from_millis(10)
+            } else {
+                Duration::from_millis(100)
+            };
+            tokio::time::sleep(poll_interval).await;
+
+            // Check if stopping was initiated
+            if state.is_stopping.load(Ordering::SeqCst) && !shutdown_initiated {
+                shutdown_initiated = true;
+                // Wait briefly for any final logs to be generated
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
             let (next_app_len, logs) = state.process_manager.logs_since_index(app_len).await;
-            let (next_apx_len, apx_logs) = log_queue_since(&state.apx_log_queue, apx_len).await;
-            let mut sent_any = false;
+            let (next_apx_len, apx_logs) = apx_log_queue_since(&state.apx_log_queue, apx_len);
             for entry in logs {
-                sent_any = true;
                 if send_log_payload(&tx, entry).await.is_err() {
                     return;
                 }
             }
             for message in apx_logs {
-                sent_any = true;
                 if send_log_payload(&tx, message).await.is_err() {
                     return;
                 }
@@ -166,11 +179,22 @@ async fn logs(
             app_len = next_app_len;
             apx_len = next_apx_len;
 
-            if state.is_stopping.load(Ordering::SeqCst)
-                && state.process_manager.is_shutdown_complete().await
-                && !sent_any
-            {
-                let _ = send_log_payload(
+            // Once stopping and processes complete, send final message and exit
+            if shutdown_initiated && state.process_manager.is_shutdown_complete().await {
+                if state.shutdown_message_sent.load(Ordering::SeqCst) {
+                    return;
+                }
+                // Flush any remaining logs
+                let (_, final_logs) = state.process_manager.logs_since_index(app_len).await;
+                let (_, final_apx_logs) = apx_log_queue_since(&state.apx_log_queue, apx_len);
+                for entry in final_logs {
+                    let _ = send_log_payload(&tx, entry).await;
+                }
+                for message in final_apx_logs {
+                    let _ = send_log_payload(&tx, message).await;
+                }
+                // Send shutdown message
+                if send_log_payload(
                     &tx,
                     LogPayload::new(
                         LogStreamName::Apx,
@@ -178,7 +202,13 @@ async fn logs(
                         APX_SHUTDOWN_MESSAGE.to_string(),
                     ),
                 )
-                .await;
+                .await
+                .is_ok()
+                {
+                    state.shutdown_message_sent.store(true, Ordering::SeqCst);
+                    // Give time for the message to be transmitted before closing
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
                 return;
             }
         }
@@ -203,7 +233,24 @@ async fn stop(State(state): State<AppState>) -> StatusCode {
     let lock = lock_path(&state.app_dir);
     let _ = remove_lock(&lock);
 
+    // Stop the processes
     state.process_manager.stop().await;
+    debug!("Processes stopped, waiting for shutdown message to be sent.");
+
+    // Wait for the logs stream to send the shutdown message (up to 3 seconds)
+    let mut wait_attempts = 0;
+    while !state.shutdown_message_sent.load(Ordering::SeqCst) && wait_attempts < 60 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_attempts += 1;
+    }
+
+    if state.shutdown_message_sent.load(Ordering::SeqCst) {
+        debug!("Shutdown message sent, giving time for transmission.");
+        // Give extra time for the message to be transmitted to clients
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    } else {
+        debug!("Shutdown message was not sent within timeout.");
+    }
 
     let mut guard = state.shutdown_tx.lock().await;
     if let Some(tx) = guard.take() {

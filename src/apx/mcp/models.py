@@ -119,7 +119,7 @@ class SDKUsageInstructions(BaseModel):
 class SDKMethodTable(SQLModel, table=True):
     """SQLModel table for storing SDK method specifications."""
 
-    __tablename__ = "sdk_methods"  # type: ignore[misc]  # pyright: ignore[reportAssignmentType]
+    __tablename__ = "sdk_methods"
 
     id: int | None = SQLField(default=None, primary_key=True)
     service_name: str = SQLField(index=True)
@@ -177,7 +177,7 @@ class SDKMethodTable(SQLModel, table=True):
 class SDKModelTable(SQLModel, table=True):
     """SQLModel table for storing SDK model specifications."""
 
-    __tablename__ = "sdk_models"  # type: ignore[misc]  # pyright: ignore[reportAssignmentType]
+    __tablename__ = "sdk_models"
 
     id: int | None = SQLField(default=None, primary_key=True)
     module_name: str = SQLField(index=True)
