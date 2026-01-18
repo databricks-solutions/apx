@@ -119,7 +119,7 @@ async fn refresh_openapi_tool(ctx: Arc<AppContext>, args: RefreshOpenapiArgs) ->
 
     match generate_openapi(&ctx.app_dir, args.force) {
         Ok(true) => ToolResult::success("OpenAPI regenerated".to_string()),
-        Ok(false) => ToolResult::success("OpenAPI unchanged".to_string()),
+        Ok(false) => ToolResult::success("OpenAPI is up to date".to_string()),
         Err(e) => ToolResult::error(e),
     }
 }
