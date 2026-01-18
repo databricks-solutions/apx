@@ -1,0 +1,47 @@
+# Model Context Protocol
+
+## Docs
+
+- [Example Clients](https://modelcontextprotocol.io/clients.md): A list of applications that support MCP integrations
+- [Antitrust Policy](https://modelcontextprotocol.io/community/antitrust.md): MCP Project Antitrust Policy for participants and contributors
+- [Contributor Communication](https://modelcontextprotocol.io/community/communication.md): Communication strategy and framework for the Model Context Protocol community
+- [Governance and Stewardship](https://modelcontextprotocol.io/community/governance.md): Learn about the Model Context Protocol's governance structure and how to participate in the community
+- [SEP Guidelines](https://modelcontextprotocol.io/community/sep-guidelines.md): Specification Enhancement Proposal (SEP) guidelines for proposing changes to the Model Context Protocol
+- [Working and Interest Groups](https://modelcontextprotocol.io/community/working-interest-groups.md): Learn about the two forms of collaborative groups within the Model Context Protocol's governance structure - Working Groups and Interest Groups.
+- [Roadmap](https://modelcontextprotocol.io/development/roadmap.md): Our plans for evolving Model Context Protocol
+- [Build an MCP client](https://modelcontextprotocol.io/docs/develop/build-client.md): Get started building your own client that can integrate with all MCP servers.
+- [Build an MCP server](https://modelcontextprotocol.io/docs/develop/build-server.md): Get started building your own server to use in Claude for Desktop and other clients.
+- [Connect to local MCP servers](https://modelcontextprotocol.io/docs/develop/connect-local-servers.md): Learn how to extend Claude Desktop with local MCP servers to enable file system access and other powerful integrations
+- [Connect to remote MCP Servers](https://modelcontextprotocol.io/docs/develop/connect-remote-servers.md): Learn how to connect Claude to remote MCP servers and extend its capabilities with internet-hosted tools and data sources
+- [What is the Model Context Protocol (MCP)?](https://modelcontextprotocol.io/docs/getting-started/intro.md)
+- [Architecture overview](https://modelcontextprotocol.io/docs/learn/architecture.md)
+- [Understanding MCP clients](https://modelcontextprotocol.io/docs/learn/client-concepts.md)
+- [Understanding MCP servers](https://modelcontextprotocol.io/docs/learn/server-concepts.md)
+- [SDKs](https://modelcontextprotocol.io/docs/sdk.md): Official SDKs for building with Model Context Protocol
+- [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector.md): In-depth guide to using the MCP Inspector for testing and debugging Model Context Protocol servers
+- [Understanding Authorization in MCP](https://modelcontextprotocol.io/docs/tutorials/security/authorization.md): Learn how to implement secure authorization for MCP servers using OAuth 2.1 to protect sensitive resources and operations
+- [Example Servers](https://modelcontextprotocol.io/examples.md): A list of example servers and implementations
+- [Architecture](https://modelcontextprotocol.io/specification/2025-11-25/architecture/index.md)
+- [Authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization.md)
+- [Overview](https://modelcontextprotocol.io/specification/2025-11-25/basic/index.md)
+- [Lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle.md)
+- [Security Best Practices](https://modelcontextprotocol.io/specification/2025-11-25/basic/security_best_practices.md)
+- [Transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports.md)
+- [Cancellation](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation.md)
+- [Ping](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/ping.md)
+- [Progress](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/progress.md)
+- [Tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks.md)
+- [Key Changes](https://modelcontextprotocol.io/specification/2025-11-25/changelog.md)
+- [Elicitation](https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation.md)
+- [Roots](https://modelcontextprotocol.io/specification/2025-11-25/client/roots.md)
+- [Sampling](https://modelcontextprotocol.io/specification/2025-11-25/client/sampling.md)
+- [Specification](https://modelcontextprotocol.io/specification/2025-11-25/index.md)
+- [Schema Reference](https://modelcontextprotocol.io/specification/2025-11-25/schema.md)
+- [Overview](https://modelcontextprotocol.io/specification/2025-11-25/server/index.md)
+- [Prompts](https://modelcontextprotocol.io/specification/2025-11-25/server/prompts.md)
+- [Resources](https://modelcontextprotocol.io/specification/2025-11-25/server/resources.md)
+- [Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools.md)
+- [Completion](https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/completion.md)
+- [Logging](https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging.md)
+- [Pagination](https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/pagination.md)
+- [Versioning](https://modelcontextprotocol.io/specification/versioning.md)
