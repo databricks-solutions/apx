@@ -6,7 +6,8 @@ use std::process::Command;
 use crate::bun_binary_path;
 use crate::cli::run_cli;
 use crate::common::{
-    bun_install, ensure_apx_plugin, ensure_dir, read_project_metadata, write_metadata_file,
+    bun_install, ensure_dir, read_project_metadata, sync_apx_plugin_from_package,
+    write_metadata_file,
 };
 use crate::generate_openapi;
 
@@ -43,7 +44,7 @@ fn run_inner(args: BuildArgs) -> Result<(), String> {
 
     println!("Building project in {}", app_path.display());
 
-    ensure_apx_plugin(&app_path)?;
+    sync_apx_plugin_from_package(&app_path)?;
 
     if build_dir.exists() {
         fs::remove_dir_all(&build_dir)

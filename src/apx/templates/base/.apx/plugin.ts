@@ -183,8 +183,8 @@ export function apxPlugin(): Plugin {
               hmr: {
                 host: devServerHost,
                 port: devServerPort,
-                // clientPort tells the browser to connect directly to the APX dev server
-                clientPort: devServerPort,
+                // clientPort tells the browser to connect directly to the vite dev server
+                clientPort: frontendPort,
               },
             };
           })()

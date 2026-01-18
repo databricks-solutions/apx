@@ -5,7 +5,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use crate::cli::run_cli;
-use crate::common::{ensure_apx_plugin, ensure_dir};
+use crate::common::{ensure_dir, sync_apx_plugin_from_package};
 use crate::dev::client::health;
 use crate::dev::common::{
     BIND_HOST, DEFAULT_HOST, DevLock, find_available_port, lock_path, read_lock, write_lock,
@@ -32,7 +32,7 @@ fn run_inner(args: StartArgs) -> Result<(), String> {
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    ensure_apx_plugin(&app_dir)?;
+    sync_apx_plugin_from_package(&app_dir)?;
     ensure_dir(&app_dir.join(".apx"))?;
 
     let lock_path = lock_path(&app_dir);

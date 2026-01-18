@@ -73,7 +73,7 @@ pub fn ensure_dir(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|err| format!("Failed to create directory: {err}"))
 }
 
-pub fn ensure_apx_plugin(app_dir: &Path) -> Result<(), String> {
+pub fn sync_apx_plugin_from_package(app_dir: &Path) -> Result<(), String> {
     let apx_dir = app_dir.join(".apx");
     let plugin_path = apx_dir.join("plugin.ts");
 
@@ -100,6 +100,7 @@ pub fn ensure_apx_plugin(app_dir: &Path) -> Result<(), String> {
     println!("Created .apx/plugin.ts from template");
     Ok(())
 }
+
 
 pub fn bun_install(app_dir: &Path, bun_path: &Path) -> Result<(), String> {
     let mut cmd = Command::new(bun_path);
