@@ -15,6 +15,7 @@ use walkdir::WalkDir;
 use crate::bun_binary_path;
 use crate::cli::run_cli;
 use crate::common::bun_install;
+use crate::dotenv::DotenvFile;
 
 const DEFAULT_APX_PACKAGE: &str = "https://github.com/databricks-solutions/apx.git";
 
@@ -271,7 +272,8 @@ fn run_inner(mut args: InitArgs) -> Result<(), String> {
             }
 
             if let Some(profile) = args.profile.as_deref() {
-                set_env_key(&app_path.join(".env"), "DATABRICKS_CONFIG_PROFILE", profile)?;
+                let mut dotenv = DotenvFile::read(&app_path.join(".env"))?;
+                dotenv.update("DATABRICKS_CONFIG_PROFILE", profile)?;
             }
 
             if matches!(layout, Layout::Sidebar) {
@@ -591,30 +593,6 @@ fn process_template_directory(
     Ok(())
 }
 
-fn set_env_key(env_path: &Path, key: &str, value: &str) -> Result<(), String> {
-    let mut lines = if env_path.exists() {
-        fs::read_to_string(env_path)
-            .map_err(|err| format!("Failed to read .env file: {err}"))?
-            .lines()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let mut updated = false;
-    for line in lines.iter_mut() {
-        if line.starts_with(&format!("{key}=")) {
-            *line = format!("{key}={value}");
-            updated = true;
-        }
-    }
-    if !updated {
-        lines.push(format!("{key}={value}"));
-    }
-    let mut contents = lines.join("\n");
-    contents.push('\n');
-    fs::write(env_path, contents).map_err(|err| format!("Failed to write .env file: {err}"))
-}
 
 fn is_in_git_repo(path: &Path) -> Result<bool, String> {
     let output = Command::new("git")

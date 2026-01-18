@@ -18,6 +18,7 @@ use crate::dev::logging::{
     log_queue_since, log_queue_since_timestamp, push_log, LogPayload, LogPipe, LogQueue,
     LogStreamName,
 };
+use crate::dotenv::DotenvFile;
 
 #[derive(Debug, Clone, Copy)]
 enum LogSource {
@@ -53,6 +54,9 @@ pub struct ProcessManager {
     dev_server_port: u16,
     host: String,
     dev_token: String,
+    app_dir: PathBuf,
+    app_module: String,
+    dotenv_vars: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl ProcessManager {
@@ -69,6 +73,10 @@ impl ProcessManager {
             return Err("bun is not installed. Please install bun to continue.".to_string());
         }
 
+        let dotenv = DotenvFile::read(&app_dir.join(".env"))?;
+        let dotenv_vars = Arc::new(Mutex::new(dotenv.get_vars()));
+        let app_module = metadata.app_module.clone();
+
         let dev_token = Self::generate_dev_token();
         let manager = Self {
             log_queue: Arc::new(Mutex::new(Vec::new())),
@@ -79,6 +87,9 @@ impl ProcessManager {
             dev_server_port,
             host: host.to_string(),
             dev_token,
+            app_dir: app_dir.to_path_buf(),
+            app_module,
+            dotenv_vars,
         };
 
         debug!(
@@ -122,12 +133,26 @@ impl ProcessManager {
         (frontend_status, backend_status)
     }
 
+    pub async fn restart_uvicorn_with_env(
+        &self,
+        new_vars: HashMap<String, String>,
+    ) -> Result<(), String> {
+        Self::stop_child_tree("backend", &self.backend_child).await;
+        {
+            let mut vars = self.dotenv_vars.lock().await;
+            *vars = new_vars;
+        }
+        self.spawn_uvicorn(&self.app_dir, self.app_module.clone())
+            .await
+    }
+
     async fn spawn_bun_dev(&self, app_dir: &Path, bun_path: PathBuf) -> Result<(), String> {
         let child = self.spawn_process(
             app_dir,
             bun_path,
             vec!["run".to_string(), "dev".to_string()],
             LogSource::Ui,
+            false,
         )
         .await
         ?;
@@ -155,6 +180,7 @@ impl ProcessManager {
                 "--reload".to_string(),
             ],
             LogSource::App,
+            true,
         )
         .await
         ?;
@@ -169,6 +195,7 @@ impl ProcessManager {
         executable: PathBuf,
         args: Vec<String>,
         source: LogSource,
+        include_dotenv: bool,
     ) -> Result<Child, String> {
         let mut cmd = Command::new(executable);
         cmd.args(args)
@@ -176,7 +203,7 @@ impl ProcessManager {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        self.apply_env(&mut cmd);
+        self.apply_env(&mut cmd, include_dotenv).await;
 
         let mut child = cmd
             .spawn()
@@ -229,12 +256,18 @@ impl ProcessManager {
         frontend_status == "stopped" && backend_status == "stopped"
     }
 
-    fn apply_env(&self, cmd: &mut Command) {
+    async fn apply_env(&self, cmd: &mut Command, include_dotenv: bool) {
         cmd.env("APX_FRONTEND_PORT", self.frontend_port.to_string());
         cmd.env("APX_BACKEND_PORT", self.backend_port.to_string());
         cmd.env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string());
         cmd.env("APX_DEV_SERVER_HOST", self.host.clone());
         cmd.env("APX_DEV_TOKEN", self.dev_token.clone());
+        if include_dotenv {
+            let vars = self.dotenv_vars.lock().await;
+            for (key, value) in vars.iter() {
+                cmd.env(key, value);
+            }
+        }
     }
 
     async fn stop_child_tree(name: &str, child: &Arc<Mutex<Option<Child>>>) {

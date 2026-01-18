@@ -9,6 +9,7 @@ mod api_generator;
 mod cli;
 mod common;
 mod dev;
+pub mod dotenv;
 
 pub use api_generator::generate_openapi;
 

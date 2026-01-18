@@ -6,6 +6,7 @@ use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use std::convert::Infallible;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::dev::common::{lock_path, remove_lock};
 use crate::dev::logging::{
@@ -25,6 +26,7 @@ use crate::dev::logging::{
 use crate::dev::proxy;
 use crate::dev::process::ProcessManager;
 use crate::api_generator::start_openapi_watcher;
+use crate::dotenv::DotenvFile;
 
 #[derive(Clone)]
 struct AppState {
@@ -72,6 +74,40 @@ pub async fn run_server(
     );
     let is_stopping = Arc::new(AtomicBool::new(false));
     let shutdown_message_sent = Arc::new(AtomicBool::new(false));
+
+    {
+        let dotenv_path = app_dir.join(".env");
+        let process_manager = Arc::clone(&process_manager);
+        let is_stopping = Arc::clone(&is_stopping);
+        tokio::spawn(async move {
+            let mut last_vars: HashMap<String, String> = HashMap::new();
+            let mut has_loaded = false;
+            loop {
+                if is_stopping.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let current_vars = match DotenvFile::read(&dotenv_path) {
+                    Ok(dotenv) => dotenv.get_vars(),
+                    Err(err) => {
+                        warn!("Failed to read .env: {err}");
+                        continue;
+                    }
+                };
+                if has_loaded && current_vars != last_vars {
+                    info!(".env changed, restarting uvicorn");
+                    if let Err(err) = process_manager
+                        .restart_uvicorn_with_env(current_vars.clone())
+                        .await
+                    {
+                        warn!("Failed to restart uvicorn: {err}");
+                    }
+                }
+                last_vars = current_vars;
+                has_loaded = true;
+            }
+        });
+    }
     if let Err(err) = start_openapi_watcher(app_dir.clone(), Arc::clone(&is_stopping)) {
         warn!("Failed to start OpenAPI watcher: {err}");
     }
