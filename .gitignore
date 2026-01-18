@@ -43,3 +43,4 @@ target/
 *.so
 
 .bins/
+.uv-cache/
