@@ -54,7 +54,7 @@ enum DevCommands {
     /// Stop development servers
     Stop(cli::dev::stop::StopArgs),
     /// Restart development servers
-    Restart,
+    Restart(cli::dev::restart::RestartArgs),
     /// Display logs from development servers
     Logs(cli::dev::logs::LogsArgs),
     /// Check the project code for errors
@@ -83,10 +83,7 @@ fn run_cli(args: Vec<String>) -> i32 {
                     0
                 }
                 DevCommands::Stop(args) => cli::dev::stop::run(args),
-                DevCommands::Restart => {
-                    println!("Restarting development servers...");
-                    0
-                }
+                DevCommands::Restart(args) => cli::dev::restart::run(args),
                 DevCommands::Logs(args) => cli::dev::logs::run(args),
                 DevCommands::Check => {
                     println!("Checking project code...");

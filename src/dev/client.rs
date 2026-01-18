@@ -3,7 +3,7 @@ use reqwest::StatusCode;
 use std::time::Duration;
 use tracing::{debug, warn};
 
-use crate::dev::common::DEFAULT_HOST;
+use crate::dev::common::CLIENT_HOST;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 2;
 const STOP_TIMEOUT_SECS: u64 = 10;
@@ -55,7 +55,7 @@ fn build_url(host: &str, port: u16, path: &str) -> String {
 
 pub fn health(port: u16) -> Result<bool, String> {
     let client = build_client()?;
-    let url = build_url(DEFAULT_HOST, port, "/_apx/health");
+    let url = build_url(CLIENT_HOST, port, "/_apx/health");
     debug!(%url, "Sending dev server health request.");
     let response = client
         .get(url)
@@ -73,7 +73,7 @@ pub fn health(port: u16) -> Result<bool, String> {
 /// Returns Ok(()) if the server acknowledged the stop request, Err otherwise.
 pub fn stop(port: u16) -> Result<(), String> {
     let client = build_client_with_timeout(STOP_TIMEOUT_SECS)?;
-    let url = build_url(DEFAULT_HOST, port, "/_apx/stop");
+    let url = build_url(CLIENT_HOST, port, "/_apx/stop");
     debug!(%url, "Sending dev server stop request.");
     let response = client.get(url).send().map_err(|err| {
         warn!(error = %err, "Stop request failed.");
@@ -111,7 +111,7 @@ pub async fn logs_async(
 }
 
 fn build_logs_url(port: u16, since: Option<i64>, follow: bool) -> String {
-    let mut url = build_url(DEFAULT_HOST, port, "/_apx/logs");
+    let mut url = build_url(CLIENT_HOST, port, "/_apx/logs");
     let mut params: Vec<String> = Vec::new();
     if let Some(since) = since {
         params.push(format!("since={since}"));

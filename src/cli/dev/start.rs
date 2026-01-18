@@ -1,4 +1,5 @@
 use clap::Args;
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread::sleep;
@@ -10,7 +11,7 @@ use crate::cli::run_cli;
 use crate::common::{ensure_dir, sync_apx_plugin_from_package};
 use crate::dev::client::{health, logs_async};
 use crate::dev::common::{
-    BIND_HOST, DEFAULT_HOST, DevLock, find_available_port, lock_path, read_lock, write_lock,
+    BIND_HOST, CLIENT_HOST, DevLock, find_available_port, lock_path, read_lock, write_lock,
 };
 
 const HEALTH_RETRY_COUNT: u32 = 20;
@@ -47,13 +48,13 @@ fn run_inner(args: StartArgs) -> Result<(), String> {
     let app_dir = resolve_app_dir(&args);
     if let Some(port) = resolve_existing_server(&app_dir)? {
         println!(
-            "Dev server already at http://{DEFAULT_HOST}:{port}, status: healthy",
+            "Dev server already at http://{CLIENT_HOST}:{port}, status: healthy",
             port = port
         );
         return Ok(());
     }
 
-    let _ = start_server(&app_dir)?;
+    let _ = start_server(&app_dir, None)?;
     Ok(())
 }
 
@@ -61,12 +62,12 @@ async fn run_attached(args: StartArgs) -> Result<(), String> {
     let app_dir = resolve_app_dir(&args);
     let port = if let Some(port) = resolve_existing_server(&app_dir)? {
         println!(
-            "Dev server already at http://{DEFAULT_HOST}:{port}, attaching logs",
+            "Dev server already at http://{CLIENT_HOST}:{port}, attaching logs",
             port = port
         );
         port
     } else {
-        start_server(&app_dir)?
+        start_server(&app_dir, None)?
     };
 
     let response = logs_async(port, None, true).await?;
@@ -93,20 +94,20 @@ fn resolve_existing_server(app_dir: &PathBuf) -> Result<Option<u16>, String> {
         Ok(Some(lock.port))
     } else {
         println!(
-            "Dev server already at http://{DEFAULT_HOST}:{port}, status: unreachable",
+            "Dev server already at http://{CLIENT_HOST}:{port}, status: unreachable",
             port = lock.port
         );
         Ok(None)
     }
 }
 
-fn start_server(app_dir: &PathBuf) -> Result<u16, String> {
+pub(crate) fn start_server(app_dir: &PathBuf, preferred_port: Option<u16>) -> Result<u16, String> {
     sync_apx_plugin_from_package(app_dir)?;
     ensure_dir(&app_dir.join(".apx"))?;
 
     let lock_path = lock_path(app_dir);
     println!("No lock file found, starting dev server");
-    let port = find_available_port(BIND_HOST)?;
+    let port = resolve_port(preferred_port)?;
     let command = format!(
         "uv run apx dev __internal__run_server --app-dir {} --host {} --port {}",
         app_dir.display(),
@@ -158,6 +159,29 @@ fn start_server(app_dir: &PathBuf) -> Result<u16, String> {
     let lock = DevLock::new(child.id(), port, command, app_dir);
     write_lock(&lock_path, &lock)?;
 
-    println!("Dev server started at http://{DEFAULT_HOST}:{port}");
+    println!("Dev server started at http://{CLIENT_HOST}:{port}");
     Ok(port)
+}
+
+/// Maximum time to wait for a preferred port to become available (in ms).
+const PORT_WAIT_TIMEOUT_MS: u64 = 2000;
+/// Interval between port availability checks (in ms).
+const PORT_WAIT_INTERVAL_MS: u64 = 100;
+
+fn resolve_port(preferred_port: Option<u16>) -> Result<u16, String> {
+    if let Some(port) = preferred_port {
+        // Try the preferred port with retries (in case it's still being released)
+        let max_attempts = PORT_WAIT_TIMEOUT_MS / PORT_WAIT_INTERVAL_MS;
+        for attempt in 0..max_attempts {
+            if TcpListener::bind((BIND_HOST, port)).is_ok() {
+                return Ok(port);
+            }
+            if attempt == 0 {
+                println!("Waiting for port {port} to become available...");
+            }
+            sleep(Duration::from_millis(PORT_WAIT_INTERVAL_MS));
+        }
+        println!("Port {port} still in use, finding alternative...");
+    }
+    find_available_port(BIND_HOST)
 }

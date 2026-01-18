@@ -5,10 +5,9 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::process::Command as TokioCommand;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Sleep};
 use tracing::{debug, info, warn};
@@ -16,6 +15,7 @@ use walkdir::WalkDir;
 
 use crate::bun_binary_path;
 use crate::common::read_project_metadata;
+use crate::dev::common::Shutdown;
 
 const APX_DIR_NAME: &str = ".apx";
 const SCHEMA_FILENAME: &str = "openapi.json";
@@ -172,7 +172,7 @@ const OPENAPI_WATCH_DEBOUNCE_MS: u64 = 100;
 
 pub fn start_openapi_watcher(
     app_dir: PathBuf,
-    is_stopping: Arc<AtomicBool>,
+    mut shutdown_rx: broadcast::Receiver<Shutdown>,
 ) -> Result<(), String> {
     debug!(
         app_dir = %app_dir.display(),
@@ -197,13 +197,18 @@ pub fn start_openapi_watcher(
         let mut poll_interval = tokio::time::interval(Duration::from_millis(200));
 
         loop {
-            if is_stopping.load(Ordering::SeqCst) {
-                debug!("OpenAPI watcher stopping.");
-                break;
-            }
-
             tokio::select! {
                 biased;
+
+                // React to shutdown signal
+                result = shutdown_rx.recv() => {
+                    match result {
+                        Ok(Shutdown::Stop) | Err(_) => {
+                            debug!("OpenAPI watcher stopping.");
+                            break;
+                        }
+                    }
+                }
 
                 _ = poll_interval.tick() => {
                     let latest = latest_python_mtime(&app_dir);

@@ -5,37 +5,35 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
-use std::convert::Infallible;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 use tokio::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 
-use crate::dev::common::{lock_path, remove_lock};
+use crate::api_generator::start_openapi_watcher;
+use crate::dev::common::{lock_path, remove_lock, Shutdown};
 use crate::dev::logging::{
     apx_log_queue, apx_log_queue_since, apx_log_queue_since_timestamp, clear_apx_log_queue,
     encode_log_payload, BrowserLogPayload, LogPayload, LogPipe, LogStreamName, SyncLogQueue,
     APX_SHUTDOWN_MESSAGE,
 };
-use crate::dev::proxy;
 use crate::dev::process::ProcessManager;
-use crate::api_generator::start_openapi_watcher;
+use crate::dev::proxy;
 use crate::dotenv::DotenvFile;
 
+/// Shared application state for the dev server.
 #[derive(Clone)]
 struct AppState {
-    shutdown_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<()>>>>,
-    app_dir: PathBuf,
+    /// Broadcast sender for shutdown signals - the single authority for shutdown coordination.
+    shutdown_tx: broadcast::Sender<Shutdown>,
     process_manager: Arc<ProcessManager>,
     apx_log_queue: SyncLogQueue,
-    is_stopping: Arc<AtomicBool>,
-    shutdown_message_sent: Arc<AtomicBool>,
 }
 
 #[derive(serde::Serialize)]
@@ -69,56 +67,30 @@ pub async fn run_server(
         frontend_port,
         "Starting dev server."
     );
+
+    // Create the single shutdown broadcast channel
+    let (shutdown_tx, _) = broadcast::channel::<Shutdown>(16);
+
     let process_manager = Arc::new(
         ProcessManager::start(&app_dir, &host, port, backend_port, frontend_port).await?,
     );
-    let is_stopping = Arc::new(AtomicBool::new(false));
-    let shutdown_message_sent = Arc::new(AtomicBool::new(false));
 
-    {
-        let dotenv_path = app_dir.join(".env");
-        let process_manager = Arc::clone(&process_manager);
-        let is_stopping = Arc::clone(&is_stopping);
-        tokio::spawn(async move {
-            let mut last_vars: HashMap<String, String> = HashMap::new();
-            let mut has_loaded = false;
-            loop {
-                if is_stopping.load(Ordering::SeqCst) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                let current_vars = match DotenvFile::read(&dotenv_path) {
-                    Ok(dotenv) => dotenv.get_vars(),
-                    Err(err) => {
-                        warn!("Failed to read .env: {err}");
-                        continue;
-                    }
-                };
-                if has_loaded && current_vars != last_vars {
-                    info!(".env changed, restarting uvicorn");
-                    if let Err(err) = process_manager
-                        .restart_uvicorn_with_env(current_vars.clone())
-                        .await
-                    {
-                        warn!("Failed to restart uvicorn: {err}");
-                    }
-                }
-                last_vars = current_vars;
-                has_loaded = true;
-            }
-        });
-    }
-    if let Err(err) = start_openapi_watcher(app_dir.clone(), Arc::clone(&is_stopping)) {
+    // Start .env watcher with shutdown receiver
+    start_env_watcher(
+        shutdown_tx.subscribe(),
+        Arc::clone(&process_manager),
+        app_dir.join(".env"),
+    );
+
+    // Start OpenAPI watcher with shutdown receiver
+    if let Err(err) = start_openapi_watcher(app_dir.clone(), shutdown_tx.subscribe()) {
         warn!("Failed to start OpenAPI watcher: {err}");
     }
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
     let state = AppState {
-        shutdown_tx: Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx))),
-        app_dir,
+        shutdown_tx: shutdown_tx.clone(),
         process_manager: Arc::clone(&process_manager),
         apx_log_queue: Arc::clone(&apx_log_queue),
-        is_stopping: Arc::clone(&is_stopping),
-        shutdown_message_sent: Arc::clone(&shutdown_message_sent),
     };
 
     // API router - proxied to backend
@@ -147,17 +119,77 @@ pub async fn run_server(
         .await
         .map_err(|err| format!("Failed to bind server: {err}"))?;
 
+    // Clone what we need for the shutdown handler
+    let mut shutdown_rx = shutdown_tx.subscribe();
+    let lock = lock_path(&app_dir);
+
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            // Wait for the shutdown signal first - code after await doesn't run until signal received
-            let _ = shutdown_rx.await;
-            debug!("Stopping the server and its subprocesses.");
-            process_manager.stop().await;
-            debug!("Server and subprocesses stopped.");
+            // Wait for Stop signal
+            match shutdown_rx.recv().await {
+                Ok(Shutdown::Stop) => {
+                    debug!("Stop signal received, shutting down server.");
+                    // ProcessManager owns all process termination
+                    process_manager.stop().await;
+                    // Remove lock file after processes are stopped
+                    let _ = remove_lock(&lock);
+                    debug!("Server shutdown complete.");
+                }
+                Err(_) => {
+                    debug!("Shutdown channel closed.");
+                }
+            }
         })
         .await
         .map_err(|err| format!("Server error: {err}"))?;
+
     Ok(())
+}
+
+/// Start the .env file watcher that restarts uvicorn when environment changes.
+fn start_env_watcher(
+    mut shutdown_rx: broadcast::Receiver<Shutdown>,
+    process_manager: Arc<ProcessManager>,
+    dotenv_path: PathBuf,
+) {
+    tokio::spawn(async move {
+        let mut last_vars: HashMap<String, String> = HashMap::new();
+        let mut has_loaded = false;
+
+        loop {
+            tokio::select! {
+                biased;
+                result = shutdown_rx.recv() => {
+                    match result {
+                        Ok(Shutdown::Stop) | Err(_) => {
+                            debug!(".env watcher stopping.");
+                            break;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(300)) => {
+                    let current_vars = match DotenvFile::read(&dotenv_path) {
+                        Ok(dotenv) => dotenv.get_vars(),
+                        Err(err) => {
+                            warn!("Failed to read .env: {err}");
+                            continue;
+                        }
+                    };
+                    if has_loaded && current_vars != last_vars {
+                        info!(".env changed, restarting uvicorn");
+                        if let Err(err) = process_manager
+                            .restart_uvicorn_with_env(current_vars.clone())
+                            .await
+                        {
+                            warn!("Failed to restart uvicorn: {err}");
+                        }
+                    }
+                    last_vars = current_vars;
+                    has_loaded = true;
+                }
+            }
+        }
+    });
 }
 
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
@@ -179,11 +211,14 @@ async fn logs(
     let since = query.since.unwrap_or(0);
     let follow = query.follow.unwrap_or(false);
     let (tx, rx) = mpsc::channel(200);
-    let state = state.clone();
+    let mut shutdown_rx = state.shutdown_tx.subscribe();
+
     tokio::spawn(async move {
+        // Send initial logs
         let (mut app_len, initial_logs) = state.process_manager.logs_since_timestamp(since).await;
         let (mut apx_len, initial_apx_logs) =
             apx_log_queue_since_timestamp(&state.apx_log_queue, since);
+
         for entry in initial_logs {
             if send_log_payload(&tx, entry).await.is_err() {
                 return;
@@ -194,72 +229,69 @@ async fn logs(
                 return;
             }
         }
+
         if !follow {
             return;
         }
-        let mut shutdown_initiated = false;
+
+        // Follow mode: poll logs until shutdown signal
+        let poll_interval = Duration::from_millis(100);
+
         loop {
-            // Poll more frequently when stopping to catch shutdown quickly
-            let poll_interval = if state.is_stopping.load(Ordering::SeqCst) {
-                Duration::from_millis(10)
-            } else {
-                Duration::from_millis(100)
-            };
-            tokio::time::sleep(poll_interval).await;
+            tokio::select! {
+                biased;
+                // React to shutdown signal
+                result = shutdown_rx.recv() => {
+                    match result {
+                        Ok(Shutdown::Stop) => {
+                            // Flush any remaining logs before sending shutdown message
+                            let (_, final_logs) = state.process_manager.logs_since_index(app_len).await;
+                            let (_, final_apx_logs) = apx_log_queue_since(&state.apx_log_queue, apx_len);
 
-            // Check if stopping was initiated
-            if state.is_stopping.load(Ordering::SeqCst) && !shutdown_initiated {
-                shutdown_initiated = true;
-                // Wait briefly for any final logs to be generated
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+                            for entry in final_logs {
+                                let _ = send_log_payload(&tx, entry).await;
+                            }
+                            for message in final_apx_logs {
+                                let _ = send_log_payload(&tx, message).await;
+                            }
 
-            let (next_app_len, logs) = state.process_manager.logs_since_index(app_len).await;
-            let (next_apx_len, apx_logs) = apx_log_queue_since(&state.apx_log_queue, apx_len);
-            for entry in logs {
-                if send_log_payload(&tx, entry).await.is_err() {
-                    return;
+                            // Send final shutdown message and close
+                            let _ = send_log_payload(
+                                &tx,
+                                LogPayload::new(
+                                    LogStreamName::Apx,
+                                    None,
+                                    APX_SHUTDOWN_MESSAGE.to_string(),
+                                ),
+                            )
+                            .await;
+                            return;
+                        }
+                        Err(_) => {
+                            // Channel closed
+                            return;
+                        }
+                    }
                 }
-            }
-            for message in apx_logs {
-                if send_log_payload(&tx, message).await.is_err() {
-                    return;
-                }
-            }
-            app_len = next_app_len;
-            apx_len = next_apx_len;
+                // Poll for new logs
+                _ = tokio::time::sleep(poll_interval) => {
+                    let (next_app_len, logs) = state.process_manager.logs_since_index(app_len).await;
+                    let (next_apx_len, apx_logs) = apx_log_queue_since(&state.apx_log_queue, apx_len);
 
-            // Once stopping and processes complete, send final message and exit
-            if shutdown_initiated && state.process_manager.is_shutdown_complete().await {
-                if state.shutdown_message_sent.load(Ordering::SeqCst) {
-                    return;
+                    for entry in logs {
+                        if send_log_payload(&tx, entry).await.is_err() {
+                            return;
+                        }
+                    }
+                    for message in apx_logs {
+                        if send_log_payload(&tx, message).await.is_err() {
+                            return;
+                        }
+                    }
+
+                    app_len = next_app_len;
+                    apx_len = next_apx_len;
                 }
-                // Flush any remaining logs
-                let (_, final_logs) = state.process_manager.logs_since_index(app_len).await;
-                let (_, final_apx_logs) = apx_log_queue_since(&state.apx_log_queue, apx_len);
-                for entry in final_logs {
-                    let _ = send_log_payload(&tx, entry).await;
-                }
-                for message in final_apx_logs {
-                    let _ = send_log_payload(&tx, message).await;
-                }
-                // Send shutdown message
-                if send_log_payload(
-                    &tx,
-                    LogPayload::new(
-                        LogStreamName::Apx,
-                        None,
-                        APX_SHUTDOWN_MESSAGE.to_string(),
-                    ),
-                )
-                .await
-                .is_ok()
-                {
-                    state.shutdown_message_sent.store(true, Ordering::SeqCst);
-                    // Give time for the message to be transmitted before closing
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-                return;
             }
         }
     });
@@ -309,35 +341,8 @@ async fn browser_logs(
 
 async fn stop(State(state): State<AppState>) -> StatusCode {
     debug!("Received dev server stop request.");
-    state.is_stopping.store(true, Ordering::SeqCst);
-    let lock = lock_path(&state.app_dir);
-    let _ = remove_lock(&lock);
-
-    // Stop the processes
-    state.process_manager.stop().await;
-    debug!("Processes stopped, waiting for shutdown message to be sent.");
-
-    // Wait for the logs stream to send the shutdown message (up to 3 seconds)
-    let mut wait_attempts = 0;
-    while !state.shutdown_message_sent.load(Ordering::SeqCst) && wait_attempts < 60 {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        wait_attempts += 1;
-    }
-
-    if state.shutdown_message_sent.load(Ordering::SeqCst) {
-        debug!("Shutdown message sent, giving time for transmission.");
-        // Give extra time for the message to be transmitted to clients
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    } else {
-        debug!("Shutdown message was not sent within timeout.");
-    }
-
-    let mut guard = state.shutdown_tx.lock().await;
-    if let Some(tx) = guard.take() {
-        debug!("Dispatching dev server shutdown signal.");
-        let _ = tx.send(());
-    }
-
+    // Send the shutdown signal - all subscribers will react appropriately
+    let _ = state.shutdown_tx.send(Shutdown::Stop);
     StatusCode::OK
 }
 

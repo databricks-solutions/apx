@@ -68,10 +68,7 @@ impl ProcessManager {
         frontend_port: u16,
     ) -> Result<Self, String> {
         let metadata = read_project_metadata(app_dir)?;
-        let bun_path = bun_binary_path()?;
-        if !bun_path.exists() {
-            return Err("bun is not installed. Please install bun to continue.".to_string());
-        }
+        let bun_path = Self::ensure_bun_path()?;
 
         let dotenv = DotenvFile::read(&app_dir.join(".env"))?;
         let dotenv_vars = Arc::new(Mutex::new(dotenv.get_vars()));
@@ -113,18 +110,39 @@ impl ProcessManager {
         &self.dev_token
     }
 
+    /// Stop all managed processes using a phased shutdown approach:
+    /// 1. Send SIGTERM to allow graceful shutdown
+    /// 2. Wait briefly for processes to exit
+    /// 3. Force kill any remaining processes
     pub async fn stop(&self) {
         debug!(
             host = %self.host,
             frontend_port = self.frontend_port,
             backend_port = self.backend_port,
             dev_server_port = self.dev_server_port,
-            "Stopping dev processes."
+            "Stopping dev processes with phased shutdown."
         );
-        Self::stop_child_tree("backend", &self.backend_child).await;
-        debug!("Backend child stop attempted.");
-        Self::stop_child_tree("frontend", &self.frontend_child).await;
-        debug!("Frontend child stop attempted.");
+
+        // Phase 1: Send SIGTERM to all processes (polite request to stop)
+        debug!("Phase 1: Sending SIGTERM to all processes.");
+        Self::send_sigterm("backend", &self.backend_child).await;
+        Self::send_sigterm("frontend", &self.frontend_child).await;
+
+        // Phase 2: Wait briefly for graceful exit (500ms)
+        debug!("Phase 2: Waiting for graceful exit.");
+        let wait_backend = Self::wait_for_child("backend", &self.backend_child);
+        let wait_frontend = Self::wait_for_child("frontend", &self.frontend_child);
+        let _ = timeout(Duration::from_millis(500), async {
+            tokio::join!(wait_backend, wait_frontend)
+        })
+        .await;
+
+        // Phase 3: Force kill any remaining processes
+        debug!("Phase 3: Force killing remaining processes.");
+        Self::force_kill("backend", &self.backend_child).await;
+        Self::force_kill("frontend", &self.frontend_child).await;
+
+        debug!("All processes stopped.");
     }
 
     pub async fn status(&self) -> (String, String) {
@@ -250,12 +268,6 @@ impl ProcessManager {
         push_log(&self.log_queue, payload).await;
     }
 
-    pub async fn is_shutdown_complete(&self) -> bool {
-        let frontend_status = Self::status_for_child(&self.frontend_child).await;
-        let backend_status = Self::status_for_child(&self.backend_child).await;
-        frontend_status == "stopped" && backend_status == "stopped"
-    }
-
     async fn apply_env(&self, cmd: &mut Command, include_dotenv: bool) {
         cmd.env("APX_FRONTEND_PORT", self.frontend_port.to_string());
         cmd.env("APX_BACKEND_PORT", self.backend_port.to_string());
@@ -270,12 +282,138 @@ impl ProcessManager {
         }
     }
 
+    fn ensure_bun_path() -> Result<PathBuf, String> {
+        let bun_path = bun_binary_path()?;
+        if !bun_path.exists() {
+            return Err("bun is not installed. Please install bun to continue.".to_string());
+        }
+        Ok(bun_path)
+    }
+
+    /// Send SIGTERM to a child process tree (polite shutdown request).
+    async fn send_sigterm(name: &str, child: &Arc<Mutex<Option<Child>>>) {
+        let guard = child.lock().await;
+        if let Some(child) = guard.as_ref() {
+            if let Some(pid) = child.id() {
+                debug!(process = name, pid, "Sending SIGTERM to process tree.");
+                Self::send_signal_to_tree(pid, Signal::Term, name.to_string()).await;
+            }
+        }
+    }
+
+    /// Wait for a child process to exit.
+    async fn wait_for_child(name: &str, child: &Arc<Mutex<Option<Child>>>) {
+        let mut guard = child.lock().await;
+        if let Some(child) = guard.as_mut() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    debug!(process = name, ?status, "Child process already exited.");
+                }
+                Ok(None) => {
+                    // Process still running, wait for it
+                    match child.wait().await {
+                        Ok(status) => debug!(process = name, ?status, "Child process exited."),
+                        Err(err) => warn!(error = %err, process = name, "Failed to wait for child."),
+                    }
+                }
+                Err(err) => warn!(error = %err, process = name, "Failed to check child status."),
+            }
+        }
+    }
+
+    /// Force kill a child process tree (SIGKILL).
+    async fn force_kill(name: &str, child: &Arc<Mutex<Option<Child>>>) {
+        let mut guard = child.lock().await;
+        if let Some(mut child) = guard.take() {
+            // Check if process is still running
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    // Already exited, nothing to do
+                    debug!(process = name, "Process already exited, skipping force kill.");
+                }
+                Ok(None) => {
+                    // Still running, force kill
+                    if let Some(pid) = child.id() {
+                        debug!(process = name, pid, "Force killing process tree.");
+                        Self::send_signal_to_tree(pid, Signal::Kill, name.to_string()).await;
+                        // Brief wait to allow kill to take effect
+                        let _ = timeout(Duration::from_millis(100), child.wait()).await;
+                    }
+                }
+                Err(err) => {
+                    warn!(error = %err, process = name, "Failed to check process status.");
+                }
+            }
+        }
+    }
+
+    /// Send a signal to an entire process tree. This is a blocking operation.
+    fn send_signal_to_tree_blocking(pid: u32, signal: Signal, label: &str) {
+        let root_pid = Pid::from_u32(pid);
+        let mut sys = System::new_all();
+        sys.refresh_all();
+
+        let Some(root_process) = sys.process(root_pid) else {
+            debug!(process = label, pid, "Process not found, may have already exited.");
+            return;
+        };
+
+        let root_start_time = root_process.start_time();
+        let parents = Self::build_parent_map(&sys);
+        Self::send_signal_tree_recursive(&sys, &parents, root_pid, root_start_time, signal, label);
+    }
+
+    /// Async wrapper for send_signal_to_tree that runs on a blocking thread.
+    async fn send_signal_to_tree(pid: u32, signal: Signal, label: String) {
+        let _ = tokio::task::spawn_blocking(move || {
+            Self::send_signal_to_tree_blocking(pid, signal, &label)
+        })
+        .await;
+    }
+
+    /// Recursively send signal to process tree.
+    fn send_signal_tree_recursive(
+        sys: &System,
+        parents: &HashMap<Pid, Vec<Pid>>,
+        pid: Pid,
+        root_start_time: u64,
+        signal: Signal,
+        label: &str,
+    ) {
+        // First, signal all children
+        if let Some(children) = parents.get(&pid) {
+            for child_pid in children {
+                Self::send_signal_tree_recursive(
+                    sys,
+                    parents,
+                    *child_pid,
+                    root_start_time,
+                    signal,
+                    label,
+                );
+            }
+        }
+
+        // Then signal this process
+        if let Some(process) = sys.process(pid) {
+            let process_start_time = process.start_time();
+            if process_start_time < root_start_time {
+                return;
+            }
+            let name = process.name();
+            if process.kill_with(signal).unwrap_or(false) {
+                debug!(pid = ?pid, process_name = ?name, ?signal, process = label, "Sent signal to process.");
+            }
+        }
+    }
+
+    /// Stop a child process tree immediately (used for restart operations).
     async fn stop_child_tree(name: &str, child: &Arc<Mutex<Option<Child>>>) {
         let mut guard = child.lock().await;
         if let Some(mut child) = guard.take() {
             let pid = child.id();
             if let Some(pid) = pid {
-                if let Err(err) = Self::kill_process_tree(pid, name) {
+                if let Err(err) = Self::kill_process_tree_async(pid, name.to_string()).await {
                     warn!(error = %err, process = name, pid, "Failed to kill process tree.");
                 }
             } else {
@@ -311,6 +449,8 @@ impl ProcessManager {
             .collect()
     }
 
+    /// Kill a process tree. This is a blocking operation that should be called
+    /// from a blocking context or wrapped in spawn_blocking.
     pub fn kill_process_tree(pid: u32, label: &str) -> Result<(), String> {
         let root_pid = Pid::from_u32(pid);
         let mut sys = System::new_all();
@@ -328,6 +468,13 @@ impl ProcessManager {
         );
         Self::kill_tree_with_guard(&sys, &parents, root_pid, root_start_time, label);
         Ok(())
+    }
+
+    /// Async wrapper for kill_process_tree that runs on a blocking thread.
+    pub async fn kill_process_tree_async(pid: u32, label: String) -> Result<(), String> {
+        tokio::task::spawn_blocking(move || Self::kill_process_tree(pid, &label))
+            .await
+            .map_err(|err| format!("Failed to spawn blocking task: {err}"))?
     }
 
     fn build_parent_map(sys: &System) -> HashMap<Pid, Vec<Pid>> {

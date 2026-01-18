@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 
 use crate::common::ensure_dir;
 
+/// Shutdown signal type for the dev server.
+/// Used as a single authority for coordinating shutdown across all components.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shutdown {
+    /// Stop the entire dev server
+    Stop,
+}
+
 pub const DEV_LOCK_DIR: &str = ".apx";
 pub const DEV_LOCK_FILE: &str = "dev.lock";
 pub const FRONTEND_PORT_START: u16 = 5000;
@@ -14,8 +22,10 @@ pub const BACKEND_PORT_START: u16 = 8000;
 pub const BACKEND_PORT_END: u16 = 8999;
 pub const DEV_PORT_START: u16 = 9000;
 pub const DEV_PORT_END: u16 = 9999;
+/// Host used for binding the server (all interfaces)
 pub const BIND_HOST: &str = "0.0.0.0";
-pub const DEFAULT_HOST: &str = "0.0.0.0";
+/// Host used for client connections (localhost)
+pub const CLIENT_HOST: &str = "127.0.0.1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevLock {
