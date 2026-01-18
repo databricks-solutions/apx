@@ -219,6 +219,10 @@ impl ProcessManager {
         log_queue_since_timestamp(&self.log_queue, since).await
     }
 
+    pub async fn push_browser_log(&self, payload: LogPayload) {
+        push_log(&self.log_queue, payload).await;
+    }
+
     pub async fn is_shutdown_complete(&self) -> bool {
         let frontend_status = Self::status_for_child(&self.frontend_child).await;
         let backend_status = Self::status_for_child(&self.backend_child).await;

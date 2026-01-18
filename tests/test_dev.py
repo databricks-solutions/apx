@@ -143,9 +143,9 @@ async def version():
         deadline = time.time() + 5
         while time.time() < deadline and not api_ts_path.exists():
             time.sleep(0.5)
-        assert (
-            api_ts_path.exists()
-        ), f"api.ts file not found at {api_ts_path} after {time.time() - deadline} seconds"
+        assert api_ts_path.exists(), (
+            f"api.ts file not found at {api_ts_path} after {time.time() - deadline} seconds"
+        )
         api_ts_content = api_ts_path.read_text()
         assert "currentUser" not in api_ts_content
 

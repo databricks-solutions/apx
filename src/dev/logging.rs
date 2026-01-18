@@ -37,6 +37,15 @@ pub struct LogPayload {
     pub timestamp: i64,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct BrowserLogPayload {
+    pub level: String,
+    pub source: String,
+    pub message: String,
+    pub stack: Option<String>,
+    pub timestamp: i64,
+}
+
 impl LogPayload {
     pub fn new(stream: LogStreamName, pipe: Option<LogPipe>, message: String) -> Self {
         Self {

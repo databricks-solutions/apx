@@ -19,7 +19,8 @@ use tracing::{debug, warn};
 use crate::dev::common::{lock_path, remove_lock};
 use crate::dev::logging::{
     apx_log_queue, apx_log_queue_since, apx_log_queue_since_timestamp, clear_apx_log_queue,
-    encode_log_payload, LogPayload, LogStreamName, SyncLogQueue, APX_SHUTDOWN_MESSAGE,
+    encode_log_payload, BrowserLogPayload, LogPayload, LogPipe, LogStreamName, SyncLogQueue,
+    APX_SHUTDOWN_MESSAGE,
 };
 use crate::dev::proxy;
 use crate::dev::process::ProcessManager;
@@ -90,7 +91,7 @@ pub async fn run_server(
     // APX internal router
     let apx_router = Router::new()
         .route("/health", get(health))
-        .route("/logs", get(logs))
+        .route("/logs", get(logs).post(browser_logs))
         .route("/stop", get(stop))
         .with_state(state);
 
@@ -238,6 +239,36 @@ async fn logs(
     } else {
         Sse::new(ReceiverStream::new(rx)).into_response()
     }
+}
+
+async fn browser_logs(
+    State(state): State<AppState>,
+    Json(payload): Json<BrowserLogPayload>,
+) -> StatusCode {
+    let level = payload.level.as_str();
+    let pipe = if level == "error" {
+        LogPipe::Error
+    } else {
+        LogPipe::Out
+    };
+    let mut message = format!(
+        "[browser:{}:{}] {}",
+        level,
+        payload.source,
+        payload.message
+    );
+    if let Some(stack) = payload.stack {
+        message.push('\n');
+        message.push_str(&stack);
+    }
+    let log_payload = LogPayload {
+        stream: LogStreamName::Ui,
+        pipe: Some(pipe),
+        message,
+        timestamp: payload.timestamp,
+    };
+    state.process_manager.push_browser_log(log_payload).await;
+    StatusCode::OK
 }
 
 async fn stop(State(state): State<AppState>) -> StatusCode {

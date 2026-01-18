@@ -13,6 +13,70 @@ type ApxMetadata = {
   appModule: string;
 };
 
+function getBrowserLoggingScript(): string {
+  return `
+(() => {
+  const endpoint = "/_apx/logs";
+
+  function sendLog(payload) {
+    const body = JSON.stringify(payload);
+    if (navigator.sendBeacon) {
+      const blob = new Blob([body], { type: "application/json" });
+      navigator.sendBeacon(endpoint, blob);
+    } else {
+      fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        keepalive: true,
+      }).catch(() => {});
+    }
+  }
+
+  function formatError(error) {
+    if (error instanceof Error) {
+      return { message: error.message, stack: error.stack };
+    }
+    return { message: String(error) };
+  }
+
+  const originalError = console.error;
+  console.error = (...args) => {
+    originalError.apply(console, args);
+    const { message, stack } = formatError(args[0]);
+    sendLog({
+      level: "error",
+      source: "console",
+      message: args.map(String).join(" ") || message,
+      stack,
+      timestamp: Date.now(),
+    });
+  };
+
+  window.addEventListener("error", (event) => {
+    sendLog({
+      level: "error",
+      source: "window",
+      message: event.message,
+      stack: event.error?.stack,
+      timestamp: Date.now(),
+    });
+  });
+
+  window.addEventListener("unhandledrejection", (event) => {
+    const { message, stack } = formatError(event.reason);
+    sendLog({
+      level: "error",
+      source: "promise",
+      message,
+      stack,
+      timestamp: Date.now(),
+    });
+  });
+})();
+`;
+}
+
 // Read metadata from pyproject.toml using toml npm package
 function readMetadata(): ApxMetadata {
   const pyprojectPath = join(process.cwd(), "pyproject.toml");
@@ -125,6 +189,21 @@ export function apxPlugin(): Plugin {
         define: {
           __APP_NAME__: JSON.stringify(APP_NAME),
         },
+      };
+    },
+    transformIndexHtml(html) {
+      if (!isDevServer) return html;
+
+      return {
+        html,
+        tags: [
+          {
+            tag: "script",
+            attrs: { type: "module" },
+            children: getBrowserLoggingScript(),
+            injectTo: "head-prepend",
+          },
+        ],
       };
     },
     configureServer(server) {
