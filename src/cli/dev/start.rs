@@ -17,8 +17,10 @@ use crate::dev::common::{
 use crate::dev::server::run_server;
 use crate::set_app_dir;
 
-const HEALTH_RETRY_COUNT: u32 = 20;
+const HEALTH_RETRY_COUNT: u32 = 30;
 const HEALTH_RETRY_DELAY_MS: u64 = 200;
+/// Initial delay before starting health checks (give server time to start Python/tokio)
+const HEALTH_INITIAL_DELAY_MS: u64 = 1000;
 
 pub async fn start_dev_server(app_dir: &PathBuf) -> Result<u16, String> {
     if let Some(port) = resolve_existing_server(app_dir).await? {
@@ -57,15 +59,21 @@ pub async fn start_dev_server(app_dir: &PathBuf) -> Result<u16, String> {
         }
     });
 
-    println!("Waiting for dev server to become healthy");
+    // Give server time to start Python/tokio before polling
+    tokio::time::sleep(Duration::from_millis(HEALTH_INITIAL_DELAY_MS)).await;
+    
     let mut healthy = false;
-    for _ in 0..HEALTH_RETRY_COUNT {
+    for attempt in 0..HEALTH_RETRY_COUNT {
         match health(port).await {
             Ok(true) => {
                 healthy = true;
                 break;
             }
             Ok(false) | Err(_) => {
+                // Only print status on first attempt
+                if attempt == 0 {
+                    println!("Waiting for dev server to become healthy...");
+                }
                 tokio::time::sleep(Duration::from_millis(HEALTH_RETRY_DELAY_MS)).await;
             }
         }
@@ -73,8 +81,7 @@ pub async fn start_dev_server(app_dir: &PathBuf) -> Result<u16, String> {
 
     if !healthy {
         return Err(format!(
-            "Dev server failed to become healthy after {HEALTH_RETRY_COUNT} retries",
-            HEALTH_RETRY_COUNT = HEALTH_RETRY_COUNT
+            "Dev server failed to become healthy after {HEALTH_RETRY_COUNT} retries"
         ));
     }
 
@@ -209,15 +216,21 @@ pub(crate) async fn start_server(
         .spawn()
         .map_err(|err| format!("Failed to start dev server: {err}"))?;
 
-    println!("Waiting for dev server to become healthy");
+    // Give server time to start Python/tokio before polling
+    tokio::time::sleep(Duration::from_millis(HEALTH_INITIAL_DELAY_MS)).await;
+    
     let mut healthy = false;
-    for _ in 0..HEALTH_RETRY_COUNT {
+    for attempt in 0..HEALTH_RETRY_COUNT {
         match health(port).await {
             Ok(true) => {
                 healthy = true;
                 break;
             }
             Ok(false) | Err(_) => {
+                // Only print status on first attempt
+                if attempt == 0 {
+                    println!("Waiting for dev server to become healthy...");
+                }
                 tokio::time::sleep(Duration::from_millis(HEALTH_RETRY_DELAY_MS)).await;
             }
         }
@@ -226,8 +239,7 @@ pub(crate) async fn start_server(
     if !healthy {
         let _ = child.kill();
         return Err(format!(
-            "Dev server failed to become healthy after {HEALTH_RETRY_COUNT} retries",
-            HEALTH_RETRY_COUNT = HEALTH_RETRY_COUNT
+            "Dev server failed to become healthy after {HEALTH_RETRY_COUNT} retries"
         ));
     }
 

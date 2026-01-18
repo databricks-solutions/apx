@@ -36,12 +36,13 @@ pub async fn health(port: u16) -> Result<bool, String> {
     let url = build_url(CLIENT_HOST, port, "/_apx/health");
     debug!(%url, "Sending dev server health request.");
     let response = client
-        .get(url)
+        .get(&url)
         .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
         .send()
         .await
         .map_err(|err| {
-            warn!(error = %err, "Health request failed.");
+            // Use debug! not warn! since health check failures are expected during startup
+            debug!(error = %err, %url, "Health request failed (server may still be starting).");
             format!("Health request failed: {err}")
         })?;
     let ok = response.status() == StatusCode::OK;

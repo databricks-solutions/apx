@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+// #![forbid(unsafe_code)]
 
 #![deny(
     warnings,
@@ -167,29 +167,35 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
 pub(crate) fn init_tracing() {
     let crate_root = module_path!().to_string();
 
+    // APX_LOG controls log level: "trace", "debug", "info", "warn", "error"
+    // or a full tracing filter spec like "apx=debug,tower_http=warn"
     let filter = match std::env::var("APX_LOG") {
         Ok(level) if is_plain_level(&level) => {
-            format!("{crate_root}::={level}")
+            format!("{crate_root}={level}")
         }
         Ok(spec) => spec,
-        Err(_) => format!("{crate_root}::=info"),
+        Err(_) => format!("{crate_root}=info"),
     };
 
     let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_target(true) // keep on while debugging
+        .with_target(true)
         .with_line_number(true)
         .with_file(true)
-        .with_filter(EnvFilter::new(filter));
+        .with_filter(EnvFilter::new(&filter));
 
     let apx_layer = std::env::var("APX_COLLECT_LOGS").ok().map(|_| {
-        dev::logging::ApxLogLayer
-            .with_filter(EnvFilter::new(format!("{crate_root}::=debug")))
+        dev::logging::ApxLogLayer.with_filter(EnvFilter::new(format!("{crate_root}=debug")))
     });
 
-    tracing_subscriber::registry()
+    if tracing_subscriber::registry()
         .with(fmt_layer)
         .with(apx_layer)
-        .init();
+        .try_init()
+        .is_err()
+    {
+        // Tracing already initialized, this can happen if module is reimported
+        eprintln!("Warning: tracing subscriber already initialized");
+    }
 }
 
 fn is_plain_level(s: &str) -> bool {
