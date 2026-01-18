@@ -68,7 +68,7 @@ async fn run_async(args: LogsArgs) -> Result<(), String> {
     stream_logs(response, args.follow).await
 }
 
-async fn stream_logs(response: reqwest::Response, follow: bool) -> Result<(), String> {
+pub async fn stream_logs(response: reqwest::Response, follow: bool) -> Result<(), String> {
     let stream = response.bytes_stream();
     let reader = BufReader::new(tokio_util::io::StreamReader::new(
         stream.map(|result| result.map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))),
@@ -79,6 +79,7 @@ async fn stream_logs(response: reqwest::Response, follow: bool) -> Result<(), St
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
+                println!("Dev server is stopping...");
                 debug!("Received Ctrl+C, stopping logs stream.");
                 break;
             }
@@ -124,7 +125,7 @@ async fn stream_logs(response: reqwest::Response, follow: bool) -> Result<(), St
 
 /// Process a line from the SSE stream.
 /// Returns Some(true) if we should exit, Some(false) to continue, None if line was just processed.
-fn process_line(line: &str, data_lines: &mut Vec<String>, follow: bool) -> Option<bool> {
+pub fn process_line(line: &str, data_lines: &mut Vec<String>, follow: bool) -> Option<bool> {
     let line = line.trim_end_matches(['\n', '\r']);
 
     if line.is_empty() {
@@ -153,7 +154,7 @@ fn process_line(line: &str, data_lines: &mut Vec<String>, follow: bool) -> Optio
     Some(false)
 }
 
-fn handle_log_payload(data: &str) -> bool {
+pub fn handle_log_payload(data: &str) -> bool {
     match decode_log_payload(data) {
         Ok(payload) => {
             let stream = match payload.stream {

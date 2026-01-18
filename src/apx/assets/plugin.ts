@@ -301,8 +301,6 @@ export function apxPlugin(): Plugin {
             }
             return;
           }
-
-          console.log("[APX] Proxy header present, passing through");
           next();
         },
       );

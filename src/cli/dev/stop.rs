@@ -1,5 +1,5 @@
 use clap::Args;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::cli::run_cli;
 use crate::dev::client::stop as stop_server;
@@ -25,7 +25,11 @@ fn run_inner(args: StopArgs) -> Result<(), String> {
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let lock_path = lock_path(&app_dir);
+    stop_server_inner(&app_dir)
+}
+
+pub fn stop_server_inner(app_dir: &Path) -> Result<(), String> {
+    let lock_path = lock_path(app_dir);
     debug!(path = %lock_path.display(), "Checking for dev server lockfile.");
     if !lock_path.exists() {
         debug!("No dev server lockfile found.");

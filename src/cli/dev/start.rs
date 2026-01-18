@@ -4,9 +4,11 @@ use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
+use crate::cli::dev::logs::stream_logs;
+use crate::cli::dev::stop::stop_server_inner;
 use crate::cli::run_cli;
 use crate::common::{ensure_dir, sync_apx_plugin_from_package};
-use crate::dev::client::health;
+use crate::dev::client::{health, logs_async};
 use crate::dev::common::{
     BIND_HOST, DEFAULT_HOST, DevLock, find_available_port, lock_path, read_lock, write_lock,
 };
@@ -21,32 +23,88 @@ pub struct StartArgs {
         help = "The path to the app. Defaults to current working directory"
     )]
     pub app_path: Option<PathBuf>,
+    #[arg(
+        short = 'a',
+        long = "attached",
+        help = "Follow logs and stop server on Ctrl+C"
+    )]
+    pub attached: bool,
 }
 
 pub fn run(args: StartArgs) -> i32 {
-    run_cli(|| run_inner(args))
+    if args.attached {
+        run_cli(|| {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|err| format!("Failed to create tokio runtime: {err}"))?;
+            runtime.block_on(run_attached(args))
+        })
+    } else {
+        run_cli(|| run_inner(args))
+    }
 }
 
 fn run_inner(args: StartArgs) -> Result<(), String> {
-    let app_dir = args
-        .app_path
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    sync_apx_plugin_from_package(&app_dir)?;
-    ensure_dir(&app_dir.join(".apx"))?;
-
-    let lock_path = lock_path(&app_dir);
-    if lock_path.exists() {
-        let lock = read_lock(&lock_path)?;
-        let is_healthy = health(lock.port)?;
-        let status = if is_healthy { "healthy" } else { "unreachable" };
+    let app_dir = resolve_app_dir(&args);
+    if let Some(port) = resolve_existing_server(&app_dir)? {
         println!(
-            "Dev server already at http://{DEFAULT_HOST}:{port}, status: {status}",
-            port = lock.port
+            "Dev server already at http://{DEFAULT_HOST}:{port}, status: healthy",
+            port = port
         );
         return Ok(());
     }
 
+    let _ = start_server(&app_dir)?;
+    Ok(())
+}
+
+async fn run_attached(args: StartArgs) -> Result<(), String> {
+    let app_dir = resolve_app_dir(&args);
+    let port = if let Some(port) = resolve_existing_server(&app_dir)? {
+        println!(
+            "Dev server already at http://{DEFAULT_HOST}:{port}, attaching logs",
+            port = port
+        );
+        port
+    } else {
+        start_server(&app_dir)?
+    };
+
+    let response = logs_async(port, None, true).await?;
+    let _ = stream_logs(response, true).await;
+
+    stop_server_inner(&app_dir)
+}
+
+fn resolve_app_dir(args: &StartArgs) -> PathBuf {
+    args.app_path
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+fn resolve_existing_server(app_dir: &PathBuf) -> Result<Option<u16>, String> {
+    let lock_path = lock_path(app_dir);
+    if !lock_path.exists() {
+        return Ok(None);
+    }
+
+    let lock = read_lock(&lock_path)?;
+    let is_healthy = health(lock.port)?;
+    if is_healthy {
+        Ok(Some(lock.port))
+    } else {
+        println!(
+            "Dev server already at http://{DEFAULT_HOST}:{port}, status: unreachable",
+            port = lock.port
+        );
+        Ok(None)
+    }
+}
+
+fn start_server(app_dir: &PathBuf) -> Result<u16, String> {
+    sync_apx_plugin_from_package(app_dir)?;
+    ensure_dir(&app_dir.join(".apx"))?;
+
+    let lock_path = lock_path(app_dir);
     println!("No lock file found, starting dev server");
     let port = find_available_port(BIND_HOST)?;
     let command = format!(
@@ -62,12 +120,12 @@ fn run_inner(args: StartArgs) -> Result<(), String> {
         .arg("dev")
         .arg("__internal__run_server")
         .arg("--app-dir")
-        .arg(&app_dir)
+        .arg(app_dir)
         .arg("--host")
         .arg(BIND_HOST)
         .arg("--port")
         .arg(port.to_string())
-        .current_dir(&app_dir)
+        .current_dir(app_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -97,9 +155,9 @@ fn run_inner(args: StartArgs) -> Result<(), String> {
         ));
     }
 
-    let lock = DevLock::new(child.id(), port, command, &app_dir);
+    let lock = DevLock::new(child.id(), port, command, app_dir);
     write_lock(&lock_path, &lock)?;
 
     println!("Dev server started at http://{DEFAULT_HOST}:{port}");
-    Ok(())
+    Ok(port)
 }
