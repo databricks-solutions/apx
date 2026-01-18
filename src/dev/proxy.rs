@@ -34,6 +34,8 @@ const HOP_HEADERS: [&str; 8] = [
 const APX_DEV_TOKEN_HEADER: &str = "x-apx-dev-token";
 // Header used to forward OAuth access token to API
 const ACCESS_TOKEN_HEADER: &str = "X-Forwarded-Access-Token";
+// Header used to forward user identity to API
+const FORWARDED_USER_HEADER: &str = "X-Forwarded-User";
 const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(45 * 60); // 45 minutes
 
 pub struct TokenManager {
@@ -88,12 +90,27 @@ fn fetch_token_from_python() -> Result<String, String> {
     })
 }
 
+fn fetch_forwarded_user_header_from_python() -> Result<String, String> {
+    Python::attach(|py| {
+        let interop = py
+            .import("apx.interop")
+            .map_err(|e| format!("Failed to import apx.interop: {e}"))?;
+        let header_value: String = interop
+            .call_method0("get_forwarded_user_header")
+            .map_err(|e| format!("Failed to call get_forwarded_user_header: {e}"))?
+            .extract()
+            .map_err(|e| format!("Failed to extract forwarded user header: {e}"))?;
+        Ok(header_value)
+    })
+}
+
 #[derive(Clone)]
 pub struct ApiProxyState {
     pub client: reqwest::Client,
     pub host: String,
     pub port: u16,
     pub token_manager: Arc<TokenManager>,
+    pub forwarded_user_header: Option<String>,
 }
 
 #[derive(Clone)]
@@ -115,11 +132,19 @@ fn build_proxy_client() -> Result<reqwest::Client, String> {
 
 /// Creates the API proxy router (nested at /api)
 pub fn api_router(backend_port: u16, token_manager: Arc<TokenManager>) -> Result<Router, String> {
+    let forwarded_user_header = match fetch_forwarded_user_header_from_python() {
+        Ok(value) => Some(value),
+        Err(err) => {
+            warn!(error = %err, "Failed to get forwarded user header for API proxy");
+            None
+        }
+    };
     let state = ApiProxyState {
         client: build_proxy_client()?,
         host: "0.0.0.0".to_string(),
         port: backend_port,
         token_manager,
+        forwarded_user_header,
     };
     Ok(Router::new()
         .route("/", any(api_proxy_handler))
@@ -160,8 +185,17 @@ async fn api_proxy_handler(State(state): State<ApiProxyState>, req: Request<Body
             None
         }
     };
-    
-    proxy_request(req, state.client, state.host, state.port, path_and_query, None, token).await
+    proxy_request(
+        req,
+        state.client,
+        state.host,
+        state.port,
+        path_and_query,
+        None,
+        token,
+        state.forwarded_user_header.clone(),
+    )
+    .await
 }
 
 async fn ui_proxy_handler(State(state): State<UiProxyState>, req: Request<Body>) -> Response {
@@ -179,6 +213,7 @@ async fn ui_proxy_handler(State(state): State<UiProxyState>, req: Request<Body>)
         path_and_query,
         Some(state.dev_token.as_str()),
         None,
+        None,
     )
     .await
 }
@@ -191,6 +226,7 @@ async fn proxy_request(
     path_and_query: String,
     dev_token: Option<&str>,
     access_token: Option<String>,
+    forwarded_user_header: Option<String>,
 ) -> Response {
     if is_websocket_request(req.headers()) {
         let (mut parts, _body) = req.into_parts();
@@ -203,7 +239,17 @@ async fn proxy_request(
             proxy_websocket(socket, host, target_port, path_and_query, headers)
         });
     }
-    proxy_http(req, client, host, target_port, path_and_query, dev_token, access_token).await
+    proxy_http(
+        req,
+        client,
+        host,
+        target_port,
+        path_and_query,
+        dev_token,
+        access_token,
+        forwarded_user_header,
+    )
+    .await
 }
 
 async fn proxy_http(
@@ -214,6 +260,7 @@ async fn proxy_http(
     path_and_query: String,
     dev_token: Option<&str>,
     access_token: Option<String>,
+    forwarded_user_header: Option<String>,
 ) -> Response {
     let (parts, body) = req.into_parts();
     let url = format!("http://{host}:{target_port}{path_and_query}");
@@ -236,6 +283,9 @@ async fn proxy_http(
     }
     if let Some(access_token) = access_token {
         builder = builder.header(ACCESS_TOKEN_HEADER, access_token);
+    }
+    if let Some(forwarded_user_header) = forwarded_user_header {
+        builder = builder.header(FORWARDED_USER_HEADER, forwarded_user_header);
     }
     let response = match builder.body(body_bytes).send().await {
         Ok(response) => response,

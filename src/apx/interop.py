@@ -33,3 +33,18 @@ def credentials_valid() -> tuple[bool, str]:
         return (True, "")
     except Exception as e:
         return (False, str(e))
+
+
+def get_forwarded_user_header() -> str:
+    apply_dotenv_vars()
+
+    from databricks.sdk import WorkspaceClient
+
+    ws = WorkspaceClient(product="apx/dev", product_version=__version__)
+    user_id = ws.current_user.me().id
+    assert user_id is not None, "User ID is not set"
+    try:
+        workspace_id = ws.config.host.split("-")[1].split(".")[0]
+    except Exception:
+        workspace_id = "placeholder"
+    return f"{user_id}@{workspace_id}"
