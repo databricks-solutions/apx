@@ -134,8 +134,12 @@ function apxDevProxyGuard(): Plugin {
             const devServerPort = process.env.APX_DEV_SERVER_PORT;
             const devServerHost =
               process.env.APX_DEV_SERVER_HOST || "localhost";
+            const hostHeader = req.headers.host;
+            const requestHost = hostHeader?.split(":")[0] || "localhost";
+            const redirectHost =
+              devServerHost === "0.0.0.0" ? requestHost : devServerHost;
             if (devServerPort) {
-              const redirectUrl = `http://${devServerHost}:${devServerPort}${url}`;
+              const redirectUrl = `http://${redirectHost}:${devServerPort}${url}`;
               res.statusCode = 302;
               res.setHeader("Location", redirectUrl);
               res.end();
