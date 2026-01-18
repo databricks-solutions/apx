@@ -182,8 +182,8 @@ export function apxPlugin(): Plugin {
               // This avoids WebSocket proxy issues and makes HMR more reliable.
               hmr: {
                 host: devServerHost,
-                port: devServerPort,
-                // clientPort tells the browser to connect directly to the vite dev server
+                port: frontendPort,
+                // clientPort tells the browser to connect directly to Vite's port
                 clientPort: frontendPort,
               },
             };
