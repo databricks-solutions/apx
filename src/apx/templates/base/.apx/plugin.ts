@@ -34,12 +34,25 @@ function readMetadata(): ApxMetadata {
 }
 
 // Get port configuration from environment variables (set by APX dev server)
-function getPortConfig(): { frontendPort: number; host: string } {
+function getPortConfig(): {
+  frontendPort: number;
+  devServerPort: number;
+  devServerHost: string;
+  host: string;
+} {
   const frontendPortEnv = process.env.APX_FRONTEND_PORT;
+  const devServerPortEnv = process.env.APX_DEV_SERVER_PORT;
+  const devServerHostEnv = process.env.APX_DEV_SERVER_HOST;
 
   if (!frontendPortEnv) {
     throw new Error(
       "APX_FRONTEND_PORT environment variable is not set. " +
+        "Please start the development server using 'apx dev' command.",
+    );
+  }
+  if (!devServerPortEnv) {
+    throw new Error(
+      "APX_DEV_SERVER_PORT environment variable is not set. " +
         "Please start the development server using 'apx dev' command.",
     );
   }
@@ -50,9 +63,17 @@ function getPortConfig(): { frontendPort: number; host: string } {
       `Invalid APX_FRONTEND_PORT value: ${frontendPortEnv}. Expected a number.`,
     );
   }
+  const devServerPort = parseInt(devServerPortEnv, 10);
+  if (isNaN(devServerPort)) {
+    throw new Error(
+      `Invalid APX_DEV_SERVER_PORT value: ${devServerPortEnv}. Expected a number.`,
+    );
+  }
 
   return {
     frontendPort,
+    devServerPort,
+    devServerHost: devServerHostEnv || "localhost",
     host: "localhost",
   };
 }
@@ -111,8 +132,10 @@ function apxDevProxyGuard(): Plugin {
           if (!hasProxyHeader) {
             // Redirect to APX dev server instead of returning 403
             const devServerPort = process.env.APX_DEV_SERVER_PORT;
+            const devServerHost =
+              process.env.APX_DEV_SERVER_HOST || "localhost";
             if (devServerPort) {
-              const redirectUrl = `http://localhost:${devServerPort}${url}`;
+              const redirectUrl = `http://${devServerHost}:${devServerPort}${url}`;
               res.statusCode = 302;
               res.setHeader("Location", redirectUrl);
               res.end();
@@ -149,7 +172,8 @@ export function apxPlugin(): Plugin {
       const isDevServer = command === "serve";
       const serverConfig = isDevServer
         ? (() => {
-            const { frontendPort, host } = getPortConfig();
+            const { frontendPort, devServerPort, devServerHost, host } =
+              getPortConfig();
             return {
               host,
               port: frontendPort,
@@ -157,10 +181,10 @@ export function apxPlugin(): Plugin {
               // Configure HMR to connect directly to Vite instead of through the APX proxy.
               // This avoids WebSocket proxy issues and makes HMR more reliable.
               hmr: {
-                host: "localhost",
-                port: frontendPort,
-                // clientPort tells the browser to connect directly to Vite's port
-                clientPort: frontendPort,
+                host: devServerHost,
+                port: devServerPort,
+                // clientPort tells the browser to connect directly to the APX dev server
+                clientPort: devServerPort,
               },
             };
           })()

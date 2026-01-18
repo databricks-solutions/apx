@@ -1,8 +1,13 @@
+import asyncio
+import json
+import pytest
 from dataclasses import dataclass
 import os
 from pathlib import Path
 import subprocess
 import time
+import httpx
+from bs4 import BeautifulSoup
 
 
 @dataclass
@@ -138,11 +143,50 @@ async def version():
         deadline = time.time() + 5
         while time.time() < deadline and not api_ts_path.exists():
             time.sleep(0.5)
-        assert api_ts_path.exists(), (
-            f"api.ts file not found at {api_ts_path} after {time.time() - deadline} seconds"
-        )
+        assert (
+            api_ts_path.exists()
+        ), f"api.ts file not found at {api_ts_path} after {time.time() - deadline} seconds"
         api_ts_content = api_ts_path.read_text()
         assert "currentUser" not in api_ts_content
+
+    finally:
+        print("Stopping dev server as a cleanup step")
+        stop_result = run_apx_subprocess(["dev", "stop"], e2e_init)
+        print(
+            f"cleanup stop result: {stop_result} with error: {stop_result.err} and output: {stop_result.out}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_dev_server_proxies(e2e_init: Path) -> None:
+    try:
+        print(f"Starting dev server in {e2e_init}")
+        start_result = run_apx_subprocess(["dev", "start"], e2e_init)
+        assert start_result.code == 0
+
+        # read .apx/dev.lock to get the backend and frontend ports
+        dev_lock_path = e2e_init / ".apx" / "dev.lock"
+        dev_lock_content = dev_lock_path.read_text()
+        dev_lock_json = json.loads(dev_lock_content)
+        dev_port = dev_lock_json.get("port")
+        assert dev_port is not None
+
+        # let the frontend/backend processes start
+        await asyncio.sleep(1)
+
+        http_client = httpx.AsyncClient()
+        backend_response = await http_client.get(
+            f"http://localhost:{dev_port}/api/version"
+        )
+        assert backend_response.status_code == 200
+        assert backend_response.json().get("version") is not None
+
+        frontend_response = await http_client.get(f"http://localhost:{dev_port}/")
+        assert frontend_response.status_code == 200
+        # verify response is a valid HTML page
+        soup = BeautifulSoup(frontend_response.text, "html.parser")
+        assert soup.find("title") is not None
+        assert soup.find("html") is not None
 
     finally:
         print("Stopping dev server as a cleanup step")

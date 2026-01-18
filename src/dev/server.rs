@@ -21,6 +21,7 @@ use crate::dev::logging::{
     apx_log_queue, apx_log_queue_since, apx_log_queue_since_timestamp, clear_apx_log_queue,
     encode_log_payload, LogPayload, LogStreamName, SyncLogQueue, APX_SHUTDOWN_MESSAGE,
 };
+use crate::dev::proxy;
 use crate::dev::process::ProcessManager;
 use crate::api_generator::start_openapi_watcher;
 
@@ -83,11 +84,23 @@ pub async fn run_server(
         shutdown_message_sent: Arc::clone(&shutdown_message_sent),
     };
 
-    let app = Router::new()
-        .route("/_apx/health", get(health))
-        .route("/_apx/logs", get(logs))
-        .route("/_apx/stop", get(stop))
+    // API router - proxied to backend
+    let api_router = proxy::api_router(backend_port)?;
+
+    // APX internal router
+    let apx_router = Router::new()
+        .route("/health", get(health))
+        .route("/logs", get(logs))
+        .route("/stop", get(stop))
         .with_state(state);
+
+    // UI router - proxied to frontend (handles / and /*path)
+    let ui_router = proxy::ui_router(frontend_port)?;
+
+    let app = Router::new()
+        .nest("/api", api_router)
+        .nest("/_apx", apx_router)
+        .merge(ui_router);
 
     let addr: SocketAddr = format!("{host}:{port}")
         .parse()

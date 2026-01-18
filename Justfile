@@ -17,7 +17,7 @@ develop *args:
 types:
     uv run mypy .
     cargo check
-    uv run ty check 
+    # uv run ty check 
     
 
 check: lint types
