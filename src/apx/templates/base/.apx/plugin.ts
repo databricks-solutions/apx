@@ -181,7 +181,7 @@ export function apxPlugin(): Plugin {
               // Configure HMR to connect directly to Vite instead of through the APX proxy.
               // This avoids WebSocket proxy issues and makes HMR more reliable.
               hmr: {
-                host: devServerHost,
+                host: "localhost",
                 port: frontendPort,
                 // clientPort tells the browser to connect directly to Vite's port
                 clientPort: frontendPort,
