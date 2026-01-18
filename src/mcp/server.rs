@@ -36,6 +36,11 @@ pub fn build_server(ctx: AppContext) -> McpServer<AppContext> {
             "Fetch recent dev server logs",
             logs_tool,
         )
+        .tool(
+            "refresh_openapi",
+            "Regenerate OpenAPI schema and API client",
+            refresh_openapi_tool,
+        )
 }
 
 // --- Resources ---
@@ -57,6 +62,12 @@ pub struct LogsArgs {
 
 fn default_logs_duration() -> String {
     crate::cli::dev::logs::DEFAULT_LOG_DURATION.to_string()
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RefreshOpenapiArgs {
+    #[serde(default)]
+    pub force: bool,
 }
 
 async fn start_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
@@ -99,6 +110,16 @@ async fn logs_tool(ctx: Arc<AppContext>, args: LogsArgs) -> ToolResult {
 
     match fetch_logs(&ctx.app_dir, &args.duration).await {
         Ok(logs) => ToolResult::success(logs),
+        Err(e) => ToolResult::error(e),
+    }
+}
+
+async fn refresh_openapi_tool(ctx: Arc<AppContext>, args: RefreshOpenapiArgs) -> ToolResult {
+    use crate::generate_openapi;
+
+    match generate_openapi(&ctx.app_dir, args.force) {
+        Ok(true) => ToolResult::success("OpenAPI regenerated".to_string()),
+        Ok(false) => ToolResult::success("OpenAPI unchanged".to_string()),
         Err(e) => ToolResult::error(e),
     }
 }
