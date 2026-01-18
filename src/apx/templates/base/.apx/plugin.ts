@@ -78,92 +78,10 @@ function getPortConfig(): {
   };
 }
 
-// Vite plugin to verify requests come from the APX dev server proxy
-function apxDevProxyGuard(): Plugin {
-  return {
-    name: "apx-dev-proxy-guard",
-    configureServer(server) {
-      // Add middleware at the start to check for the proxy header
-      server.middlewares.use(
-        (req: IncomingMessage, res: ServerResponse, next) => {
-          const url = req.url || "";
-          if (url.startsWith(APX_SIGNAL_PATH)) {
-            const devToken = process.env.APX_DEV_TOKEN;
-            const requestToken = req.headers[APX_DEV_TOKEN_HEADER] as
-              | string
-              | undefined;
-            if (!devToken || requestToken !== devToken) {
-              res.statusCode = 401;
-              res.setHeader("Content-Type", "text/plain");
-              res.end("Invalid APX dev token.");
-              return;
-            }
-
-            res.statusCode = 200;
-            res.end("ok");
-            setTimeout(() => {
-              process.exit(0);
-            }, 50);
-            return;
-          }
-
-          // Allow internal Vite requests (HMR, etc.)
-          if (
-            url.startsWith("/@") ||
-            url.startsWith("/__vite") ||
-            url.startsWith("/node_modules")
-          ) {
-            next();
-            return;
-          }
-
-          // Allow WebSocket upgrade requests (HMR connections from the proxy)
-          const upgradeHeader = req.headers["upgrade"];
-          if (
-            upgradeHeader &&
-            upgradeHeader.toLowerCase().includes("websocket")
-          ) {
-            next();
-            return;
-          }
-
-          // Check for the APX dev proxy header
-          const hasProxyHeader = req.headers[APX_DEV_PROXY_HEADER] === "true";
-          if (!hasProxyHeader) {
-            // Redirect to APX dev server instead of returning 403
-            const devServerPort = process.env.APX_DEV_SERVER_PORT;
-            const devServerHost =
-              process.env.APX_DEV_SERVER_HOST || "localhost";
-            const hostHeader = req.headers.host;
-            const requestHost = hostHeader?.split(":")[0] || "localhost";
-            const redirectHost =
-              devServerHost === "0.0.0.0" ? requestHost : devServerHost;
-            if (devServerPort) {
-              const redirectUrl = `http://${redirectHost}:${devServerPort}${url}`;
-              res.statusCode = 302;
-              res.setHeader("Location", redirectUrl);
-              res.end();
-            } else {
-              // Fallback to 403 if dev server port is not set
-              res.statusCode = 403;
-              res.setHeader("Content-Type", "text/plain");
-              res.end(
-                "Direct access to Vite dev server is not allowed. " +
-                  "Please access through the APX dev server proxy.",
-              );
-            }
-            return;
-          }
-
-          next();
-        },
-      );
-    },
-  };
-}
-
 // Main APX plugin that configures Vite for APX apps
 export function apxPlugin(): Plugin {
+  let isDevServer = false;
+
   return {
     name: "apx-plugin",
     config(_, { command }) {
@@ -173,13 +91,12 @@ export function apxPlugin(): Plugin {
       const OUT_DIR = `../__dist__`; // relative to APP_UI_PATH!
 
       // Port config is only needed for dev server, not for production build
-      const isDevServer = command === "serve";
+      isDevServer = command === "serve";
       const serverConfig = isDevServer
         ? (() => {
-            const { frontendPort, devServerPort, devServerHost, host } =
-              getPortConfig();
+            const { frontendPort } = getPortConfig();
             return {
-              host,
+              host: "localhost",
               port: frontendPort,
               strictPort: true,
               // Configure HMR to connect directly to Vite instead of through the APX proxy.
@@ -197,7 +114,6 @@ export function apxPlugin(): Plugin {
       return {
         root: APP_UI_PATH,
         publicDir: "./public", // relative to APP_UI_PATH!
-        plugins: isDevServer ? [apxDevProxyGuard()] : [],
         server: serverConfig,
         resolve: {
           alias: {
@@ -212,6 +128,116 @@ export function apxPlugin(): Plugin {
           __APP_NAME__: JSON.stringify(APP_NAME),
         },
       };
+    },
+    configureServer(server) {
+      if (!isDevServer) return;
+
+      console.log("[APX] apxPlugin configureServer called");
+      console.log(
+        "[APX] APX_DEV_SERVER_PORT:",
+        process.env.APX_DEV_SERVER_PORT,
+      );
+      console.log(
+        "[APX] APX_DEV_SERVER_HOST:",
+        process.env.APX_DEV_SERVER_HOST,
+      );
+      console.log("[APX] APX_FRONTEND_PORT:", process.env.APX_FRONTEND_PORT);
+
+      // Add middleware at the start to check for the proxy header
+      server.middlewares.use(
+        (req: IncomingMessage, res: ServerResponse, next) => {
+          const url = req.url || "";
+          const method = req.method || "UNKNOWN";
+
+          console.log(`[APX] Middleware hit: ${method} ${url}`);
+          console.log(`[APX] Headers:`, JSON.stringify(req.headers, null, 2));
+
+          if (url.startsWith(APX_SIGNAL_PATH)) {
+            console.log("[APX] Signal path detected, checking token");
+            const devToken = process.env.APX_DEV_TOKEN;
+            const requestToken = req.headers[APX_DEV_TOKEN_HEADER] as
+              | string
+              | undefined;
+            if (!devToken || requestToken !== devToken) {
+              console.log("[APX] Invalid token, returning 401");
+              res.statusCode = 401;
+              res.setHeader("Content-Type", "text/plain");
+              res.end("Invalid APX dev token.");
+              return;
+            }
+
+            console.log("[APX] Valid token, shutting down");
+            res.statusCode = 200;
+            res.end("ok");
+            setTimeout(() => {
+              process.exit(0);
+            }, 50);
+            return;
+          }
+
+          // Allow internal Vite requests (HMR, etc.)
+          if (
+            url.startsWith("/@") ||
+            url.startsWith("/__vite") ||
+            url.startsWith("/node_modules")
+          ) {
+            console.log("[APX] Internal Vite request, passing through");
+            next();
+            return;
+          }
+
+          // Allow WebSocket upgrade requests (HMR connections from the proxy)
+          const upgradeHeader = req.headers["upgrade"];
+          if (
+            upgradeHeader &&
+            upgradeHeader.toLowerCase().includes("websocket")
+          ) {
+            console.log("[APX] WebSocket upgrade request, passing through");
+            next();
+            return;
+          }
+
+          // Check for the APX dev proxy header
+          const hasProxyHeader = req.headers[APX_DEV_PROXY_HEADER] === "true";
+          console.log(`[APX] Has proxy header: ${hasProxyHeader}`);
+
+          if (!hasProxyHeader) {
+            // Redirect to APX dev server instead of returning 403
+            const devServerPort = process.env.APX_DEV_SERVER_PORT;
+            const devServerHost =
+              process.env.APX_DEV_SERVER_HOST || "localhost";
+            const hostHeader = req.headers.host;
+            const requestHost = hostHeader?.split(":")[0] || "localhost";
+            const redirectHost =
+              devServerHost === "0.0.0.0" ? requestHost : devServerHost;
+
+            console.log(
+              `[APX] No proxy header. devServerPort=${devServerPort}, devServerHost=${devServerHost}, requestHost=${requestHost}, redirectHost=${redirectHost}`,
+            );
+
+            if (devServerPort) {
+              const redirectUrl = `http://${redirectHost}:${devServerPort}${url}`;
+              console.log(`[APX] Redirecting to: ${redirectUrl}`);
+              res.statusCode = 302;
+              res.setHeader("Location", redirectUrl);
+              res.end();
+            } else {
+              console.log("[APX] No dev server port, returning 403");
+              // Fallback to 403 if dev server port is not set
+              res.statusCode = 403;
+              res.setHeader("Content-Type", "text/plain");
+              res.end(
+                "Direct access to Vite dev server is not allowed. " +
+                  "Please access through the APX dev server proxy.",
+              );
+            }
+            return;
+          }
+
+          console.log("[APX] Proxy header present, passing through");
+          next();
+        },
+      );
     },
   };
 }
