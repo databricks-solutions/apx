@@ -146,8 +146,11 @@ impl ProcessManager {
     }
 
     pub async fn status(&self) -> (String, String) {
-        let frontend_status = Self::status_for_child(&self.frontend_child).await;
-        let backend_status = Self::status_for_child(&self.backend_child).await;
+        let one_minute_ago = chrono::Utc::now().timestamp_millis() - 60_000;
+        let (_, logs) = self.logs_since_timestamp(one_minute_ago).await;
+        
+        let frontend_status = Self::status_for_child(&self.frontend_child, &logs, LogSource::Ui).await;
+        let backend_status = Self::status_for_child(&self.backend_child, &logs, LogSource::App).await;
         (frontend_status, backend_status)
     }
 
@@ -429,12 +432,27 @@ impl ProcessManager {
         }
     }
 
-    async fn status_for_child(child: &Arc<Mutex<Option<Child>>>) -> String {
+    async fn status_for_child(
+        child: &Arc<Mutex<Option<Child>>>,
+        logs: &[LogPayload],
+        source: LogSource,
+    ) -> String {
         let mut guard = child.lock().await;
         match guard.as_mut() {
             None => "stopped".to_string(),
             Some(process) => match process.try_wait() {
-                Ok(None) => "healthy".to_string(),
+                Ok(None) => {
+                    // Process is running, check for errors in logs
+                    let has_errors = logs.iter().any(|log| {
+                        log.stream == LogStreamName::from(source) && log.pipe == Some(LogPipe::Error)
+                    });
+                    
+                    if has_errors {
+                        "degraded, please check the logs".to_string()
+                    } else {
+                        "healthy".to_string()
+                    }
+                }
                 Ok(Some(_)) => "stopped".to_string(),
                 Err(_) => "error".to_string(),
             },

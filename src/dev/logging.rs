@@ -21,7 +21,7 @@ pub enum LogStreamName {
 
 pub const APX_SHUTDOWN_MESSAGE: &str = "Dev server shutdown complete.";
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LogPipe {
     Out,

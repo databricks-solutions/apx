@@ -1,5 +1,6 @@
 use reqwest::blocking::Client;
 use reqwest::StatusCode;
+use serde::Deserialize;
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -7,6 +8,12 @@ use crate::dev::common::CLIENT_HOST;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 2;
 const STOP_TIMEOUT_SECS: u64 = 10;
+
+#[derive(Debug, Deserialize)]
+pub struct StatusResponse {
+    pub frontend_status: String,
+    pub backend_status: String,
+}
 
 fn build_async_client() -> Result<reqwest::Client, String> {
     debug!("Building async HTTP client.");
@@ -67,6 +74,39 @@ pub fn health(port: u16) -> Result<bool, String> {
     let ok = response.status() == StatusCode::OK;
     debug!(status = %response.status(), ok, "Received dev server health response.");
     Ok(ok)
+}
+
+/// Get the status of the dev server including frontend and backend statuses.
+pub fn status(port: u16) -> Result<StatusResponse, String> {
+    let client = build_client()?;
+    let url = build_url(CLIENT_HOST, port, "/_apx/health");
+    debug!(%url, "Sending dev server status request.");
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|err| {
+            warn!(error = %err, "Status request failed.");
+            format!("Status request failed: {err}")
+        })?;
+    
+    if response.status() != StatusCode::OK {
+        return Err(format!(
+            "Status request failed with status {}",
+            response.status()
+        ));
+    }
+    
+    let status_response: StatusResponse = response.json().map_err(|err| {
+        warn!(error = %err, "Failed to parse status response.");
+        format!("Failed to parse status response: {err}")
+    })?;
+    
+    debug!(
+        frontend_status = %status_response.frontend_status,
+        backend_status = %status_response.backend_status,
+        "Received dev server status response."
+    );
+    Ok(status_response)
 }
 
 /// Request the dev server to stop gracefully.

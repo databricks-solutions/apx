@@ -50,7 +50,7 @@ enum DevCommands {
     /// Start development servers in detached mode
     Start(cli::dev::start::StartArgs),
     /// Check the status of development servers
-    Status,
+    Status(cli::dev::status::StatusArgs),
     /// Stop development servers
     Stop(cli::dev::stop::StopArgs),
     /// Restart development servers
@@ -78,10 +78,7 @@ fn run_cli(args: Vec<String>) -> i32 {
             }
             Some(Commands::Dev(dev_cmd)) => match dev_cmd {
                 DevCommands::Start(args) => cli::dev::start::run(args),
-                DevCommands::Status => {
-                    println!("Checking status...");
-                    0
-                }
+                DevCommands::Status(args) => cli::dev::status::run(args),
                 DevCommands::Stop(args) => cli::dev::stop::run(args),
                 DevCommands::Restart(args) => cli::dev::restart::run(args),
                 DevCommands::Logs(args) => cli::dev::logs::run(args),
