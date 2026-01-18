@@ -26,6 +26,9 @@ const HOP_HEADERS: [&str; 8] = [
     "host",
 ];
 
+// Header used by the Vite plugin to verify proxy requests
+const APX_DEV_TOKEN_HEADER: &str = "x-apx-dev-token";
+
 #[derive(Clone)]
 pub struct ApiProxyState {
     pub client: reqwest::Client,
@@ -38,6 +41,7 @@ pub struct UiProxyState {
     pub client: reqwest::Client,
     pub host: String,
     pub port: u16,
+    pub dev_token: String,
 }
 
 fn build_proxy_client() -> Result<reqwest::Client, String> {
@@ -63,11 +67,12 @@ pub fn api_router(backend_port: u16) -> Result<Router, String> {
 }
 
 /// Creates the UI proxy router (handles / and /*path)
-pub fn ui_router(frontend_port: u16) -> Result<Router, String> {
+pub fn ui_router(frontend_port: u16, dev_token: &str) -> Result<Router, String> {
     let state = UiProxyState {
         client: build_proxy_client()?,
         host: "localhost".to_string(),
         port: frontend_port,
+        dev_token: dev_token.to_string(),
     };
     Ok(Router::new()
         .route("/", any(ui_proxy_handler))
@@ -85,7 +90,7 @@ async fn api_proxy_handler(State(state): State<ApiProxyState>, req: Request<Body
             .map(|pq| pq.as_str())
             .unwrap_or("/")
     );
-    proxy_request(req, state.client, state.host, state.port, path_and_query).await
+    proxy_request(req, state.client, state.host, state.port, path_and_query, None).await
 }
 
 async fn ui_proxy_handler(State(state): State<UiProxyState>, req: Request<Body>) -> Response {
@@ -95,7 +100,15 @@ async fn ui_proxy_handler(State(state): State<UiProxyState>, req: Request<Body>)
         .map(|pq| pq.as_str())
         .unwrap_or("/")
         .to_string();
-    proxy_request(req, state.client, state.host, state.port, path_and_query).await
+    proxy_request(
+        req,
+        state.client,
+        state.host,
+        state.port,
+        path_and_query,
+        Some(state.dev_token.as_str()),
+    )
+    .await
 }
 
 async fn proxy_request(
@@ -104,6 +117,7 @@ async fn proxy_request(
     host: String,
     target_port: u16,
     path_and_query: String,
+    dev_token: Option<&str>,
 ) -> Response {
     if is_websocket_request(req.headers()) {
         let (mut parts, _body) = req.into_parts();
@@ -116,7 +130,7 @@ async fn proxy_request(
             proxy_websocket(socket, host, target_port, path_and_query, headers)
         });
     }
-    proxy_http(req, client, host, target_port, path_and_query).await
+    proxy_http(req, client, host, target_port, path_and_query, dev_token).await
 }
 
 async fn proxy_http(
@@ -125,6 +139,7 @@ async fn proxy_http(
     host: String,
     target_port: u16,
     path_and_query: String,
+    dev_token: Option<&str>,
 ) -> Response {
     let (parts, body) = req.into_parts();
     let url = format!("http://{host}:{target_port}{path_and_query}");
@@ -141,6 +156,9 @@ async fn proxy_http(
             continue;
         }
         builder = builder.header(name, value);
+    }
+    if let Some(dev_token) = dev_token {
+        builder = builder.header(APX_DEV_TOKEN_HEADER, dev_token);
     }
     let response = match builder.body(body_bytes).send().await {
         Ok(response) => response,

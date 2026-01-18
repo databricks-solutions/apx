@@ -95,7 +95,7 @@ pub async fn run_server(
         .with_state(state);
 
     // UI router - proxied to frontend (handles / and /*path)
-    let ui_router = proxy::ui_router(frontend_port)?;
+    let ui_router = proxy::ui_router(frontend_port, process_manager.dev_token())?;
 
     let app = Router::new()
         .nest("/api", api_router)

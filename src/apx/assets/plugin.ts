@@ -4,8 +4,6 @@ import { parse } from "smol-toml";
 import type { IncomingMessage, ServerResponse } from "http";
 import type { Plugin } from "vite";
 
-// Header that the APX dev server adds to requests to verify they come from the proxy
-const APX_DEV_PROXY_HEADER = "x-apx-dev-proxy";
 const APX_DEV_TOKEN_HEADER = "x-apx-dev-token";
 const APX_SIGNAL_PATH = "/_apx/signal";
 
@@ -78,7 +76,6 @@ function getPortConfig(): {
   };
 }
 
-
 // Main APX plugin that configures Vite for APX apps
 export function apxPlugin(): Plugin {
   let isDevServer = false;
@@ -133,7 +130,6 @@ export function apxPlugin(): Plugin {
     configureServer(server) {
       if (!isDevServer) return;
 
-      console.log("[APX] apxPlugin configureServer called");
       console.log(
         "[APX] APX_DEV_SERVER_PORT:",
         process.env.APX_DEV_SERVER_PORT,
@@ -144,30 +140,25 @@ export function apxPlugin(): Plugin {
       );
       console.log("[APX] APX_FRONTEND_PORT:", process.env.APX_FRONTEND_PORT);
 
-      // Add middleware at the start to check for the proxy header
+      // Add middleware at the start to check for the dev token header
       server.middlewares.use(
         (req: IncomingMessage, res: ServerResponse, next) => {
           const url = req.url || "";
-          const method = req.method || "UNKNOWN";
-
-          console.log(`[APX] Middleware hit: ${method} ${url}`);
-          console.log(`[APX] Headers:`, JSON.stringify(req.headers, null, 2));
 
           if (url.startsWith(APX_SIGNAL_PATH)) {
-            console.log("[APX] Signal path detected, checking token");
             const devToken = process.env.APX_DEV_TOKEN;
             const requestToken = req.headers[APX_DEV_TOKEN_HEADER] as
               | string
               | undefined;
             if (!devToken || requestToken !== devToken) {
-              console.log("[APX] Invalid token, returning 401");
+              console.log("[APX] received invalid token, returning 401");
               res.statusCode = 401;
               res.setHeader("Content-Type", "text/plain");
               res.end("Invalid APX dev token.");
               return;
             }
 
-            console.log("[APX] Valid token, shutting down");
+            console.log("[APX] received shutdown signal, shutting down");
             res.statusCode = 200;
             res.end("ok");
             setTimeout(() => {
@@ -182,7 +173,6 @@ export function apxPlugin(): Plugin {
             url.startsWith("/__vite") ||
             url.startsWith("/node_modules")
           ) {
-            console.log("[APX] Internal Vite request, passing through");
             next();
             return;
           }
@@ -193,16 +183,18 @@ export function apxPlugin(): Plugin {
             upgradeHeader &&
             upgradeHeader.toLowerCase().includes("websocket")
           ) {
-            console.log("[APX] WebSocket upgrade request, passing through");
             next();
             return;
           }
 
-          // Check for the APX dev proxy header
-          const hasProxyHeader = req.headers[APX_DEV_PROXY_HEADER] === "true";
-          console.log(`[APX] Has proxy header: ${hasProxyHeader}`);
+          // Check for the APX dev token header
+          const devToken = process.env.APX_DEV_TOKEN;
+          const requestToken = req.headers[APX_DEV_TOKEN_HEADER] as
+            | string
+            | undefined;
+          const hasValidToken = devToken && requestToken === devToken;
 
-          if (!hasProxyHeader) {
+          if (!hasValidToken) {
             // Redirect to APX dev server instead of returning 403
             const devServerPort = process.env.APX_DEV_SERVER_PORT;
             const devServerHost =
@@ -211,10 +203,6 @@ export function apxPlugin(): Plugin {
             const requestHost = hostHeader?.split(":")[0] || "localhost";
             const redirectHost =
               devServerHost === "0.0.0.0" ? requestHost : devServerHost;
-
-            console.log(
-              `[APX] No proxy header. devServerPort=${devServerPort}, devServerHost=${devServerHost}, requestHost=${requestHost}, redirectHost=${redirectHost}`,
-            );
 
             if (devServerPort) {
               const redirectUrl = `http://${redirectHost}:${devServerPort}${url}`;

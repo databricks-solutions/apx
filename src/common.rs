@@ -79,7 +79,7 @@ pub fn sync_apx_plugin_from_package(app_dir: &Path) -> Result<(), String> {
 
     let plugin_contents = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/apx/templates/base/.apx/plugin.ts"
+        "/src/apx/assets/plugin.ts"
     ));
 
     if plugin_path.exists() {

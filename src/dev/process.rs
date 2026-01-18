@@ -98,6 +98,10 @@ impl ProcessManager {
         Ok(manager)
     }
 
+    pub fn dev_token(&self) -> &str {
+        &self.dev_token
+    }
+
     pub async fn stop(&self) {
         debug!(
             host = %self.host,
