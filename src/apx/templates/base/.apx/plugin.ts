@@ -78,6 +78,7 @@ function getPortConfig(): {
   };
 }
 
+
 // Main APX plugin that configures Vite for APX apps
 export function apxPlugin(): Plugin {
   let isDevServer = false;
