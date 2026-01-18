@@ -6,7 +6,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
 use futures_util::SinkExt;
+use pyo3::prelude::*;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::select;
+use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 use tokio_tungstenite::tungstenite::http::Request as WsRequest;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -28,12 +32,68 @@ const HOP_HEADERS: [&str; 8] = [
 
 // Header used by the Vite plugin to verify proxy requests
 const APX_DEV_TOKEN_HEADER: &str = "x-apx-dev-token";
+// Header used to forward OAuth access token to API
+const ACCESS_TOKEN_HEADER: &str = "X-Forwarded-Access-Token";
+const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(45 * 60); // 45 minutes
+
+pub struct TokenManager {
+    token: RwLock<String>,
+    fetched_at: RwLock<Instant>,
+}
+
+impl TokenManager {
+    pub fn new(initial_token: String) -> Self {
+        Self {
+            token: RwLock::new(initial_token),
+            fetched_at: RwLock::new(Instant::now()),
+        }
+    }
+    
+    pub async fn get_token_refreshing_if_needed(&self) -> Result<String, String> {
+        // Check if token needs refresh
+        let fetched_at = *self.fetched_at.read().await;
+        if fetched_at.elapsed() >= TOKEN_REFRESH_INTERVAL {
+            self.refresh_token().await?;
+        }
+        
+        let token = self.token.read().await.clone();
+        Ok(token)
+    }
+    
+    async fn refresh_token(&self) -> Result<(), String> {
+        debug!("Refreshing OAuth access token");
+        let new_token = fetch_token_from_python()?;
+        
+        let mut token = self.token.write().await;
+        let mut fetched_at = self.fetched_at.write().await;
+        
+        *token = new_token;
+        *fetched_at = Instant::now();
+        
+        debug!("OAuth access token refreshed successfully");
+        Ok(())
+    }
+}
+
+fn fetch_token_from_python() -> Result<String, String> {
+    Python::attach(|py| {
+        let interop = py.import("apx.interop")
+            .map_err(|e| format!("Failed to import apx.interop: {e}"))?;
+        let token: String = interop
+            .call_method0("get_token")
+            .map_err(|e| format!("Failed to call get_token: {e}"))?
+            .extract()
+            .map_err(|e| format!("Failed to extract token: {e}"))?;
+        Ok(token)
+    })
+}
 
 #[derive(Clone)]
 pub struct ApiProxyState {
     pub client: reqwest::Client,
     pub host: String,
     pub port: u16,
+    pub token_manager: Arc<TokenManager>,
 }
 
 #[derive(Clone)]
@@ -54,11 +114,12 @@ fn build_proxy_client() -> Result<reqwest::Client, String> {
 }
 
 /// Creates the API proxy router (nested at /api)
-pub fn api_router(backend_port: u16) -> Result<Router, String> {
+pub fn api_router(backend_port: u16, token_manager: Arc<TokenManager>) -> Result<Router, String> {
     let state = ApiProxyState {
         client: build_proxy_client()?,
         host: "0.0.0.0".to_string(),
         port: backend_port,
+        token_manager,
     };
     Ok(Router::new()
         .route("/", any(api_proxy_handler))
@@ -90,7 +151,17 @@ async fn api_proxy_handler(State(state): State<ApiProxyState>, req: Request<Body
             .map(|pq| pq.as_str())
             .unwrap_or("/")
     );
-    proxy_request(req, state.client, state.host, state.port, path_and_query, None).await
+    
+    // Get OAuth access token for API requests
+    let token = match state.token_manager.get_token_refreshing_if_needed().await {
+        Ok(t) => Some(t),
+        Err(err) => {
+            warn!(error = %err, "Failed to get OAuth access token for API request");
+            None
+        }
+    };
+    
+    proxy_request(req, state.client, state.host, state.port, path_and_query, None, token).await
 }
 
 async fn ui_proxy_handler(State(state): State<UiProxyState>, req: Request<Body>) -> Response {
@@ -107,6 +178,7 @@ async fn ui_proxy_handler(State(state): State<UiProxyState>, req: Request<Body>)
         state.port,
         path_and_query,
         Some(state.dev_token.as_str()),
+        None,
     )
     .await
 }
@@ -118,6 +190,7 @@ async fn proxy_request(
     target_port: u16,
     path_and_query: String,
     dev_token: Option<&str>,
+    access_token: Option<String>,
 ) -> Response {
     if is_websocket_request(req.headers()) {
         let (mut parts, _body) = req.into_parts();
@@ -130,7 +203,7 @@ async fn proxy_request(
             proxy_websocket(socket, host, target_port, path_and_query, headers)
         });
     }
-    proxy_http(req, client, host, target_port, path_and_query, dev_token).await
+    proxy_http(req, client, host, target_port, path_and_query, dev_token, access_token).await
 }
 
 async fn proxy_http(
@@ -140,6 +213,7 @@ async fn proxy_http(
     target_port: u16,
     path_and_query: String,
     dev_token: Option<&str>,
+    access_token: Option<String>,
 ) -> Response {
     let (parts, body) = req.into_parts();
     let url = format!("http://{host}:{target_port}{path_and_query}");
@@ -159,6 +233,9 @@ async fn proxy_http(
     }
     if let Some(dev_token) = dev_token {
         builder = builder.header(APX_DEV_TOKEN_HEADER, dev_token);
+    }
+    if let Some(access_token) = access_token {
+        builder = builder.header(ACCESS_TOKEN_HEADER, access_token);
     }
     let response = match builder.body(body_bytes).send().await {
         Ok(response) => response,

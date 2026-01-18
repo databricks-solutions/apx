@@ -76,6 +76,24 @@ pub fn health(port: u16) -> Result<bool, String> {
     Ok(ok)
 }
 
+pub async fn health_async(port: u16) -> Result<bool, String> {
+    let client = build_async_client()?;
+    let url = build_url(CLIENT_HOST, port, "/_apx/health");
+    debug!(%url, "Sending async dev server health request.");
+    let response = client
+        .get(url)
+        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(|err| {
+            warn!(error = %err, "Async health request failed.");
+            format!("Health request failed: {err}")
+        })?;
+    let ok = response.status() == StatusCode::OK;
+    debug!(status = %response.status(), ok, "Received async dev server health response.");
+    Ok(ok)
+}
+
 /// Get the status of the dev server including frontend and backend statuses.
 pub fn status(port: u16) -> Result<StatusResponse, String> {
     let client = build_client()?;

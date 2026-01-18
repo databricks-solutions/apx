@@ -1,6 +1,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
@@ -170,6 +171,29 @@ fn resolve_bun_binary_path(py: Python<'_>) -> PyResult<PathBuf> {
     Ok(PathBuf::from(bun_path_str))
 }
 
+#[pyfunction]
+fn get_dotenv_vars() -> PyResult<HashMap<String, String>> {
+    use tracing::warn;
+    
+    // Use APX_APP_DIR if set, otherwise fall back to current_dir
+    let app_dir = std::env::var("APX_APP_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| PyRuntimeError::new_err("Failed to determine app directory"))?;
+    
+    let dotenv_path = app_dir.join(".env");
+    
+    if !dotenv_path.exists() {
+        warn!(".env file not found at {}, using empty environment", dotenv_path.display());
+        return Ok(HashMap::new());
+    }
+    
+    let dotenv = dotenv::DotenvFile::read(&dotenv_path)
+        .map_err(|e| PyRuntimeError::new_err(e))?;
+    Ok(dotenv.get_vars())
+}
+
 /// A Python module implemented in Rust. The name of this module must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
 /// import the module.
@@ -179,6 +203,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_cli, m)?)?;
     m.add_function(wrap_pyfunction!(get_bun_binary_path, m)?)?;
     m.add_function(wrap_pyfunction!(generate_openapi_py, m)?)?;
+    m.add_function(wrap_pyfunction!(get_dotenv_vars, m)?)?;
     Ok(())
 }
 

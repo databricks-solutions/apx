@@ -5,6 +5,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
+use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -68,6 +69,10 @@ pub async fn run_server(
         "Starting dev server."
     );
 
+    // Fetch initial OAuth access token from Python
+    let initial_token = fetch_token_from_python()?;
+    let token_manager = Arc::new(proxy::TokenManager::new(initial_token));
+
     // Create the single shutdown broadcast channel
     let (shutdown_tx, _) = broadcast::channel::<Shutdown>(16);
 
@@ -93,8 +98,8 @@ pub async fn run_server(
         apx_log_queue: Arc::clone(&apx_log_queue),
     };
 
-    // API router - proxied to backend
-    let api_router = proxy::api_router(backend_port)?;
+    // API router - proxied to backend with token manager
+    let api_router = proxy::api_router(backend_port, token_manager)?;
 
     // APX internal router
     let apx_router = Router::new()
@@ -144,6 +149,19 @@ pub async fn run_server(
         .map_err(|err| format!("Server error: {err}"))?;
 
     Ok(())
+}
+
+fn fetch_token_from_python() -> Result<String, String> {
+    Python::attach(|py| {
+        let interop = py.import("apx.interop")
+            .map_err(|e| format!("Failed to import apx.interop: {e}"))?;
+        let token: String = interop
+            .call_method0("get_token")
+            .map_err(|e| format!("Failed to call get_token: {e}"))?
+            .extract()
+            .map_err(|e| format!("Failed to extract token: {e}"))?;
+        Ok(token)
+    })
 }
 
 /// Start the .env file watcher that restarts uvicorn when environment changes.

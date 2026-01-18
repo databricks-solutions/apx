@@ -1,4 +1,6 @@
 use clap::Args;
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
 use std::path::PathBuf;
 
 use crate::cli::run_cli;
@@ -23,6 +25,16 @@ pub fn run(args: InternalRunServerArgs) -> i32 {
 }
 
 fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
+    // Set app directory context for Rust/Python interop
+    // SAFETY: This is safe because we're setting it before any Python interop
+    // and the subprocess will inherit it. No other threads are accessing env vars yet.
+    unsafe {
+        std::env::set_var("APX_APP_DIR", &args.app_dir);
+    }
+    
+    // Load dotenv and validate credentials before starting server
+    validate_credentials()?;
+    
     let backend_port =
         find_available_port_in_range(&args.host, BACKEND_PORT_START, BACKEND_PORT_END)?;
     let frontend_port =
@@ -36,4 +48,18 @@ fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
         backend_port,
         frontend_port,
     ))
+}
+
+fn validate_credentials() -> Result<(), String> {
+    Python::attach(|py| -> PyResult<()> {
+        
+        let interop = py.import("apx.interop")?;
+        let result = interop.call_method0("credentials_valid")?;
+        let (valid, error): (bool, String) = result.extract()?;
+        
+        if !valid {
+            return Err(PyRuntimeError::new_err(error));
+        }
+        Ok(())
+    }).map_err(|e| format!("Credentials validation failed: {e}"))
 }
