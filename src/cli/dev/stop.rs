@@ -25,10 +25,11 @@ async fn run_inner(args: StopArgs) -> Result<(), String> {
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    stop_server_inner(&app_dir).await
+    stop_dev_server(&app_dir).await
 }
 
-pub async fn stop_server_inner(app_dir: &Path) -> Result<(), String> {
+/// Stop the dev server for the given app directory.
+pub async fn stop_dev_server(app_dir: &Path) -> Result<(), String> {
     let lock_path = lock_path(app_dir);
     debug!(path = %lock_path.display(), "Checking for dev server lockfile.");
     if !lock_path.exists() {

@@ -21,6 +21,21 @@ pub fn build_server(ctx: AppContext) -> McpServer<AppContext> {
             "Start development server and return the URL",
             start_tool,
         )
+        .tool(
+            "stop",
+            "Stop the development server",
+            stop_tool,
+        )
+        .tool(
+            "restart",
+            "Restart the development server (preserves port if possible)",
+            restart_tool,
+        )
+        .tool(
+            "logs",
+            "Fetch recent dev server logs",
+            logs_tool,
+        )
 }
 
 // --- Resources ---
@@ -32,19 +47,58 @@ async fn apx_info_resource(_ctx: Arc<AppContext>) -> Result<String, String> {
 // --- Tools ---
 
 #[derive(Deserialize, schemars::JsonSchema)]
-pub struct StartArgs {}
+pub struct EmptyArgs {}
 
-async fn start_tool(ctx: Arc<AppContext>, _args: StartArgs) -> ToolResult {
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct LogsArgs {
+    #[serde(default = "default_logs_duration")]
+    pub duration: String,
+}
+
+fn default_logs_duration() -> String {
+    crate::cli::dev::logs::DEFAULT_LOG_DURATION.to_string()
+}
+
+async fn start_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
     use crate::cli::dev::start::start_dev_server;
     use crate::dev::common::CLIENT_HOST;
 
-    let app_dir = &ctx.app_dir;
-
-    match start_dev_server(app_dir).await {
+    match start_dev_server(&ctx.app_dir).await {
         Ok(port) => ToolResult::success(format!(
             "Dev server started at http://{}:{}",
             CLIENT_HOST, port
         )),
+        Err(e) => ToolResult::error(e),
+    }
+}
+
+async fn stop_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
+    use crate::cli::dev::stop::stop_dev_server;
+
+    match stop_dev_server(&ctx.app_dir).await {
+        Ok(()) => ToolResult::success("Dev server stopped".to_string()),
+        Err(e) => ToolResult::error(e),
+    }
+}
+
+async fn restart_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
+    use crate::cli::dev::restart::restart_dev_server;
+    use crate::dev::common::CLIENT_HOST;
+
+    match restart_dev_server(&ctx.app_dir).await {
+        Ok(port) => ToolResult::success(format!(
+            "Dev server restarted at http://{}:{}",
+            CLIENT_HOST, port
+        )),
+        Err(e) => ToolResult::error(e),
+    }
+}
+
+async fn logs_tool(ctx: Arc<AppContext>, args: LogsArgs) -> ToolResult {
+    use crate::cli::dev::logs::fetch_logs;
+
+    match fetch_logs(&ctx.app_dir, &args.duration).await {
+        Ok(logs) => ToolResult::success(logs),
         Err(e) => ToolResult::error(e),
     }
 }

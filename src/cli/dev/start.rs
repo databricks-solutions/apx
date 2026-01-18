@@ -1,100 +1,25 @@
 use clap::Args;
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::cli::dev::logs::stream_logs;
-use crate::cli::dev::stop::stop_server_inner;
+use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
 use crate::common::{ensure_dir, sync_apx_plugin_from_package};
-use crate::dev::client::{health, logs};
+use crate::dev::client::{health, logs, wait_for_healthy, HealthCheckConfig};
 use crate::dev::common::{
-    find_available_port_in_range, BACKEND_PORT_END, BACKEND_PORT_START, BIND_HOST, CLIENT_HOST,
-    DevLock, FRONTEND_PORT_END, FRONTEND_PORT_START, find_available_port, lock_path, read_lock, write_lock,
+    find_available_port, lock_path, read_lock, write_lock,
+    DevLock, BIND_HOST, CLIENT_HOST,
 };
-use crate::dev::server::run_server;
-use crate::interop::validate_credentials;
-use crate::set_app_dir;
 
-const HEALTH_RETRY_COUNT: u32 = 30;
-const HEALTH_RETRY_DELAY_MS: u64 = 200;
-/// Initial delay before starting health checks (give server time to start Python/tokio)
-const HEALTH_INITIAL_DELAY_MS: u64 = 1000;
-
-pub async fn start_dev_server(app_dir: &PathBuf) -> Result<u16, String> {
-    if let Some(port) = resolve_existing_server(app_dir).await? {
-        return Ok(port);
-    }
-
+/// Prepare the app directory for dev server startup.
+/// Syncs the apx plugin and ensures the .apx directory exists.
+fn prepare_app_dir(app_dir: &Path) -> Result<(), String> {
     sync_apx_plugin_from_package(app_dir)?;
     ensure_dir(&app_dir.join(".apx"))?;
-
-    let lock_path = lock_path(app_dir);
-    
-    set_app_dir(app_dir.clone())?;
-
-    // Load dotenv and validate credentials before starting server
-    validate_credentials()?;
-
-    let host = BIND_HOST.to_string();
-    let port = resolve_port(None).await?;
-    let backend_port = find_available_port_in_range(&host, BACKEND_PORT_START, BACKEND_PORT_END)?;
-    let frontend_port = find_available_port_in_range(&host, FRONTEND_PORT_START, FRONTEND_PORT_END)?;
-
-    let app_dir_clone = app_dir.clone();
-
-    // Spawn the server in a background task
-    tokio::spawn(async move {
-        if let Err(e) = run_server(
-            app_dir_clone,
-            host,
-            port,
-            backend_port,
-            frontend_port,
-        )
-        .await
-        {
-            eprintln!("Dev server error: {}", e);
-        }
-    });
-
-    // Give server time to start Python/tokio before polling
-    tokio::time::sleep(Duration::from_millis(HEALTH_INITIAL_DELAY_MS)).await;
-    
-    let mut healthy = false;
-    for attempt in 0..HEALTH_RETRY_COUNT {
-        match health(port).await {
-            Ok(true) => {
-                healthy = true;
-                break;
-            }
-            Ok(false) | Err(_) => {
-                // Only print status on first attempt
-                if attempt == 0 {
-                    println!("Waiting for dev server to become healthy...");
-                }
-                tokio::time::sleep(Duration::from_millis(HEALTH_RETRY_DELAY_MS)).await;
-            }
-        }
-    }
-
-    if !healthy {
-        return Err(format!(
-            "Dev server failed to become healthy after {HEALTH_RETRY_COUNT} retries"
-        ));
-    }
-
-    let lock = DevLock::new(
-        std::process::id(),
-        port,
-        "internal".to_string(), // Mark as internal since it's not a CLI command
-        app_dir,
-    );
-    write_lock(&lock_path, &lock)?;
-
-    println!("Dev server started at http://{CLIENT_HOST}:{port}");
-    Ok(port)
+    Ok(())
 }
 
 #[derive(Args, Debug, Clone)]
@@ -133,7 +58,7 @@ async fn run_detached(args: StartArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    let _ = start_server(&app_dir, None).await?;
+    let _ = spawn_server(&app_dir, None).await?;
     Ok(())
 }
 
@@ -146,13 +71,13 @@ async fn run_attached(args: StartArgs) -> Result<(), String> {
         );
         port
     } else {
-        start_server(&app_dir, None).await?
+        spawn_server(&app_dir, None).await?
     };
 
     let response = logs(port, None, true).await?;
     let _ = stream_logs(response, true).await;
 
-    stop_server_inner(&app_dir).await
+    stop_dev_server(&app_dir).await
 }
 
 fn resolve_app_dir(args: &StartArgs) -> PathBuf {
@@ -161,7 +86,7 @@ fn resolve_app_dir(args: &StartArgs) -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
-async fn resolve_existing_server(app_dir: &PathBuf) -> Result<Option<u16>, String> {
+async fn resolve_existing_server(app_dir: &Path) -> Result<Option<u16>, String> {
     let lock_path = lock_path(app_dir);
     if !lock_path.exists() {
         return Ok(None);
@@ -180,15 +105,25 @@ async fn resolve_existing_server(app_dir: &PathBuf) -> Result<Option<u16>, Strin
     }
 }
 
-pub(crate) async fn start_server(
-    app_dir: &PathBuf,
+/// Start a dev server for the given app directory.
+/// If a server is already running and healthy, returns its port.
+/// Otherwise spawns a new server subprocess.
+pub async fn start_dev_server(app_dir: &Path) -> Result<u16, String> {
+    if let Some(port) = resolve_existing_server(app_dir).await? {
+        return Ok(port);
+    }
+    spawn_server(app_dir, None).await
+}
+
+/// Spawn a new dev server subprocess (does not check for existing server).
+pub(crate) async fn spawn_server(
+    app_dir: &Path,
     preferred_port: Option<u16>,
 ) -> Result<u16, String> {
-    sync_apx_plugin_from_package(app_dir)?;
-    ensure_dir(&app_dir.join(".apx"))?;
-
+    prepare_app_dir(app_dir)?;
     let lock_path = lock_path(app_dir);
-    println!("No lock file found, starting dev server");
+
+    println!("Starting dev server...");
     let port = resolve_port(preferred_port).await?;
     let command = format!(
         "uv run apx dev __internal__run_server --app-dir {} --host {} --port {}",
@@ -216,31 +151,9 @@ pub(crate) async fn start_server(
         .spawn()
         .map_err(|err| format!("Failed to start dev server: {err}"))?;
 
-    // Give server time to start Python/tokio before polling
-    tokio::time::sleep(Duration::from_millis(HEALTH_INITIAL_DELAY_MS)).await;
-    
-    let mut healthy = false;
-    for attempt in 0..HEALTH_RETRY_COUNT {
-        match health(port).await {
-            Ok(true) => {
-                healthy = true;
-                break;
-            }
-            Ok(false) | Err(_) => {
-                // Only print status on first attempt
-                if attempt == 0 {
-                    println!("Waiting for dev server to become healthy...");
-                }
-                tokio::time::sleep(Duration::from_millis(HEALTH_RETRY_DELAY_MS)).await;
-            }
-        }
-    }
-
-    if !healthy {
+    if let Err(e) = wait_for_healthy(port, &HealthCheckConfig::default()).await {
         let _ = child.kill();
-        return Err(format!(
-            "Dev server failed to become healthy after {HEALTH_RETRY_COUNT} retries"
-        ));
+        return Err(e);
     }
 
     let lock = DevLock::new(child.id(), port, command, app_dir);

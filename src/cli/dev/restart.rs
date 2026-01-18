@@ -1,8 +1,8 @@
 use clap::Args;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::cli::dev::start::start_server;
-use crate::cli::dev::stop::stop_server_inner;
+use crate::cli::dev::start::spawn_server;
+use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
 use crate::dev::common::{lock_path, read_lock, CLIENT_HOST};
 
@@ -24,7 +24,14 @@ async fn run_inner(args: RestartArgs) -> Result<(), String> {
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     
-    let lock_path = lock_path(&app_dir);
+    restart_dev_server(&app_dir).await?;
+    Ok(())
+}
+
+/// Restart the dev server for the given app directory.
+/// Preserves the port if an existing server is found.
+pub async fn restart_dev_server(app_dir: &Path) -> Result<u16, String> {
+    let lock_path = lock_path(app_dir);
     let preferred_port = if lock_path.exists() {
         let lock = read_lock(&lock_path)?;
         println!(
@@ -38,12 +45,11 @@ async fn run_inner(args: RestartArgs) -> Result<(), String> {
     };
     
     println!("Stopping dev server...");
-    stop_server_inner(&app_dir).await?;
-    println!("Starting dev server...");
-    let port = start_server(&app_dir, preferred_port).await?;
+    stop_dev_server(app_dir).await?;
+    let port = spawn_server(app_dir, preferred_port).await?;
     println!(
         "Dev server restarted at http://{CLIENT_HOST}:{port}",
         port = port
     );
-    Ok(())
+    Ok(port)
 }

@@ -8,6 +8,58 @@ use crate::dev::common::CLIENT_HOST;
 const DEFAULT_TIMEOUT_SECS: u64 = 2;
 const STOP_TIMEOUT_SECS: u64 = 10;
 
+/// Default number of health check retries
+const HEALTH_RETRY_COUNT: u32 = 30;
+/// Delay between health check retries (in ms)
+const HEALTH_RETRY_DELAY_MS: u64 = 200;
+/// Initial delay before starting health checks (give server time to start)
+const HEALTH_INITIAL_DELAY_MS: u64 = 1000;
+
+/// Configuration for health check waiting behavior
+#[derive(Debug, Clone)]
+pub struct HealthCheckConfig {
+    pub retry_count: u32,
+    pub retry_delay_ms: u64,
+    pub initial_delay_ms: u64,
+    pub print_waiting: bool,
+}
+
+impl Default for HealthCheckConfig {
+    fn default() -> Self {
+        Self {
+            retry_count: HEALTH_RETRY_COUNT,
+            retry_delay_ms: HEALTH_RETRY_DELAY_MS,
+            initial_delay_ms: HEALTH_INITIAL_DELAY_MS,
+            print_waiting: true,
+        }
+    }
+}
+
+/// Wait for the dev server to become healthy.
+/// Returns Ok(()) if healthy, Err with message if not healthy after retries.
+pub async fn wait_for_healthy(port: u16, config: &HealthCheckConfig) -> Result<(), String> {
+    // Give server time to start Python/tokio before polling
+    tokio::time::sleep(Duration::from_millis(config.initial_delay_ms)).await;
+
+    for attempt in 0..config.retry_count {
+        match health(port).await {
+            Ok(true) => return Ok(()),
+            Ok(false) | Err(_) => {
+                // Only print status on first attempt
+                if attempt == 0 && config.print_waiting {
+                    println!("Waiting for dev server to become healthy...");
+                }
+                tokio::time::sleep(Duration::from_millis(config.retry_delay_ms)).await;
+            }
+        }
+    }
+
+    Err(format!(
+        "Dev server failed to become healthy after {} retries",
+        config.retry_count
+    ))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct StatusResponse {
     pub frontend_status: String,
