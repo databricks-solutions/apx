@@ -11,6 +11,7 @@ mod cli;
 mod common;
 mod dev;
 pub mod dotenv;
+mod mcp;
 
 pub use api_generator::generate_openapi;
 
@@ -73,10 +74,7 @@ fn run_cli(args: Vec<String>) -> i32 {
         Ok(cli) => match cli.command {
             Some(Commands::Init(init_args)) => cli::init::run(init_args),
             Some(Commands::Build(build_args)) => cli::build::run(build_args),
-            Some(Commands::Mcp) => {
-                println!("Starting MCP server...");
-                0
-            }
+            Some(Commands::Mcp) => cli::dev::mcp::run(cli::dev::mcp::McpArgs {}),
             Some(Commands::Dev(dev_cmd)) => match dev_cmd {
                 DevCommands::Start(args) => cli::dev::start::run(args),
                 DevCommands::Status(args) => cli::dev::status::run(args),

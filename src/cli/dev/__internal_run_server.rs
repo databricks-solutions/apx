@@ -50,7 +50,7 @@ fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
     ))
 }
 
-fn validate_credentials() -> Result<(), String> {
+pub(crate) fn validate_credentials() -> Result<(), String> {
     Python::attach(|py| -> PyResult<()> {
         
         let interop = py.import("apx.interop")?;

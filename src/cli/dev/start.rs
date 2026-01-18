@@ -10,12 +10,89 @@ use crate::cli::dev::stop::stop_server_inner;
 use crate::cli::run_cli;
 use crate::common::{ensure_dir, sync_apx_plugin_from_package};
 use crate::dev::client::{health, health_async, logs_async};
+use crate::cli::dev::__internal_run_server::validate_credentials;
 use crate::dev::common::{
-    BIND_HOST, CLIENT_HOST, DevLock, find_available_port, lock_path, read_lock, write_lock,
+    find_available_port_in_range, BACKEND_PORT_END, BACKEND_PORT_START, BIND_HOST, CLIENT_HOST,
+    DevLock, FRONTEND_PORT_END, FRONTEND_PORT_START, find_available_port, lock_path, read_lock, write_lock,
 };
+use crate::dev::server::run_server;
 
 const HEALTH_RETRY_COUNT: u32 = 20;
 const HEALTH_RETRY_DELAY_MS: u64 = 200;
+
+pub async fn start_dev_server(app_dir: &PathBuf) -> Result<u16, String> {
+    if let Some(port) = resolve_existing_server_async(app_dir).await? {
+        return Ok(port);
+    }
+
+    sync_apx_plugin_from_package(app_dir)?;
+    ensure_dir(&app_dir.join(".apx"))?;
+
+    let lock_path = lock_path(app_dir);
+    
+    // SAFETY: This is safe because we're setting it before any Python interop
+    // and the server task will inherit it.
+    unsafe {
+        std::env::set_var("APX_APP_DIR", app_dir);
+    }
+
+    // Load dotenv and validate credentials before starting server
+    validate_credentials()?;
+
+    let host = BIND_HOST.to_string();
+    let port = resolve_port(None)?;
+    let backend_port = find_available_port_in_range(&host, BACKEND_PORT_START, BACKEND_PORT_END)?;
+    let frontend_port = find_available_port_in_range(&host, FRONTEND_PORT_START, FRONTEND_PORT_END)?;
+
+    let app_dir_clone = app_dir.clone();
+
+    // Spawn the server in a background task
+    tokio::spawn(async move {
+        if let Err(e) = run_server(
+            app_dir_clone,
+            host,
+            port,
+            backend_port,
+            frontend_port,
+        )
+        .await
+        {
+            eprintln!("Dev server error: {}", e);
+        }
+    });
+
+    println!("Waiting for dev server to become healthy");
+    let mut healthy = false;
+    for _ in 0..HEALTH_RETRY_COUNT {
+        match health_async(port).await {
+            Ok(true) => {
+                healthy = true;
+                break;
+            }
+            Ok(false) | Err(_) => {
+                tokio::time::sleep(Duration::from_millis(HEALTH_RETRY_DELAY_MS)).await;
+            }
+        }
+    }
+
+    if !healthy {
+        return Err(format!(
+            "Dev server failed to become healthy after {HEALTH_RETRY_COUNT} retries",
+            HEALTH_RETRY_COUNT = HEALTH_RETRY_COUNT
+        ));
+    }
+
+    let lock = DevLock::new(
+        std::process::id(),
+        port,
+        "internal".to_string(), // Mark as internal since it's not a CLI command
+        app_dir,
+    );
+    write_lock(&lock_path, &lock)?;
+
+    println!("Dev server started at http://{CLIENT_HOST}:{port}");
+    Ok(port)
+}
 
 #[derive(Args, Debug, Clone)]
 pub struct StartArgs {
