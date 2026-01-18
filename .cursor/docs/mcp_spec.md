@@ -26,16 +26,16 @@ appear in all capitals, as shown here.
 
 MCP provides a standardized way for applications to:
 
-* Share contextual information with language models
-* Expose tools and capabilities to AI systems
-* Build composable integrations and workflows
+- Share contextual information with language models
+- Expose tools and capabilities to AI systems
+- Build composable integrations and workflows
 
 The protocol uses [JSON-RPC](https://www.jsonrpc.org/) 2.0 messages to establish
 communication between:
 
-* **Hosts**: LLM applications that initiate connections
-* **Clients**: Connectors within the host application
-* **Servers**: Services that provide context and capabilities
+- **Hosts**: LLM applications that initiate connections
+- **Clients**: Connectors within the host application
+- **Servers**: Services that provide context and capabilities
 
 MCP takes some inspiration from the
 [Language Server Protocol](https://microsoft.github.io/language-server-protocol/), which
@@ -47,31 +47,31 @@ and tools into the ecosystem of AI applications.
 
 ### Base Protocol
 
-* [JSON-RPC](https://www.jsonrpc.org/) message format
-* Stateful connections
-* Server and client capability negotiation
+- [JSON-RPC](https://www.jsonrpc.org/) message format
+- Stateful connections
+- Server and client capability negotiation
 
 ### Features
 
 Servers offer any of the following features to clients:
 
-* **Resources**: Context and data, for the user or the AI model to use
-* **Prompts**: Templated messages and workflows for users
-* **Tools**: Functions for the AI model to execute
+- **Resources**: Context and data, for the user or the AI model to use
+- **Prompts**: Templated messages and workflows for users
+- **Tools**: Functions for the AI model to execute
 
 Clients may offer the following features to servers:
 
-* **Sampling**: Server-initiated agentic behaviors and recursive LLM interactions
-* **Roots**: Server-initiated inquiries into uri or filesystem boundaries to operate in
-* **Elicitation**: Server-initiated requests for additional information from users
+- **Sampling**: Server-initiated agentic behaviors and recursive LLM interactions
+- **Roots**: Server-initiated inquiries into uri or filesystem boundaries to operate in
+- **Elicitation**: Server-initiated requests for additional information from users
 
 ### Additional Utilities
 
-* Configuration
-* Progress tracking
-* Cancellation
-* Error reporting
-* Logging
+- Configuration
+- Progress tracking
+- Cancellation
+- Error reporting
+- Logging
 
 ## Security and Trust & Safety
 
@@ -82,30 +82,30 @@ considerations that all implementors must carefully address.
 ### Key Principles
 
 1. **User Consent and Control**
-   * Users must explicitly consent to and understand all data access and operations
-   * Users must retain control over what data is shared and what actions are taken
-   * Implementors should provide clear UIs for reviewing and authorizing activities
+   - Users must explicitly consent to and understand all data access and operations
+   - Users must retain control over what data is shared and what actions are taken
+   - Implementors should provide clear UIs for reviewing and authorizing activities
 
 2. **Data Privacy**
-   * Hosts must obtain explicit user consent before exposing user data to servers
-   * Hosts must not transmit resource data elsewhere without user consent
-   * User data should be protected with appropriate access controls
+   - Hosts must obtain explicit user consent before exposing user data to servers
+   - Hosts must not transmit resource data elsewhere without user consent
+   - User data should be protected with appropriate access controls
 
 3. **Tool Safety**
-   * Tools represent arbitrary code execution and must be treated with appropriate
+   - Tools represent arbitrary code execution and must be treated with appropriate
      caution.
-     * In particular, descriptions of tool behavior such as annotations should be
+     - In particular, descriptions of tool behavior such as annotations should be
        considered untrusted, unless obtained from a trusted server.
-   * Hosts must obtain explicit user consent before invoking any tool
-   * Users should understand what each tool does before authorizing its use
+   - Hosts must obtain explicit user consent before invoking any tool
+   - Users should understand what each tool does before authorizing its use
 
 4. **LLM Sampling Controls**
-   * Users must explicitly approve any LLM sampling requests
-   * Users should control:
-     * Whether sampling occurs at all
-     * The actual prompt that will be sent
-     * What results the server can see
-   * The protocol intentionally limits server visibility into prompts
+   - Users must explicitly approve any LLM sampling requests
+   - Users should control:
+     - Whether sampling occurs at all
+     - The actual prompt that will be sent
+     - What results the server can see
+   - The protocol intentionally limits server visibility into prompts
 
 ### Implementation Guidelines
 
@@ -133,7 +133,6 @@ Explore the detailed specification for each protocol component:
 
   <Card title="Contributing" icon="pencil" href="/community/communication" />
 </CardGroup>
-
 
 ---
 
