@@ -1,0 +1,161 @@
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
+use std::path::{Path, PathBuf};
+
+#[cfg(target_os = "windows")]
+const BUN_FILENAME: &str = "bun.exe";
+#[cfg(not(target_os = "windows"))]
+const BUN_FILENAME: &str = "bun";
+
+pub(crate) fn get_bun_binary_path(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let bun_path = resolve_bun_binary_path(py)?;
+    let pathlib = py.import("pathlib")?;
+    let path_cls = pathlib.getattr("Path")?;
+    let path_obj = path_cls.call1((bun_path.to_string_lossy().as_ref(),))?;
+    Ok(path_obj.unbind())
+}
+
+pub(crate) fn bun_binary_path() -> Result<PathBuf, String> {
+    Python::attach(|py| {
+        resolve_bun_binary_path(py)
+            .map_err(|err| format!("Failed to resolve bun binary path: {err}"))
+    })
+}
+
+fn resolve_bun_binary_path(py: Python<'_>) -> PyResult<PathBuf> {
+    let importlib = py.import("importlib.resources")?;
+    let files = importlib.getattr("files")?;
+    let apx_resources = files.call1(("apx",))?;
+    let binaries_dir = apx_resources.getattr("joinpath")?.call1(("binaries",))?;
+    let bun_path = binaries_dir.getattr("joinpath")?.call1((BUN_FILENAME,))?;
+    let fspath = bun_path.getattr("__fspath__")?.call0()?;
+    let bun_path_str: String = fspath.extract()?;
+    Ok(PathBuf::from(bun_path_str))
+}
+
+pub(crate) fn list_profiles() -> Result<Vec<String>, String> {
+    Python::attach(|py| {
+        let utils = py
+            .import("apx.utils")
+            .map_err(|err| format!("Failed to import apx.utils: {err}"))?;
+        let func = utils
+            .getattr("list_profiles")
+            .map_err(|err| format!("Failed to access list_profiles: {err}"))?;
+        let profiles = func
+            .call0()
+            .map_err(|err| format!("Failed to call list_profiles: {err}"))?;
+        profiles
+            .extract::<Vec<String>>()
+            .map_err(|err| format!("Failed to parse profiles: {err}"))
+    })
+}
+
+pub(crate) fn templates_dir() -> Result<PathBuf, String> {
+    Python::attach(|py| {
+        let importlib = py
+            .import("importlib.resources")
+            .map_err(|err| format!("Failed to import importlib.resources: {err}"))?;
+        let files = importlib
+            .getattr("files")
+            .map_err(|err| format!("Failed to access importlib.resources.files: {err}"))?;
+        let apx_resources = files
+            .call1(("apx",))
+            .map_err(|err| format!("Failed to access apx package resources: {err}"))?;
+        let templates_dir = apx_resources
+            .getattr("joinpath")
+            .map_err(|err| format!("Failed to access joinpath: {err}"))?
+            .call1(("templates",))
+            .map_err(|err| format!("Failed to resolve templates path: {err}"))?;
+        let fspath = templates_dir
+            .getattr("__fspath__")
+            .map_err(|err| format!("Failed to access __fspath__: {err}"))?
+            .call0()
+            .map_err(|err| format!("Failed to resolve templates path: {err}"))?;
+        let templates_path: String = fspath
+            .extract()
+            .map_err(|err| format!("Failed to parse templates path: {err}"))?;
+        Ok(PathBuf::from(templates_path))
+    })
+}
+
+pub(crate) fn validate_credentials() -> Result<(), String> {
+    Python::attach(|py| -> PyResult<()> {
+        let interop = py.import("apx.interop")?;
+        let result = interop.call_method0("credentials_valid")?;
+        let (valid, error): (bool, String) = result.extract()?;
+        if !valid {
+            return Err(PyRuntimeError::new_err(error));
+        }
+        Ok(())
+    })
+    .map_err(|e| format!("Credentials validation failed: {e}"))
+}
+
+pub(crate) fn get_token() -> Result<String, String> {
+    Python::attach(|py| {
+        let interop = py
+            .import("apx.interop")
+            .map_err(|e| format!("Failed to import apx.interop: {e}"))?;
+        let token: String = interop
+            .call_method0("get_token")
+            .map_err(|e| format!("Failed to call get_token: {e}"))?
+            .extract()
+            .map_err(|e| format!("Failed to extract token: {e}"))?;
+        Ok(token)
+    })
+}
+
+pub(crate) fn get_forwarded_user_header() -> Result<String, String> {
+    Python::attach(|py| {
+        let interop = py
+            .import("apx.interop")
+            .map_err(|e| format!("Failed to import apx.interop: {e}"))?;
+        let header_value: String = interop
+            .call_method0("get_forwarded_user_header")
+            .map_err(|e| format!("Failed to call get_forwarded_user_header: {e}"))?
+            .extract()
+            .map_err(|e| format!("Failed to extract forwarded user header: {e}"))?;
+        Ok(header_value)
+    })
+}
+
+pub(crate) fn generate_openapi_spec(
+    project_root: &Path,
+    app_module: &str,
+    app_slug: &str,
+) -> Result<(String, String), String> {
+    let project_root_str = project_root.to_string_lossy().to_string();
+    let src_root = project_root.join("src");
+    let src_root_str = src_root.to_string_lossy().to_string();
+
+    Python::attach(|py| -> PyResult<(String, String)> {
+        let sys = py.import("sys")?;
+        let path_any = sys.getattr("path")?;
+        let path = path_any.cast::<PyList>()?;
+        if src_root.exists() && !path.contains(src_root_str.as_str())? {
+            path.insert(0, src_root_str.as_str())?;
+        }
+        if !path.contains(project_root_str.as_str())? {
+            path.insert(0, project_root_str.as_str())?;
+        }
+
+        let (module_path, attr_name) = app_module
+            .split_once(':')
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Invalid app-module format"))?;
+
+        let importlib = py.import("importlib")?;
+        let module = importlib.call_method1("import_module", (module_path,))?;
+        let app = module.getattr(attr_name)?;
+        let spec = app.call_method0("openapi")?;
+        let json = py.import("json")?;
+        let dumps_kwargs = PyDict::new(py);
+        dumps_kwargs.set_item("indent", 2)?;
+        let spec_json: String = json
+            .call_method("dumps", (spec,), Some(&dumps_kwargs))?
+            .extract()?;
+
+        Ok((spec_json, app_slug.to_string()))
+    })
+    .map_err(|err| format!("Failed to generate OpenAPI schema: {err}"))
+}

@@ -1,4 +1,4 @@
-// #![forbid(unsafe_code)]
+#![forbid(unsafe_code)]
 
 #![deny(
     warnings,
@@ -30,9 +30,11 @@ mod cli;
 mod common;
 mod dev;
 pub mod dotenv;
+mod interop;
 mod mcp;
 
 pub use api_generator::generate_openapi;
+pub(crate) use interop::bun_binary_path;
 
 static APP_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -54,11 +56,6 @@ pub(crate) fn set_app_dir(app_dir: PathBuf) -> Result<(), String> {
 pub(crate) fn get_app_dir() -> Option<PathBuf> {
     APP_DIR.get().cloned()
 }
-
-#[cfg(target_os = "windows")]
-const BUN_FILENAME: &str = "bun.exe";
-#[cfg(not(target_os = "windows"))]
-const BUN_FILENAME: &str = "bun";
 
 #[derive(Parser)]
 #[command(
@@ -207,29 +204,7 @@ fn is_plain_level(s: &str) -> bool {
 
 #[pyfunction]
 fn get_bun_binary_path(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let bun_path = resolve_bun_binary_path(py)?;
-    let pathlib = py.import("pathlib")?;
-    let path_cls = pathlib.getattr("Path")?;
-    let path_obj = path_cls.call1((bun_path.to_string_lossy().as_ref(),))?;
-    Ok(path_obj.unbind())
-}
-
-pub(crate) fn bun_binary_path() -> Result<PathBuf, String> {
-    Python::attach(|py| {
-        resolve_bun_binary_path(py)
-            .map_err(|err| format!("Failed to resolve bun binary path: {err}"))
-    })
-}
-
-fn resolve_bun_binary_path(py: Python<'_>) -> PyResult<PathBuf> {
-    let importlib = py.import("importlib.resources")?;
-    let files = importlib.getattr("files")?;
-    let apx_resources = files.call1(("apx",))?;
-    let binaries_dir = apx_resources.getattr("joinpath")?.call1(("binaries",))?;
-    let bun_path = binaries_dir.getattr("joinpath")?.call1((BUN_FILENAME,))?;
-    let fspath = bun_path.getattr("__fspath__")?.call0()?;
-    let bun_path_str: String = fspath.extract()?;
-    Ok(PathBuf::from(bun_path_str))
+    interop::get_bun_binary_path(py)
 }
 
 #[pyfunction]
@@ -237,7 +212,6 @@ fn get_dotenv_vars() -> PyResult<HashMap<String, String>> {
     use tracing::warn;
 
     let app_dir = get_app_dir()
-        .or_else(|| std::env::var("APX_APP_DIR").ok().map(PathBuf::from))
         .or_else(|| std::env::current_dir().ok())
         .ok_or_else(|| PyRuntimeError::new_err("Failed to determine app directory"))?;
 

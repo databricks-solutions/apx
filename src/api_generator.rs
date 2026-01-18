@@ -1,6 +1,4 @@
 use notify::{RecursiveMode, Watcher};
-use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
@@ -16,6 +14,7 @@ use walkdir::WalkDir;
 use crate::bun_binary_path;
 use crate::common::read_project_metadata;
 use crate::dev::common::Shutdown;
+use crate::interop::generate_openapi_spec;
 
 const APX_DIR_NAME: &str = ".apx";
 const SCHEMA_FILENAME: &str = "openapi.json";
@@ -23,40 +22,12 @@ const ORVAL_CONFIG_FILENAME: &str = "orval.config.ts";
 const ORVAL_SCHEMA_INPUT: &str = ".apx/openapi.json";
 
 pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String> {
-    let project_root_str = project_root.to_string_lossy().to_string();
-    let src_root = project_root.join("src");
-    let src_root_str = src_root.to_string_lossy().to_string();
     let metadata = read_project_metadata(project_root)?;
     let app_slug = metadata.app_slug;
     let app_module = metadata.app_module;
 
-    let (spec_json, app_slug) = Python::attach(|py| -> PyResult<(String, String)> {
-        let sys = py.import("sys")?;
-        let path_any = sys.getattr("path")?;
-        let path = path_any.cast::<PyList>()?;
-        if src_root.exists() && !path.contains(src_root_str.as_str())? {
-            path.insert(0, src_root_str.as_str())?;
-        }
-        if !path.contains(project_root_str.as_str())? {
-            path.insert(0, project_root_str.as_str())?;
-        }
-
-        let (module_path, attr_name) = app_module
-            .split_once(':')
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Invalid app-module format"))?;
-
-        let importlib = py.import("importlib")?;
-        let module = importlib.call_method1("import_module", (module_path,))?;
-        let app = module.getattr(attr_name)?;
-        let spec = app.call_method0("openapi")?;
-        let json = py.import("json")?;
-        let dumps_kwargs = PyDict::new(py);
-        dumps_kwargs.set_item("indent", 2)?;
-        let spec_json: String = json.call_method("dumps", (spec,), Some(&dumps_kwargs))?.extract()?;
-
-        Ok((spec_json, app_slug.clone()))
-    })
-    .map_err(|err| format!("Failed to generate OpenAPI schema: {err}"))?;
+    let (spec_json, app_slug) =
+        generate_openapi_spec(project_root, &app_module, &app_slug)?;
 
     let apx_dir = project_root.join(APX_DIR_NAME);
     let schema_path = apx_dir.join(SCHEMA_FILENAME);

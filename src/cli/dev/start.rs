@@ -9,12 +9,12 @@ use crate::cli::dev::stop::stop_server_inner;
 use crate::cli::run_cli_async;
 use crate::common::{ensure_dir, sync_apx_plugin_from_package};
 use crate::dev::client::{health, logs};
-use crate::cli::dev::__internal_run_server::validate_credentials;
 use crate::dev::common::{
     find_available_port_in_range, BACKEND_PORT_END, BACKEND_PORT_START, BIND_HOST, CLIENT_HOST,
     DevLock, FRONTEND_PORT_END, FRONTEND_PORT_START, find_available_port, lock_path, read_lock, write_lock,
 };
 use crate::dev::server::run_server;
+use crate::interop::validate_credentials;
 use crate::set_app_dir;
 
 const HEALTH_RETRY_COUNT: u32 = 30;

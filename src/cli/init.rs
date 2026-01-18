@@ -1,7 +1,6 @@
 use clap::{Args, ValueEnum};
 use dialoguer::{Confirm, Input, Select};
 use indicatif::{ProgressBar, ProgressStyle};
-use pyo3::prelude::*;
 use rand::seq::SliceRandom;
 use std::ffi::OsStr;
 use std::fs;
@@ -16,6 +15,7 @@ use crate::bun_binary_path;
 use crate::cli::run_cli;
 use crate::common::bun_install;
 use crate::dotenv::DotenvFile;
+use crate::interop::{list_profiles, templates_dir};
 
 const DEFAULT_APX_PACKAGE: &str = "https://github.com/databricks-solutions/apx.git";
 
@@ -717,47 +717,3 @@ fn is_command_available(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn list_profiles() -> Result<Vec<String>, String> {
-    Python::attach(|py| {
-        let utils = py
-            .import("apx.utils")
-            .map_err(|err| format!("Failed to import apx.utils: {err}"))?;
-        let func = utils
-            .getattr("list_profiles")
-            .map_err(|err| format!("Failed to access list_profiles: {err}"))?;
-        let profiles = func
-            .call0()
-            .map_err(|err| format!("Failed to call list_profiles: {err}"))?;
-        profiles
-            .extract::<Vec<String>>()
-            .map_err(|err| format!("Failed to parse profiles: {err}"))
-    })
-}
-
-fn templates_dir() -> Result<PathBuf, String> {
-    Python::attach(|py| {
-        let importlib = py
-            .import("importlib.resources")
-            .map_err(|err| format!("Failed to import importlib.resources: {err}"))?;
-        let files = importlib
-            .getattr("files")
-            .map_err(|err| format!("Failed to access importlib.resources.files: {err}"))?;
-        let apx_resources = files
-            .call1(("apx",))
-            .map_err(|err| format!("Failed to access apx package resources: {err}"))?;
-        let templates_dir = apx_resources
-            .getattr("joinpath")
-            .map_err(|err| format!("Failed to access joinpath: {err}"))?
-            .call1(("templates",))
-            .map_err(|err| format!("Failed to resolve templates path: {err}"))?;
-        let fspath = templates_dir
-            .getattr("__fspath__")
-            .map_err(|err| format!("Failed to access __fspath__: {err}"))?
-            .call0()
-            .map_err(|err| format!("Failed to resolve templates path: {err}"))?;
-        let templates_path: String = fspath
-            .extract()
-            .map_err(|err| format!("Failed to parse templates path: {err}"))?;
-        Ok(PathBuf::from(templates_path))
-    })
-}

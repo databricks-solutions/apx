@@ -5,7 +5,6 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
-use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -27,6 +26,7 @@ use crate::dev::logging::{
 use crate::dev::process::ProcessManager;
 use crate::dev::proxy;
 use crate::dotenv::DotenvFile;
+use crate::interop::get_token;
 
 /// Shared application state for the dev server.
 #[derive(Clone)]
@@ -70,7 +70,7 @@ pub async fn run_server(
     );
 
     // Fetch initial OAuth access token from Python
-    let initial_token = fetch_token_from_python()?;
+    let initial_token = get_token()?;
     let token_manager = Arc::new(proxy::TokenManager::new(initial_token));
 
     // Create the single shutdown broadcast channel
@@ -149,19 +149,6 @@ pub async fn run_server(
         .map_err(|err| format!("Server error: {err}"))?;
 
     Ok(())
-}
-
-fn fetch_token_from_python() -> Result<String, String> {
-    Python::attach(|py| {
-        let interop = py.import("apx.interop")
-            .map_err(|e| format!("Failed to import apx.interop: {e}"))?;
-        let token: String = interop
-            .call_method0("get_token")
-            .map_err(|e| format!("Failed to call get_token: {e}"))?
-            .extract()
-            .map_err(|e| format!("Failed to extract token: {e}"))?;
-        Ok(token)
-    })
 }
 
 /// Start the .env file watcher that restarts uvicorn when environment changes.

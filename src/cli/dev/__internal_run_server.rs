@@ -1,6 +1,4 @@
 use clap::Args;
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::prelude::*;
 use std::path::PathBuf;
 
 use crate::cli::run_cli_async;
@@ -10,6 +8,7 @@ use crate::dev::common::{
     FRONTEND_PORT_END, FRONTEND_PORT_START,
 };
 use crate::dev::server::run_server;
+use crate::interop::validate_credentials;
 
 #[derive(Args, Debug, Clone)]
 pub struct InternalRunServerArgs {
@@ -43,18 +42,4 @@ async fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
         frontend_port,
     )
     .await
-}
-
-pub(crate) fn validate_credentials() -> Result<(), String> {
-    Python::attach(|py| -> PyResult<()> {
-        
-        let interop = py.import("apx.interop")?;
-        let result = interop.call_method0("credentials_valid")?;
-        let (valid, error): (bool, String) = result.extract()?;
-        
-        if !valid {
-            return Err(PyRuntimeError::new_err(error));
-        }
-        Ok(())
-    }).map_err(|e| format!("Credentials validation failed: {e}"))
 }

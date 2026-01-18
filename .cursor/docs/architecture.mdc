@@ -95,3 +95,36 @@ Therefore:
 ### Guiding Principle
 
 Async at the core. Python at the edge. Isolation over cleverness.
+
+
+## Python Interop Module (`src/interop.rs`)
+
+All Rust→Python calls are centralized in `src/interop.rs`. This module is the single location for PyO3/GIL code.
+
+### Rules for Python Interop
+
+1. **All Python calls go through `src/interop.rs`**
+   - Never add `use pyo3::*` imports outside of `interop.rs`
+   - Never call `Python::attach` or `Python::with_gil` outside of `interop.rs`
+
+2. **Expose clean Rust APIs**
+   - Functions in `interop.rs` return `Result<T, String>` (not `PyResult`)
+   - Callers should not need to know about PyO3 types
+
+3. **Keep functions short and focused**
+   - Each function does one thing (get token, validate credentials, resolve path)
+   - No complex control flow inside `Python::attach` blocks
+
+4. **Error handling**
+   - Convert `PyResult` to `Result<T, String>` at the boundary
+   - Provide meaningful error messages with context
+
+
+### Adding New Python Interop
+
+When you need to call Python from Rust:
+
+1. Add the function to `src/interop.rs`
+2. Use `Python::attach(|py| { ... })` pattern
+3. Return `Result<T, String>` with clear error messages
+4. Import from `crate::interop` at call site

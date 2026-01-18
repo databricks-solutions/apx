@@ -6,7 +6,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
 use futures_util::SinkExt;
-use pyo3::prelude::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::select;
@@ -17,6 +16,8 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame as TungsteniteCloseFrame;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tracing::{debug, warn};
+
+use crate::interop::{get_forwarded_user_header, get_token};
 
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 const HOP_HEADERS: [&str; 8] = [
@@ -64,7 +65,7 @@ impl TokenManager {
     
     async fn refresh_token(&self) -> Result<(), String> {
         debug!("Refreshing OAuth access token");
-        let new_token = fetch_token_from_python()?;
+        let new_token = get_token()?;
         
         let mut token = self.token.write().await;
         let mut fetched_at = self.fetched_at.write().await;
@@ -75,33 +76,6 @@ impl TokenManager {
         debug!("OAuth access token refreshed successfully");
         Ok(())
     }
-}
-
-fn fetch_token_from_python() -> Result<String, String> {
-    Python::attach(|py| {
-        let interop = py.import("apx.interop")
-            .map_err(|e| format!("Failed to import apx.interop: {e}"))?;
-        let token: String = interop
-            .call_method0("get_token")
-            .map_err(|e| format!("Failed to call get_token: {e}"))?
-            .extract()
-            .map_err(|e| format!("Failed to extract token: {e}"))?;
-        Ok(token)
-    })
-}
-
-fn fetch_forwarded_user_header_from_python() -> Result<String, String> {
-    Python::attach(|py| {
-        let interop = py
-            .import("apx.interop")
-            .map_err(|e| format!("Failed to import apx.interop: {e}"))?;
-        let header_value: String = interop
-            .call_method0("get_forwarded_user_header")
-            .map_err(|e| format!("Failed to call get_forwarded_user_header: {e}"))?
-            .extract()
-            .map_err(|e| format!("Failed to extract forwarded user header: {e}"))?;
-        Ok(header_value)
-    })
 }
 
 #[derive(Clone)]
@@ -132,7 +106,7 @@ fn build_proxy_client() -> Result<reqwest::Client, String> {
 
 /// Creates the API proxy router (nested at /api)
 pub fn api_router(backend_port: u16, token_manager: Arc<TokenManager>) -> Result<Router, String> {
-    let forwarded_user_header = match fetch_forwarded_user_header_from_python() {
+    let forwarded_user_header = match get_forwarded_user_header() {
         Ok(value) => Some(value),
         Err(err) => {
             warn!(error = %err, "Failed to get forwarded user header for API proxy");
