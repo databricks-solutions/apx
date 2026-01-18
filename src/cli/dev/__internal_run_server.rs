@@ -3,7 +3,8 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::path::PathBuf;
 
-use crate::cli::run_cli;
+use crate::cli::run_cli_async;
+use crate::set_app_dir;
 use crate::dev::common::{
     find_available_port_in_range, BACKEND_PORT_END, BACKEND_PORT_START, BIND_HOST,
     FRONTEND_PORT_END, FRONTEND_PORT_START,
@@ -20,17 +21,12 @@ pub struct InternalRunServerArgs {
     pub port: u16,
 }
 
-pub fn run(args: InternalRunServerArgs) -> i32 {
-    run_cli(|| run_inner(args))
+pub async fn run(args: InternalRunServerArgs) -> i32 {
+    run_cli_async(|| run_inner(args)).await
 }
 
-fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
-    // Set app directory context for Rust/Python interop
-    // SAFETY: This is safe because we're setting it before any Python interop
-    // and the subprocess will inherit it. No other threads are accessing env vars yet.
-    unsafe {
-        std::env::set_var("APX_APP_DIR", &args.app_dir);
-    }
+async fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
+    set_app_dir(args.app_dir.clone())?;
     
     // Load dotenv and validate credentials before starting server
     validate_credentials()?;
@@ -39,15 +35,14 @@ fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
         find_available_port_in_range(&args.host, BACKEND_PORT_START, BACKEND_PORT_END)?;
     let frontend_port =
         find_available_port_in_range(&args.host, FRONTEND_PORT_START, FRONTEND_PORT_END)?;
-    let runtime = tokio::runtime::Runtime::new()
-        .map_err(|err| format!("Failed to start runtime: {err}"))?;
-    runtime.block_on(run_server(
+    run_server(
         args.app_dir,
         args.host,
         args.port,
         backend_port,
         frontend_port,
-    ))
+    )
+    .await
 }
 
 pub(crate) fn validate_credentials() -> Result<(), String> {

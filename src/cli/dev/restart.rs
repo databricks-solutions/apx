@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::cli::dev::start::start_server;
 use crate::cli::dev::stop::stop_server_inner;
-use crate::cli::run_cli;
+use crate::cli::run_cli_async;
 use crate::dev::common::{lock_path, read_lock, CLIENT_HOST};
 
 #[derive(Args, Debug, Clone)]
@@ -15,11 +15,11 @@ pub struct RestartArgs {
     pub app_path: Option<PathBuf>,
 }
 
-pub fn run(args: RestartArgs) -> i32 {
-    run_cli(|| run_inner(args))
+pub async fn run(args: RestartArgs) -> i32 {
+    run_cli_async(|| run_inner(args)).await
 }
 
-fn run_inner(args: RestartArgs) -> Result<(), String> {
+async fn run_inner(args: RestartArgs) -> Result<(), String> {
     let app_dir = args
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -38,9 +38,9 @@ fn run_inner(args: RestartArgs) -> Result<(), String> {
     };
     
     println!("Stopping dev server...");
-    stop_server_inner(&app_dir)?;
+    stop_server_inner(&app_dir).await?;
     println!("Starting dev server...");
-    let port = start_server(&app_dir, preferred_port)?;
+    let port = start_server(&app_dir, preferred_port).await?;
     println!(
         "Dev server restarted at http://{CLIENT_HOST}:{port}",
         port = port

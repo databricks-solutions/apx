@@ -1,7 +1,7 @@
 use clap::Args;
 use std::path::PathBuf;
 
-use crate::cli::run_cli;
+use crate::cli::run_cli_async;
 use crate::dev::client::status as get_status;
 use crate::dev::common::{lock_path, read_lock};
 use tracing::debug;
@@ -15,11 +15,11 @@ pub struct StatusArgs {
     pub app_path: Option<PathBuf>,
 }
 
-pub fn run(args: StatusArgs) -> i32 {
-    run_cli(|| run_inner(args))
+pub async fn run(args: StatusArgs) -> i32 {
+    run_cli_async(|| run_inner(args)).await
 }
 
-fn run_inner(args: StatusArgs) -> Result<(), String> {
+async fn run_inner(args: StatusArgs) -> Result<(), String> {
     let app_dir = args
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -37,7 +37,7 @@ fn run_inner(args: StatusArgs) -> Result<(), String> {
     debug!(port = lock.port, pid = lock.pid, "Loaded dev server lockfile.");
 
     // Query the health endpoint
-    match get_status(lock.port) {
+    match get_status(lock.port).await {
         Ok(status) => {
             println!("Dev Server Status: running");
             println!("Frontend: {}", status.frontend_status);

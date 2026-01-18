@@ -6,8 +6,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_stream::StreamExt;
 use tracing::{debug, warn};
 
-use crate::cli::run_cli;
-use crate::dev::client::logs_async;
+use crate::cli::run_cli_async;
+use crate::dev::client::logs;
 use crate::dev::common::{lock_path, read_lock};
 use crate::dev::logging::{decode_log_payload, LogPipe, LogStreamName, APX_SHUTDOWN_MESSAGE};
 
@@ -32,12 +32,8 @@ pub struct LogsArgs {
     pub follow: bool,
 }
 
-pub fn run(args: LogsArgs) -> i32 {
-    run_cli(|| {
-        let runtime = tokio::runtime::Runtime::new()
-            .map_err(|err| format!("Failed to create tokio runtime: {err}"))?;
-        runtime.block_on(run_async(args))
-    })
+pub async fn run(args: LogsArgs) -> i32 {
+    run_cli_async(|| run_async(args)).await
 }
 
 async fn run_async(args: LogsArgs) -> Result<(), String> {
@@ -57,7 +53,7 @@ async fn run_async(args: LogsArgs) -> Result<(), String> {
     debug!(port = lock.port, "Connecting to dev server logs.");
     let duration = parse_duration(&args.duration)?;
     let since = Some(since_timestamp_millis(duration));
-    let response = logs_async(lock.port, since, args.follow).await?;
+    let response = logs(lock.port, since, args.follow).await?;
     if !response.status().is_success() {
         return Err(format!(
             "Logs request failed with status {}",

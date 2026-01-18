@@ -1,8 +1,27 @@
+#![forbid(unsafe_code)]
+
+#![deny(
+    warnings,
+    unused_must_use,
+    dead_code,
+    missing_debug_implementations
+)]
+
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::todo,
+    clippy::unimplemented,
+    clippy::dbg_macro
+)]
+
 use clap::{CommandFactory, Parser, Subcommand};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
@@ -14,6 +33,27 @@ pub mod dotenv;
 mod mcp;
 
 pub use api_generator::generate_openapi;
+
+static APP_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub(crate) fn set_app_dir(app_dir: PathBuf) -> Result<(), String> {
+    if let Some(existing) = APP_DIR.get() {
+        if existing != &app_dir {
+            return Err(format!(
+                "App directory already set to {}",
+                existing.display()
+            ));
+        }
+        return Ok(());
+    }
+    APP_DIR
+        .set(app_dir)
+        .map_err(|_| "Failed to set app directory".to_string())
+}
+
+pub(crate) fn get_app_dir() -> Option<PathBuf> {
+    APP_DIR.get().cloned()
+}
 
 #[cfg(target_os = "windows")]
 const BUN_FILENAME: &str = "bun.exe";
@@ -70,17 +110,32 @@ enum DevCommands {
 
 #[pyfunction]
 fn run_cli(args: Vec<String>) -> i32 {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("Failed to create tokio runtime: {err}");
+            return 1;
+        }
+    };
+
+    runtime.block_on(run_cli_async(args))
+}
+
+async fn run_cli_async(args: Vec<String>) -> i32 {
     match Cli::try_parse_from(args) {
         Ok(cli) => match cli.command {
             Some(Commands::Init(init_args)) => cli::init::run(init_args),
             Some(Commands::Build(build_args)) => cli::build::run(build_args),
-            Some(Commands::Mcp) => cli::dev::mcp::run(cli::dev::mcp::McpArgs {}),
+            Some(Commands::Mcp) => cli::dev::mcp::run(cli::dev::mcp::McpArgs {}).await,
             Some(Commands::Dev(dev_cmd)) => match dev_cmd {
-                DevCommands::Start(args) => cli::dev::start::run(args),
-                DevCommands::Status(args) => cli::dev::status::run(args),
-                DevCommands::Stop(args) => cli::dev::stop::run(args),
-                DevCommands::Restart(args) => cli::dev::restart::run(args),
-                DevCommands::Logs(args) => cli::dev::logs::run(args),
+                DevCommands::Start(args) => cli::dev::start::run(args).await,
+                DevCommands::Status(args) => cli::dev::status::run(args).await,
+                DevCommands::Stop(args) => cli::dev::stop::run(args).await,
+                DevCommands::Restart(args) => cli::dev::restart::run(args).await,
+                DevCommands::Logs(args) => cli::dev::logs::run(args).await,
                 DevCommands::Check => {
                     println!("Checking project code...");
                     0
@@ -89,7 +144,9 @@ fn run_cli(args: Vec<String>) -> i32 {
                     println!("Applying addon...");
                     0
                 }
-                DevCommands::InternalRunServer(args) => cli::dev::__internal_run_server::run(args),
+                DevCommands::InternalRunServer(args) => {
+                    cli::dev::__internal_run_server::run(args).await
+                }
             },
             Some(Commands::GenerateOpenapi(args)) => cli::__generate_openapi::run(args),
             None => {
@@ -172,14 +229,12 @@ fn resolve_bun_binary_path(py: Python<'_>) -> PyResult<PathBuf> {
 #[pyfunction]
 fn get_dotenv_vars() -> PyResult<HashMap<String, String>> {
     use tracing::warn;
-    
-    // Use APX_APP_DIR if set, otherwise fall back to current_dir
-    let app_dir = std::env::var("APX_APP_DIR")
-        .ok()
-        .map(PathBuf::from)
+
+    let app_dir = get_app_dir()
+        .or_else(|| std::env::var("APX_APP_DIR").ok().map(PathBuf::from))
         .or_else(|| std::env::current_dir().ok())
         .ok_or_else(|| PyRuntimeError::new_err("Failed to determine app directory"))?;
-    
+
     let dotenv_path = app_dir.join(".env");
     
     if !dotenv_path.exists() {

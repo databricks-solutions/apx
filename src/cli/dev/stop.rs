@@ -1,7 +1,7 @@
 use clap::Args;
 use std::path::{Path, PathBuf};
 
-use crate::cli::run_cli;
+use crate::cli::run_cli_async;
 use crate::dev::client::stop as stop_server;
 use crate::dev::common::{lock_path, read_lock, remove_lock};
 use crate::dev::process::ProcessManager;
@@ -16,19 +16,19 @@ pub struct StopArgs {
     pub app_path: Option<PathBuf>,
 }
 
-pub fn run(args: StopArgs) -> i32 {
-    run_cli(|| run_inner(args))
+pub async fn run(args: StopArgs) -> i32 {
+    run_cli_async(|| run_inner(args)).await
 }
 
-fn run_inner(args: StopArgs) -> Result<(), String> {
+async fn run_inner(args: StopArgs) -> Result<(), String> {
     let app_dir = args
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    stop_server_inner(&app_dir)
+    stop_server_inner(&app_dir).await
 }
 
-pub fn stop_server_inner(app_dir: &Path) -> Result<(), String> {
+pub async fn stop_server_inner(app_dir: &Path) -> Result<(), String> {
     let lock_path = lock_path(app_dir);
     debug!(path = %lock_path.display(), "Checking for dev server lockfile.");
     if !lock_path.exists() {
@@ -41,7 +41,7 @@ pub fn stop_server_inner(app_dir: &Path) -> Result<(), String> {
     debug!(port = lock.port, pid = lock.pid, "Loaded dev server lockfile.");
 
     // Try graceful shutdown first via HTTP request
-    match stop_server(lock.port) {
+    match stop_server(lock.port).await {
         Ok(()) => {
             debug!("Dev server stopped gracefully via HTTP.");
             println!("Dev server stopped.");
