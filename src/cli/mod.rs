@@ -3,7 +3,7 @@ pub mod dev;
 pub mod init;
 pub mod __generate_openapi;
 pub mod bun;
-pub mod shadcn;
+pub mod components;
 
 pub fn run_cli<F>(f: F) -> i32
 where
