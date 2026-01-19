@@ -41,6 +41,11 @@ pub fn build_server(ctx: AppContext) -> McpServer<AppContext> {
             "Regenerate OpenAPI schema and API client",
             refresh_openapi_tool,
         )
+        .tool(
+            "check",
+            "Check the project code for errors (runs tsc and ty checks in parallel)",
+            check_tool,
+        )
 }
 
 // --- Resources ---
@@ -120,6 +125,19 @@ async fn refresh_openapi_tool(ctx: Arc<AppContext>, args: RefreshOpenapiArgs) ->
     match generate_openapi(&ctx.app_dir, args.force) {
         Ok(true) => ToolResult::success("OpenAPI regenerated".to_string()),
         Ok(false) => ToolResult::success("OpenAPI is up to date".to_string()),
+        Err(e) => ToolResult::error(e),
+    }
+}
+
+async fn check_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
+    use crate::cli::dev::check::{CheckArgs, run_inner};
+
+    match run_inner(CheckArgs {
+        app_path: Some(ctx.app_dir.clone()),
+    })
+    .await
+    {
+        Ok(()) => ToolResult::success("All checks passed".to_string()),
         Err(e) => ToolResult::error(e),
     }
 }

@@ -19,7 +19,7 @@ pub async fn run(args: CheckArgs) -> i32 {
     run_cli_async(|| run_inner(args)).await
 }
 
-async fn run_inner(args: CheckArgs) -> Result<(), String> {
+pub async fn run_inner(args: CheckArgs) -> Result<(), String> {
     let app_dir = args
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
