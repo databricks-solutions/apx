@@ -97,7 +97,7 @@ enum DevCommands {
     /// Display logs from development servers
     Logs(cli::dev::logs::LogsArgs),
     /// Check the project code for errors
-    Check,
+    Check(cli::dev::check::CheckArgs),
     /// Apply an addon to an existing project
     Apply,
     /// Internal: run dev server
@@ -133,10 +133,7 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
                 DevCommands::Stop(args) => cli::dev::stop::run(args).await,
                 DevCommands::Restart(args) => cli::dev::restart::run(args).await,
                 DevCommands::Logs(args) => cli::dev::logs::run(args).await,
-                DevCommands::Check => {
-                    println!("Checking project code...");
-                    0
-                }
+                DevCommands::Check(args) => cli::dev::check::run(args).await,
                 DevCommands::Apply => {
                     println!("Applying addon...");
                     0
