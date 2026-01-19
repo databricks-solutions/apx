@@ -76,7 +76,7 @@ enum Commands {
     Build(cli::build::BuildArgs),
     /// Run a command using bun
     Bun(cli::bun::BunArgs),
-    // Run a shadcn command
+    /// Run a shadcn command
     Shadcn(cli::shadcn::ShadcnArgs),
     /// Start the MCP server
     Mcp,
