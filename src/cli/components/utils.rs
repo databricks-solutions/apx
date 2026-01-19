@@ -1,3 +1,4 @@
+use std::path::Path;
 use tracing::trace;
 
 /// Strip JSONC comments from input.
@@ -40,7 +41,7 @@ pub fn strip_jsonc_comments(input: &str) -> String {
 
         if in_line_comment {
             if c == '\n' {
-                debug!(
+                trace!(
                     line = line_num,
                     col = col_num,
                     "Ending line comment"
@@ -54,7 +55,7 @@ pub fn strip_jsonc_comments(input: &str) -> String {
         if in_block_comment {
             if c == '*' && matches!(chars.peek(), Some('/')) {
                 chars.next(); // consume '/'
-                debug!(
+                trace!(
                     line = line_num,
                     col = col_num,
                     "Ending block comment"
@@ -142,4 +143,22 @@ pub fn strip_jsonc_comments(input: &str) -> String {
     );
 
     out
+}
+
+/// Format a path as relative to the app directory, with ./ prefix and cleaned up ././ patterns.
+pub fn format_relative_path(path: &Path, app_dir: &Path) -> String {
+    path.strip_prefix(app_dir)
+        .map(format_relative_string)
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
+pub fn format_relative_string(path: &Path) -> String {
+    let mut s = path.to_string_lossy().to_string();
+    if !s.starts_with('.') {
+        s.insert_str(0, "./");
+    }
+    while s.contains("././") {
+        s = s.replace("././", "./");
+    }
+    s
 }

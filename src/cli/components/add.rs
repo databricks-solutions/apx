@@ -2,52 +2,70 @@ use clap::Args;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-use crate::{
-    bun_binary_path,
-    cli::{components::resolve_component_request, run_cli_async},
-};
+use crate::{bun_binary_path, cli::run_cli_async};
 
-use super::{fetch_component, load_components_json, resolve_ui_base_dir, write_component_files};
-
-/// Format a path as relative to the app directory, with ./ prefix and cleaned up ././ patterns
-fn format_relative_path(path: &Path, app_dir: &Path) -> String {
-    path.strip_prefix(app_dir)
-        .map(format_relative_string)
-        .unwrap_or_else(|_| path.display().to_string())
-}
-
-fn format_relative_string(path: &Path) -> String {
-    let mut s = path.to_string_lossy().to_string();
-    // Ensure it starts with ./
-    if !s.starts_with('.') {
-        s.insert_str(0, "./");
-    }
-    // Clean up ././ patterns
-    while s.contains("././") {
-        s = s.replace("././", "./");
-    }
-    s
-}
+use super::{load_components_json, plan_add, AddPlan, PlannedFile};
+use crate::cli::components::utils::format_relative_path;
 
 fn resolve_app_dir(app_path: Option<PathBuf>) -> PathBuf {
     app_path.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
-fn print_dependencies(dependencies: &[String]) {
-    if dependencies.is_empty() {
-        return;
+fn print_plan_summary(plan: &AddPlan) {
+    println!("Components:");
+    for component in &plan.components {
+        let registry = component.registry.as_deref().unwrap_or("default");
+        println!("  - {} ({})", component.name, registry);
     }
 
-    println!("Dependencies:");
-    for dependency in dependencies {
-        println!("  - {}", dependency);
+    println!("Files:");
+    for file in &plan.files_to_write {
+        println!(
+            "  {} (from {})",
+            file.relative_path.display(),
+            file.source_component
+        );
+    }
+
+    if !plan.component_deps.is_empty() {
+        println!("Dependencies:");
+        for dep in &plan.component_deps {
+            println!("  - {}", dep);
+        }
+    }
+
+    if !plan.warnings.is_empty() {
+        println!("Warnings:");
+        for warning in &plan.warnings {
+            let indented = warning.replace('\n', "\n    ");
+            println!("  - {}", indented);
+        }
     }
 }
 
-fn print_written_paths(paths: &[PathBuf], app_dir: &Path) {
-    for path in paths {
-        println!("  {}", format_relative_path(path, app_dir));
+fn write_file_if_changed(file: &PlannedFile, force: bool) -> Result<bool, String> {
+    if file.absolute_path.exists() {
+        let existing = std::fs::read_to_string(&file.absolute_path)
+            .map_err(|e| format!("Failed to read {}: {e}", file.absolute_path.display()))?;
+        if existing == file.content {
+            return Ok(false);
+        }
+        if !force {
+            return Err(format!(
+                "File already exists (use --force): {}",
+                file.absolute_path.display()
+            ));
+        }
     }
+
+    if let Some(parent) = file.absolute_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory: {e}"))?;
+    }
+
+    std::fs::write(&file.absolute_path, &file.content)
+        .map_err(|e| format!("Failed to write {}: {e}", file.absolute_path.display()))?;
+    Ok(true)
 }
 
 #[derive(Args, Debug, Clone)]
@@ -80,59 +98,92 @@ pub async fn run(args: ComponentsAddArgs) -> i32 {
 
 async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
     let app_dir = resolve_app_dir(args.app_path);
-
-    let cfg = load_components_json(&app_dir)?;
-    let ui_base = resolve_ui_base_dir(&app_dir, &cfg)?;
-
+    let loaded = load_components_json(&app_dir)?;
     let client = reqwest::Client::new();
-
-    let req = resolve_component_request(&cfg, args.registry.as_deref(), &args.component)?;
-    let spec = fetch_component(&client, &req).await?;
+    
+    // Parse component name to extract registry prefix if present (e.g., @animate-ui/button)
+    let (registry, component) = if args.component.starts_with('@') && args.registry.is_none() {
+        if let Some((prefix, name)) = args.component.split_once('/') {
+            tracing::debug!(
+                original = %args.component,
+                registry = %prefix,
+                component = %name,
+                "Detected registry prefix in component name"
+            );
+            (Some(prefix.to_string()), name.to_string())
+        } else {
+            (args.registry, args.component.clone())
+        }
+    } else {
+        (args.registry, args.component.clone())
+    };
+    
+    let plan = plan_add(
+        &client,
+        &app_dir,
+        &loaded.config,
+        registry.as_deref(),
+        &component,
+    )
+    .await?;
+    let mut plan = plan;
+    plan.warnings.extend(loaded.warnings);
 
     if args.dry_run {
-        println!("Component: {}", spec.name);
-        println!("Registry URL: {}", req.url);
-        println!(
-            "Target directory: {}",
-            format_relative_path(&ui_base, &app_dir)
-        );
-        println!("Files:");
-        let file_paths: Vec<PathBuf> = spec.files.iter().map(|f| ui_base.join(&f.path)).collect();
-        print_written_paths(&file_paths, &app_dir);
-        print_dependencies(&spec.dependencies);
-
+        print_plan_summary(&plan);
         return Ok(());
     }
 
-    let written = write_component_files(&ui_base, &spec, args.force)?;
-
-    println!("Added component -> {}", spec.name);
-    print_written_paths(&written, &app_dir);
-
-    if spec.dependencies.is_empty() {
-        return Ok(());
+    let mut written_paths = Vec::new();
+    for file in &plan.files_to_write {
+        if write_file_if_changed(file, args.force)? {
+            written_paths.push(file.absolute_path.clone());
+        }
     }
 
-    println!();
-    println!("Installing dependencies:");
-    println!("  {}", spec.dependencies.join(" "));
+    if !written_paths.is_empty() {
+        println!("Added components:");
+        for path in &written_paths {
+            println!("  {}", format_relative_path(path, &app_dir));
+        }
+    }
+
+    if !plan.component_deps.is_empty() {
+        let deps: Vec<String> = plan.component_deps.iter().cloned().collect();
+        println!();
+        println!("Installing dependencies:");
+        println!("  {}", deps.join(" "));
+        bun_add(&app_dir, &deps).await?;
+        println!("Dependencies installed");
+    }
+
+    for warning in &plan.warnings {
+        eprintln!("\nWARNING: {}", warning);
+    }
+
+    Ok(())
+}
+
+async fn bun_add(app_dir: &Path, deps: &[String]) -> Result<(), String> {
+    if deps.is_empty() {
+        return Ok(());
+    }
 
     let bun_path = bun_binary_path()?;
     let output = Command::new(bun_path)
         .arg("add")
-        .args(&spec.dependencies)
-        .current_dir(&app_dir)
+        .args(deps)
+        .current_dir(app_dir)
         .output()
         .await
         .map_err(|e| format!("Failed to install dependencies: {e}"))?;
     if !output.status.success() {
         return Err(format!(
-            "Failed to install dependencies: {}",
+            "Failed to install dependencies. Stdout: {} Stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-
-    println!("Dependencies installed");
 
     Ok(())
 }

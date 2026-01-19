@@ -2,7 +2,8 @@ pub mod add;
 pub mod utils;
 
 use serde::Deserialize;
-use std::collections::HashMap;
+use serde_json::{Map, Value};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, trace};
 
@@ -13,13 +14,11 @@ use tracing::{debug, trace};
 ///   https://ui.shadcn.com/r/styles/{style}/{name}.json
 /// Example:
 ///   https://ui.shadcn.com/r/styles/new-york/button.json
-pub const SHADCN_REGISTRY_ITEM_TEMPLATE: &str = "https://ui.shadcn.com/r/styles/{style}/{name}.json";
-
-/// Default style if components.json doesn't specify one.
-pub const DEFAULT_STYLE: &str = "new-york";
+pub const SHADCN_REGISTRY_ITEM_TEMPLATE: &str =
+    "https://ui.shadcn.com/r/styles/{style}/{name}.json";
 
 /// Subset of components.json we actually need (plus "style")
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ComponentsJson {
     #[serde(default)]
     pub style: Option<String>,
@@ -32,6 +31,14 @@ pub struct ComponentsJson {
     ///   - advanced object: { "url": "...", "headers": {...}, "params": {...} }
     #[serde(default)]
     pub registries: HashMap<String, RegistryConfig>,
+
+
+    pub tailwind: TailwindConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TailwindConfig {
+    pub css: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,18 +59,123 @@ pub struct RegistryAdvanced {
     pub params: HashMap<String, String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RegistryCatalogEntry {
+    pub name: String,
+    pub url: String,
+    // #[serde(default)]
+    // pub homepage: Option<String>,
+}
+
+pub async fn fetch_registry_catalog(
+    client: &reqwest::Client,
+) -> Result<Vec<RegistryCatalogEntry>, String> {
+    let url = "https://ui.shadcn.com/r/registries.json";
+    client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch registry catalog: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Registry catalog returned error: {e}"))?
+        .json::<Vec<RegistryCatalogEntry>>()
+        .await
+        .map_err(|e| format!("Invalid registry catalog JSON: {e}"))
+}
+
+pub fn merge_registries(
+    local: &HashMap<String, RegistryConfig>,
+    discovered: &[RegistryCatalogEntry],
+) -> HashMap<String, RegistryConfig> {
+    let mut merged: HashMap<String, RegistryConfig> = discovered
+        .iter()
+        .map(|entry| {
+            (
+                entry.name.clone(),
+                RegistryConfig::Template(entry.url.clone()),
+            )
+        })
+        .collect();
+
+    for (name, config) in local {
+        merged.insert(name.clone(), config.clone());
+    }
+
+    merged
+}
+
+pub type CssRules = Map<String, Value>;
+
+#[derive(Debug, Deserialize, Clone)]
+pub enum RegistryItemType {
+    #[serde(rename = "registry:block")]
+    Block,
+    #[serde(rename = "registry:component")]
+    Component,
+    #[serde(rename = "registry:lib")]
+    Lib,
+    #[serde(rename = "registry:hook")]
+    Hook,
+    #[serde(rename = "registry:ui")]
+    Ui,
+    #[serde(rename = "registry:page")]
+    Page,
+    #[serde(rename = "registry:file")]
+    File,
+    #[serde(rename = "registry:style")]
+    Style,
+    #[serde(rename = "registry:theme")]
+    Theme,
+    #[serde(rename = "registry:item")]
+    Item,
+}
+
 /// Component JSON (registry item)
 #[derive(Debug, Deserialize)]
-pub struct ComponentSpec {
+pub struct RegistryItem {
     pub name: String,
-    pub files: Vec<ComponentFile>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(rename = "type")]
+    pub item_type: RegistryItemType,
+    pub files: Vec<RegistryFile>,
 
     #[serde(default)]
     pub dependencies: Vec<String>,
+
+    #[serde(default, rename = "registryDependencies")]
+    pub registry_dependencies: Vec<String>,
+
+    #[serde(default, rename = "cssVars")]
+    pub css_vars: Option<CssVars>,
+
+    #[serde(default)]
+    pub css: Option<CssRules>,
+
+    #[serde(default)]
+    pub docs: Option<String>,
+
+    #[serde(default)]
+    pub categories: Vec<String>,
+
+    #[serde(default)]
+    pub meta: Option<Value>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct CssVars {
+    #[serde(default)]
+    pub theme: HashMap<String, String>,
+    #[serde(default)]
+    pub light: HashMap<String, String>,
+    #[serde(default)]
+    pub dark: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ComponentFile {
+pub struct RegistryFile {
     pub path: String,
     pub content: String,
 
@@ -75,6 +187,36 @@ pub struct ComponentFile {
     #[allow(dead_code)]
     #[serde(default, rename = "type")]
     pub file_type: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct ResolvedComponent {
+    pub name: String,
+    pub spec: RegistryItem,
+    pub registry: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct AddPlan {
+    pub components: Vec<ResolvedComponent>,
+    pub files_to_write: Vec<PlannedFile>,
+    pub component_deps: BTreeSet<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct PlannedFile {
+    pub relative_path: PathBuf,
+    pub absolute_path: PathBuf,
+    pub content: String,
+    pub source_component: String,
+}
+
+#[derive(Debug)]
+pub struct LoadedComponentsJson {
+    pub config: ComponentsJson,
+    pub warnings: Vec<String>,
 }
 
 /// Request resolved from a registry definition (URL + optional headers/params).
@@ -98,12 +240,17 @@ struct TsCompilerOptions {
     paths: Option<HashMap<String, Vec<String>>>,
 }
 
-pub fn load_components_json(app_dir: &Path) -> Result<ComponentsJson, String> {
+pub fn load_components_json(app_dir: &Path) -> Result<LoadedComponentsJson, String> {
     let path = app_dir.join("components.json");
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read components.json: {e}"))?;
 
-    serde_json::from_str(&text).map_err(|e| format!("Invalid components.json: {e}"))
+    let value: Value =
+        serde_json::from_str(&text).map_err(|e| format!("Invalid components.json: {e}"))?;
+    let warnings = Vec::new();
+    let config =
+        serde_json::from_value(value).map_err(|e| format!("Invalid components.json: {e}"))?;
+    Ok(LoadedComponentsJson { config, warnings })
 }
 
 /// Resolve "@/components/ui" → filesystem path using tsconfig.json (JSONC allowed).
@@ -127,7 +274,10 @@ pub fn resolve_ui_base_dir(app_dir: &Path, cfg: &ComponentsJson) -> Result<PathB
 
     let stripped = crate::cli::components::utils::strip_jsonc_comments(&raw);
 
-    trace!(length = stripped.len(), "Stripped tsconfig.json after comment removal");
+    trace!(
+        length = stripped.len(),
+        "Stripped tsconfig.json after comment removal"
+    );
     trace!("Stripped tsconfig.json first 30 lines:");
     for (i, line) in stripped.lines().take(30).enumerate() {
         trace!(line_num = i + 1, line = %line, "Stripped tsconfig line");
@@ -175,21 +325,34 @@ pub fn resolve_ui_base_dir(app_dir: &Path, cfg: &ComponentsJson) -> Result<PathB
 /// - If `component` is a full URL: use it directly.
 /// - If `registry` is None: use shadcn default template with {style}.
 /// - Else: look up registry in components.json registries and resolve {name}, {style},
-///   and ${ENV_VAR} in headers/params.
 pub fn resolve_component_request(
     cfg: &ComponentsJson,
     registry: Option<&str>,
     component: &str,
 ) -> Result<ResolvedRequest, String> {
+    debug!(
+        registry = ?registry,
+        component = component,
+        available_registries = ?cfg.registries.keys().collect::<Vec<_>>(),
+        "Starting component request resolution"
+    );
+
     // 1) Explicit URL provided
     if component.starts_with("http://") || component.starts_with("https://") {
+        debug!(
+            url = component,
+            "Component is a direct URL"
+        );
         return Ok(ResolvedRequest {
             url: component.to_string(),
             headers: HashMap::new(),
         });
     }
 
-    let style = cfg.style.as_deref().unwrap_or(DEFAULT_STYLE);
+    let style = cfg
+        .style
+        .as_deref()
+        .ok_or("components.json missing style")?;
 
     // 2) Default registry: shadcn/ui
     if registry.is_none() {
@@ -212,10 +375,22 @@ pub fn resolve_component_request(
 
     // 3) Named registry from components.json
     let registry_name = registry.unwrap();
+    
+    debug!(
+        registry_name = registry_name,
+        "Looking up named registry in components.json"
+    );
+    
     let reg = cfg
         .registries
         .get(registry_name)
-        .ok_or_else(|| format!("Unknown registry: {registry_name}"))?
+        .ok_or_else(|| {
+            let available: Vec<&String> = cfg.registries.keys().collect();
+            format!(
+                "Unknown registry: {registry_name}. Available registries: {:?}",
+                available
+            )
+        })?
         .clone();
 
     match reg {
@@ -241,8 +416,8 @@ pub fn resolve_component_request(
             if !adv.params.is_empty() {
                 let mut first = !url.contains('?');
                 for (k, v) in adv.params {
-                    let k = expand_env(&k);
-                    let v = expand_env(&v);
+                    let k = expand_env(&k)?;
+                    let v = expand_env(&v)?;
 
                     let sep = if first { '?' } else { '&' };
                     first = false;
@@ -258,7 +433,7 @@ pub fn resolve_component_request(
             // Headers (env expanded)
             let mut headers = HashMap::new();
             for (k, v) in adv.headers {
-                headers.insert(expand_env(&k), expand_env(&v));
+                headers.insert(expand_env(&k)?, expand_env(&v)?);
             }
 
             debug!(
@@ -279,87 +454,224 @@ pub fn resolve_component_request(
 pub async fn fetch_component(
     client: &reqwest::Client,
     req: &ResolvedRequest,
-) -> Result<ComponentSpec, String> {
+) -> Result<(RegistryItem, Vec<String>), String> {
     let mut rb = client.get(&req.url);
     for (k, v) in &req.headers {
         rb = rb.header(k, v);
     }
 
-    rb.send()
+    let value = rb
+        .send()
         .await
         .map_err(|e| format!("Failed to fetch component: {e}"))?
         .error_for_status()
         .map_err(|e| format!("Registry returned error: {e}"))?
-        .json::<ComponentSpec>()
+        .json::<Value>()
         .await
-        .map_err(|e| format!("Invalid component spec: {e}"))
+        .map_err(|e| format!("Invalid component spec: {e}"))?;
+    let warnings = detect_forbidden_fields(&value);
+    let item: RegistryItem =
+        serde_json::from_value(value).map_err(|e| format!("Invalid component spec: {e}"))?;
+    validate_registry_item(&item)?;
+    Ok((item, warnings))
 }
 
-/// Writes component files into ui_base_dir.
-///
-/// NOTE: shadcn registry item file paths often include a leading "ui/" or
-/// "registry/<style>/ui/". Since ui_base_dir already points at the ui folder,
-/// we normalize to avoid nested "ui/ui/...".
-pub fn write_component_files(
-    ui_base_dir: &Path,
-    spec: &ComponentSpec,
-    force: bool,
-) -> Result<Vec<PathBuf>, String> {
-    let mut written = vec![];
+pub async fn resolve_component_closure(
+    client: &reqwest::Client,
+    cfg: &ComponentsJson,
+    registry: Option<&str>,
+    root_component: &str,
+) -> Result<Vec<ResolvedComponent>, String> {
+    debug!(
+        registry = ?registry,
+        component = root_component,
+        "Starting component closure resolution"
+    );
 
-    for file in &spec.files {
-        let rel = normalize_ui_file_path(&file.path);
-        let target = ui_base_dir.join(rel);
-
-        if target.exists() && !force {
-            return Err(format!(
-                "File already exists (use --force): {}",
-                target.display()
-            ));
-        }
-
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory: {e}"))?;
-        }
-
-        std::fs::write(&target, &file.content)
-            .map_err(|e| format!("Failed to write {}: {e}", target.display()))?;
-
-        written.push(target);
+    #[derive(Clone)]
+    enum VisitState {
+        Enter,
+        Exit,
     }
 
-    Ok(written)
+    let mut stack: Vec<(VisitState, Option<String>, String)> = vec![(
+        VisitState::Enter,
+        registry.map(|value| value.to_string()),
+        root_component.to_string(),
+    )];
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut specs: HashMap<String, (RegistryItem, Option<String>, Vec<String>)> = HashMap::new();
+    let mut ordered: Vec<ResolvedComponent> = Vec::new();
+    let mut component_deps: BTreeSet<String> = BTreeSet::new();
+
+    while let Some((state, current_registry, component)) = stack.pop() {
+        let key = format!(
+            "{}::{}",
+            current_registry
+                .clone()
+                .unwrap_or_else(|| "_default".to_string()),
+            component
+        );
+
+        match state {
+            VisitState::Enter => {
+                if visited.contains(&key) {
+                    continue;
+                }
+                visited.insert(key.clone());
+
+                debug!(
+                    component = component.as_str(),
+                    registry = ?current_registry,
+                    "Resolving component in closure"
+                );
+
+                let req = resolve_component_request(
+                    cfg,
+                    current_registry.as_deref(),
+                    component.as_str(),
+                )?;
+                
+                debug!(
+                    url = req.url.as_str(),
+                    headers_count = req.headers.len(),
+                    "Resolved component request"
+                );
+                
+                let (spec, warnings) = fetch_component(client, &req).await?;
+
+                for dep in &spec.dependencies {
+                    component_deps.insert(dep.to_string());
+                }
+
+                stack.push((
+                    VisitState::Exit,
+                    current_registry.clone(),
+                    component.clone(),
+                ));
+                specs.insert(key.clone(), (spec, current_registry.clone(), warnings));
+
+                if let Some((spec, _, _)) = specs.get(&key) {
+                    for dep in &spec.registry_dependencies {
+                        let (dep_registry, dep_component) =
+                            parse_registry_dependency(dep, current_registry.as_deref());
+                        let dep_key = format!(
+                            "{}::{}",
+                            dep_registry
+                                .clone()
+                                .unwrap_or_else(|| "_default".to_string()),
+                            dep_component
+                        );
+                        if !visited.contains(&dep_key) {
+                            stack.push((VisitState::Enter, dep_registry, dep_component));
+                        }
+                    }
+                }
+            }
+            VisitState::Exit => {
+                if let Some((spec, spec_registry, warnings)) = specs.remove(&key) {
+                    ordered.push(ResolvedComponent {
+                        name: spec.name.clone(),
+                        spec,
+                        registry: spec_registry,
+                        warnings,
+                    });
+                }
+            }
+        }
+    }
+
+    if !component_deps.is_empty() {
+        debug!(
+            count = component_deps.len(),
+            "Collected component dependencies"
+        );
+    }
+
+    Ok(ordered)
+}
+
+pub async fn plan_add(
+    client: &reqwest::Client,
+    app_dir: &Path,
+    cfg: &ComponentsJson,
+    registry: Option<&str>,
+    component: &str,
+) -> Result<AddPlan, String> {
+    debug!(
+        registry = ?registry,
+        component = component,
+        "Planning component addition"
+    );
+
+    let ui_base_dir = resolve_ui_base_dir(app_dir, cfg)?;
+
+    let discovered = fetch_registry_catalog(client).await?;
+    let merged_registries = merge_registries(&cfg.registries, &discovered);
+    
+    debug!(
+        local_registries = ?cfg.registries.keys().collect::<Vec<_>>(),
+        discovered_count = discovered.len(),
+        merged_count = merged_registries.len(),
+        "Registry merge complete"
+    );
+
+    // print cfg.tailwind.css
+    debug!(cfg.tailwind.css = ?cfg.tailwind.css, "CSS file path loaded");
+
+    let merged_cfg = ComponentsJson {
+        style: cfg.style.clone(),
+        aliases: cfg.aliases.clone(),
+        registries: merged_registries,
+        tailwind: cfg.tailwind.clone(),
+    };
+
+    let components = resolve_component_closure(client, &merged_cfg, registry, component).await?;
+
+    let mut files_to_write = Vec::new();
+    let mut component_deps: BTreeSet<String> = BTreeSet::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    for resolved in &components {
+        warnings.extend(resolved.warnings.clone());
+        for dep in &resolved.spec.dependencies {
+            component_deps.insert(dep.to_string());
+        }
+
+        for file in &resolved.spec.files {
+            let rel = normalize_ui_file_path(&file.path);
+            let absolute_path = ui_base_dir.join(rel);
+            files_to_write.push(PlannedFile {
+                relative_path: PathBuf::from(rel),
+                absolute_path,
+                content: file.content.clone(),
+                source_component: resolved.name.clone(),
+            });
+        }
+    }
+
+    Ok(AddPlan {
+        components,
+        files_to_write,
+        component_deps,
+        warnings,
+    })
 }
 
 // ---------------------- helpers ----------------------
 
 fn apply_placeholders(template: &str, name: &str, style: &str) -> Result<String, String> {
-    // If it's missing {name}, allow appending "/{name}.json" for convenience.
-    let mut url = template.to_string();
-
-    // Support {style} placeholder (documented).
-    url = url.replace("{style}", style);
-
-    if url.contains("{name}") {
-        url = url.replace("{name}", name);
-    } else if url.contains("{name}") == false && url.ends_with('/') {
-        url.push_str(name);
-    } else if url.contains("{name}") == false && !url.ends_with(".json") {
-        // Heuristic: append "/<name>.json"
-        if !url.ends_with('/') {
-            url.push('/');
-        }
-        url.push_str(name);
-        url.push_str(".json");
+    if !template.contains("{name}") {
+        return Err("Registry template missing {name} placeholder".to_string());
     }
-
+    let mut url = template.to_string();
+    url = url.replace("{style}", style);
+    url = url.replace("{name}", name);
     Ok(url)
 }
 
 /// Expand ${VAR_NAME} from process environment.
-/// Undefined vars are replaced with empty string (safe default).
-fn expand_env(s: &str) -> String {
+fn expand_env(s: &str) -> Result<String, String> {
     let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -377,7 +689,8 @@ fn expand_env(s: &str) -> String {
             if i < bytes.len() && bytes[i] == b'}' {
                 i += 1;
             }
-            let val = std::env::var(key).unwrap_or_default();
+            let val =
+                std::env::var(key).map_err(|_| format!("Missing environment variable `{key}`"))?;
             out.push_str(&val);
         } else {
             out.push(bytes[i] as char);
@@ -385,7 +698,7 @@ fn expand_env(s: &str) -> String {
         }
     }
 
-    out
+    Ok(out)
 }
 
 /// Minimal URL component encoding (enough for query params).
@@ -393,13 +706,9 @@ fn url_encode_component(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             b' ' => out.push_str("%20"),
             _ => out.push_str(&format!("%{:02X}", b)),
         }
@@ -419,4 +728,237 @@ fn normalize_ui_file_path(path: &str) -> &str {
         return stripped;
     }
     path
+}
+
+fn parse_registry_dependency(
+    dep: &str,
+    current_registry: Option<&str>,
+) -> (Option<String>, String) {
+    if dep.starts_with("http://") || dep.starts_with("https://") {
+        return (None, dep.to_string());
+    }
+
+    if dep.starts_with('@') {
+        if let Some((registry, name)) = dep.split_once('/') {
+            return (Some(registry.to_string()), name.to_string());
+        }
+    }
+
+    (
+        current_registry.map(|value| value.to_string()),
+        dep.to_string(),
+    )
+}
+
+fn detect_forbidden_fields(value: &Value) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let obj = match value.as_object() {
+        Some(obj) => obj,
+        None => return warnings,
+    };
+    let name = obj
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("registry item");
+
+    if obj.contains_key("envVars") {
+        warnings.push(format!(
+            "Registry item `{name}` includes unsupported `envVars`. Ignoring envVars contents."
+        ));
+    }
+
+    if obj.contains_key("tailwind") {
+        warnings.push(format!(
+            "Registry item `{name}` includes deprecated `tailwind`. Ignoring tailwind contents."
+        ));
+    }
+
+    // Detect cssVars and render content for manual application
+    if let Some(css_vars_value) = obj.get("cssVars") {
+        if let Ok(css_vars) = serde_json::from_value::<CssVars>(css_vars_value.clone()) {
+            let rendered = render_css_vars(&css_vars);
+            if !rendered.is_empty() {
+                warnings.push(format!(
+                    "Registry item `{name}` includes CSS variables. Add the following to your CSS file:\n\n{rendered}"
+                ));
+            }
+        }
+    }
+
+    // Detect css and render content for manual application
+    if let Some(css_value) = obj.get("css") {
+        if let Some(css_rules) = css_value.as_object() {
+            match render_css_rules(css_rules) {
+                Ok(rendered) if !rendered.is_empty() => {
+                    warnings.push(format!(
+                        "Registry item `{name}` includes CSS rules. Add the following to your CSS file:\n\n{rendered}"
+                    ));
+                }
+                Err(e) => {
+                    warnings.push(format!(
+                        "Registry item `{name}` includes CSS rules but failed to render: {e}"
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    warnings
+}
+
+fn validate_registry_item(item: &RegistryItem) -> Result<(), String> {
+    debug!(
+        name = %item.name,
+        title = ?item.title,
+        description = ?item.description,
+        item_type = ?item.item_type,
+        css_vars = ?item.css_vars,
+        css = ?item.css,
+        docs = ?item.docs,
+        categories = ?item.categories,
+        meta = ?item.meta,
+        "Validating registry item"
+    );
+
+    if item.name.trim().is_empty() {
+        return Err("Registry item `name` is required".to_string());
+    }
+    if item.files.is_empty() {
+        return Err(format!("Registry item `{}` has no files", item.name));
+    }
+    for file in &item.files {
+        if file.path.trim().is_empty() {
+            return Err(format!(
+                "Registry item `{}` has a file with empty path",
+                item.name
+            ));
+        }
+        if file.content.trim().is_empty() {
+            return Err(format!(
+                "Registry item `{}` file `{}` is missing content",
+                item.name, file.path
+            ));
+        }
+        if matches!(
+            file.file_type.as_deref(),
+            Some("registry:page") | Some("registry:file")
+        ) && file
+            .target
+            .as_ref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
+            return Err(format!(
+                "Registry item `{}` file `{}` requires a target",
+                item.name, file.path
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn render_css_vars(css_vars: &CssVars) -> String {
+    let mut out = String::new();
+
+    if !css_vars.theme.is_empty() {
+        out.push_str("@theme {\n");
+        append_css_var_block(&mut out, &css_vars.theme, 2);
+        out.push_str("}\n");
+    }
+
+    if !css_vars.light.is_empty() {
+        out.push_str(":root {\n");
+        append_css_var_block(&mut out, &css_vars.light, 2);
+        out.push_str("}\n");
+    }
+
+    if !css_vars.dark.is_empty() {
+        out.push_str(".dark {\n");
+        append_css_var_block(&mut out, &css_vars.dark, 2);
+        out.push_str("}\n");
+    }
+
+    out.trim().to_string()
+}
+
+fn append_css_var_block(out: &mut String, vars: &HashMap<String, String>, indent: usize) {
+    let mut keys: Vec<&String> = vars.keys().collect();
+    keys.sort();
+    for key in keys {
+        if let Some(value) = vars.get(key) {
+            out.push_str(&" ".repeat(indent));
+            out.push_str("--");
+            out.push_str(key);
+            out.push_str(": ");
+            out.push_str(value);
+            out.push_str(";\n");
+        }
+    }
+}
+
+fn render_css_rules(css: &CssRules) -> Result<String, String> {
+    let mut out = String::new();
+    for (selector, value) in css {
+        render_css_rule(&mut out, selector, value, 0)?;
+    }
+    Ok(out.trim().to_string())
+}
+
+fn render_css_rule(
+    out: &mut String,
+    selector: &str,
+    value: &Value,
+    indent: usize,
+) -> Result<(), String> {
+    let map = value.as_object().ok_or_else(|| {
+        format!("CSS rule `{selector}` must be an object of declarations or nested rules")
+    })?;
+
+    if map.is_empty() {
+        out.push_str(&" ".repeat(indent));
+        out.push_str(selector);
+        out.push_str(";\n");
+        return Ok(());
+    }
+
+    if map.values().all(is_declaration_value) {
+        out.push_str(&" ".repeat(indent));
+        out.push_str(selector);
+        out.push_str(" {\n");
+        for (prop, prop_value) in map {
+            let value = render_declaration_value(prop_value)?;
+            out.push_str(&" ".repeat(indent + 2));
+            out.push_str(prop);
+            out.push_str(": ");
+            out.push_str(&value);
+            out.push_str(";\n");
+        }
+        out.push_str(&" ".repeat(indent));
+        out.push_str("}\n");
+        return Ok(());
+    }
+
+    out.push_str(&" ".repeat(indent));
+    out.push_str(selector);
+    out.push_str(" {\n");
+    for (nested_selector, nested_value) in map {
+        render_css_rule(out, nested_selector, nested_value, indent + 2)?;
+    }
+    out.push_str(&" ".repeat(indent));
+    out.push_str("}\n");
+    Ok(())
+}
+
+fn is_declaration_value(value: &Value) -> bool {
+    matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
+}
+
+fn render_declaration_value(value: &Value) -> Result<String, String> {
+    match value {
+        Value::String(val) => Ok(val.clone()),
+        Value::Number(val) => Ok(val.to_string()),
+        Value::Bool(val) => Ok(val.to_string()),
+        _ => Err("CSS declaration values must be string, number, or bool".to_string()),
+    }
 }

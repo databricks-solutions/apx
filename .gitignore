@@ -44,3 +44,5 @@ target/
 
 .bins/
 .uv-cache/
+
+.cursor/plans
