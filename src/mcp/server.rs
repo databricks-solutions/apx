@@ -54,7 +54,7 @@ pub fn build_server(ctx: AppContext) -> McpServer<AppContext> {
         )
         .tool(
             "databricks_apps_logs",
-            "Fetch Databricks Apps logs in production via the Databricks CLI",
+            "Fetch Databricks Apps logs from an already deployed app using the Databricks CLI",
             databricks_apps_logs_tool,
         )
 }
@@ -453,42 +453,15 @@ fn resolve_app_name_from_databricks_yml(project_dir: &Path) -> Result<String, St
     }
 }
 
-const APX_INFO_CONTENT: &str = r#"# apx - Toolkit for Building Databricks Apps
+const APX_INFO_CONTENT: &str = r#"
 
-🚀 **apx** is the toolkit for building Databricks Apps ⚡**
-
+this project uses apx toolkit to build a Databricks app. 
 apx bundles together a set of tools and libraries to help you with the complete app development lifecycle: develop, build and deploy.
-
-## Overview
-
-The main idea of apx is to provide convenient, fast and AI-friendly development experience for building modern full-stack applications.
 
 ## Technology Stack
 
 - **Backend**: Python + FastAPI + Pydantic
 - **Frontend**: React + TypeScript + shadcn/ui
 - **Build Tools**: uv (Python), bun (JavaScript/TypeScript)
-- **Code Generation**: orval (OpenAPI client generation)
 
-## What This MCP Server Provides
-
-This MCP server gives you access to development server management tools:
-- **start**: Start development servers (frontend, backend, OpenAPI watcher)
-- **restart**: Restart all development servers
-- **stop**: Stop all development servers  
-- **status**: Get dev server status and URL
-- **refresh_openapi**: Trigger OpenAPI schema and api.ts regeneration
-- **list_routes**: List available backend API routes
-- **call_route**: Call a backend route through the dev server proxy
-- **get_metadata**: Get project metadata from pyproject.toml
-
-Databricks SDK documentation tools:
-- **search_databricks_sdk**: Search SDK methods by natural language query
-- **get_method_spec**: Get detailed specification for a specific SDK method
-
-Resources:
-- **apx://info**: Information about apx toolkit
-- **apx://backend/openapi**: Backend OpenAPI schema
-- **apx://openapi/status**: OpenAPI regeneration timestamps
-
-Use these tools to interact with your apx project during development."#;
+"#;

@@ -74,6 +74,8 @@ enum Commands {
     Init(cli::init::InitArgs),
     /// Build the project
     Build(cli::build::BuildArgs),
+    /// Run a command using bun
+    Bun(cli::bun::BunArgs),
     /// Start the MCP server
     Mcp,
     /// Development server commands
@@ -126,6 +128,7 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
         Ok(cli) => match cli.command {
             Some(Commands::Init(init_args)) => cli::init::run(init_args),
             Some(Commands::Build(build_args)) => cli::build::run(build_args),
+            Some(Commands::Bun(bun_args)) => cli::bun::run(bun_args).await,
             Some(Commands::Mcp) => cli::dev::mcp::run(cli::dev::mcp::McpArgs {}).await,
             Some(Commands::Dev(dev_cmd)) => match dev_cmd {
                 DevCommands::Start(args) => cli::dev::start::run(args).await,
