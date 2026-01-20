@@ -33,6 +33,9 @@ pub mod dotenv;
 mod interop;
 mod mcp;
 
+#[allow(dead_code)] // TODO: Remove once search functionality is exposed
+mod search;
+
 pub use api_generator::generate_openapi;
 pub(crate) use interop::bun_binary_path;
 
