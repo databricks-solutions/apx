@@ -41,4 +41,8 @@ tokio-tungstenite = { version = "0.28", features = [
   "rustls-tls-webpki-roots"
 ]}
 schemars = "1.2.0"
+biome_css_parser = "0.5.8"
+biome_css_syntax = "0.5.8"
+biome_rowan = "0.5.8"
+url = "2.5.8"
 

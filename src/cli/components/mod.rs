@@ -1,4 +1,5 @@
 pub mod add;
+pub mod css_updater;
 pub mod utils;
 
 use serde::Deserialize;
@@ -6,6 +7,7 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, trace};
+use url::Url;
 
 /// Default shadcn/ui registry item template.
 ///
@@ -31,7 +33,6 @@ pub struct ComponentsJson {
     ///   - advanced object: { "url": "...", "headers": {...}, "params": {...} }
     #[serde(default)]
     pub registries: HashMap<String, RegistryConfig>,
-
 
     pub tailwind: TailwindConfig,
 }
@@ -222,7 +223,7 @@ pub struct LoadedComponentsJson {
 /// Request resolved from a registry definition (URL + optional headers/params).
 #[derive(Debug, Clone)]
 pub struct ResolvedRequest {
-    pub url: String,
+    pub url: Url,
     pub headers: HashMap<String, String>,
 }
 
@@ -339,12 +340,9 @@ pub fn resolve_component_request(
 
     // 1) Explicit URL provided
     if component.starts_with("http://") || component.starts_with("https://") {
-        debug!(
-            url = component,
-            "Component is a direct URL"
-        );
+        debug!(url = component, "Component is a direct URL");
         return Ok(ResolvedRequest {
-            url: component.to_string(),
+            url: Url::parse(component).map_err(|e| format!("Invalid URL: {e}"))?,
             headers: HashMap::new(),
         });
     }
@@ -356,31 +354,36 @@ pub fn resolve_component_request(
 
     // 2) Default registry: shadcn/ui
     if registry.is_none() {
-        let url = SHADCN_REGISTRY_ITEM_TEMPLATE
+        let url_candidate = SHADCN_REGISTRY_ITEM_TEMPLATE
             .replace("{style}", style)
             .replace("{name}", component);
+
+        let url = Url::parse(&url_candidate).map_err(|e| format!("Invalid URL: {e}"))?;
 
         debug!(
             component = component,
             style = style,
-            url = url.as_str(),
+            url = url_candidate,
             "Resolving via default shadcn registry"
         );
 
         return Ok(ResolvedRequest {
-            url,
+            url: url.clone(),
             headers: HashMap::new(),
         });
     }
 
     // 3) Named registry from components.json
-    let registry_name = registry.unwrap();
-    
+    // SAFETY: registry is guaranteed to be Some here because we returned early if it was None
+    let Some(registry_name) = registry else {
+        unreachable!("registry cannot be None here due to early return above")
+    };
+
     debug!(
         registry_name = registry_name,
         "Looking up named registry in components.json"
     );
-    
+
     let reg = cfg
         .registries
         .get(registry_name)
@@ -395,7 +398,8 @@ pub fn resolve_component_request(
 
     match reg {
         RegistryConfig::Template(tpl) => {
-            let url = apply_placeholders(&tpl, component, style)?;
+            let url_candidate = apply_placeholders(&tpl, component, style)?;
+            let url = Url::parse(&url_candidate).map_err(|e| format!("Invalid URL: {e}"))?;
             debug!(
                 registry = registry_name,
                 component = component,
@@ -405,42 +409,37 @@ pub fn resolve_component_request(
             );
 
             Ok(ResolvedRequest {
-                url,
+                url: url.clone(),
                 headers: HashMap::new(),
             })
         }
         RegistryConfig::Advanced(adv) => {
-            let mut url = apply_placeholders(&adv.url, component, style)?;
+            // 1. Expand placeholders before URL parsing
+            let url_candidate = apply_placeholders(&adv.url, component, style)?;
+            let mut url = Url::parse(&url_candidate).map_err(|e| format!("Invalid URL: {e}"))?;
 
-            // Params become query string entries
+            // 2. Append params via url::Url (handles encoding & ?/& correctly)
             if !adv.params.is_empty() {
-                let mut first = !url.contains('?');
-                for (k, v) in adv.params {
-                    let k = expand_env(&k)?;
-                    let v = expand_env(&v)?;
-
-                    let sep = if first { '?' } else { '&' };
-                    first = false;
-
-                    // Minimal escaping; for full URL encoding use url crate.
-                    url.push(sep);
-                    url.push_str(&url_encode_component(&k));
-                    url.push('=');
-                    url.push_str(&url_encode_component(&v));
+                let mut pairs = url.query_pairs_mut();
+                for (k, v) in &adv.params {
+                    let k = expand_env(k)?;
+                    let v = expand_env(v)?;
+                    pairs.append_pair(&k, &v);
                 }
+                // `pairs` is committed when dropped
             }
 
-            // Headers (env expanded)
+            // 3. Headers (env expanded)
             let mut headers = HashMap::new();
-            for (k, v) in adv.headers {
-                headers.insert(expand_env(&k)?, expand_env(&v)?);
+            for (k, v) in &adv.headers {
+                headers.insert(expand_env(k)?, expand_env(v)?);
             }
 
             debug!(
                 registry = registry_name,
                 component = component,
                 style = style,
-                url = url.as_str(),
+                url = %url,
                 headers_len = headers.len(),
                 "Resolving via advanced registry"
             );
@@ -450,12 +449,24 @@ pub fn resolve_component_request(
     }
 }
 
-/// Fetch component spec, applying headers from resolved request.
 pub async fn fetch_component(
     client: &reqwest::Client,
     req: &ResolvedRequest,
 ) -> Result<(RegistryItem, Vec<String>), String> {
-    let mut rb = client.get(&req.url);
+    match req.url.scheme() {
+        "http" | "https" => fetch_http_component(client, req).await,
+        "file" => fetch_file_component(req).await,
+        scheme => Err(format!("Unsupported registry URL scheme: {scheme}")),
+    }
+}
+
+/// Fetch component spec, applying headers from resolved request.
+async fn fetch_http_component(
+    client: &reqwest::Client,
+    req: &ResolvedRequest,
+) -> Result<(RegistryItem, Vec<String>), String> {
+    let mut rb = client.get(req.url.clone());
+
     for (k, v) in &req.headers {
         rb = rb.header(k, v);
     }
@@ -466,13 +477,42 @@ pub async fn fetch_component(
         .map_err(|e| format!("Failed to fetch component: {e}"))?
         .error_for_status()
         .map_err(|e| format!("Registry returned error: {e}"))?
-        .json::<Value>()
+        .json::<serde_json::Value>()
         .await
         .map_err(|e| format!("Invalid component spec: {e}"))?;
+
     let warnings = detect_forbidden_fields(&value);
+
     let item: RegistryItem =
         serde_json::from_value(value).map_err(|e| format!("Invalid component spec: {e}"))?;
+
     validate_registry_item(&item)?;
+
+    Ok((item, warnings))
+}
+
+async fn fetch_file_component(
+    req: &ResolvedRequest,
+) -> Result<(RegistryItem, Vec<String>), String> {
+    let path = req
+        .url
+        .to_file_path()
+        .map_err(|_| format!("Invalid file URL: {}", req.url))?;
+
+    let text = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("Failed to read registry file {}: {e}", path.display()))?;
+
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("Invalid component spec: {e}"))?;
+
+    let warnings = detect_forbidden_fields(&value);
+
+    let item: RegistryItem =
+        serde_json::from_value(value).map_err(|e| format!("Invalid component spec: {e}"))?;
+
+    validate_registry_item(&item)?;
+
     Ok((item, warnings))
 }
 
@@ -531,13 +571,13 @@ pub async fn resolve_component_closure(
                     current_registry.as_deref(),
                     component.as_str(),
                 )?;
-                
+
                 debug!(
                     url = req.url.as_str(),
                     headers_count = req.headers.len(),
                     "Resolved component request"
                 );
-                
+
                 let (spec, warnings) = fetch_component(client, &req).await?;
 
                 for dep in &spec.dependencies {
@@ -608,7 +648,7 @@ pub async fn plan_add(
 
     let discovered = fetch_registry_catalog(client).await?;
     let merged_registries = merge_registries(&cfg.registries, &discovered);
-    
+
     debug!(
         local_registries = ?cfg.registries.keys().collect::<Vec<_>>(),
         discovered_count = discovered.len(),
@@ -701,21 +741,6 @@ fn expand_env(s: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// Minimal URL component encoding (enough for query params).
-fn url_encode_component(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            b' ' => out.push_str("%20"),
-            _ => out.push_str(&format!("%{:02X}", b)),
-        }
-    }
-    out
-}
-
 /// Normalize shadcn registry file paths so they land under ui_base_dir correctly.
 fn normalize_ui_file_path(path: &str) -> &str {
     // common patterns:
@@ -773,36 +798,8 @@ fn detect_forbidden_fields(value: &Value) -> Vec<String> {
         ));
     }
 
-    // Detect cssVars and render content for manual application
-    if let Some(css_vars_value) = obj.get("cssVars") {
-        if let Ok(css_vars) = serde_json::from_value::<CssVars>(css_vars_value.clone()) {
-            let rendered = render_css_vars(&css_vars);
-            if !rendered.is_empty() {
-                warnings.push(format!(
-                    "Registry item `{name}` includes CSS variables. Add the following to your CSS file:\n\n{rendered}"
-                ));
-            }
-        }
-    }
-
-    // Detect css and render content for manual application
-    if let Some(css_value) = obj.get("css") {
-        if let Some(css_rules) = css_value.as_object() {
-            match render_css_rules(css_rules) {
-                Ok(rendered) if !rendered.is_empty() => {
-                    warnings.push(format!(
-                        "Registry item `{name}` includes CSS rules. Add the following to your CSS file:\n\n{rendered}"
-                    ));
-                }
-                Err(e) => {
-                    warnings.push(format!(
-                        "Registry item `{name}` includes CSS rules but failed to render: {e}"
-                    ));
-                }
-                _ => {}
-            }
-        }
-    }
+    // Note: cssVars and css are now automatically applied via apply_css_updates
+    // No need to add warnings here anymore
 
     warnings
 }
@@ -824,9 +821,14 @@ fn validate_registry_item(item: &RegistryItem) -> Result<(), String> {
     if item.name.trim().is_empty() {
         return Err("Registry item `name` is required".to_string());
     }
-    if item.files.is_empty() {
-        return Err(format!("Registry item `{}` has no files", item.name));
+
+    if item.files.is_empty() && item.css_vars.is_none() && item.css.is_none() {
+        return Err(format!(
+            "Registry item `{}` has no files and no CSS effects",
+            item.name
+        ));
     }
+
     for file in &item.files {
         if file.path.trim().is_empty() {
             return Err(format!(
@@ -856,45 +858,6 @@ fn validate_registry_item(item: &RegistryItem) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn render_css_vars(css_vars: &CssVars) -> String {
-    let mut out = String::new();
-
-    if !css_vars.theme.is_empty() {
-        out.push_str("@theme {\n");
-        append_css_var_block(&mut out, &css_vars.theme, 2);
-        out.push_str("}\n");
-    }
-
-    if !css_vars.light.is_empty() {
-        out.push_str(":root {\n");
-        append_css_var_block(&mut out, &css_vars.light, 2);
-        out.push_str("}\n");
-    }
-
-    if !css_vars.dark.is_empty() {
-        out.push_str(".dark {\n");
-        append_css_var_block(&mut out, &css_vars.dark, 2);
-        out.push_str("}\n");
-    }
-
-    out.trim().to_string()
-}
-
-fn append_css_var_block(out: &mut String, vars: &HashMap<String, String>, indent: usize) {
-    let mut keys: Vec<&String> = vars.keys().collect();
-    keys.sort();
-    for key in keys {
-        if let Some(value) = vars.get(key) {
-            out.push_str(&" ".repeat(indent));
-            out.push_str("--");
-            out.push_str(key);
-            out.push_str(": ");
-            out.push_str(value);
-            out.push_str(";\n");
-        }
-    }
 }
 
 fn render_css_rules(css: &CssRules) -> Result<String, String> {
@@ -961,4 +924,85 @@ fn render_declaration_value(value: &Value) -> Result<String, String> {
         Value::Bool(val) => Ok(val.to_string()),
         _ => Err("CSS declaration values must be string, number, or bool".to_string()),
     }
+}
+
+use crate::cli::components::css_updater::{CssMutation, CssUpdater};
+
+pub fn apply_css_updates(css_path: &Path, mutations: Vec<CssMutation>) -> Result<(), String> {
+    let source =
+        std::fs::read_to_string(css_path).map_err(|e| format!("Failed to read CSS file: {e}"))?;
+    let mut updater = CssUpdater::new(&source).map_err(|e| format!("Failed to parse CSS: {e}"))?;
+    if updater
+        .apply(&mutations)
+        .map_err(|e| format!("Failed to apply CSS updates: {e}"))?
+    {
+        std::fs::write(css_path, updater.finish())
+            .map_err(|e| format!("Failed to write CSS file: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Collect CSS mutations from registry items
+pub fn collect_css_mutations(components: &[ResolvedComponent]) -> Vec<CssMutation> {
+    let mut mutations = Vec::new();
+
+    for resolved in components {
+        // Convert cssVars to mutations
+        if let Some(ref css_vars) = resolved.spec.css_vars {
+            // Theme vars
+            if !css_vars.theme.is_empty() {
+                let vars: Vec<(String, String)> = css_vars
+                    .theme
+                    .iter()
+                    .map(|(k, v)| (format!("--{}", k), v.clone()))
+                    .collect();
+                mutations.push(CssMutation::AddThemeMappings { vars });
+            }
+
+            // Light vars (:root)
+            if !css_vars.light.is_empty() {
+                let vars: Vec<(String, String)> = css_vars
+                    .light
+                    .iter()
+                    .map(|(k, v)| (format!("--{}", k), v.clone()))
+                    .collect();
+                mutations.push(CssMutation::AddCssVars {
+                    selector: ":root".to_string(),
+                    vars,
+                });
+            }
+
+            // Dark vars (.dark)
+            if !css_vars.dark.is_empty() {
+                let vars: Vec<(String, String)> = css_vars
+                    .dark
+                    .iter()
+                    .map(|(k, v)| (format!("--{}", k), v.clone()))
+                    .collect();
+                mutations.push(CssMutation::AddCssVars {
+                    selector: ".dark".to_string(),
+                    vars,
+                });
+            }
+        }
+
+        // Convert css rules to mutations
+        if let Some(ref css_rules) = resolved.spec.css {
+            // For now, convert CSS rules to a single @layer base block
+            // This matches shadcn's typical pattern
+            if !css_rules.is_empty() {
+                match render_css_rules(css_rules) {
+                    Ok(rendered) if !rendered.is_empty() => {
+                        mutations.push(CssMutation::AddCssBlock {
+                            at_rule: "@layer base".to_string(),
+                            body: rendered,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    mutations
 }

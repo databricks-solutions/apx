@@ -4,7 +4,7 @@ use tokio::process::Command;
 
 use crate::{bun_binary_path, cli::run_cli_async};
 
-use super::{load_components_json, plan_add, AddPlan, PlannedFile};
+use super::{load_components_json, plan_add, AddPlan, PlannedFile, collect_css_mutations, apply_css_updates};
 use crate::cli::components::utils::format_relative_path;
 
 fn resolve_app_dir(app_path: Option<PathBuf>) -> PathBuf {
@@ -155,6 +155,22 @@ async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
         println!("  {}", deps.join(" "));
         bun_add(&app_dir, &deps).await?;
         println!("Dependencies installed");
+    }
+
+    // Apply CSS updates automatically
+    let css_mutations = collect_css_mutations(&plan.components);
+    if !css_mutations.is_empty() {
+        let css_path = app_dir.join(&loaded.config.tailwind.css);
+        match apply_css_updates(&css_path, css_mutations) {
+            Ok(()) => {
+                println!();
+                println!("Updated CSS file: {}", format_relative_path(&css_path, &app_dir));
+            }
+            Err(e) => {
+                eprintln!("\nWARNING: Failed to automatically update CSS: {}", e);
+                eprintln!("You may need to manually add CSS variables to your CSS file.");
+            }
+        }
     }
 
     for warning in &plan.warnings {
