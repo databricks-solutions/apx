@@ -43,7 +43,7 @@ pub struct RegistryAdvanced {
     pub params: HashMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize, Clone)]
 pub struct RegistryCatalogEntry {
     pub name: String,
     pub url: String,

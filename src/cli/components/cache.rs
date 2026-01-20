@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
-use super::models::RegistryItem;
+use super::models::{RegistryItem, RegistryCatalogEntry};
 
 /// Cached component data structure
 #[derive(Debug, Serialize, Deserialize)]
@@ -150,6 +150,108 @@ pub fn save_cached_component(
     // Atomic rename
     fs::rename(&temp_path, &final_path)
         .map_err(|e| format!("Failed to rename cache file: {}", e))?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Registry Catalog Caching
+// ============================================================================
+
+/// Cached registry catalog data structure
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedRegistryCatalog {
+    version: u8,
+    fetched_at: i64,
+    entries: Vec<RegistryCatalogEntry>,
+}
+
+/// Get the registry catalog cache file path (~/.apx/cache/registries.json)
+fn get_registry_catalog_cache_path() -> Result<PathBuf, String> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| "Could not determine home directory".to_string())?;
+
+    Ok(home.join(".apx").join("cache").join("registries.json"))
+}
+
+/// Load the cached registry catalog from disk
+/// Returns Ok(Some(entries)) if cache exists and is valid
+/// Returns Ok(None) if cache doesn't exist, is corrupted, or is stale
+/// This function is designed to be non-fatal - any errors result in Ok(None)
+pub fn load_cached_registry_catalog() -> Result<Option<Vec<RegistryCatalogEntry>>, String> {
+    // Get cache file path - if this fails, just return None
+    let cache_path = match get_registry_catalog_cache_path() {
+        Ok(path) => path,
+        Err(_) => return Ok(None),
+    };
+
+    // Check if file exists
+    if !cache_path.exists() {
+        return Ok(None);
+    }
+
+    // Try to read and parse the cache file
+    let content = match fs::read_to_string(&cache_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+
+    let cached: CachedRegistryCatalog = match serde_json::from_str(&content) {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+
+    // Validate cache version
+    if cached.version != CACHE_VERSION {
+        return Ok(None);
+    }
+
+    // Check if cache is fresh (default 1 hour TTL)
+    if !is_cache_fresh(cached.fetched_at, 1) {
+        return Ok(None);
+    }
+
+    Ok(Some(cached.entries))
+}
+
+/// Save the registry catalog to the cache
+/// Errors are returned but should generally be treated as non-fatal
+pub fn save_cached_registry_catalog(entries: &[RegistryCatalogEntry]) -> Result<(), String> {
+    // Get cache file path
+    let cache_path = get_registry_catalog_cache_path()?;
+
+    // Ensure cache directory exists
+    if let Some(cache_dir) = cache_path.parent() {
+        fs::create_dir_all(cache_dir)
+            .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+    }
+
+    // Get current timestamp
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    // Create cached registry catalog
+    let cached = CachedRegistryCatalog {
+        version: CACHE_VERSION,
+        fetched_at: now,
+        entries: entries.to_vec(),
+    };
+
+    // Serialize to JSON
+    let json_content = serde_json::to_string_pretty(&cached)
+        .map_err(|e| format!("Failed to serialize registry catalog cache: {}", e))?;
+
+    // Write to temporary file first
+    let temp_path = cache_path.with_extension("tmp");
+
+    fs::write(&temp_path, json_content)
+        .map_err(|e| format!("Failed to write registry catalog cache file: {}", e))?;
+
+    // Atomic rename
+    fs::rename(&temp_path, &cache_path)
+        .map_err(|e| format!("Failed to rename registry catalog cache file: {}", e))?;
 
     Ok(())
 }

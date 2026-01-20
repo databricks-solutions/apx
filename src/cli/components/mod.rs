@@ -34,9 +34,14 @@ pub async fn fetch_registry_catalog(
 pub async fn fetch_registry_catalog_impl(
     client: &reqwest::Client,
 ) -> Result<Vec<RegistryCatalogEntry>, String> {
+    // Try cache first
+    if let Ok(Some(catalog)) = cache::load_cached_registry_catalog() {
+        return Ok(catalog);
+    }
+
     // Direct HTTP fetch (original implementation)
     let url = "https://ui.shadcn.com/r/registries.json";
-    client
+    let catalog = client
         .get(url)
         .send()
         .await
@@ -45,7 +50,12 @@ pub async fn fetch_registry_catalog_impl(
         .map_err(|e| format!("Registry catalog returned error: {e}"))?
         .json::<Vec<RegistryCatalogEntry>>()
         .await
-        .map_err(|e| format!("Invalid registry catalog JSON: {e}"))
+        .map_err(|e| format!("Invalid registry catalog JSON: {e}"))?;
+
+    // Save to cache (non-fatal on error)
+    let _ = cache::save_cached_registry_catalog(&catalog);
+
+    Ok(catalog)
 }
 
 pub fn merge_registries(
