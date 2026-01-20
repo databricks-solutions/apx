@@ -1,9 +1,14 @@
 pub mod add;
+pub mod cache;
 pub mod css_updater;
+pub mod models;
 pub mod utils;
 
+// Re-export models for easier access
+pub use models::{ComponentsJson, CssRules, RegistryCatalogEntry, RegistryConfig, RegistryItem};
+
 use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, trace};
@@ -19,74 +24,16 @@ use url::Url;
 pub const SHADCN_REGISTRY_ITEM_TEMPLATE: &str =
     "https://ui.shadcn.com/r/styles/{style}/{name}.json";
 
-/// Subset of components.json we actually need (plus "style")
-#[derive(Debug, Deserialize, Clone)]
-pub struct ComponentsJson {
-    #[serde(default)]
-    pub style: Option<String>,
-
-    #[serde(default)]
-    pub aliases: HashMap<String, String>,
-
-    /// Registries can be:
-    ///   - string template: "https://example.com/r/{name}.json"
-    ///   - advanced object: { "url": "...", "headers": {...}, "params": {...} }
-    #[serde(default)]
-    pub registries: HashMap<String, RegistryConfig>,
-
-    pub tailwind: TailwindConfig,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct TailwindConfig {
-    pub css: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-pub enum RegistryConfig {
-    Template(String),
-    Advanced(RegistryAdvanced),
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct RegistryAdvanced {
-    pub url: String,
-
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
-
-    #[serde(default)]
-    pub params: HashMap<String, String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RegistryCatalogEntry {
-    pub name: String,
-    pub url: String,
-    // #[serde(default)]
-    // pub homepage: Option<String>,
-}
-
 #[allow(dead_code)]
 pub async fn fetch_registry_catalog(
     client: &reqwest::Client,
 ) -> Result<Vec<RegistryCatalogEntry>, String> {
-    fetch_registry_catalog_impl(client, None).await
+    fetch_registry_catalog_impl(client).await
 }
 
 pub async fn fetch_registry_catalog_impl(
     client: &reqwest::Client,
-    db: Option<&crate::db::RegistryDb>,
 ) -> Result<Vec<RegistryCatalogEntry>, String> {
-    // Try cache first if available
-    if let Some(db) = db {
-        if let Ok(catalog) = db.get_catalog(client).await {
-            return Ok(catalog);
-        }
-        // Fall through to HTTP on cache error
-    }
-
     // Direct HTTP fetch (original implementation)
     let url = "https://ui.shadcn.com/r/registries.json";
     client
@@ -120,91 +67,6 @@ pub fn merge_registries(
     }
 
     merged
-}
-
-pub type CssRules = Map<String, Value>;
-
-#[derive(Debug, Deserialize, serde::Serialize, Clone)]
-pub enum RegistryItemType {
-    #[serde(rename = "registry:block")]
-    Block,
-    #[serde(rename = "registry:component")]
-    Component,
-    #[serde(rename = "registry:lib")]
-    Lib,
-    #[serde(rename = "registry:hook")]
-    Hook,
-    #[serde(rename = "registry:ui")]
-    Ui,
-    #[serde(rename = "registry:page")]
-    Page,
-    #[serde(rename = "registry:file")]
-    File,
-    #[serde(rename = "registry:style")]
-    Style,
-    #[serde(rename = "registry:theme")]
-    Theme,
-    #[serde(rename = "registry:item")]
-    Item,
-}
-
-/// Component JSON (registry item)
-#[derive(Debug, Deserialize, serde::Serialize)]
-pub struct RegistryItem {
-    pub name: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(rename = "type")]
-    pub item_type: RegistryItemType,
-    pub files: Vec<RegistryFile>,
-
-    #[serde(default)]
-    pub dependencies: Vec<String>,
-
-    #[serde(default, rename = "registryDependencies")]
-    pub registry_dependencies: Vec<String>,
-
-    #[serde(default, rename = "cssVars")]
-    pub css_vars: Option<CssVars>,
-
-    #[serde(default)]
-    pub css: Option<CssRules>,
-
-    #[serde(default)]
-    pub docs: Option<String>,
-
-    #[serde(default)]
-    pub categories: Vec<String>,
-
-    #[serde(default)]
-    pub meta: Option<Value>,
-}
-
-#[derive(Debug, Deserialize, serde::Serialize, Clone)]
-pub struct CssVars {
-    #[serde(default)]
-    pub theme: HashMap<String, String>,
-    #[serde(default)]
-    pub light: HashMap<String, String>,
-    #[serde(default)]
-    pub dark: HashMap<String, String>,
-}
-
-#[derive(Debug, Deserialize, serde::Serialize)]
-pub struct RegistryFile {
-    pub path: String,
-    pub content: String,
-
-    /// Some registry items include "target" (often empty). Keep it optional.
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub target: Option<String>,
-
-    #[allow(dead_code)]
-    #[serde(default, rename = "type")]
-    pub file_type: Option<String>,
 }
 
 #[derive(Debug)]
@@ -507,31 +369,35 @@ pub async fn fetch_component(
     client: &reqwest::Client,
     req: &ResolvedRequest,
 ) -> Result<(RegistryItem, Vec<String>), String> {
-    fetch_component_impl(client, req, None, None, None, None).await
+    fetch_component_impl(client, req, None, None).await
 }
 
 pub async fn fetch_component_impl(
     client: &reqwest::Client,
     req: &ResolvedRequest,
-    db: Option<&crate::db::RegistryDb>,
     registry_name: Option<&str>,
-    style: Option<&str>,
     component_name: Option<&str>,
 ) -> Result<(RegistryItem, Vec<String>), String> {
-    // Try cache first if available and we have all metadata
-    if let (Some(db), Some(style_val), Some(component_name_val)) = (db, style, component_name) {
-        if let Ok(result) = db.get_component(client, req, registry_name, style_val, component_name_val).await {
-            return Ok(result);
+    // Try cache first if we have component name
+    if let Some(component_name_val) = component_name {
+        if let Ok(Some((item, warnings))) = cache::load_cached_component(component_name_val, registry_name) {
+            return Ok((item, warnings));
         }
-        // Fall through to HTTP on cache error
     }
 
     // Direct fetch (original implementation)
-    match req.url.scheme() {
-        "http" | "https" => fetch_http_component(client, req).await,
-        "file" => fetch_file_component(req).await,
-        scheme => Err(format!("Unsupported registry URL scheme: {scheme}")),
+    let result = match req.url.scheme() {
+        "http" | "https" => fetch_http_component(client, req).await?,
+        "file" => fetch_file_component(req).await?,
+        scheme => return Err(format!("Unsupported registry URL scheme: {scheme}")),
+    };
+
+    // Save to cache if we have component name
+    if let Some(component_name_val) = component_name {
+        let _ = cache::save_cached_component(component_name_val, registry_name, &result.0, &result.1);
     }
+
+    Ok(result)
 }
 
 /// Fetch component spec, applying headers from resolved request.
@@ -595,7 +461,6 @@ pub async fn resolve_component_closure(
     cfg: &ComponentsJson,
     registry: Option<&str>,
     root_component: &str,
-    db: Option<&crate::db::RegistryDb>,
 ) -> Result<Vec<ResolvedComponent>, String> {
     debug!(
         registry = ?registry,
@@ -653,13 +518,10 @@ pub async fn resolve_component_closure(
                     "Resolved component request"
                 );
 
-                let style = cfg.style.as_deref();
                 let (spec, warnings) = fetch_component_impl(
                     client,
                     &req,
-                    db,
                     current_registry.as_deref(),
-                    style,
                     Some(component.as_str()),
                 ).await?;
 
@@ -720,7 +582,6 @@ pub async fn plan_add(
     cfg: &ComponentsJson,
     registry: Option<&str>,
     component: &str,
-    db: Option<&crate::db::RegistryDb>,
 ) -> Result<AddPlan, String> {
     debug!(
         registry = ?registry,
@@ -732,7 +593,7 @@ pub async fn plan_add(
     let lib_base_dir = resolve_lib_base_dir(app_dir, cfg)?;
     let hooks_base_dir = resolve_hooks_base_dir(app_dir, cfg)?;
 
-    let discovered = fetch_registry_catalog_impl(client, db).await?;
+    let discovered = fetch_registry_catalog_impl(client).await?;
     let merged_registries = merge_registries(&cfg.registries, &discovered);
 
     debug!(
@@ -752,7 +613,7 @@ pub async fn plan_add(
         tailwind: cfg.tailwind.clone(),
     };
 
-    let components = resolve_component_closure(client, &merged_cfg, registry, component, db).await?;
+    let components = resolve_component_closure(client, &merged_cfg, registry, component).await?;
 
     let mut files_to_write = Vec::new();
     let mut component_deps: BTreeSet<String> = BTreeSet::new();

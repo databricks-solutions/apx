@@ -46,7 +46,7 @@ gen-sample:
 
 gen folder profile *args:
     rm -rf /tmp/{{folder}}
-    uv run apx init /tmp/{{folder}} -p {{profile}} \
+    RUST_LOG=DEBUG uv run apx init /tmp/{{folder}} -p {{profile}} \
         --apx-package="{{justfile_directory()}}" \
         --apx-editable \
         {{args}}

@@ -130,6 +130,7 @@ fn default_max_output_chars() -> i32 {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[allow(dead_code)]
 pub struct SearchRegistryComponentsArgs {
     pub query: String,
     #[serde(default = "default_search_limit")]
@@ -477,31 +478,10 @@ fn resolve_app_name_from_databricks_yml(project_dir: &Path) -> Result<String, St
 
 async fn search_registry_components_tool(
     _ctx: Arc<AppContext>,
-    args: SearchRegistryComponentsArgs,
+    _args: SearchRegistryComponentsArgs,
 ) -> ToolResult {
-    // Initialize database
-    let db = match crate::db::get_db().await {
-        Ok(db) => db,
-        Err(e) => return ToolResult::error(format!("Failed to initialize database: {}", e)),
-    };
-
-    // Execute search
-    let results = match db.search_components(
-        &args.query,
-        args.limit,
-        args.categories.as_deref(),
-        args.item_types.as_deref(),
-        args.registries.as_deref(),
-    ).await {
-        Ok(results) => results,
-        Err(e) => return ToolResult::error(format!("Search failed: {}", e)),
-    };
-
-    // Format results as JSON
-    match serde_json::to_string_pretty(&results) {
-        Ok(json) => ToolResult::success(json),
-        Err(e) => ToolResult::error(format!("Failed to serialize results: {}", e)),
-    }
+    // Search functionality is not currently available with the file-based cache
+    ToolResult::error("Component search is not currently supported. Please use the registry website or browse components manually.".to_string())
 }
 
 const APX_INFO_CONTENT: &str = r#"

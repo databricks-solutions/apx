@@ -127,22 +127,12 @@ async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
         (args.registry, args.component.clone())
     };
 
-    // Initialize database (graceful fallback on error)
-    let db = match crate::db::get_db().await {
-        Ok(db) => Some(db),
-        Err(e) => {
-            tracing::warn!("Failed to initialize database: {}. Continuing without cache.", e);
-            None
-        }
-    };
-
     let plan = plan_add(
         &client,
         &app_dir,
         &loaded.config,
         registry.as_deref(),
         &component,
-        db,
     )
     .await?;
     let mut plan = plan;

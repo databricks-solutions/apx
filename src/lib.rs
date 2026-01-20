@@ -28,7 +28,6 @@ use tracing_subscriber::prelude::*;
 mod api_generator;
 mod cli;
 mod common;
-mod db;
 mod dev;
 pub mod dotenv;
 mod interop;
