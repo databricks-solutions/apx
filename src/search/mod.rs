@@ -6,5 +6,6 @@
 pub mod embedded_model;
 pub mod embedder;
 pub mod component_index;
+pub mod common;
 
 pub use component_index::ComponentIndex;

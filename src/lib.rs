@@ -28,6 +28,7 @@ use tracing_subscriber::prelude::*;
 mod api_generator;
 mod cli;
 mod common;
+mod databricks_sdk_doc;
 mod dev;
 pub mod dotenv;
 mod interop;

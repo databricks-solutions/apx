@@ -1,4 +1,4 @@
-use lancedb::{connect, Connection, Table};
+use lancedb::{Connection, Table};
 use lancedb::query::{ExecutableQuery, QueryBase};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ use crate::cli::components::{RegistryItem, cache};
 
 use super::embedder::Embedder;
 use super::embedded_model::EMBEDDING_DIM;
+use super::common;
 
 /// Minimal component record for LanceDB storage
 /// Only contains ID and embeddings to minimize storage
@@ -21,36 +22,8 @@ pub struct ComponentRecord {
     /// Component ID: either "component-name" or "@registry-name/component-name"
     pub id: String,
     /// Embedding vector (384 dimensions for all-MiniLM-L6-v2)
-    #[serde(with = "serde_arrays")]
+    #[serde(with = "common::serde_arrays")]
     pub embedding: [f32; EMBEDDING_DIM],
-}
-
-mod serde_arrays {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use super::EMBEDDING_DIM;
-
-    pub fn serialize<S>(arr: &[f32; EMBEDDING_DIM], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        arr.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<[f32; EMBEDDING_DIM], D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let vec = Vec::<f32>::deserialize(deserializer)?;
-        let arr: [f32; EMBEDDING_DIM] = vec.try_into()
-            .map_err(|v: Vec<f32>| {
-                serde::de::Error::custom(format!(
-                    "Expected array of length {}, got {}",
-                    EMBEDDING_DIM,
-                    v.len()
-                ))
-            })?;
-        Ok(arr)
-    }
 }
 
 /// Component with metadata for indexing
@@ -178,36 +151,17 @@ impl ComponentIndex {
 
     /// Get LanceDB connection
     async fn get_connection(&self) -> Result<Connection, String> {
-        std::fs::create_dir_all(&self.db_path)
-            .map_err(|e| format!("Failed to create db directory: {e}"))?;
-
-        let db_uri = self.db_path.to_string_lossy().to_string();
-        connect(&db_uri)
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to connect to LanceDB: {e}"))
+        common::get_connection(&self.db_path).await
     }
 
     /// Check if the index table exists
     async fn table_exists(&self, table_name: &str) -> Result<bool, String> {
-        let conn = self.get_connection().await?;
-        let table_names = conn
-            .table_names()
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to list tables: {e}"))?;
-
-        Ok(table_names.contains(&table_name.to_string()))
+        common::table_exists(&self.db_path, table_name).await
     }
 
     /// Get or create the components table
     async fn get_table(&self, table_name: &str) -> Result<Table, String> {
-        let conn = self.get_connection().await?;
-
-        conn.open_table(table_name)
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to open table: {e}"))
+        common::get_table(&self.db_path, table_name).await
     }
 
     /// Build index from cached components

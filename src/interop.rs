@@ -159,3 +159,38 @@ pub(crate) fn generate_openapi_spec(
     })
     .map_err(|err| format!("Failed to generate OpenAPI schema: {err}"))
 }
+
+/// Get the installed Databricks SDK version
+pub(crate) fn get_databricks_sdk_version() -> Result<Option<String>, String> {
+    Python::attach(|py| {
+        // Try to import databricks.sdk and get its version
+        let importlib = py.import("importlib.metadata");
+
+        match importlib {
+            Ok(module) => {
+                let version_fn = module
+                    .getattr("version")
+                    .map_err(|e| format!("Failed to get version function: {e}"))?;
+
+                let version = version_fn.call1(("databricks-sdk",));
+
+                match version {
+                    Ok(v) => {
+                        let version_str: String = v
+                            .extract()
+                            .map_err(|e| format!("Failed to extract version string: {e}"))?;
+                        Ok(Some(version_str))
+                    }
+                    Err(_) => {
+                        // databricks-sdk not installed
+                        Ok(None)
+                    }
+                }
+            }
+            Err(_) => {
+                // importlib.metadata not available
+                Ok(None)
+            }
+        }
+    })
+}

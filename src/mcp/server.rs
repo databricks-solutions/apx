@@ -1,5 +1,6 @@
 use crate::mcp::core::{McpServer, ToolResult};
 use crate::dotenv::DotenvFile;
+use crate::databricks_sdk_doc::{SDKDocIndex, SDKSource};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -8,9 +9,11 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 pub struct AppContext {
     pub app_dir: PathBuf,
+    pub sdk_doc_index: Arc<Mutex<Option<SDKDocIndex>>>,
 }
 
 pub fn build_server(ctx: AppContext) -> McpServer<AppContext> {
@@ -66,6 +69,11 @@ pub fn build_server(ctx: AppContext) -> McpServer<AppContext> {
             "add_component",
             "Add a component to the project. Component ID can be 'component-name' (from default registry) or '@registry-name/component-name'.",
             add_component_tool,
+        )
+        .tool(
+            "docs",
+            "Search Databricks SDK documentation for relevant code examples and API references",
+            docs_tool,
         )
 }
 
@@ -162,6 +170,21 @@ pub struct AddComponentArgs {
     /// Force overwrite existing files
     #[serde(default)]
     pub force: bool,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DocsArgs {
+    /// Documentation source (currently only "databricks-sdk-python" is supported)
+    pub source: SDKSource,
+    /// Search query (e.g., "create cluster", "list jobs", "databricks connect")
+    pub query: String,
+    /// Maximum number of results to return
+    #[serde(default = "default_docs_limit")]
+    pub num_results: usize,
+}
+
+fn default_docs_limit() -> usize {
+    5
 }
 
 async fn start_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
@@ -628,6 +651,57 @@ async fn add_component_tool(ctx: Arc<AppContext>, args: AddComponentArgs) -> Too
             ToolResult::success(format!("Successfully added component: {}", args.component_id))
         }
         Err(e) => ToolResult::error(format!("Failed to add component: {}", e)),
+    }
+}
+
+async fn docs_tool(ctx: Arc<AppContext>, args: DocsArgs) -> ToolResult {
+    // Get the SDK doc index
+    let index_guard = ctx.sdk_doc_index.lock().await;
+
+    let index = match index_guard.as_ref() {
+        Some(idx) => idx,
+        None => {
+            return ToolResult::error(
+                "SDK documentation is not available. The Databricks SDK may not be installed or the index failed to bootstrap.".to_string()
+            );
+        }
+    };
+
+    // Search
+    match index.search(&args.source, &args.query, args.num_results).await {
+        Ok(results) => {
+            #[derive(Serialize)]
+            struct DocsResponse {
+                source: String,
+                query: String,
+                results: Vec<DocsResult>,
+            }
+
+            #[derive(Serialize)]
+            struct DocsResult {
+                text: String,
+                source_file: String,
+                score: f32,
+            }
+
+            let response = DocsResponse {
+                source: match args.source {
+                    SDKSource::DatabricksSdkPython => "databricks-sdk-python".to_string(),
+                },
+                query: args.query,
+                results: results.into_iter().map(|r| DocsResult {
+                    text: r.text,
+                    source_file: r.source_file,
+                    score: r.score,
+                }).collect(),
+            };
+
+            match serde_json::to_string_pretty(&response) {
+                Ok(json) => ToolResult::success(json),
+                Err(e) => ToolResult::error(format!("Failed to serialize results: {}", e)),
+            }
+        }
+        Err(e) => ToolResult::error(e),
     }
 }
 

@@ -278,3 +278,72 @@ async def test_search_and_add_custom_registry_component(init_test_project):
             ]), "Should have a clear error message"
         else:
             print(f"Component add result: {result_text}")
+
+
+@pytest.mark.asyncio
+async def test_docs_tool():
+    """Test the docs tool for searching Databricks SDK documentation."""
+    server_params = StdioServerParameters(command="uv", args=["run", "apx", "mcp"])
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            # Test 1: List tools and verify docs tool exists
+            tools = await session.list_tools()
+            tool_names = [t.name for t in tools.tools]
+            assert "docs" in tool_names, "docs tool should exist"
+
+            # Test 2: Search for cluster-related docs
+            print("\n=== Testing docs tool: searching for cluster documentation ===")
+            search_result = await session.call_tool(
+                "docs",
+                arguments={
+                    "source": "databricks-sdk-python",
+                    "query": "create cluster",
+                    "num_results": 3
+                }
+            )
+
+            assert len(search_result.content) > 0, "Search should return content"
+            result_text = search_result.content[0].text
+
+            # Check if we got an error or actual results
+            if "not available" in result_text or "not installed" in result_text:
+                print(f"⚠ SDK docs not available (acceptable for test): {result_text}")
+                pytest.skip("Databricks SDK not installed or docs not indexed")
+            else:
+                # We got results, parse and validate
+                result_json = json.loads(result_text)
+                print(f"\n=== Docs Search Result ===\n{json.dumps(result_json, indent=2)}\n====================\n")
+
+                assert "source" in result_json
+                assert "query" in result_json
+                assert "results" in result_json
+                assert result_json["source"] == "databricks-sdk-python"
+                assert result_json["query"] == "create cluster"
+
+                results = result_json["results"]
+                assert len(results) <= 3, "Should respect num_results limit"
+
+                if len(results) > 0:
+                    # Validate structure of first result
+                    first_result = results[0]
+                    assert "text" in first_result
+                    assert "source_file" in first_result
+                    assert "score" in first_result
+
+                    # Text should be non-empty
+                    assert len(first_result["text"]) > 0
+
+                    # Source file should be a workspace RST file
+                    assert "workspace" in first_result["source_file"]
+
+                    # Score should be between 0 and 1
+                    assert 0 <= first_result["score"] <= 1
+
+                    print(f"✓ Found {len(results)} relevant documentation chunks")
+                    print(f"  Top result score: {first_result['score']:.3f}")
+                    print(f"  Top result file: {first_result['source_file']}")
+                else:
+                    print("⚠ No results found (may be normal for specific queries)")
