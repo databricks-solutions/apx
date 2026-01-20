@@ -52,6 +52,7 @@ dev = [
     "pytest-xdist>=3.8.0",
     "ruff>=0.14.0",
     "sqlmodel>=0.0.27",
+    "tqdm>=4.67.1",
     "ty>=0.0.12",
     "types-cachetools>=6.2.0.20251022",
     "types-cffi>=1.17.0.20250915",

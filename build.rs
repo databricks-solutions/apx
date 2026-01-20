@@ -7,6 +7,8 @@ use std::os::unix::fs::PermissionsExt;
 
 const BIN_DIR: &str = ".bins";
 const OUTPUT_DIR: &str = "src/apx/binaries";
+const MODELS_DIR: &str = "assets/models";
+const MODELS_OUTPUT_DIR: &str = "src/search/models";
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
@@ -52,6 +54,58 @@ fn main() {
     let plugin_ts = manifest_dir.join("src/apx/assets/plugin.ts");
     println!("cargo:rerun-if-changed={}", plugin_ts.display());
 
+    // Copy model files to output directory
+    copy_model_files(&manifest_dir);
+}
+
+fn copy_model_files(manifest_dir: &PathBuf) {
+    let models_source = manifest_dir.join(MODELS_DIR);
+    let models_output = manifest_dir.join(MODELS_OUTPUT_DIR);
+
+    // Create output directory
+    if let Err(e) = fs::create_dir_all(&models_output) {
+        eprintln!("Warning: Failed to create models output dir: {}", e);
+        return;
+    }
+
+    // Check if models directory exists
+    if !models_source.exists() {
+        println!("cargo:warning=Models directory not found at {}. Run 'python3 scripts/download_model.py' to download models.", models_source.display());
+        return;
+    }
+
+    // Recursively copy all model files
+    match copy_dir_recursive(&models_source, &models_output) {
+        Ok(_) => {
+            println!("cargo:warning=Copied model files from {} to {}", models_source.display(), models_output.display());
+            // Watch for changes in the models directory
+            println!("cargo:rerun-if-changed={}", models_source.display());
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to copy model files: {}", e);
+        }
+    }
+}
+
+fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {
+    if !dst.exists() {
+        fs::create_dir_all(dst)?;
+    }
+
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let dst_path = dst.join(&file_name);
+
+        if path.is_dir() {
+            copy_dir_recursive(&path, &dst_path)?;
+        } else {
+            fs::copy(&path, &dst_path)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn bun_binary_name(target_os: &str, target_arch: &str) -> Option<&'static str> {

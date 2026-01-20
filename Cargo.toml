@@ -50,6 +50,4 @@ biome_rowan = "0.5.8"
 url = "2.5.8"
 lancedb = "0.23.1"
 tokenizers = "0.22.2"
-# ort = "=2.0.0-rc.11"
-# ndarray = "0.16"
 uuid = { version = "1.11", features = ["v4", "serde"] }
