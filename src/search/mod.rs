@@ -4,8 +4,7 @@
 /// Models are embedded at compile time for zero-dependency runtime.
 
 pub mod embedded_model;
+pub mod embedder;
+pub mod component_index;
 
-// TODO: Add modules for:
-// - tokenizer wrapper (using tokenizers crate)
-// - embedding generator (using candle)
-// - vector search integration (using lancedb)
+pub use component_index::ComponentIndex;

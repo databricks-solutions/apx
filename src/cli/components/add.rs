@@ -105,7 +105,7 @@ pub async fn run(args: ComponentsAddArgs) -> i32 {
     run_cli_async(|| run_inner(args)).await
 }
 
-async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
+pub async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
     let app_dir = resolve_app_dir(args.app_path);
     let loaded = load_components_json(&app_dir)?;
     let client = reqwest::Client::new();

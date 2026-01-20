@@ -33,7 +33,6 @@ pub mod dotenv;
 mod interop;
 mod mcp;
 
-#[allow(dead_code)] // TODO: Remove once search functionality is exposed
 mod search;
 
 pub use api_generator::generate_openapi;
@@ -190,6 +189,7 @@ pub(crate) fn init_tracing() {
     };
 
     let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
         .with_target(true)
         .with_line_number(true)
         .with_file(true)

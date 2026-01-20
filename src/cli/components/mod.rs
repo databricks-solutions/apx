@@ -24,13 +24,6 @@ use url::Url;
 pub const SHADCN_REGISTRY_ITEM_TEMPLATE: &str =
     "https://ui.shadcn.com/r/styles/{style}/{name}.json";
 
-#[allow(dead_code)]
-pub async fn fetch_registry_catalog(
-    client: &reqwest::Client,
-) -> Result<Vec<RegistryCatalogEntry>, String> {
-    fetch_registry_catalog_impl(client).await
-}
-
 pub async fn fetch_registry_catalog_impl(
     client: &reqwest::Client,
 ) -> Result<Vec<RegistryCatalogEntry>, String> {
@@ -372,14 +365,6 @@ pub fn resolve_component_request(
             Ok(ResolvedRequest { url, headers })
         }
     }
-}
-
-#[allow(dead_code)]
-pub async fn fetch_component(
-    client: &reqwest::Client,
-    req: &ResolvedRequest,
-) -> Result<(RegistryItem, Vec<String>), String> {
-    fetch_component_impl(client, req, None, None).await
 }
 
 pub async fn fetch_component_impl(

@@ -1,5 +1,3 @@
-#![allow(dead_code)] // TODO: Remove once functionality is implemented
-
 /// Embedded model files for all-MiniLM-L6-v2 sentence transformer.
 ///
 /// These files are embedded at compile time from assets/models/all-MiniLM-L6-v2/
@@ -23,22 +21,9 @@ pub const MODEL_SAFETENSORS: &[u8] = include_bytes!(concat!(
     "/assets/models/all-MiniLM-L6-v2/model.safetensors"
 ));
 
-/// Optional: Tokenizer config (if needed)
-pub const TOKENIZER_CONFIG_JSON: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/models/all-MiniLM-L6-v2/tokenizer_config.json"
-));
-
-/// Optional: Vocabulary file (if needed)
-pub const VOCAB_TXT: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/models/all-MiniLM-L6-v2/vocab.txt"
-));
-
 /// Model metadata
 pub const EMBEDDING_DIM: usize = 384;
 pub const MAX_SEQ_LENGTH: usize = 256;
-pub const MODEL_NAME: &str = "all-MiniLM-L6-v2";
 
 #[cfg(test)]
 mod tests {
