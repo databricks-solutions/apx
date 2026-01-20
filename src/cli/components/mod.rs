@@ -68,9 +68,26 @@ pub struct RegistryCatalogEntry {
     // pub homepage: Option<String>,
 }
 
+#[allow(dead_code)]
 pub async fn fetch_registry_catalog(
     client: &reqwest::Client,
 ) -> Result<Vec<RegistryCatalogEntry>, String> {
+    fetch_registry_catalog_impl(client, None).await
+}
+
+pub async fn fetch_registry_catalog_impl(
+    client: &reqwest::Client,
+    db: Option<&crate::db::RegistryDb>,
+) -> Result<Vec<RegistryCatalogEntry>, String> {
+    // Try cache first if available
+    if let Some(db) = db {
+        if let Ok(catalog) = db.get_catalog(client).await {
+            return Ok(catalog);
+        }
+        // Fall through to HTTP on cache error
+    }
+
+    // Direct HTTP fetch (original implementation)
     let url = "https://ui.shadcn.com/r/registries.json";
     client
         .get(url)
@@ -107,7 +124,7 @@ pub fn merge_registries(
 
 pub type CssRules = Map<String, Value>;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, serde::Serialize, Clone)]
 pub enum RegistryItemType {
     #[serde(rename = "registry:block")]
     Block,
@@ -132,7 +149,7 @@ pub enum RegistryItemType {
 }
 
 /// Component JSON (registry item)
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct RegistryItem {
     pub name: String,
     #[serde(default)]
@@ -165,7 +182,7 @@ pub struct RegistryItem {
     pub meta: Option<Value>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, serde::Serialize, Clone)]
 pub struct CssVars {
     #[serde(default)]
     pub theme: HashMap<String, String>,
@@ -175,7 +192,7 @@ pub struct CssVars {
     pub dark: HashMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct RegistryFile {
     pub path: String,
     pub content: String,
@@ -485,10 +502,31 @@ pub fn resolve_component_request(
     }
 }
 
+#[allow(dead_code)]
 pub async fn fetch_component(
     client: &reqwest::Client,
     req: &ResolvedRequest,
 ) -> Result<(RegistryItem, Vec<String>), String> {
+    fetch_component_impl(client, req, None, None, None, None).await
+}
+
+pub async fn fetch_component_impl(
+    client: &reqwest::Client,
+    req: &ResolvedRequest,
+    db: Option<&crate::db::RegistryDb>,
+    registry_name: Option<&str>,
+    style: Option<&str>,
+    component_name: Option<&str>,
+) -> Result<(RegistryItem, Vec<String>), String> {
+    // Try cache first if available and we have all metadata
+    if let (Some(db), Some(style_val), Some(component_name_val)) = (db, style, component_name) {
+        if let Ok(result) = db.get_component(client, req, registry_name, style_val, component_name_val).await {
+            return Ok(result);
+        }
+        // Fall through to HTTP on cache error
+    }
+
+    // Direct fetch (original implementation)
     match req.url.scheme() {
         "http" | "https" => fetch_http_component(client, req).await,
         "file" => fetch_file_component(req).await,
@@ -497,7 +535,7 @@ pub async fn fetch_component(
 }
 
 /// Fetch component spec, applying headers from resolved request.
-async fn fetch_http_component(
+pub(crate) async fn fetch_http_component(
     client: &reqwest::Client,
     req: &ResolvedRequest,
 ) -> Result<(RegistryItem, Vec<String>), String> {
@@ -557,6 +595,7 @@ pub async fn resolve_component_closure(
     cfg: &ComponentsJson,
     registry: Option<&str>,
     root_component: &str,
+    db: Option<&crate::db::RegistryDb>,
 ) -> Result<Vec<ResolvedComponent>, String> {
     debug!(
         registry = ?registry,
@@ -614,7 +653,15 @@ pub async fn resolve_component_closure(
                     "Resolved component request"
                 );
 
-                let (spec, warnings) = fetch_component(client, &req).await?;
+                let style = cfg.style.as_deref();
+                let (spec, warnings) = fetch_component_impl(
+                    client,
+                    &req,
+                    db,
+                    current_registry.as_deref(),
+                    style,
+                    Some(component.as_str()),
+                ).await?;
 
                 for dep in &spec.dependencies {
                     component_deps.insert(dep.to_string());
@@ -673,6 +720,7 @@ pub async fn plan_add(
     cfg: &ComponentsJson,
     registry: Option<&str>,
     component: &str,
+    db: Option<&crate::db::RegistryDb>,
 ) -> Result<AddPlan, String> {
     debug!(
         registry = ?registry,
@@ -684,7 +732,7 @@ pub async fn plan_add(
     let lib_base_dir = resolve_lib_base_dir(app_dir, cfg)?;
     let hooks_base_dir = resolve_hooks_base_dir(app_dir, cfg)?;
 
-    let discovered = fetch_registry_catalog(client).await?;
+    let discovered = fetch_registry_catalog_impl(client, db).await?;
     let merged_registries = merge_registries(&cfg.registries, &discovered);
 
     debug!(
@@ -704,7 +752,7 @@ pub async fn plan_add(
         tailwind: cfg.tailwind.clone(),
     };
 
-    let components = resolve_component_closure(client, &merged_cfg, registry, component).await?;
+    let components = resolve_component_closure(client, &merged_cfg, registry, component, db).await?;
 
     let mut files_to_write = Vec::new();
     let mut component_deps: BTreeSet<String> = BTreeSet::new();

@@ -57,6 +57,11 @@ pub fn build_server(ctx: AppContext) -> McpServer<AppContext> {
             "Fetch Databricks Apps logs from an already deployed app using the Databricks CLI",
             databricks_apps_logs_tool,
         )
+        .tool(
+            "search_registry_components",
+            "Search shadcn registry components using semantic search. Supports filtering by category, type, and registry.",
+            search_registry_components_tool,
+        )
 }
 
 // --- Resources ---
@@ -122,6 +127,23 @@ fn default_timeout_seconds() -> f64 {
 
 fn default_max_output_chars() -> i32 {
     20000
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SearchRegistryComponentsArgs {
+    pub query: String,
+    #[serde(default = "default_search_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub categories: Option<Vec<String>>,
+    #[serde(default)]
+    pub item_types: Option<Vec<String>>,
+    #[serde(default)]
+    pub registries: Option<Vec<String>>,
+}
+
+fn default_search_limit() -> usize {
+    10
 }
 
 async fn start_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
@@ -450,6 +472,35 @@ fn resolve_app_name_from_databricks_yml(project_dir: &Path) -> Result<String, St
             ({}). Please pass app_name explicitly.",
             app_names_vec.join(", ")
         )),
+    }
+}
+
+async fn search_registry_components_tool(
+    _ctx: Arc<AppContext>,
+    args: SearchRegistryComponentsArgs,
+) -> ToolResult {
+    // Initialize database
+    let db = match crate::db::get_db().await {
+        Ok(db) => db,
+        Err(e) => return ToolResult::error(format!("Failed to initialize database: {}", e)),
+    };
+
+    // Execute search
+    let results = match db.search_components(
+        &args.query,
+        args.limit,
+        args.categories.as_deref(),
+        args.item_types.as_deref(),
+        args.registries.as_deref(),
+    ).await {
+        Ok(results) => results,
+        Err(e) => return ToolResult::error(format!("Search failed: {}", e)),
+    };
+
+    // Format results as JSON
+    match serde_json::to_string_pretty(&results) {
+        Ok(json) => ToolResult::success(json),
+        Err(e) => ToolResult::error(format!("Failed to serialize results: {}", e)),
     }
 }
 

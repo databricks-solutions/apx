@@ -46,3 +46,5 @@ target/
 .uv-cache/
 
 .cursor/plans
+
+/assets/models

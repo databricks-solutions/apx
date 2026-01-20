@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::{PathBuf};
+use std::path::PathBuf;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -51,6 +51,7 @@ fn main() {
     // Watch for changes in the plugin.ts asset file
     let plugin_ts = manifest_dir.join("src/apx/assets/plugin.ts");
     println!("cargo:rerun-if-changed={}", plugin_ts.display());
+
 }
 
 fn bun_binary_name(target_os: &str, target_arch: &str) -> Option<&'static str> {
