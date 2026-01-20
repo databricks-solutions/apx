@@ -43,17 +43,26 @@ fn print_plan_summary(plan: &AddPlan) {
     }
 }
 
-fn write_file_if_changed(file: &PlannedFile, force: bool) -> Result<bool, String> {
+enum WriteResult {
+    Written,
+    Unchanged,
+}
+
+fn write_file_if_changed(
+    file: &PlannedFile,
+    force: bool,
+    app_dir: &Path,
+) -> Result<WriteResult, String> {
     if file.absolute_path.exists() {
         let existing = std::fs::read_to_string(&file.absolute_path)
             .map_err(|e| format!("Failed to read {}: {e}", file.absolute_path.display()))?;
         if existing == file.content {
-            return Ok(false);
+            return Ok(WriteResult::Unchanged);
         }
         if !force {
             return Err(format!(
                 "File already exists (use --force): {}",
-                file.absolute_path.display()
+                format_relative_path(&file.absolute_path, app_dir)
             ));
         }
     }
@@ -65,7 +74,7 @@ fn write_file_if_changed(file: &PlannedFile, force: bool) -> Result<bool, String
 
     std::fs::write(&file.absolute_path, &file.content)
         .map_err(|e| format!("Failed to write {}: {e}", file.absolute_path.display()))?;
-    Ok(true)
+    Ok(WriteResult::Written)
 }
 
 #[derive(Args, Debug, Clone)]
@@ -135,15 +144,24 @@ async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
     }
 
     let mut written_paths = Vec::new();
+    let mut unchanged_paths = Vec::new();
     for file in &plan.files_to_write {
-        if write_file_if_changed(file, args.force)? {
-            written_paths.push(file.absolute_path.clone());
+        match write_file_if_changed(file, args.force, &app_dir)? {
+            WriteResult::Written => written_paths.push(file.absolute_path.clone()),
+            WriteResult::Unchanged => unchanged_paths.push(file.absolute_path.clone()),
         }
     }
 
     if !written_paths.is_empty() {
-        println!("Added components:");
+        println!("Written:");
         for path in &written_paths {
+            println!("  {}", format_relative_path(path, &app_dir));
+        }
+    }
+
+    if !unchanged_paths.is_empty() {
+        println!("Unchanged:");
+        for path in &unchanged_paths {
             println!("  {}", format_relative_path(path, &app_dir));
         }
     }

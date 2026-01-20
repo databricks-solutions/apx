@@ -254,12 +254,15 @@ pub fn load_components_json(app_dir: &Path) -> Result<LoadedComponentsJson, Stri
     Ok(LoadedComponentsJson { config, warnings })
 }
 
-/// Resolve "@/components/ui" → filesystem path using tsconfig.json (JSONC allowed).
-pub fn resolve_ui_base_dir(app_dir: &Path, cfg: &ComponentsJson) -> Result<PathBuf, String> {
-    let ui_alias = cfg
-        .aliases
-        .get("ui")
-        .ok_or("components.json missing aliases.ui")?;
+
+/// Resolve "@/components" → filesystem path using tsconfig.json (JSONC allowed).
+fn resolve_alias_base_dir(
+    app_dir: &Path,
+    cfg: &ComponentsJson,
+    alias_key: &str,
+    missing_msg: &str,
+) -> Result<PathBuf, String> {
+    let alias = cfg.aliases.get(alias_key).ok_or(missing_msg)?;
 
     let tsconfig_path = app_dir.join("tsconfig.json");
     debug!(path = %tsconfig_path.display(), "Reading tsconfig.json");
@@ -303,8 +306,8 @@ pub fn resolve_ui_base_dir(app_dir: &Path, cfg: &ComponentsJson) -> Result<PathB
 
     for (key, targets) in paths {
         if let Some(prefix) = key.strip_suffix('*') {
-            if ui_alias.starts_with(prefix) {
-                let remainder = ui_alias.trim_start_matches(prefix);
+            if alias.starts_with(prefix) {
+                let remainder = alias.trim_start_matches(prefix);
 
                 let target = targets.first().ok_or("tsconfig paths entry is empty")?;
 
@@ -316,8 +319,41 @@ pub fn resolve_ui_base_dir(app_dir: &Path, cfg: &ComponentsJson) -> Result<PathB
     }
 
     Err(format!(
-        "Failed to resolve alias `{ui_alias}` via tsconfig.json paths"
+        "Failed to resolve alias `{alias}` via tsconfig.json paths"
     ))
+}
+
+/// Resolve "@/components" → filesystem path using tsconfig.json (JSONC allowed).
+pub fn resolve_components_base_dir(
+    app_dir: &Path,
+    cfg: &ComponentsJson,
+) -> Result<PathBuf, String> {
+    resolve_alias_base_dir(
+        app_dir,
+        cfg,
+        "components",
+        "components.json missing aliases.components",
+    )
+}
+
+/// Resolve "@/lib" → filesystem path using tsconfig.json (JSONC allowed).
+pub fn resolve_lib_base_dir(app_dir: &Path, cfg: &ComponentsJson) -> Result<PathBuf, String> {
+    resolve_alias_base_dir(
+        app_dir,
+        cfg,
+        "lib",
+        "components.json missing aliases.lib",
+    )
+}
+
+/// Resolve "@/hooks" → filesystem path using tsconfig.json (JSONC allowed).
+pub fn resolve_hooks_base_dir(app_dir: &Path, cfg: &ComponentsJson) -> Result<PathBuf, String> {
+    resolve_alias_base_dir(
+        app_dir,
+        cfg,
+        "hooks",
+        "components.json missing aliases.hooks",
+    )
 }
 
 /// Resolve a component spec request.
@@ -644,7 +680,9 @@ pub async fn plan_add(
         "Planning component addition"
     );
 
-    let ui_base_dir = resolve_ui_base_dir(app_dir, cfg)?;
+    let components_base_dir = resolve_components_base_dir(app_dir, cfg)?;
+    let lib_base_dir = resolve_lib_base_dir(app_dir, cfg)?;
+    let hooks_base_dir = resolve_hooks_base_dir(app_dir, cfg)?;
 
     let discovered = fetch_registry_catalog(client).await?;
     let merged_registries = merge_registries(&cfg.registries, &discovered);
@@ -678,11 +716,54 @@ pub async fn plan_add(
             component_deps.insert(dep.to_string());
         }
 
+        enum OutputRoot {
+            Components,
+            Lib,
+            Hooks,
+        }
+
         for file in &resolved.spec.files {
-            let rel = normalize_ui_file_path(&file.path);
-            let absolute_path = ui_base_dir.join(rel);
+            let root = match file.file_type.as_deref() {
+                Some("registry:ui") => OutputRoot::Components,
+                Some("registry:hook") => OutputRoot::Hooks,
+                Some("registry:lib") | Some("registry:file") => OutputRoot::Lib,
+                _ => OutputRoot::Components,
+            };
+
+            let file_name = match root {
+                OutputRoot::Components => format!("{}.tsx", resolved.name),
+                OutputRoot::Lib | OutputRoot::Hooks => format!("{}.ts", resolved.name),
+            };
+            let (relative_path, absolute_path) = match root {
+                OutputRoot::Components => {
+                    let registry = resolved
+                        .registry
+                        .as_deref()
+                        .map(|r| r.trim_start_matches('@'));
+
+                    let subdir = match registry {
+                        None => "ui",
+                        Some(name) => name,
+                    };
+
+                    let relative_path = PathBuf::from(subdir).join(file_name);
+                    let absolute_path = components_base_dir.join(&relative_path);
+                    (relative_path, absolute_path)
+                }
+                OutputRoot::Lib => {
+                    let relative_path = PathBuf::from(file_name);
+                    let absolute_path = lib_base_dir.join(&relative_path);
+                    (relative_path, absolute_path)
+                }
+                OutputRoot::Hooks => {
+                    let relative_path = PathBuf::from(file_name);
+                    let absolute_path = hooks_base_dir.join(&relative_path);
+                    (relative_path, absolute_path)
+                }
+            };
+
             files_to_write.push(PlannedFile {
-                relative_path: PathBuf::from(rel),
+                relative_path,
                 absolute_path,
                 content: file.content.clone(),
                 source_component: resolved.name.clone(),
@@ -697,8 +778,6 @@ pub async fn plan_add(
         warnings,
     })
 }
-
-// ---------------------- helpers ----------------------
 
 fn apply_placeholders(template: &str, name: &str, style: &str) -> Result<String, String> {
     if !template.contains("{name}") {
@@ -741,20 +820,6 @@ fn expand_env(s: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// Normalize shadcn registry file paths so they land under ui_base_dir correctly.
-fn normalize_ui_file_path(path: &str) -> &str {
-    // common patterns:
-    // - "ui/button.tsx"
-    // - "registry/new-york-v4/ui/button.tsx"
-    if let Some(idx) = path.rfind("/ui/") {
-        return &path[idx + 4..]; // after "/ui/"
-    }
-    if let Some(stripped) = path.strip_prefix("ui/") {
-        return stripped;
-    }
-    path
-}
-
 fn parse_registry_dependency(
     dep: &str,
     current_registry: Option<&str>,
@@ -763,16 +828,20 @@ fn parse_registry_dependency(
         return (None, dep.to_string());
     }
 
+    // Explicit registry always wins: "@animate-ui/foo"
     if dep.starts_with('@') {
         if let Some((registry, name)) = dep.split_once('/') {
             return (Some(registry.to_string()), name.to_string());
         }
     }
 
-    (
-        current_registry.map(|value| value.to_string()),
-        dep.to_string(),
-    )
+    // Unqualified deps should resolve from the default registry.
+    // This is crucial for 3rd-party registries that depend on shadcn primitives
+    // like "button", "input", "use-mobile", etc.
+    //
+    // If a 3rd-party registry wants an internal dep, it should qualify it via "@registry/name".
+    let _ = current_registry; // keep param for now (may be useful for future fallback logic)
+    (None, dep.to_string())
 }
 
 fn detect_forbidden_fields(value: &Value) -> Vec<String> {
@@ -842,20 +911,7 @@ fn validate_registry_item(item: &RegistryItem) -> Result<(), String> {
                 item.name, file.path
             ));
         }
-        if matches!(
-            file.file_type.as_deref(),
-            Some("registry:page") | Some("registry:file")
-        ) && file
-            .target
-            .as_ref()
-            .map(|value| value.trim().is_empty())
-            .unwrap_or(true)
-        {
-            return Err(format!(
-                "Registry item `{}` file `{}` requires a target",
-                item.name, file.path
-            ));
-        }
+
     }
     Ok(())
 }
