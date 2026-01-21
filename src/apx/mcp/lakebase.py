@@ -8,6 +8,9 @@ This module provides MCP (Model Context Protocol) tools for:
 
 The tools follow the same patterns as Neon MCP for PostgreSQL operations,
 adapted for Databricks Lakebase instances.
+
+Note: SQL execution and schema introspection require the 'lakebase' extra:
+    uv add apx[lakebase]
 """
 
 import asyncio
@@ -29,6 +32,24 @@ from apx.models import (
     LakebaseTableSchemaResponse,
     LakebaseTablesResponse,
     McpErrorResponse,
+)
+
+# Check if psycopg is available for PostgreSQL connectivity
+def _check_psycopg_available() -> bool:
+    try:
+        import psycopg  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+_psycopg_available = _check_psycopg_available()
+
+PSYCOPG_INSTALL_MSG = (
+    "The psycopg PostgreSQL driver is not installed. "
+    "Install the 'lakebase' extra to enable SQL functionality:\n"
+    "  uv add apx[lakebase]"
 )
 
 # Available Lakebase capacity tiers
@@ -66,7 +87,13 @@ def _get_lakebase_engine(
 
     Returns:
         SQLAlchemy Engine configured for the Lakebase instance
+
+    Raises:
+        ImportError: If psycopg is not installed (requires apx[lakebase] extra)
     """
+    if not _psycopg_available:
+        raise ImportError(PSYCOPG_INSTALL_MSG)
+
     instance = ws.database.get_database_instance(instance_name)
 
     username = ws.config.client_id or ws.current_user.me().user_name
