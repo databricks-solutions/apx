@@ -14,9 +14,13 @@ Note: SQL execution and schema introspection require the 'lakebase' extra:
 """
 
 import asyncio
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from databricks.sdk import WorkspaceClient
+from pydantic import JsonValue
 from databricks.sdk.errors import NotFound
 from sqlalchemy import create_engine, event, text
 
@@ -115,6 +119,56 @@ def _get_lakebase_engine(
     event.listen(engine, "do_connect", before_connect)
 
     return engine
+
+
+def _serialize_row_value(value: Any) -> JsonValue:
+    """Convert a database value to a JSON-serializable type.
+
+    Handles common PostgreSQL types that are not natively JSON-serializable:
+    - datetime, date, time -> ISO format string
+    - timedelta -> string representation
+    - Decimal -> float
+    - UUID -> string
+    - bytes -> UTF-8 decoded string
+    - memoryview -> UTF-8 decoded string
+
+    Args:
+        value: Any value from a database row
+
+    Returns:
+        A JSON-serializable value (str, int, float, bool, list, dict, or None)
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, timedelta):
+        return str(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (bytes, memoryview)):
+        return bytes(value).decode("utf-8", errors="replace")
+    if isinstance(value, (list, tuple)):
+        return [_serialize_row_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _serialize_row_value(v) for k, v in value.items()}
+    # Fallback for any other type
+    return str(value)
+
+
+def _serialize_row(columns: list[str], row: tuple[Any, ...]) -> dict[str, JsonValue]:
+    """Convert a database row to a JSON-serializable dictionary.
+
+    Args:
+        columns: List of column names
+        row: Tuple of values from the database
+
+    Returns:
+        Dictionary mapping column names to JSON-serializable values
+    """
+    return {col: _serialize_row_value(val) for col, val in zip(columns, row)}
 
 
 # ============================================================================
@@ -346,11 +400,11 @@ async def run_lakebase_sql(
 
                 if result.returns_rows:
                     columns = list(result.keys())
-                    rows = [dict(zip(columns, row)) for row in result.fetchall()]
+                    rows = [_serialize_row(columns, row) for row in result.fetchall()]
                     return LakebaseSqlResult(
                         success=True,
                         columns=columns,
-                        rows=rows,  # type: ignore[arg-type]
+                        rows=rows,
                     )
                 else:
                     if not read_only:
