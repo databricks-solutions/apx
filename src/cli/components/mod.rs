@@ -5,13 +5,12 @@ pub mod models;
 pub mod utils;
 
 // Re-export models for easier access
-pub use models::{ComponentsJson, CssRules, RegistryCatalogEntry, RegistryConfig, RegistryItem};
+pub use models::{CssRules, RegistryCatalogEntry, RegistryConfig, RegistryItem, UiConfig};
 
-use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use tracing::{debug, trace};
+use tracing::debug;
 use url::Url;
 
 /// Default shadcn/ui registry item template.
@@ -96,12 +95,6 @@ pub struct PlannedFile {
     pub source_component: String,
 }
 
-#[derive(Debug)]
-pub struct LoadedComponentsJson {
-    pub config: ComponentsJson,
-    pub warnings: Vec<String>,
-}
-
 /// Request resolved from a registry definition (URL + optional headers/params).
 #[derive(Debug, Clone)]
 pub struct ResolvedRequest {
@@ -109,143 +102,14 @@ pub struct ResolvedRequest {
     pub headers: HashMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct TsConfig {
-    #[serde(rename = "compilerOptions")]
-    compiler_options: Option<TsCompilerOptions>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TsCompilerOptions {
-    #[serde(rename = "baseUrl")]
-    base_url: Option<String>,
-
-    paths: Option<HashMap<String, Vec<String>>>,
-}
-
-pub fn load_components_json(app_dir: &Path) -> Result<LoadedComponentsJson, String> {
-    let path = app_dir.join("components.json");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read components.json: {e}"))?;
-
-    let value: Value =
-        serde_json::from_str(&text).map_err(|e| format!("Invalid components.json: {e}"))?;
-    let warnings = Vec::new();
-    let config =
-        serde_json::from_value(value).map_err(|e| format!("Invalid components.json: {e}"))?;
-    Ok(LoadedComponentsJson { config, warnings })
-}
-
-
-/// Resolve "@/components" → filesystem path using tsconfig.json (JSONC allowed).
-fn resolve_alias_base_dir(
-    app_dir: &Path,
-    cfg: &ComponentsJson,
-    alias_key: &str,
-    missing_msg: &str,
-) -> Result<PathBuf, String> {
-    let alias = cfg.aliases.get(alias_key).ok_or(missing_msg)?;
-
-    let tsconfig_path = app_dir.join("tsconfig.json");
-    debug!(path = %tsconfig_path.display(), "Reading tsconfig.json");
-
-    let raw = std::fs::read_to_string(&tsconfig_path)
-        .map_err(|e| format!("Failed to read tsconfig.json: {e}"))?;
-
-    trace!(length = raw.len(), "Raw tsconfig.json loaded");
-    trace!("Raw tsconfig.json first 30 lines:");
-    for (i, line) in raw.lines().take(30).enumerate() {
-        trace!(line_num = i + 1, line = %line, "Raw tsconfig line");
-    }
-
-    let stripped = crate::cli::components::utils::strip_jsonc_comments(&raw);
-
-    trace!(
-        length = stripped.len(),
-        "Stripped tsconfig.json after comment removal"
-    );
-    trace!("Stripped tsconfig.json first 30 lines:");
-    for (i, line) in stripped.lines().take(30).enumerate() {
-        trace!(line_num = i + 1, line = %line, "Stripped tsconfig line");
-    }
-
-    let tsconfig: TsConfig = serde_json::from_str(&stripped).map_err(|e| {
-        debug!(error = %e, "JSON parse error");
-        debug!(error_details = ?e, "Full error details");
-        format!("Invalid tsconfig.json: {e}")
-    })?;
-
-    let compiler = tsconfig
-        .compiler_options
-        .ok_or("tsconfig.json missing compilerOptions")?;
-
-    let base_url = compiler.base_url.unwrap_or_else(|| ".".to_string());
-    let base_url = Path::new(&base_url);
-
-    let paths = compiler
-        .paths
-        .ok_or("tsconfig.json missing compilerOptions.paths")?;
-
-    for (key, targets) in paths {
-        if let Some(prefix) = key.strip_suffix('*') {
-            if alias.starts_with(prefix) {
-                let remainder = alias.trim_start_matches(prefix);
-
-                let target = targets.first().ok_or("tsconfig paths entry is empty")?;
-
-                let target_base = target.strip_suffix('*').unwrap_or(target);
-
-                return Ok(app_dir.join(base_url).join(target_base).join(remainder));
-            }
-        }
-    }
-
-    Err(format!(
-        "Failed to resolve alias `{alias}` via tsconfig.json paths"
-    ))
-}
-
-/// Resolve "@/components" → filesystem path using tsconfig.json (JSONC allowed).
-pub fn resolve_components_base_dir(
-    app_dir: &Path,
-    cfg: &ComponentsJson,
-) -> Result<PathBuf, String> {
-    resolve_alias_base_dir(
-        app_dir,
-        cfg,
-        "components",
-        "components.json missing aliases.components",
-    )
-}
-
-/// Resolve "@/lib" → filesystem path using tsconfig.json (JSONC allowed).
-pub fn resolve_lib_base_dir(app_dir: &Path, cfg: &ComponentsJson) -> Result<PathBuf, String> {
-    resolve_alias_base_dir(
-        app_dir,
-        cfg,
-        "lib",
-        "components.json missing aliases.lib",
-    )
-}
-
-/// Resolve "@/hooks" → filesystem path using tsconfig.json (JSONC allowed).
-pub fn resolve_hooks_base_dir(app_dir: &Path, cfg: &ComponentsJson) -> Result<PathBuf, String> {
-    resolve_alias_base_dir(
-        app_dir,
-        cfg,
-        "hooks",
-        "components.json missing aliases.hooks",
-    )
-}
-
 /// Resolve a component spec request.
 ///
 /// Behavior:
 /// - If `component` is a full URL: use it directly.
 /// - If `registry` is None: use shadcn default template with {style}.
-/// - Else: look up registry in components.json registries and resolve {name}, {style},
+/// - Else: look up registry in UiConfig registries and resolve {name}, {style},
 pub fn resolve_component_request(
-    cfg: &ComponentsJson,
+    cfg: &UiConfig,
     registry: Option<&str>,
     component: &str,
 ) -> Result<ResolvedRequest, String> {
@@ -265,10 +129,7 @@ pub fn resolve_component_request(
         });
     }
 
-    let style = cfg
-        .style
-        .as_deref()
-        .ok_or("components.json missing style")?;
+    let style = cfg.style();
 
     // 2) Default registry: shadcn/ui
     if registry.is_none() {
@@ -291,7 +152,7 @@ pub fn resolve_component_request(
         });
     }
 
-    // 3) Named registry from components.json
+    // 3) Named registry from UiConfig
     // SAFETY: registry is guaranteed to be Some here because we returned early if it was None
     let Some(registry_name) = registry else {
         unreachable!("registry cannot be None here due to early return above")
@@ -299,7 +160,7 @@ pub fn resolve_component_request(
 
     debug!(
         registry_name = registry_name,
-        "Looking up named registry in components.json"
+        "Looking up named registry in UiConfig"
     );
 
     let reg = cfg
@@ -453,7 +314,7 @@ async fn fetch_file_component(
 
 pub async fn resolve_component_closure(
     client: &reqwest::Client,
-    cfg: &ComponentsJson,
+    cfg: &UiConfig,
     registry: Option<&str>,
     root_component: &str,
 ) -> Result<Vec<ResolvedComponent>, String> {
@@ -574,7 +435,7 @@ pub async fn resolve_component_closure(
 pub async fn plan_add(
     client: &reqwest::Client,
     app_dir: &Path,
-    cfg: &ComponentsJson,
+    cfg: &UiConfig,
     registry: Option<&str>,
     component: &str,
 ) -> Result<AddPlan, String> {
@@ -584,9 +445,9 @@ pub async fn plan_add(
         "Planning component addition"
     );
 
-    let components_base_dir = resolve_components_base_dir(app_dir, cfg)?;
-    let lib_base_dir = resolve_lib_base_dir(app_dir, cfg)?;
-    let hooks_base_dir = resolve_hooks_base_dir(app_dir, cfg)?;
+    let components_base_dir = app_dir.join(cfg.components_dir());
+    let lib_base_dir = app_dir.join(cfg.lib_dir());
+    let hooks_base_dir = app_dir.join(cfg.hooks_dir());
 
     let discovered = fetch_registry_catalog_impl(client).await?;
     let merged_registries = merge_registries(&cfg.registries, &discovered);
@@ -598,14 +459,12 @@ pub async fn plan_add(
         "Registry merge complete"
     );
 
-    // print cfg.tailwind.css
-    debug!(cfg.tailwind.css = ?cfg.tailwind.css, "CSS file path loaded");
+    // print CSS path
+    debug!(css_path = ?cfg.css_path(), "CSS file path loaded");
 
-    let merged_cfg = ComponentsJson {
-        style: cfg.style.clone(),
-        aliases: cfg.aliases.clone(),
+    let merged_cfg = UiConfig {
+        root: cfg.root.clone(),
         registries: merged_registries,
-        tailwind: cfg.tailwind.clone(),
     };
 
     let components = resolve_component_closure(client, &merged_cfg, registry, component).await?;
@@ -669,7 +528,7 @@ pub async fn plan_add(
             files_to_write.push(PlannedFile {
                 relative_path,
                 absolute_path,
-                content: file.content.clone(),
+                content: rewrite_registry_imports(&file.content),
                 source_component: resolved.name.clone(),
             });
         }
@@ -681,6 +540,40 @@ pub async fn plan_add(
         component_deps,
         warnings,
     })
+}
+
+/// Rewrite imports from shadcn registry structure to flat structure.
+/// Transforms: `@/registry/{style}/hooks/use-mobile` → `@/hooks/use-mobile`
+/// Transforms: `@/registry/{style}/components/ui/button` → `@/components/ui/button`
+/// Transforms: `@/registry/{style}/lib/utils` → `@/lib/utils`
+fn rewrite_registry_imports(content: &str) -> String {
+    const PREFIX: &str = "@/registry/";
+    
+    let mut result = String::with_capacity(content.len());
+    let mut remaining = content;
+    
+    while let Some(pos) = remaining.find(PREFIX) {
+        // Add everything before the match
+        result.push_str(&remaining[..pos]);
+        
+        // Skip past "@/registry/"
+        let after_prefix = &remaining[pos + PREFIX.len()..];
+        
+        // Find the next '/' which marks the end of the style name
+        if let Some(slash_pos) = after_prefix.find('/') {
+            // Skip the style name and the slash, replace with "@/"
+            result.push_str("@/");
+            remaining = &after_prefix[slash_pos + 1..];
+        } else {
+            // No slash found, just copy the prefix and continue
+            result.push_str(PREFIX);
+            remaining = after_prefix;
+        }
+    }
+    
+    // Add any remaining content
+    result.push_str(remaining);
+    result
 }
 
 fn apply_placeholders(template: &str, name: &str, style: &str) -> Result<String, String> {

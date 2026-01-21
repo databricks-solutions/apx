@@ -1,28 +1,56 @@
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-/// Subset of components.json we actually need (plus "style")
-#[derive(Debug, Deserialize, Clone)]
-pub struct ComponentsJson {
-    #[serde(default)]
-    pub style: Option<String>,
+use crate::common::ProjectMetadata;
 
-    #[serde(default)]
-    pub aliases: HashMap<String, String>,
-
-    /// Registries can be:
-    ///   - string template: "https://example.com/r/{name}.json"
-    ///   - advanced object: { "url": "...", "headers": {...}, "params": {...} }
-    #[serde(default)]
+/// UI configuration derived from pyproject.toml [tool.apx.ui]
+#[derive(Debug, Clone)]
+pub struct UiConfig {
+    pub root: PathBuf,
     pub registries: HashMap<String, RegistryConfig>,
-
-    pub tailwind: TailwindConfig,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct TailwindConfig {
-    pub css: String,
+impl UiConfig {
+    /// Construct UiConfig from ProjectMetadata
+    pub fn from_metadata(metadata: &ProjectMetadata, app_dir: &Path) -> Self {
+        let root = app_dir.join(&metadata.ui_root);
+        
+        // Convert string registries to RegistryConfig
+        let registries: HashMap<String, RegistryConfig> = metadata
+            .ui_registries
+            .iter()
+            .map(|(k, v)| (k.clone(), RegistryConfig::Template(v.clone())))
+            .collect();
+
+        Self { root, registries }
+    }
+
+    /// Hardcoded shadcn style
+    pub fn style(&self) -> &str {
+        "new-york"
+    }
+
+    /// CSS file path: {root}/styles/globals.css
+    pub fn css_path(&self) -> PathBuf {
+        self.root.join("styles/globals.css")
+    }
+
+    /// Components dir: {root}/components
+    pub fn components_dir(&self) -> PathBuf {
+        self.root.join("components")
+    }
+
+    /// Lib dir: {root}/lib
+    pub fn lib_dir(&self) -> PathBuf {
+        self.root.join("lib")
+    }
+
+    /// Hooks dir: {root}/hooks
+    pub fn hooks_dir(&self) -> PathBuf {
+        self.root.join("hooks")
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

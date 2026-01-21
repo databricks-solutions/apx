@@ -1,10 +1,10 @@
 use clap::Args;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use tokio::process::Command;
 
 use crate::bun_binary_path;
-use crate::cli::run_cli;
+use crate::cli::run_cli_async;
 use crate::common::{
     bun_install, ensure_dir, read_project_metadata, sync_apx_plugin_from_package,
     write_metadata_file,
@@ -32,11 +32,11 @@ pub struct BuildArgs {
     pub skip_ui_build: bool,
 }
 
-pub fn run(args: BuildArgs) -> i32 {
-    run_cli(|| run_inner(args))
+pub async fn run(args: BuildArgs) -> i32 {
+    run_cli_async(|| run_inner(args)).await
 }
 
-fn run_inner(args: BuildArgs) -> Result<(), String> {
+async fn run_inner(args: BuildArgs) -> Result<(), String> {
     let app_path = args
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -74,12 +74,12 @@ fn run_inner(args: BuildArgs) -> Result<(), String> {
         let node_modules_dir = app_path.join("node_modules");
         if !node_modules_dir.exists() {
             let bun_path = bun_binary_path()?;
-            bun_install(app_path.as_path(), bun_path.as_path())?;
+            bun_install(app_path.as_path(), bun_path.as_path()).await?;
         }
-        build_ui(&app_path)?;
+        build_ui(&app_path).await?;
     }
 
-    build_wheel(&app_path, &args.build_path)?;
+    build_wheel(&app_path, &args.build_path).await?;
     copy_app_config_files(&app_path, &build_dir)?;
 
     let wheel_file = find_wheel_file(&build_dir)?;
@@ -91,13 +91,14 @@ fn run_inner(args: BuildArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn build_ui(app_path: &Path) -> Result<(), String> {
+async fn build_ui(app_path: &Path) -> Result<(), String> {
     let bun_path = bun_binary_path()?;
     let output = Command::new(bun_path)
         .arg("run")
         .arg("build")
         .current_dir(app_path)
         .output()
+        .await
         .map_err(|err| format!("Failed to run bun build: {err}"))?;
 
     if !output.status.success() {
@@ -110,8 +111,8 @@ fn build_ui(app_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn build_wheel(app_path: &Path, build_path: &Path) -> Result<(), String> {
-    let base_version = get_base_version(app_path);
+async fn build_wheel(app_path: &Path, build_path: &Path) -> Result<(), String> {
+    let base_version = get_base_version(app_path).await;
     let build_version = generate_build_version(&base_version);
 
     let output = Command::new("uv")
@@ -122,6 +123,7 @@ fn build_wheel(app_path: &Path, build_path: &Path) -> Result<(), String> {
         .current_dir(app_path)
         .env("UV_DYNAMIC_VERSIONING_BYPASS", build_version)
         .output()
+        .await
         .map_err(|err| format!("Failed to run uv build: {err}"))?;
 
     if !output.status.success() {
@@ -171,13 +173,14 @@ fn find_wheel_file(build_dir: &Path) -> Result<String, String> {
         .ok_or_else(|| "Invalid wheel file name".to_string())
 }
 
-fn get_base_version(app_path: &Path) -> String {
+async fn get_base_version(app_path: &Path) -> String {
     let output = Command::new("uv")
         .arg("run")
         .arg("hatch")
         .arg("version")
         .current_dir(app_path)
-        .output();
+        .output()
+        .await;
 
     match output {
         Ok(result) => {

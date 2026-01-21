@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use tokio::process::Command;
 
 const DEFAULT_API_PREFIX: &str = "/api";
 const PYPROJECT_FILENAME: &str = "pyproject.toml";
@@ -12,6 +13,8 @@ pub struct ProjectMetadata {
     pub app_module: String,
     pub api_prefix: String,
     pub metadata_path: PathBuf,
+    pub ui_root: PathBuf,
+    pub ui_registries: HashMap<String, String>,
 }
 
 pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, String> {
@@ -22,10 +25,13 @@ pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, Str
         .parse()
         .map_err(|err| format!("Failed to parse pyproject.toml: {err}"))?;
 
-    let metadata = pyproject_value
+    let apx = pyproject_value
         .get("tool")
         .and_then(|tool| tool.get("apx"))
-        .and_then(|apx| apx.get("metadata"))
+        .ok_or_else(|| "Missing tool.apx in pyproject.toml".to_string())?;
+
+    let metadata = apx
+        .get("metadata")
         .ok_or_else(|| "Missing tool.apx.metadata in pyproject.toml".to_string())?;
 
     let app_name = get_metadata_string(metadata, "app-name")?;
@@ -38,12 +44,36 @@ pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, Str
         .to_string();
     let metadata_path = get_metadata_string(metadata, "metadata-path")?;
 
+    // Parse UI configuration
+    let ui = apx.get("ui");
+    
+    let ui_root = ui
+        .and_then(|u| u.get("root"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("src/ui")
+        .to_string();
+
+    let ui_registries: HashMap<String, String> = ui
+        .and_then(|u| u.get("registries"))
+        .and_then(|r| r.as_table())
+        .map(|table| {
+            table
+                .iter()
+                .filter_map(|(k, v)| {
+                    v.as_str().map(|s| (k.clone(), s.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     Ok(ProjectMetadata {
         app_name,
         app_slug,
         app_module,
         api_prefix,
         metadata_path: PathBuf::from(metadata_path),
+        ui_root: PathBuf::from(ui_root),
+        ui_registries,
     })
 }
 
@@ -102,7 +132,7 @@ pub fn sync_apx_plugin_from_package(app_dir: &Path) -> Result<(), String> {
 }
 
 
-pub fn bun_install(app_dir: &Path, bun_path: &Path) -> Result<(), String> {
+pub async fn bun_install(app_dir: &Path, bun_path: &Path) -> Result<(), String> {
     let mut cmd = Command::new(bun_path);
     cmd.arg("install");
     if let Ok(cache_dir) = std::env::var("BUN_CACHE_DIR") {
@@ -111,6 +141,7 @@ pub fn bun_install(app_dir: &Path, bun_path: &Path) -> Result<(), String> {
     cmd.current_dir(app_dir);
     let output = cmd
         .output()
+        .await
         .map_err(|err| format!("Failed to run bun install: {err}"))?;
 
     if !output.status.success() {

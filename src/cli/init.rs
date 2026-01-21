@@ -5,14 +5,15 @@ use rand::seq::SliceRandom;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::thread;
 use std::time::{Duration, Instant};
 use tera::Context;
+use tokio::process::Command;
 use walkdir::WalkDir;
 
 use crate::bun_binary_path;
-use crate::cli::run_cli;
+use crate::cli::run_cli_async;
+use crate::cli::components::add::run_inner as add_component;
+use crate::cli::components::add::ComponentsAddArgs;
 use crate::common::bun_install;
 use crate::dotenv::DotenvFile;
 use crate::interop::{list_profiles, templates_dir};
@@ -112,15 +113,15 @@ pub struct InitArgs {
     pub skip_build: bool,
 }
 
-pub fn run(args: InitArgs) -> i32 {
-    run_cli(|| run_inner(args))
+pub async fn run(args: InitArgs) -> i32 {
+    run_cli_async(|| run_inner(args)).await
 }
 
-fn run_inner(mut args: InitArgs) -> Result<(), String> {
-    if !is_command_available("uv") {
+async fn run_inner(mut args: InitArgs) -> Result<(), String> {
+    if !is_command_available("uv").await {
         return Err("uv is not installed. Please install uv to continue.".to_string());
     }
-    if !is_command_available("git") {
+    if !is_command_available("git").await {
         return Err("git is not installed. Please install git to continue.".to_string());
     }
 
@@ -284,20 +285,20 @@ fn run_inner(mut args: InitArgs) -> Result<(), String> {
         },
     )?;
 
-    if is_in_git_repo(&app_path)? {
+    if is_in_git_repo(&app_path).await? {
         println!("Skipping git init (already in a git repository)");
     } else {
-        run_with_spinner(
+        run_with_spinner_async(
             "🔧 Initializing git repository...",
             "✅ Git repository initialized",
-            || {
+            || async {
                 let mut init_cmd = Command::new("git");
                 init_cmd.arg("init").current_dir(&app_path);
-                run_command(&mut init_cmd, "Failed to initialize git repository")?;
+                run_command(&mut init_cmd, "Failed to initialize git repository").await?;
 
                 let mut add_cmd = Command::new("git");
                 add_cmd.arg("add").arg(".").current_dir(&app_path);
-                run_command(&mut add_cmd, "Failed to add files to git repository")?;
+                run_command(&mut add_cmd, "Failed to add files to git repository").await?;
 
                 let mut commit_cmd = Command::new("git");
                 commit_cmd
@@ -305,18 +306,19 @@ fn run_inner(mut args: InitArgs) -> Result<(), String> {
                     .arg("-m")
                     .arg("init")
                     .current_dir(&app_path);
-                run_command(&mut commit_cmd, "Failed to commit files to git repository")?;
+                run_command(&mut commit_cmd, "Failed to commit files to git repository").await?;
                 Ok(())
             },
-        )?;
+        )
+        .await?;
     }
 
     let backend_task = if !args.skip_backend_dependencies {
         let app_path = app_path.clone();
         let apx_package = args.apx_package.clone();
         let apx_editable = args.apx_editable;
-        Some(thread::spawn(move || {
-            setup_backend(&app_path, &apx_package, apx_editable)
+        Some(tokio::spawn(async move {
+            setup_backend(&app_path, &apx_package, apx_editable).await
         }))
     } else {
         None
@@ -325,7 +327,9 @@ fn run_inner(mut args: InitArgs) -> Result<(), String> {
     let frontend_task = if !args.skip_frontend_dependencies {
         let app_path = app_path.clone();
         let bun_path = bun_path.clone();
-        Some(thread::spawn(move || bun_install(&app_path, &bun_path)))
+        Some(tokio::spawn(
+            async move { bun_install(&app_path, &bun_path).await },
+        ))
     } else {
         None
     };
@@ -334,16 +338,24 @@ fn run_inner(mut args: InitArgs) -> Result<(), String> {
         let spinner = spinner("📦 Installing dependencies...");
         let dependencies_start = Instant::now();
 
-        let backend_result = backend_task.map(|handle| {
-            handle
-                .join()
-                .unwrap_or_else(|_| Err("Backend setup panicked".to_string()))
-        });
-        let frontend_result = frontend_task.map(|handle| {
-            handle
-                .join()
-                .unwrap_or_else(|_| Err("Frontend setup panicked".to_string()))
-        });
+        let backend_result = if let Some(handle) = backend_task {
+            Some(
+                handle
+                    .await
+                    .unwrap_or_else(|_| Err("Backend setup panicked".to_string())),
+            )
+        } else {
+            None
+        };
+        let frontend_result = if let Some(handle) = frontend_task {
+            Some(
+                handle
+                    .await
+                    .unwrap_or_else(|_| Err("Frontend setup panicked".to_string())),
+            )
+        } else {
+            None
+        };
 
         spinner.finish_and_clear();
 
@@ -361,40 +373,55 @@ fn run_inner(mut args: InitArgs) -> Result<(), String> {
     }
 
     if !args.skip_frontend_dependencies {
-        run_with_spinner(
+        run_with_spinner_async(
             "🎨 Bootstrapping shadcn components...",
             "✅ Shadcn components added",
-            || {
-                add_shadcn_components(&app_path, &bun_path, &["button"])?;
+            || async {
+                add_component(ComponentsAddArgs {
+                    component: "button".to_string(),
+                    registry: None,
+                    force: true,
+                    dry_run: false,
+                    app_path: Some(app_path.clone()),
+                })
+                .await?;
+                
                 if matches!(layout, Layout::Sidebar) {
-                    add_shadcn_components(
-                        &app_path,
-                        &bun_path,
-                        &[
-                            "avatar",
-                            "sidebar",
-                            "separator",
-                            "skeleton",
-                            "badge",
-                            "sidebar",
-                            "card",
-                        ],
-                    )?;
+                    let components = vec![
+                        "avatar",
+                        "sidebar",
+                        "separator",
+                        "skeleton",
+                        "badge",
+                        "card",
+                    ];
+                    for comp in components {
+                        add_component(ComponentsAddArgs {
+                            component: comp.to_string(),
+                            registry: None,
+                            force: true,
+                            dry_run: false,
+                            app_path: Some(app_path.clone()),
+                        })
+                        .await?;
+                    }
                 }
                 Ok(())
             },
-        )?;
+        )
+        .await?;
     }
 
     if !args.skip_build {
-        run_with_spinner("🔧 Building project...", "✅ Project built", || {
+        run_with_spinner_async("🔧 Building project...", "✅ Project built", || async {
             let mut cmd = Command::new("uv");
             cmd.arg("run")
                 .arg("apx")
                 .arg("build")
                 .current_dir(&app_path);
-            run_command(&mut cmd, "Failed to build project")
-        })?;
+            run_command(&mut cmd, "Failed to build project").await
+        })
+        .await?;
     }
 
     if let Some(assistant) = args.assistant.take() {
@@ -459,6 +486,25 @@ where
     let spinner = spinner(description);
     let start = Instant::now();
     let result = f();
+    spinner.finish_and_clear();
+    if result.is_ok() {
+        println!("{} ({})", success_message, format_elapsed_ms(start));
+    }
+    result
+}
+
+async fn run_with_spinner_async<F, Fut>(
+    description: &str,
+    success_message: &str,
+    f: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let spinner = spinner(description);
+    let start = Instant::now();
+    let result = f().await;
     spinner.finish_and_clear();
     if result.is_ok() {
         println!("{} ({})", success_message, format_elapsed_ms(start));
@@ -594,12 +640,13 @@ fn process_template_directory(
 }
 
 
-fn is_in_git_repo(path: &Path) -> Result<bool, String> {
+async fn is_in_git_repo(path: &Path) -> Result<bool, String> {
     let output = Command::new("git")
         .arg("rev-parse")
         .arg("--is-inside-work-tree")
         .current_dir(path)
         .output()
+        .await
         .map_err(|err| format!("Failed to check git repository: {err}"))?;
     let is_inside = output.status.success()
         && String::from_utf8_lossy(&output.stdout).trim() == "true";
@@ -619,8 +666,11 @@ fn has_git_dir(path: &Path) -> bool {
     false
 }
 
-fn run_command(cmd: &mut Command, error_msg: &str) -> Result<(), String> {
-    let output = cmd.output().map_err(|err| format!("{error_msg}: {err}"))?;
+async fn run_command(cmd: &mut Command, error_msg: &str) -> Result<(), String> {
+    let output = cmd
+        .output()
+        .await
+        .map_err(|err| format!("{error_msg}: {err}"))?;
     if output.status.success() {
         return Ok(());
     }
@@ -636,20 +686,8 @@ fn run_command(cmd: &mut Command, error_msg: &str) -> Result<(), String> {
     Err(message)
 }
 
-fn add_shadcn_components(app_path: &Path, bun_path: &Path, args: &[&str]) -> Result<(), String> {
-    let mut cmd = Command::new(bun_path);
-    cmd.arg("x")
-        .arg("--bun")
-        .arg("shadcn@latest")
-        .arg("add")
-        .args(args)
-        .arg("--yes")
-        .arg("--overwrite")
-        .current_dir(app_path);
-    run_command(&mut cmd, "Failed to add shadcn components")
-}
 
-fn setup_backend(app_path: &Path, apx_package: &str, apx_editable: bool) -> Result<(), String> {
+async fn setup_backend(app_path: &Path, apx_package: &str, apx_editable: bool) -> Result<(), String> {
     generate_metadata_file(app_path)?;
     if !apx_package.is_empty() {
         let mut cmd = Command::new("uv");
@@ -658,11 +696,11 @@ fn setup_backend(app_path: &Path, apx_package: &str, apx_editable: bool) -> Resu
             cmd.arg("--editable");
         }
         cmd.arg(apx_package).current_dir(app_path);
-        run_command(&mut cmd, "Failed to add apx package")?;
+        run_command(&mut cmd, "Failed to add apx package").await?;
     }
     let mut sync_cmd = Command::new("uv");
     sync_cmd.arg("sync").current_dir(app_path);
-    run_command(&mut sync_cmd, "Failed to set up project")
+    run_command(&mut sync_cmd, "Failed to set up project").await
 }
 
 fn generate_metadata_file(app_path: &Path) -> Result<(), String> {
@@ -709,10 +747,11 @@ fn generate_metadata_file(app_path: &Path) -> Result<(), String> {
     fs::write(target_path, contents).map_err(|err| format!("Failed to write metadata file: {err}"))
 }
 
-fn is_command_available(cmd: &str) -> bool {
+async fn is_command_available(cmd: &str) -> bool {
     Command::new(cmd)
         .arg("--version")
         .output()
+        .await
         .map(|output| output.status.success())
         .unwrap_or(false)
 }

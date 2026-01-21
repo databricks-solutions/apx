@@ -138,8 +138,8 @@ fn run_cli(args: Vec<String>) -> i32 {
 async fn run_cli_async(args: Vec<String>) -> i32 {
     match Cli::try_parse_from(args) {
         Ok(cli) => match cli.command {
-            Some(Commands::Init(init_args)) => cli::init::run(init_args),
-            Some(Commands::Build(build_args)) => cli::build::run(build_args),
+            Some(Commands::Init(init_args)) => cli::init::run(init_args).await,
+            Some(Commands::Build(build_args)) => cli::build::run(build_args).await,
             Some(Commands::Bun(bun_args)) => cli::bun::run(bun_args).await,
             Some(Commands::Components(components_cmd)) => match components_cmd {
                 ComponentsCommands::Add(args) => cli::components::add::run(args).await,

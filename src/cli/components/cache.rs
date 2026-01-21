@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use super::models::{RegistryItem, RegistryCatalogEntry, ComponentsJson};
+use super::models::{RegistryItem, RegistryCatalogEntry, UiConfig};
 use super::{resolve_component_request, fetch_component_impl, merge_registries, fetch_registry_catalog_impl};
+use crate::common::read_project_metadata;
 
 /// Current cache format version
 const CACHE_VERSION: u8 = 2;
@@ -228,7 +229,7 @@ pub fn save_cached_registry_catalog(entries: &[RegistryCatalogEntry]) -> Result<
 async fn fetch_registry_components_list(
     client: &reqwest::Client,
     registry_name: Option<&str>,
-    _cfg: &ComponentsJson,
+    _cfg: &UiConfig,
 ) -> Result<Vec<String>, String> {
     // For default shadcn registry, we need to fetch the components list
     // The shadcn registry has an index at https://ui.shadcn.com/r/index.json
@@ -282,25 +283,24 @@ async fn fetch_registry_components_list(
     Ok(Vec::new())
 }
 
-/// Sync all items from all registries in components.json
+/// Sync all items from all registries in pyproject.toml
 /// This downloads ALL items from each registry and caches them
 pub async fn sync_all_registries(
     app_dir: &Path,
 ) -> Result<HashMap<String, Vec<String>>, String> {
-    tracing::info!("Syncing all registries from components.json");
+    tracing::info!("Syncing all registries from pyproject.toml");
 
-    let cfg = super::load_components_json(app_dir)?.config;
+    let metadata = read_project_metadata(app_dir)?;
+    let cfg = UiConfig::from_metadata(&metadata, app_dir);
     let client = reqwest::Client::new();
 
     // Fetch registry catalog
     let discovered = fetch_registry_catalog_impl(&client).await?;
     let merged_registries = merge_registries(&cfg.registries, &discovered);
 
-    let merged_cfg = ComponentsJson {
-        style: cfg.style.clone(),
-        aliases: cfg.aliases.clone(),
+    let merged_cfg = UiConfig {
+        root: cfg.root.clone(),
         registries: merged_registries.clone(),
-        tailwind: cfg.tailwind.clone(),
     };
 
     let mut synced_items: HashMap<String, Vec<String>> = HashMap::new();

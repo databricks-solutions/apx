@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 use crate::{bun_binary_path, cli::run_cli_async};
+use crate::common::read_project_metadata;
 
-use super::{load_components_json, plan_add, AddPlan, PlannedFile, collect_css_mutations, apply_css_updates};
+use super::{plan_add, AddPlan, PlannedFile, collect_css_mutations, apply_css_updates, UiConfig};
 use crate::cli::components::utils::format_relative_path;
 
 fn resolve_app_dir(app_path: Option<PathBuf>) -> PathBuf {
@@ -107,7 +108,11 @@ pub async fn run(args: ComponentsAddArgs) -> i32 {
 
 pub async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
     let app_dir = resolve_app_dir(args.app_path);
-    let loaded = load_components_json(&app_dir)?;
+    
+    // Load metadata from pyproject.toml
+    let metadata = read_project_metadata(&app_dir)?;
+    let cfg = UiConfig::from_metadata(&metadata, &app_dir);
+    
     let client = reqwest::Client::new();
     
     // Parse component name to extract registry prefix if present (e.g., @animate-ui/button)
@@ -130,13 +135,11 @@ pub async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
     let plan = plan_add(
         &client,
         &app_dir,
-        &loaded.config,
+        &cfg,
         registry.as_deref(),
         &component,
     )
     .await?;
-    let mut plan = plan;
-    plan.warnings.extend(loaded.warnings);
 
     if args.dry_run {
         print_plan_summary(&plan);
@@ -178,7 +181,7 @@ pub async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
     // Apply CSS updates automatically
     let css_mutations = collect_css_mutations(&plan.components);
     if !css_mutations.is_empty() {
-        let css_path = app_dir.join(&loaded.config.tailwind.css);
+        let css_path = app_dir.join(cfg.css_path());
         match apply_css_updates(&css_path, css_mutations) {
             Ok(()) => {
                 println!();

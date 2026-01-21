@@ -10,6 +10,7 @@ use tracing::trace;
 /// Guarantees:
 /// - Does NOT strip comment markers inside string literals
 /// - Preserves newlines to keep line numbers stable
+#[allow(dead_code)]
 pub fn strip_jsonc_comments(input: &str) -> String {
     use tracing::debug;
 
