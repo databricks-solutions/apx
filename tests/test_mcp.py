@@ -347,3 +347,73 @@ async def test_docs_tool():
                     print(f"  Top result file: {first_result['source_file']}")
                 else:
                     print("⚠ No results found (may be normal for specific queries)")
+
+
+@pytest.mark.asyncio
+async def test_docs_create_cluster():
+    """Test that 'create cluster' query returns relevant cluster creation docs in top 3."""
+    server_params = StdioServerParameters(command="uv", args=["run", "apx", "mcp"])
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            # Search for "create cluster" with 5 results
+            result = await session.call_tool(
+                "docs",
+                arguments={
+                    "source": "databricks-sdk-python",
+                    "query": "create cluster",
+                    "num_results": 5
+                }
+            )
+
+            assert len(result.content) > 0, "Search should return content"
+            result_text = result.content[0].text
+
+            # Debug: Print the actual response
+            print(f"\n=== Raw Response ===")
+            print(f"Response text: {result_text[:500]}...")
+            print(f"Response length: {len(result_text)}")
+            print(f"===================\n")
+
+            # Skip if SDK not available
+            if "not available" in result_text or "not installed" in result_text:
+                pytest.skip("Databricks SDK not installed or docs not indexed")
+
+            # Parse results
+            try:
+                result_json = json.loads(result_text)
+            except json.JSONDecodeError as e:
+                print(f"\n=== JSON Parse Error ===")
+                print(f"Error: {e}")
+                print(f"Full response text:\n{result_text}")
+                print(f"=======================\n")
+                raise
+            results = result_json["results"]
+
+            print(f"\n=== Test: 'create cluster' relevance ===")
+            print(f"Query: {result_json['query']}")
+            print(f"Total results: {len(results)}")
+
+            # At least one of top 3 should be cluster-related
+            top_3 = results[:3]
+            cluster_related = [
+                r for r in top_3
+                if "cluster" in r["source_file"].lower() 
+                or "cluster" in r["text"].lower()
+            ]
+
+            print(f"\nTop 3 results:")
+            for i, r in enumerate(top_3, 1):
+                print(f"  {i}. Score: {r['score']:.3f}, File: {r['source_file']}")
+                is_cluster = "✓ cluster-related" if r in cluster_related else ""
+                if is_cluster:
+                    print(f"     {is_cluster}")
+
+            assert len(cluster_related) >= 1, (
+                f"Expected at least 1 cluster-related result in top 3, got {len(cluster_related)}. "
+                f"Top 3 files: {[r['source_file'] for r in top_3]}"
+            )
+
+            print(f"\n✓ Test passed: {len(cluster_related)} cluster-related result(s) in top 3")
