@@ -11,6 +11,7 @@ from apx.mcp.server import mcp
 # Import tools to register them with the mcp instance
 # These imports must come after mcp is available
 from apx.mcp import common as _common  # noqa: F401
+from apx.mcp import lakebase as _lakebase  # noqa: F401
 from apx.mcp import sdk as _sdk  # noqa: F401
 
 # Track initialization state
