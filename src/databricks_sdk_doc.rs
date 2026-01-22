@@ -18,7 +18,7 @@ use crate::interop::get_databricks_sdk_version;
 const GITHUB_REPO: &str = "databricks/databricks-sdk-py";
 const CHUNK_SIZE: usize = 512; // tokens - increased for more context
 const CHUNK_OVERLAP: usize = 128; // tokens - 25% overlap for better coverage
-const SCHEMA_VERSION: u32 = 5; // Increment when schema changes (v5: improved RST parsing with enums, attributes, code examples)
+const SCHEMA_VERSION: u32 = 6; // Increment when schema changes (v6: added FTS index for hybrid search)
 
 /// Documentation chunk record for LanceDB storage
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -700,6 +700,18 @@ fn chunks_to_batch(chunks: Vec<DocChunk>) -> Result<RecordBatch, String> {
     .map_err(|e| format!("Failed to create record batch: {}", e))
 }
 
+/// Candidate from search results with metadata for hybrid ranking
+struct SearchCandidate {
+    id: String,
+    text: String,
+    source_file: String,
+    service: String,
+    operation: String,
+    symbols: String,
+    vector_rank: Option<usize>,
+    fts_rank: Option<usize>,
+}
+
 /// SDK documentation index using LanceDB
 pub struct SDKDocIndex {
     db_path: PathBuf,
@@ -847,116 +859,122 @@ impl SDKDocIndex {
                     schema,
                 );
 
-                conn.create_table(&table_name, Box::new(batches))
+                let table = conn.create_table(&table_name, Box::new(batches))
                     .execute()
                     .await
                     .map_err(|e| format!("Failed to create table: {}", e))?;
 
-                tracing::info!("SDK docs indexed successfully");
+                // Create FTS index on text column for hybrid search
+                tracing::info!("Creating FTS index on text column");
+                table.create_index(
+                    &["text"], 
+                    lancedb::index::Index::FTS(lancedb::index::scalar::FtsIndexBuilder::default())
+                )
+                    .execute()
+                    .await
+                    .map_err(|e| format!("Failed to create FTS index: {}", e))?;
+
+                tracing::info!("SDK docs indexed successfully (vector + FTS)");
                 Ok(true)
             }
         }
     }
 
-    /// Tokenize text for lexical matching
-    fn tokenize_for_lexical(text: &str) -> std::collections::HashSet<String> {
-        use std::collections::HashSet;
-        text.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .filter(|t| !t.is_empty())
-            .map(String::from)
-            .collect::<HashSet<String>>()
+    /// Extract candidates from a record batch stream
+    async fn extract_candidates_from_batch(
+        batch: &RecordBatch,
+        rank_start: usize,
+    ) -> Result<Vec<(String, String, String, String, String, String, usize)>, String> {
+        let mut results = Vec::new();
+        
+        let id_array = batch
+            .column_by_name("id")
+            .ok_or("Missing id column")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("Failed to downcast id column")?;
+
+        let text_array = batch
+            .column_by_name("text")
+            .ok_or("Missing text column")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("Failed to downcast text column")?;
+
+        let source_file_array = batch
+            .column_by_name("source_file")
+            .ok_or("Missing source_file column")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("Failed to downcast source_file column")?;
+
+        let service_array = batch
+            .column_by_name("service")
+            .ok_or("Missing service column")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("Failed to downcast service column")?;
+
+        let operation_array = batch
+            .column_by_name("operation")
+            .ok_or("Missing operation column")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("Failed to downcast operation column")?;
+
+        let symbols_array = batch
+            .column_by_name("symbols")
+            .ok_or("Missing symbols column")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or("Failed to downcast symbols column")?;
+
+        for i in 0..batch.num_rows() {
+            results.push((
+                id_array.value(i).to_string(),
+                text_array.value(i).to_string(),
+                source_file_array.value(i).to_string(),
+                service_array.value(i).to_string(),
+                operation_array.value(i).to_string(),
+                symbols_array.value(i).to_string(),
+                rank_start + i,
+            ));
+        }
+        
+        Ok(results)
     }
 
-    /// Compute lexical score based on token overlap and phrase matching
-    fn compute_lexical_score(query: &str, text: &str) -> f32 {
-        let query_tokens = Self::tokenize_for_lexical(query);
-        let text_tokens = Self::tokenize_for_lexical(text);
-
-        if query_tokens.is_empty() || text_tokens.is_empty() {
-            return 0.0;
+    /// Compute RRF (Reciprocal Rank Fusion) score
+    /// RRF = sum(1 / (k + rank)) for each ranking list where item appears
+    fn compute_rrf_score(vector_rank: Option<usize>, fts_rank: Option<usize>, k: f32) -> f32 {
+        let mut score = 0.0;
+        if let Some(rank) = vector_rank {
+            score += 1.0 / (k + rank as f32);
         }
-
-        // Token overlap (Jaccard-like similarity)
-        let overlap = query_tokens.intersection(&text_tokens).count();
-        let union = query_tokens.union(&text_tokens).count();
-        let token_score = overlap as f32 / union.max(1) as f32;
-
-        // Exact phrase match bonus
-        let phrase_bonus = if text.to_lowercase().contains(&query.to_lowercase()) {
-            0.3
-        } else {
-            0.0
-        };
-
-        token_score + phrase_bonus
+        if let Some(rank) = fts_rank {
+            score += 1.0 / (k + rank as f32);
+        }
+        score
     }
 
-    /// Compute final combined score with metadata boosts
-    fn compute_final_score(
-        vector_score: f32,
-        query: &str,
-        text: &str,
-        service: &str,
-        operation: &str,
-        symbols: &str,
-    ) -> f32 {
-        let lexical = Self::compute_lexical_score(query, text);
-
-        let mut boost = 0.0;
-        let query_lower = query.to_lowercase();
-
-        // Service match boost (e.g., "cluster" in query, service="clusters")
-        if !service.is_empty() {
-            let service_singular = service.trim_end_matches('s');
-            if query_lower.contains(service_singular) || query_lower.contains(service) {
-                boost += 0.3;
-            }
-        }
-
-        // Operation match boost (e.g., "create" in query, operation="create")
-        if !operation.is_empty() && query_lower.contains(operation) {
-            boost += 0.3;
-        }
-
-        // Symbol exact match (big boost)
-        if !symbols.is_empty() && symbols.to_lowercase().contains(&query_lower) {
-            boost += 0.5;
-        }
-
-        // Weighted combination with normalized vector score
-        // vector_score is already 1.0 - distance, which can be negative if distance > 1
-        // Normalize to 0-1 range and combine with lexical and boosts
-        let normalized_vector = (vector_score + 1.0) / 2.0; // Map [-1, 1] to [0, 1]
-        
-        let final_score = 0.4 * normalized_vector + 0.2 * lexical + boost;
-        
-        // Debug logging
-        tracing::debug!(
-            "Scoring: query='{}', service='{}', operation='{}', symbols='{}' | vec={:.3}, lex={:.3}, boost={:.3} -> final={:.3}",
-            query, service, operation, symbols, normalized_vector, lexical, boost, final_score
-        );
-        
-        final_score
-    }
-
-    /// Search for relevant documentation chunks
+    /// Search for relevant documentation chunks using hybrid vector + FTS search
     pub async fn search(
         &self,
         source: &SDKSource,
         query: &str,
         limit: usize,
     ) -> Result<Vec<DocSearchResult>, String> {
+        use std::collections::HashMap;
+        use futures_util::StreamExt;
+        use lancedb::index::scalar::FullTextSearchQuery;
+        
         match source {
             SDKSource::DatabricksSdkPython => {
-                // Get SDK version
                 let version = get_databricks_sdk_version()?
                     .ok_or_else(|| "databricks-sdk is not installed. Please install databricks-sdk to use this feature.".to_string())?;
 
-                // Include schema version in table name (must match bootstrap)
                 let table_name = format!("sdk_docs_python_{}_schema_v{}", version.replace('.', "_"), SCHEMA_VERSION);
 
-                // Check if indexed
                 if !self.table_exists(&table_name).await? {
                     return Err(format!(
                         "SDK docs not indexed for version {}. Index will be built on next server start.",
@@ -964,110 +982,125 @@ impl SDKDocIndex {
                     ));
                 }
 
-                // Generate query embedding
                 let query_embedding = self.embedder.embed(query)?;
-
-                // Get table
                 let table = self.get_table(&table_name).await?;
-
-                // Fetch larger candidate pool for reranking (10x the limit, minimum 100)
+                
+                // Fetch candidate pool size (more candidates for better fusion)
                 let candidate_pool = (limit * 10).max(100);
 
-                // Perform vector search with larger pool
-                let mut results = table
+                // === Vector Search ===
+                let mut vector_results = table
                     .query()
                     .nearest_to(query_embedding)
-                    .map_err(|e| format!("Failed to create query: {}", e))?
+                    .map_err(|e| format!("Failed to create vector query: {}", e))?
                     .limit(candidate_pool)
                     .execute()
                     .await
-                    .map_err(|e| format!("Failed to execute search: {}", e))?;
+                    .map_err(|e| format!("Failed to execute vector search: {}", e))?;
 
-                // Collect candidates with metadata for reranking
-                let mut candidates: Vec<(f32, String, String, String, String, String)> = Vec::new();
-
-                use futures_util::StreamExt;
-                while let Some(batch_result) = results.next().await {
-                    let batch = batch_result.map_err(|e| format!("Failed to read batch: {}", e))?;
-
-                    let text_array = batch
-                        .column_by_name("text")
-                        .ok_or("Missing text column")?
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or("Failed to downcast text column")?;
-
-                    let source_file_array = batch
-                        .column_by_name("source_file")
-                        .ok_or("Missing source_file column")?
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or("Failed to downcast source_file column")?;
-
-                    let distance_array = batch
-                        .column_by_name("_distance")
-                        .ok_or("Missing _distance column")?
-                        .as_any()
-                        .downcast_ref::<Float32Array>()
-                        .ok_or("Failed to downcast distance column")?;
-
-                    let service_array = batch
-                        .column_by_name("service")
-                        .ok_or("Missing service column")?
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or("Failed to downcast service column")?;
-
-                    let operation_array = batch
-                        .column_by_name("operation")
-                        .ok_or("Missing operation column")?
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or("Failed to downcast operation column")?;
-
-                    let symbols_array = batch
-                        .column_by_name("symbols")
-                        .ok_or("Missing symbols column")?
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or("Failed to downcast symbols column")?;
-
-                    for i in 0..batch.num_rows() {
-                        let text = text_array.value(i).to_string();
-                        let source_file = source_file_array.value(i).to_string();
-                        let distance = distance_array.value(i);
-                        let vector_score = 1.0 - distance;
-                        let service = service_array.value(i).to_string();
-                        let operation = operation_array.value(i).to_string();
-                        let symbols = symbols_array.value(i).to_string();
-
-                        candidates.push((vector_score, text, source_file, service, operation, symbols));
+                let mut candidates: HashMap<String, SearchCandidate> = HashMap::new();
+                let mut rank = 0;
+                
+                while let Some(batch_result) = vector_results.next().await {
+                    let batch = batch_result.map_err(|e| format!("Failed to read vector batch: {}", e))?;
+                    let extracted = Self::extract_candidates_from_batch(&batch, rank).await?;
+                    
+                    for (id, text, source_file, service, operation, symbols, r) in extracted {
+                        candidates.insert(id.clone(), SearchCandidate {
+                            id,
+                            text,
+                            source_file,
+                            service,
+                            operation,
+                            symbols,
+                            vector_rank: Some(r),
+                            fts_rank: None,
+                        });
                     }
+                    rank += batch.num_rows();
                 }
+                
+                tracing::debug!("Vector search returned {} candidates", candidates.len());
 
-                // Rerank candidates with combined score
+                // === FTS Search ===
+                let fts_query = FullTextSearchQuery::new(query.to_string());
+                let mut fts_results = table
+                    .query()
+                    .full_text_search(fts_query)
+                    .limit(candidate_pool)
+                    .execute()
+                    .await
+                    .map_err(|e| format!("Failed to execute FTS search: {}", e))?;
+
+                let mut fts_rank = 0;
+                while let Some(batch_result) = fts_results.next().await {
+                    let batch = batch_result.map_err(|e| format!("Failed to read FTS batch: {}", e))?;
+                    let extracted = Self::extract_candidates_from_batch(&batch, fts_rank).await?;
+                    
+                    for (id, text, source_file, service, operation, symbols, r) in extracted {
+                        if let Some(existing) = candidates.get_mut(&id) {
+                            // Already in vector results, add FTS rank
+                            existing.fts_rank = Some(r);
+                        } else {
+                            // New candidate from FTS only
+                            candidates.insert(id.clone(), SearchCandidate {
+                                id,
+                                text,
+                                source_file,
+                                service,
+                                operation,
+                                symbols,
+                                vector_rank: None,
+                                fts_rank: Some(r),
+                            });
+                        }
+                    }
+                    fts_rank += batch.num_rows();
+                }
+                
+                tracing::debug!("FTS search added candidates, total now: {}", candidates.len());
+
+                // === Reciprocal Rank Fusion (RRF) with metadata boosts ===
+                const RRF_K: f32 = 60.0; // Standard RRF constant
+                
                 let mut scored_results: Vec<(f32, String, String)> = candidates
-                    .into_iter()
-                    .map(|(vector_score, text, source_file, service, operation, symbols)| {
-                        let final_score = Self::compute_final_score(
-                            vector_score,
-                            query,
-                            &text,
-                            &service,
-                            &operation,
-                            &symbols,
+                    .into_values()
+                    .map(|c| {
+                        // Base RRF score from rank fusion
+                        let rrf_score = Self::compute_rrf_score(c.vector_rank, c.fts_rank, RRF_K);
+                        
+                        // Metadata boosts
+                        let mut boost = 0.0;
+                        let query_lower = query.to_lowercase();
+                        
+                        if !c.service.is_empty() {
+                            let service_singular = c.service.trim_end_matches('s');
+                            if query_lower.contains(service_singular) || query_lower.contains(&c.service) {
+                                boost += 0.01; // Small boost relative to RRF scores
+                            }
+                        }
+                        if !c.operation.is_empty() && query_lower.contains(&c.operation) {
+                            boost += 0.01;
+                        }
+                        if !c.symbols.is_empty() && c.symbols.to_lowercase().contains(&query_lower) {
+                            boost += 0.02;
+                        }
+                        
+                        let final_score = rrf_score + boost;
+                        
+                        tracing::debug!(
+                            "RRF: id='{}' vec_rank={:?} fts_rank={:?} rrf={:.4} boost={:.4} final={:.4}",
+                            c.id, c.vector_rank, c.fts_rank, rrf_score, boost, final_score
                         );
-                        (final_score, text, source_file)
+                        
+                        (final_score, c.text, c.source_file)
                     })
                     .collect();
 
                 // Sort by final score (descending)
                 scored_results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-                // Take top results
                 scored_results.truncate(limit);
 
-                // Convert to search results
                 let search_results: Vec<DocSearchResult> = scored_results
                     .into_iter()
                     .map(|(score, text, source_file)| DocSearchResult {
@@ -1077,8 +1110,10 @@ impl SDKDocIndex {
                     })
                     .collect();
 
-                tracing::info!("Found {} doc results for query: {} (reranked from {} candidates)", 
-                    search_results.len(), query, candidate_pool);
+                tracing::info!(
+                    "Hybrid search for '{}': {} results (from {} vector + FTS candidates)", 
+                    query, search_results.len(), candidate_pool
+                );
 
                 Ok(search_results)
             }

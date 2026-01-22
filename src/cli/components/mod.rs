@@ -542,22 +542,20 @@ pub async fn plan_add(
     })
 }
 
-/// Rewrite imports from shadcn registry structure to flat structure.
-/// Transforms: `@/registry/{style}/hooks/use-mobile` → `@/hooks/use-mobile`
-/// Transforms: `@/registry/{style}/components/ui/button` → `@/components/ui/button`
-/// Transforms: `@/registry/{style}/lib/utils` → `@/lib/utils`
+/// Rewrite imports from shadcn default registry structure to project structure.
+///
+/// Only handles the default shadcn registry case:
+/// - `@/registry/{style}/ui/button` → first pass → `@/ui/button` → second pass → `@/components/ui/button`
+/// - `@/registry/{style}/hooks/use-mobile` → `@/hooks/use-mobile` (correct after first pass)
+/// - `@/registry/{style}/lib/utils` → `@/lib/utils` (correct after first pass)
 fn rewrite_registry_imports(content: &str) -> String {
-    const PREFIX: &str = "@/registry/";
-    
     let mut result = String::with_capacity(content.len());
     let mut remaining = content;
     
-    while let Some(pos) = remaining.find(PREFIX) {
-        // Add everything before the match
+    // First pass: Strip @/registry/{style}/ → @/
+    while let Some(pos) = remaining.find("@/registry/") {
         result.push_str(&remaining[..pos]);
-        
-        // Skip past "@/registry/"
-        let after_prefix = &remaining[pos + PREFIX.len()..];
+        let after_prefix = &remaining[pos + "@/registry/".len()..];
         
         // Find the next '/' which marks the end of the style name
         if let Some(slash_pos) = after_prefix.find('/') {
@@ -566,14 +564,15 @@ fn rewrite_registry_imports(content: &str) -> String {
             remaining = &after_prefix[slash_pos + 1..];
         } else {
             // No slash found, just copy the prefix and continue
-            result.push_str(PREFIX);
+            result.push_str("@/registry/");
             remaining = after_prefix;
         }
     }
-    
-    // Add any remaining content
     result.push_str(remaining);
-    result
+    
+    // Second pass: Transform @/ui/ → @/components/ui/
+    // This handles the case where shadcn components import from "@/ui/..." shorthand
+    result.replace("@/ui/", "@/components/ui/")
 }
 
 fn apply_placeholders(template: &str, name: &str, style: &str) -> Result<String, String> {

@@ -166,6 +166,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures-util",
  "indicatif 0.17.11",
+ "lance-index",
  "lancedb",
  "notify",
  "pyo3",
