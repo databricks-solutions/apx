@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use clap::Args;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 use crate::cli::run_cli_async;
 use crate::dev::client::logs;
 use crate::dev::common::{lock_path, read_lock};
-use crate::dev::logging::{decode_log_payload, LogPipe, LogStreamName, APX_SHUTDOWN_MESSAGE};
+use crate::dev::logging::{decode_log_payload, LogPayload, LogPipe, LogStreamName, APX_SHUTDOWN_MESSAGE};
 
 pub const DEFAULT_LOG_DURATION: &str = "10m";
 
@@ -217,22 +217,40 @@ pub fn handle_log_payload(data: &str) -> bool {
     }
 }
 
+/// Format a timestamp in milliseconds to `HH:MM:SS.mmm` format (12 chars).
+fn format_timestamp(timestamp_ms: i64) -> String {
+    let datetime = Utc.timestamp_millis_opt(timestamp_ms).single();
+    match datetime {
+        Some(dt) => dt.format("%H:%M:%S%.3f").to_string(),
+        None => "??:??:??.???".to_string(),
+    }
+}
+
+/// Format a log payload into a formatted line.
+/// Returns (formatted_line, should_exit).
+pub fn format_log_payload_struct(payload: &LogPayload) -> (String, bool) {
+    // Fixed-width source names (3 chars)
+    let source = match payload.stream {
+        LogStreamName::App => "app",
+        LogStreamName::Ui => " ui",
+        LogStreamName::Apx => "apx",
+        LogStreamName::Db => " db",
+    };
+    // Fixed-width channel names (3 chars)
+    let channel = match payload.pipe {
+        Some(LogPipe::Out) => "out",
+        Some(LogPipe::Error) => "err",
+        None => "---",
+    };
+    let timestamp = format_timestamp(payload.timestamp);
+    let line = format!("{timestamp} | {source} | {channel} | {}", payload.message);
+    let should_exit = payload.stream == LogStreamName::Apx && payload.message == APX_SHUTDOWN_MESSAGE;
+    (line, should_exit)
+}
+
 fn format_log_payload(data: &str) -> Result<(String, bool), String> {
     let payload = decode_log_payload(data)?;
-    let stream = match payload.stream {
-        LogStreamName::App => "app",
-        LogStreamName::Ui => "ui",
-        LogStreamName::Apx => "apx",
-        LogStreamName::Db => "db",
-    };
-    let pipe = match payload.pipe {
-        Some(LogPipe::Out) => "[out] ",
-        Some(LogPipe::Error) => "[error] ",
-        None => "",
-    };
-    let line = format!("[{stream}] {pipe}{}", payload.message);
-    let should_exit = payload.stream == LogStreamName::Apx && payload.message == APX_SHUTDOWN_MESSAGE;
-    Ok((line, should_exit))
+    Ok(format_log_payload_struct(&payload))
 }
 
 fn process_line_collect(

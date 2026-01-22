@@ -223,18 +223,17 @@ async fn logs(
     let mut shutdown_rx = state.shutdown_tx.subscribe();
 
     tokio::spawn(async move {
-        // Send initial logs
+        // Send initial logs (merged and sorted by timestamp)
         let (mut app_len, initial_logs) = state.process_manager.logs_since_timestamp(since).await;
         let (mut apx_len, initial_apx_logs) =
             apx_log_queue_since_timestamp(&state.apx_log_queue, since);
 
-        for entry in initial_logs {
+        let mut merged = initial_logs;
+        merged.extend(initial_apx_logs);
+        merged.sort_by_key(|log| log.timestamp);
+
+        for entry in merged {
             if send_log_payload(&tx, entry).await.is_err() {
-                return;
-            }
-        }
-        for message in initial_apx_logs {
-            if send_log_payload(&tx, message).await.is_err() {
                 return;
             }
         }
@@ -253,15 +252,16 @@ async fn logs(
                 result = shutdown_rx.recv() => {
                     match result {
                         Ok(Shutdown::Stop) => {
-                            // Flush any remaining logs before sending shutdown message
+                            // Flush any remaining logs before sending shutdown message (merged and sorted)
                             let (_, final_logs) = state.process_manager.logs_since_index(app_len).await;
                             let (_, final_apx_logs) = apx_log_queue_since(&state.apx_log_queue, apx_len);
 
-                            for entry in final_logs {
+                            let mut merged = final_logs;
+                            merged.extend(final_apx_logs);
+                            merged.sort_by_key(|log| log.timestamp);
+
+                            for entry in merged {
                                 let _ = send_log_payload(&tx, entry).await;
-                            }
-                            for message in final_apx_logs {
-                                let _ = send_log_payload(&tx, message).await;
                             }
 
                             // Send final shutdown message and close
@@ -282,18 +282,17 @@ async fn logs(
                         }
                     }
                 }
-                // Poll for new logs
+                // Poll for new logs (merged and sorted)
                 _ = tokio::time::sleep(poll_interval) => {
                     let (next_app_len, logs) = state.process_manager.logs_since_index(app_len).await;
                     let (next_apx_len, apx_logs) = apx_log_queue_since(&state.apx_log_queue, apx_len);
 
-                    for entry in logs {
+                    let mut merged = logs;
+                    merged.extend(apx_logs);
+                    merged.sort_by_key(|log| log.timestamp);
+
+                    for entry in merged {
                         if send_log_payload(&tx, entry).await.is_err() {
-                            return;
-                        }
-                    }
-                    for message in apx_logs {
-                        if send_log_payload(&tx, message).await.is_err() {
                             return;
                         }
                     }

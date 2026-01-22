@@ -15,7 +15,7 @@ use tokio_tungstenite::tungstenite::http::Request as WsRequest;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame as TungsteniteCloseFrame;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::interop::{get_forwarded_user_header, get_token};
 
@@ -38,6 +38,46 @@ const ACCESS_TOKEN_HEADER: &str = "X-Forwarded-Access-Token";
 // Header used to forward user identity to API
 const FORWARDED_USER_HEADER: &str = "X-Forwarded-User";
 const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(45 * 60); // 45 minutes
+
+/// Check if a request path should be logged (filters out Vite dev assets).
+fn should_log_request(path: &str, is_ui: bool) -> bool {
+    // Skip Vite dev server internal paths
+    if path.starts_with("/@") {
+        return false;
+    }
+    // Skip TanStack Router code splitting requests
+    if is_ui && path.contains("?tsr-split") {
+        return false;
+    }
+    // Skip common static assets served by Vite
+    let lower = path.to_ascii_lowercase();
+    // Get just the path part (before query string) for extension check
+    let path_only = lower.split('?').next().unwrap_or(&lower);
+    if path_only.ends_with(".js")
+        || path_only.ends_with(".ts")
+        || path_only.ends_with(".tsx")
+        || path_only.ends_with(".jsx")
+        || path_only.ends_with(".css")
+        || path_only.ends_with(".map")
+        || path_only.ends_with(".svg")
+        || path_only.ends_with(".png")
+        || path_only.ends_with(".jpg")
+        || path_only.ends_with(".jpeg")
+        || path_only.ends_with(".gif")
+        || path_only.ends_with(".ico")
+        || path_only.ends_with(".woff")
+        || path_only.ends_with(".woff2")
+        || path_only.ends_with(".ttf")
+        || path_only.ends_with(".eot")
+    {
+        return false;
+    }
+    // Skip node_modules paths
+    if path.contains("/node_modules/") {
+        return false;
+    }
+    true
+}
 
 pub struct TokenManager {
     token: RwLock<String>,
@@ -150,7 +190,7 @@ async fn api_proxy_handler(State(state): State<ApiProxyState>, req: Request<Body
             .map(|pq| pq.as_str())
             .unwrap_or("/")
     );
-    
+
     // Get OAuth access token for API requests
     let token = match state.token_manager.get_token_refreshing_if_needed().await {
         Ok(t) => Some(t),
@@ -168,6 +208,7 @@ async fn api_proxy_handler(State(state): State<ApiProxyState>, req: Request<Body
         None,
         token,
         state.forwarded_user_header.clone(),
+        "api",
     )
     .await
 }
@@ -188,6 +229,7 @@ async fn ui_proxy_handler(State(state): State<UiProxyState>, req: Request<Body>)
         Some(state.dev_token.as_str()),
         None,
         None,
+        "ui",
     )
     .await
 }
@@ -201,6 +243,7 @@ async fn proxy_request(
     dev_token: Option<&str>,
     access_token: Option<String>,
     forwarded_user_header: Option<String>,
+    target_name: &'static str,
 ) -> Response {
     if is_websocket_request(req.headers()) {
         let (mut parts, _body) = req.into_parts();
@@ -222,6 +265,7 @@ async fn proxy_request(
         dev_token,
         access_token,
         forwarded_user_header,
+        target_name,
     )
     .await
 }
@@ -235,8 +279,23 @@ async fn proxy_http(
     dev_token: Option<&str>,
     access_token: Option<String>,
     forwarded_user_header: Option<String>,
+    target_name: &'static str,
 ) -> Response {
     let (parts, body) = req.into_parts();
+    let method = parts.method.clone();
+    let is_ui = target_name == "ui";
+    let should_log = should_log_request(&path_and_query, is_ui);
+    let start = Instant::now();
+
+    if should_log {
+        info!(
+            "~> {} {} {}",
+            target_name,
+            method,
+            path_and_query,
+        );
+    }
+
     let url = format!("http://{host}:{target_port}{path_and_query}");
     let body_bytes = match to_bytes(body, MAX_BODY_BYTES).await {
         Ok(bytes) => bytes,
@@ -265,6 +324,16 @@ async fn proxy_http(
         Ok(response) => response,
         Err(err) => {
             warn!(error = %err, "Proxy request failed.");
+            if should_log {
+                let elapsed = start.elapsed().as_millis();
+                info!(
+                    "<~ {} {} {} 502 [{}ms]",
+                    target_name,
+                    method,
+                    path_and_query,
+                    elapsed
+                );
+            }
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
@@ -277,6 +346,19 @@ async fn proxy_http(
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
+
+    if should_log {
+        let elapsed = start.elapsed().as_millis();
+        info!(
+            "<~ {} {} {} {} [{}ms]",
+            target_name,
+            method,
+            path_and_query,
+            status.as_u16(),
+            elapsed
+        );
+    }
+
     let mut builder = Response::builder().status(status);
     for (name, value) in headers.iter() {
         if is_hop_header(name.as_str()) {

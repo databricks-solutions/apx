@@ -164,6 +164,11 @@ where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        // Only capture INFO level and above for apx logs shown to users
+        let level = event.metadata().level();
+        if *level > tracing::Level::INFO {
+            return;
+        }
         let queue = apx_log_queue();
         let message = format_event(event);
         let payload = LogPayload::new(LogStreamName::Apx, None, message);
@@ -184,31 +189,16 @@ impl Visit for FieldVisitor {
 }
 
 fn format_event(event: &Event<'_>) -> String {
-    let metadata = event.metadata();
     let mut visitor = FieldVisitor::default();
     event.record(&mut visitor);
-    let target = metadata
-        .target()
-        .strip_prefix("_core::")
-        .unwrap_or(metadata.target());
     if visitor.fields.is_empty() {
-        return format!("{} {}", metadata.level(), target);
+        return String::new();
     }
     let (message, other_fields) = split_message_fields(&visitor.fields);
     match message {
-        Some(message) if other_fields.is_empty() => {
-            format!("{} {}: {}", metadata.level(), target, message)
-        }
-        Some(message) => {
-            format!(
-                "{} {}: {} {}",
-                metadata.level(),
-                target,
-                message,
-                other_fields.join(" ")
-            )
-        }
-        None => format!("{} {} {}", metadata.level(), target, visitor.fields.join(" ")),
+        Some(message) if other_fields.is_empty() => message,
+        Some(message) => format!("{} {}", message, other_fields.join(" ")),
+        None => visitor.fields.join(" "),
     }
 }
 
