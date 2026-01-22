@@ -623,27 +623,35 @@ async fn search_registry_components_tool(
     let search_results = match index.search(&table_name, &args.query, args.limit).await {
         Ok(results) => results,
         Err(e) if e.contains("Index not built") => {
-            // Check if indexing is running
-            let is_running = {
-                let guard = ctx.cache_state.lock().await;
-                guard.is_running
-            };
-
-            if is_running {
-                return ToolResult::error(
-                    "Component index is being built in background. Please try again shortly.".to_string()
-                );
+            // Wait for background indexing to complete (up to 10 seconds)
+            let mut waited = 0;
+            while waited < 10 {
+                let is_running = {
+                    let guard = ctx.cache_state.lock().await;
+                    guard.is_running
+                };
+                if !is_running {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                waited += 1;
             }
 
-            // Build index from registry indexes
-            tracing::info!("Index not found, building from registry indexes...");
-            if let Err(build_err) = index.build_index_from_registries(&table_name).await {
-                return ToolResult::error(format!("Failed to build index: {}", build_err));
-            }
-
+            // Try to search again, or build index if still not available
             match index.search(&table_name, &args.query, args.limit).await {
                 Ok(results) => results,
-                Err(e) => return ToolResult::error(format!("Search failed after building index: {}", e)),
+                Err(_) => {
+                    // Build index from registry indexes
+                    tracing::info!("Index not found, building from registry indexes...");
+                    if let Err(build_err) = index.build_index_from_registries(&table_name).await {
+                        return ToolResult::error(format!("Failed to build index: {}", build_err));
+                    }
+
+                    match index.search(&table_name, &args.query, args.limit).await {
+                        Ok(results) => results,
+                        Err(e) => return ToolResult::error(format!("Search failed after building index: {}", e)),
+                    }
+                }
             }
         }
         Err(e) => return ToolResult::error(format!("Search failed: {}", e)),
