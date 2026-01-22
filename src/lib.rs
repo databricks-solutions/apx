@@ -39,6 +39,12 @@ mod search;
 pub use api_generator::generate_openapi;
 pub(crate) use interop::bun_binary_path;
 
+// Export frontend module functions
+pub mod frontend {
+    pub use crate::cli::frontend::build::run_build;
+    pub use crate::cli::frontend::dev::run_dev;
+}
+
 static APP_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 pub(crate) fn set_app_dir(app_dir: PathBuf) -> Result<(), String> {

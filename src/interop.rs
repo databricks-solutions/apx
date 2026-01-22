@@ -34,6 +34,25 @@ fn resolve_bun_binary_path(py: Python<'_>) -> PyResult<PathBuf> {
     Ok(PathBuf::from(bun_path_str))
 }
 
+/// Get the path to the frontend entrypoint.ts asset
+pub(crate) fn frontend_entrypoint_path() -> Result<PathBuf, String> {
+    Python::attach(|py| {
+        resolve_frontend_entrypoint_path(py)
+            .map_err(|err| format!("Failed to resolve frontend entrypoint path: {err}"))
+    })
+}
+
+fn resolve_frontend_entrypoint_path(py: Python<'_>) -> PyResult<PathBuf> {
+    let importlib = py.import("importlib.resources")?;
+    let files = importlib.getattr("files")?;
+    let apx_resources = files.call1(("apx",))?;
+    let assets_dir = apx_resources.getattr("joinpath")?.call1(("assets",))?;
+    let entrypoint_path = assets_dir.getattr("joinpath")?.call1(("entrypoint.ts",))?;
+    let fspath = entrypoint_path.getattr("__fspath__")?.call0()?;
+    let entrypoint_path_str: String = fspath.extract()?;
+    Ok(PathBuf::from(entrypoint_path_str))
+}
+
 pub(crate) fn list_profiles() -> Result<Vec<String>, String> {
     Python::attach(|py| {
         let utils = py

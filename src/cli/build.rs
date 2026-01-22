@@ -6,8 +6,7 @@ use tokio::process::Command;
 use crate::bun_binary_path;
 use crate::cli::run_cli_async;
 use crate::common::{
-    bun_install, ensure_dir, read_project_metadata, sync_apx_plugin_from_package,
-    write_metadata_file,
+    bun_install, ensure_dir, read_project_metadata, write_metadata_file,
 };
 use crate::generate_openapi;
 
@@ -43,8 +42,6 @@ async fn run_inner(args: BuildArgs) -> Result<(), String> {
     let build_dir = app_path.join(&args.build_path);
 
     println!("Building project in {}", app_path.display());
-
-    sync_apx_plugin_from_package(&app_path)?;
 
     if build_dir.exists() {
         fs::remove_dir_all(&build_dir)
@@ -92,23 +89,7 @@ async fn run_inner(args: BuildArgs) -> Result<(), String> {
 }
 
 async fn build_ui(app_path: &Path) -> Result<(), String> {
-    let bun_path = bun_binary_path()?;
-    let output = Command::new(bun_path)
-        .arg("run")
-        .arg("build")
-        .current_dir(app_path)
-        .output()
-        .await
-        .map_err(|err| format!("Failed to run bun build: {err}"))?;
-
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "Failed to build UI. Stdout: {stdout} Stderr: {stderr}"
-        ));
-    }
-    Ok(())
+    crate::cli::frontend::build::run_build(app_path).await
 }
 
 async fn build_wheel(app_path: &Path, build_path: &Path) -> Result<(), String> {

@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::cli::dev::logs::stream_logs;
 use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
-use crate::common::{ensure_dir, sync_apx_plugin_from_package};
+use crate::common::ensure_dir;
 use crate::dev::client::{health, logs, wait_for_healthy, HealthCheckConfig};
 use crate::dev::common::{
     find_available_port, lock_path, read_lock, write_lock,
@@ -15,9 +15,8 @@ use crate::dev::common::{
 };
 
 /// Prepare the app directory for dev server startup.
-/// Syncs the apx plugin and ensures the .apx directory exists.
+/// Ensures the .apx directory exists.
 fn prepare_app_dir(app_dir: &Path) -> Result<(), String> {
-    sync_apx_plugin_from_package(app_dir)?;
     ensure_dir(&app_dir.join(".apx"))?;
     Ok(())
 }

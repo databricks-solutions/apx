@@ -4,6 +4,7 @@ pub mod init;
 pub mod __generate_openapi;
 pub mod bun;
 pub mod components;
+pub mod frontend;
 
 pub async fn run_cli_async<F, Fut>(f: F) -> i32
 where
