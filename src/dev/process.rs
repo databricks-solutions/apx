@@ -262,7 +262,6 @@ impl ProcessManager {
                 let elapsed = chrono::Utc::now() - start_time;
 
                 if elapsed > timeout_duration {
-                    debug!("PGLite process survived 1 minute startup period");
                     break;
                 }
 

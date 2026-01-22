@@ -129,6 +129,10 @@ pub struct RegistryItem {
     #[serde(default)]
     pub css: Option<CssRules>,
 
+    /// Deprecated Tailwind v3 config - converted to CSS for Tailwind v4
+    #[serde(default)]
+    pub tailwind: Option<TailwindConfig>,
+
     #[serde(default)]
     pub docs: Option<String>,
 
@@ -147,6 +151,59 @@ pub struct CssVars {
     pub light: HashMap<String, String>,
     #[serde(default)]
     pub dark: HashMap<String, String>,
+}
+
+/// Tailwind configuration from registry items (deprecated in Tailwind v4, but still used by many components)
+/// Structure: { config: { theme: { extend: { colors, keyframes, animation } } } }
+#[derive(Debug, Deserialize, serde::Serialize, Clone, Default)]
+pub struct TailwindConfig {
+    #[serde(default)]
+    pub config: Option<TailwindConfigInner>,
+}
+
+#[derive(Debug, Deserialize, serde::Serialize, Clone, Default)]
+pub struct TailwindConfigInner {
+    #[serde(default)]
+    pub theme: Option<TailwindTheme>,
+}
+
+#[derive(Debug, Deserialize, serde::Serialize, Clone, Default)]
+pub struct TailwindTheme {
+    #[serde(default)]
+    pub extend: Option<TailwindThemeExtend>,
+}
+
+#[derive(Debug, Deserialize, serde::Serialize, Clone, Default)]
+pub struct TailwindThemeExtend {
+    /// Color definitions - can be simple or nested:
+    /// Simple: { "brand": "hsl(var(--brand))" }
+    /// Nested: { "sidebar": { "DEFAULT": "hsl(...)", "foreground": "hsl(...)" } }
+    #[serde(default)]
+    pub colors: HashMap<String, Value>,
+
+    /// Keyframe definitions: { "accordion-down": { "from": {...}, "to": {...} } }
+    /// Selectors can be "from"/"to" or percentages like "0%, 100%"
+    #[serde(default)]
+    pub keyframes: HashMap<String, HashMap<String, Value>>,
+
+    /// Animation definitions: { "accordion-down": "accordion-down 0.2s ease-out" }
+    #[serde(default)]
+    pub animation: HashMap<String, String>,
+
+    /// Font family definitions: { "heading": ["Poppins", "sans-serif"] }
+    /// Converted to @theme inline { --font-{name}: value; }
+    #[serde(default, rename = "fontFamily")]
+    pub font_family: HashMap<String, Value>,
+
+    /// Border radius definitions: { "custom": "0.5rem" }
+    /// Converted to @theme inline { --radius-{name}: value; }
+    #[serde(default, rename = "borderRadius")]
+    pub border_radius: HashMap<String, String>,
+
+    /// Spacing definitions: { "custom": "2rem" }
+    /// Converted to @theme inline { --spacing-{name}: value; }
+    #[serde(default)]
+    pub spacing: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize, Clone)]

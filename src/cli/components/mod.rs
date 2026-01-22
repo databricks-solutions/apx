@@ -663,14 +663,8 @@ fn detect_forbidden_fields(value: &Value) -> Vec<String> {
         ));
     }
 
-    if obj.contains_key("tailwind") {
-        warnings.push(format!(
-            "Registry item `{name}` includes deprecated `tailwind`. Ignoring tailwind contents."
-        ));
-    }
-
-    // Note: cssVars and css are now automatically applied via apply_css_updates
-    // No need to add warnings here anymore
+    // Note: tailwind, cssVars and css are now automatically applied via apply_css_updates
+    // tailwind config is converted to Tailwind v4 CSS format automatically
 
     warnings
 }
@@ -785,6 +779,7 @@ fn render_declaration_value(value: &Value) -> Result<String, String> {
 }
 
 use crate::cli::components::css_updater::{CssMutation, CssUpdater};
+use crate::cli::components::models::TailwindConfig;
 
 pub fn apply_css_updates(css_path: &Path, mutations: Vec<CssMutation>) -> Result<(), String> {
     let source =
@@ -798,6 +793,134 @@ pub fn apply_css_updates(css_path: &Path, mutations: Vec<CssMutation>) -> Result
             .map_err(|e| format!("Failed to write CSS file: {e}"))?;
     }
     Ok(())
+}
+
+/// Convert deprecated Tailwind v3 config to Tailwind v4 CSS mutations.
+///
+/// Handles:
+/// - `theme.extend.colors` -> `@theme inline { --color-{name}: value; }`
+/// - `theme.extend.keyframes` -> `@keyframes { ... }`
+/// - `theme.extend.animation` -> `@theme inline { --animate-{name}: value; }`
+/// - `theme.extend.fontFamily` -> `@theme inline { --font-{name}: value; }`
+/// - `theme.extend.borderRadius` -> `@theme inline { --radius-{name}: value; }`
+/// - `theme.extend.spacing` -> `@theme inline { --spacing-{name}: value; }`
+fn convert_tailwind_to_mutations(tailwind: &TailwindConfig, mutations: &mut Vec<CssMutation>) {
+    let Some(ref config) = tailwind.config else {
+        return;
+    };
+    let Some(ref theme) = config.theme else {
+        return;
+    };
+    let Some(ref extend) = theme.extend else {
+        return;
+    };
+
+    let mut theme_vars = Vec::new();
+
+    // Convert colors to @theme inline mappings
+    // Handles both simple and nested formats:
+    // Simple: { "brand": "hsl(var(--brand))" } -> --color-brand: hsl(var(--brand));
+    // Nested: { "sidebar": { "DEFAULT": "...", "foreground": "..." } } -> --color-sidebar: ...; --color-sidebar-foreground: ...;
+    for (color_name, value) in &extend.colors {
+        match value {
+            // Nested format: { "DEFAULT": "...", "foreground": "..." }
+            Value::Object(variants) => {
+                for (variant, val) in variants {
+                    if let Some(val_str) = val.as_str() {
+                        let var_name = if variant == "DEFAULT" {
+                            format!("--color-{}", color_name)
+                        } else {
+                            format!("--color-{}-{}", color_name, variant)
+                        };
+                        theme_vars.push((var_name, val_str.to_string()));
+                    }
+                }
+            }
+            // Simple format: "hsl(var(--brand))"
+            Value::String(val_str) => {
+                theme_vars.push((format!("--color-{}", color_name), val_str.clone()));
+            }
+            _ => {}
+        }
+    }
+
+    // Convert animations to @theme inline mappings
+    // e.g., { "accordion-down": "accordion-down 0.2s ease-out" }
+    // becomes: --animate-accordion-down: accordion-down 0.2s ease-out;
+    for (name, value) in &extend.animation {
+        theme_vars.push((format!("--animate-{}", name), value.clone()));
+    }
+
+    // Convert fontFamily to @theme inline mappings
+    // e.g., { "heading": ["Poppins", "sans-serif"] } or { "heading": "Poppins, sans-serif" }
+    // becomes: --font-heading: Poppins, sans-serif;
+    for (name, value) in &extend.font_family {
+        let font_value = match value {
+            Value::Array(fonts) => fonts
+                .iter()
+                .filter_map(|f| f.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            Value::String(s) => s.clone(),
+            _ => continue,
+        };
+        if !font_value.is_empty() {
+            theme_vars.push((format!("--font-{}", name), font_value));
+        }
+    }
+
+    // Convert borderRadius to @theme inline mappings
+    // e.g., { "custom": "0.5rem" } -> --radius-custom: 0.5rem;
+    for (name, value) in &extend.border_radius {
+        theme_vars.push((format!("--radius-{}", name), value.clone()));
+    }
+
+    // Convert spacing to @theme inline mappings
+    // e.g., { "custom": "2rem" } -> --spacing-custom: 2rem;
+    for (name, value) in &extend.spacing {
+        theme_vars.push((format!("--spacing-{}", name), value.clone()));
+    }
+
+    // Add all theme vars as a single mutation
+    if !theme_vars.is_empty() {
+        mutations.push(CssMutation::AddThemeMappings { vars: theme_vars });
+    }
+
+    // Convert keyframes to @keyframes blocks
+    // e.g., { "accordion-down": { "from": { "height": "0" }, "to": { "height": "var(...)" } } }
+    // Also handles percentage selectors like "0%, 100%"
+    for (keyframe_name, frames) in &extend.keyframes {
+        let body = render_keyframes(frames);
+        if !body.is_empty() {
+            mutations.push(CssMutation::AddCssBlock {
+                at_rule: format!("@keyframes {}", keyframe_name),
+                body,
+            });
+        }
+    }
+}
+
+/// Render keyframe frames to CSS
+fn render_keyframes(frames: &HashMap<String, Value>) -> String {
+    let mut out = String::new();
+    for (selector, props) in frames {
+        out.push_str("  ");
+        out.push_str(selector);
+        out.push_str(" {\n");
+        if let Some(obj) = props.as_object() {
+            for (prop, value) in obj {
+                if let Some(val_str) = value.as_str() {
+                    out.push_str("    ");
+                    out.push_str(prop);
+                    out.push_str(": ");
+                    out.push_str(val_str);
+                    out.push_str(";\n");
+                }
+            }
+        }
+        out.push_str("  }\n");
+    }
+    out
 }
 
 /// Collect CSS mutations from registry items
@@ -859,6 +982,11 @@ pub fn collect_css_mutations(components: &[ResolvedComponent]) -> Vec<CssMutatio
                     _ => {}
                 }
             }
+        }
+
+        // Convert deprecated tailwind config to Tailwind v4 CSS format
+        if let Some(ref tailwind) = resolved.spec.tailwind {
+            convert_tailwind_to_mutations(tailwind, &mut mutations);
         }
     }
 

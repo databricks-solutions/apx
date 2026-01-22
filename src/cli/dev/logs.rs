@@ -130,7 +130,6 @@ pub async fn stream_logs(response: reqwest::Response, follow: bool) -> Result<()
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                println!("Dev server is stopping...");
                 debug!("Received Ctrl+C, stopping logs stream.");
                 break;
             }
