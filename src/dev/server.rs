@@ -42,6 +42,7 @@ struct HealthResponse {
     status: &'static str,
     frontend_status: String,
     backend_status: String,
+    db_status: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -56,6 +57,7 @@ pub async fn run_server(
     port: u16,
     backend_port: u16,
     frontend_port: u16,
+    db_port: u16,
 ) -> Result<(), String> {
     let apx_log_queue = apx_log_queue();
     clear_apx_log_queue(&apx_log_queue);
@@ -66,6 +68,7 @@ pub async fn run_server(
         port,
         backend_port,
         frontend_port,
+        db_port,
         "Starting dev server."
     );
 
@@ -77,7 +80,7 @@ pub async fn run_server(
     let (shutdown_tx, _) = broadcast::channel::<Shutdown>(16);
 
     let process_manager = Arc::new(
-        ProcessManager::start(&app_dir, &host, port, backend_port, frontend_port).await?,
+        ProcessManager::start(&app_dir, &host, port, backend_port, frontend_port, db_port).await?,
     );
 
     // Start .env watcher with shutdown receiver
@@ -198,13 +201,14 @@ fn start_env_watcher(
 }
 
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
-    let (frontend_status, backend_status) = state.process_manager.status().await;
+    let (frontend_status, backend_status, db_status) = state.process_manager.status().await;
     (
         StatusCode::OK,
         Json(HealthResponse {
             status: "ok",
             frontend_status,
             backend_status,
+            db_status,
         }),
     )
 }

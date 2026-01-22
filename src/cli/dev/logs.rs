@@ -224,6 +224,7 @@ fn format_log_payload(data: &str) -> Result<(String, bool), String> {
         LogStreamName::App => "app",
         LogStreamName::Ui => "ui",
         LogStreamName::Apx => "apx",
+        LogStreamName::Db => "db",
     };
     let pipe = match payload.pipe {
         Some(LogPipe::Out) => "[out] ",

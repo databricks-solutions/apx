@@ -17,6 +17,7 @@ pub enum LogStreamName {
     App,
     Ui,
     Apx,
+    Db,
 }
 
 pub const APX_SHUTDOWN_MESSAGE: &str = "Dev server shutdown complete.";

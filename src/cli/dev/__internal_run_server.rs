@@ -5,7 +5,7 @@ use crate::cli::run_cli_async;
 use crate::set_app_dir;
 use crate::dev::common::{
     find_available_port_in_range, BACKEND_PORT_END, BACKEND_PORT_START, BIND_HOST,
-    FRONTEND_PORT_END, FRONTEND_PORT_START,
+    DB_PORT_END, DB_PORT_START, FRONTEND_PORT_END, FRONTEND_PORT_START,
 };
 use crate::dev::server::run_server;
 use crate::interop::validate_credentials;
@@ -34,12 +34,15 @@ async fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
         find_available_port_in_range(&args.host, BACKEND_PORT_START, BACKEND_PORT_END)?;
     let frontend_port =
         find_available_port_in_range(&args.host, FRONTEND_PORT_START, FRONTEND_PORT_END)?;
+    let db_port =
+        find_available_port_in_range(&args.host, DB_PORT_START, DB_PORT_END)?;
     run_server(
         args.app_dir,
         args.host,
         args.port,
         backend_port,
         frontend_port,
+        db_port,
     )
     .await
 }

@@ -24,6 +24,7 @@ use crate::dotenv::DotenvFile;
 enum LogSource {
     App,
     Ui,
+    Db,
 }
 
 impl fmt::Display for LogSource {
@@ -31,6 +32,7 @@ impl fmt::Display for LogSource {
         match self {
             LogSource::App => write!(f, "app"),
             LogSource::Ui => write!(f, "ui"),
+            LogSource::Db => write!(f, "db"),
         }
     }
 }
@@ -40,6 +42,7 @@ impl From<LogSource> for LogStreamName {
         match source {
             LogSource::App => LogStreamName::App,
             LogSource::Ui => LogStreamName::Ui,
+            LogSource::Db => LogStreamName::Db,
         }
     }
 }
@@ -49,8 +52,10 @@ pub struct ProcessManager {
     log_queue: LogQueue,
     frontend_child: Arc<Mutex<Option<Child>>>,
     backend_child: Arc<Mutex<Option<Child>>>,
+    db_child: Arc<Mutex<Option<Child>>>,
     backend_port: u16,
     frontend_port: u16,
+    db_port: u16,
     dev_server_port: u16,
     host: String,
     dev_token: String,
@@ -66,6 +71,7 @@ impl ProcessManager {
         dev_server_port: u16,
         backend_port: u16,
         frontend_port: u16,
+        db_port: u16,
     ) -> Result<Self, String> {
         let metadata = read_project_metadata(app_dir)?;
         let bun_path = Self::ensure_bun_path()?;
@@ -79,8 +85,10 @@ impl ProcessManager {
             log_queue: Arc::new(Mutex::new(Vec::new())),
             frontend_child: Arc::new(Mutex::new(None)),
             backend_child: Arc::new(Mutex::new(None)),
+            db_child: Arc::new(Mutex::new(None)),
             backend_port,
             frontend_port,
+            db_port,
             dev_server_port,
             host: host.to_string(),
             dev_token,
@@ -92,7 +100,11 @@ impl ProcessManager {
         debug!(
             "Spawning bun dev process"
         );
-        manager.spawn_bun_dev(app_dir, bun_path).await?;
+        manager.spawn_bun_dev(app_dir, bun_path.clone()).await?;
+        debug!(
+            "Spawning PGLite database process"
+        );
+        manager.spawn_pglite(&bun_path).await?;
         debug!(
             "Spawning uvicorn process"
         );
@@ -119,6 +131,7 @@ impl ProcessManager {
             host = %self.host,
             frontend_port = self.frontend_port,
             backend_port = self.backend_port,
+            db_port = self.db_port,
             dev_server_port = self.dev_server_port,
             "Stopping dev processes with phased shutdown."
         );
@@ -127,13 +140,15 @@ impl ProcessManager {
         debug!("Phase 1: Sending SIGTERM to all processes.");
         Self::send_sigterm("backend", &self.backend_child).await;
         Self::send_sigterm("frontend", &self.frontend_child).await;
+        Self::send_sigterm("db", &self.db_child).await;
 
         // Phase 2: Wait briefly for graceful exit (500ms)
         debug!("Phase 2: Waiting for graceful exit.");
         let wait_backend = Self::wait_for_child("backend", &self.backend_child);
         let wait_frontend = Self::wait_for_child("frontend", &self.frontend_child);
+        let wait_db = Self::wait_for_child("db", &self.db_child);
         let _ = timeout(Duration::from_millis(500), async {
-            tokio::join!(wait_backend, wait_frontend)
+            tokio::join!(wait_backend, wait_frontend, wait_db)
         })
         .await;
 
@@ -141,17 +156,19 @@ impl ProcessManager {
         debug!("Phase 3: Force killing remaining processes.");
         Self::force_kill("backend", &self.backend_child).await;
         Self::force_kill("frontend", &self.frontend_child).await;
+        Self::force_kill("db", &self.db_child).await;
 
         debug!("All processes stopped.");
     }
 
-    pub async fn status(&self) -> (String, String) {
+    pub async fn status(&self) -> (String, String, String) {
         let one_minute_ago = chrono::Utc::now().timestamp_millis() - 60_000;
         let (_, logs) = self.logs_since_timestamp(one_minute_ago).await;
-        
+
         let frontend_status = Self::status_for_child(&self.frontend_child, &logs, LogSource::Ui).await;
         let backend_status = Self::status_for_child(&self.backend_child, &logs, LogSource::App).await;
-        (frontend_status, backend_status)
+        let db_status = Self::status_for_child(&self.db_child, &logs, LogSource::Db).await;
+        (frontend_status, backend_status, db_status)
     }
 
     pub async fn restart_uvicorn_with_env(
@@ -208,6 +225,66 @@ impl ProcessManager {
         let mut guard = self.backend_child.lock().await;
         *guard = Some(child);
         Ok(())
+    }
+
+    async fn spawn_pglite(&self, bun_path: &Path) -> Result<(), String> {
+        let child = self.spawn_process(
+            &self.app_dir,
+            bun_path.to_path_buf(),
+            vec![
+                "x".to_string(),
+                "@electric-sql/pglite-socket".to_string(),
+                "--db=memory://".to_string(),
+                format!("--host={}", self.host),
+                "--debug=0".to_string(),
+                format!("--port={}", self.db_port),
+            ],
+            LogSource::Db,
+            false,
+        )
+        .await?;
+
+        let mut guard = self.db_child.lock().await;
+        *guard = Some(child);
+
+        self.spawn_db_health_monitor();
+        Ok(())
+    }
+
+    fn spawn_db_health_monitor(&self) {
+        let db_child = Arc::clone(&self.db_child);
+        tokio::spawn(async move {
+            let start_time = chrono::Utc::now();
+            let timeout_duration = chrono::Duration::seconds(60);
+
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let elapsed = chrono::Utc::now() - start_time;
+
+                if elapsed > timeout_duration {
+                    debug!("PGLite process survived 1 minute startup period");
+                    break;
+                }
+
+                let mut guard = db_child.lock().await;
+                if let Some(child) = guard.as_mut() {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            warn!("PGLite process exited early with status: {:?}", status);
+                            break;
+                        }
+                        Ok(None) => continue,
+                        Err(e) => {
+                            warn!("Failed to check PGLite process status: {}", e);
+                            break;
+                        }
+                    }
+                } else {
+                    warn!("PGLite process handle lost");
+                    break;
+                }
+            }
+        });
     }
 
     async fn spawn_process(
@@ -274,6 +351,7 @@ impl ProcessManager {
     async fn apply_env(&self, cmd: &mut Command, include_dotenv: bool) {
         cmd.env("APX_FRONTEND_PORT", self.frontend_port.to_string());
         cmd.env("APX_BACKEND_PORT", self.backend_port.to_string());
+        cmd.env("APX_DEV_DB_PORT", self.db_port.to_string());
         cmd.env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string());
         cmd.env("APX_DEV_SERVER_HOST", self.host.clone());
         cmd.env("APX_DEV_TOKEN", self.dev_token.clone());
