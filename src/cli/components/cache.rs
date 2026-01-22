@@ -1,14 +1,19 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use super::models::{RegistryItem, RegistryCatalogEntry, UiConfig};
-use super::{resolve_component_request, fetch_component_impl, merge_registries, fetch_registry_catalog_impl};
+use tokio::sync::Mutex;
+use super::models::{RegistryItem, RegistryCatalogEntry, RegistryConfig, UiConfig};
+use super::{resolve_component_request, fetch_component_impl};
 use crate::common::read_project_metadata;
 
 /// Current cache format version
 const CACHE_VERSION: u8 = 2;
+
+/// Cache TTL in hours
+const CACHE_TTL_HOURS: i64 = 1;
 
 /// Cached component item
 #[derive(Debug, Serialize, Deserialize)]
@@ -19,7 +24,7 @@ struct CachedItem {
     warnings: Vec<String>,
 }
 
-/// Registry catalog cache
+/// Registry catalog cache (shadcn directory)
 #[derive(Debug, Serialize, Deserialize)]
 struct CachedRegistryCatalog {
     version: u8,
@@ -27,11 +32,30 @@ struct CachedRegistryCatalog {
     entries: Vec<RegistryCatalogEntry>,
 }
 
+/// Cached registry index (registry.json content)
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedRegistryIndex {
+    version: u8,
+    fetched_at: i64,
+    items: Vec<RegistryIndexItem>,
+}
+
+/// Item from registry.json
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryIndexItem {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default, rename = "registryDependencies")]
+    pub registry_dependencies: Vec<String>,
+}
+
 /// Get the base cache directory path (~/.apx/cache/components/)
 fn get_cache_base_dir() -> Result<PathBuf, String> {
     let home = dirs::home_dir()
         .ok_or_else(|| "Could not determine home directory".to_string())?;
-
     Ok(home.join(".apx").join("cache").join("components"))
 }
 
@@ -40,20 +64,34 @@ fn get_items_dir() -> Result<PathBuf, String> {
     Ok(get_cache_base_dir()?.join("items"))
 }
 
-/// Get the registries.json cache file path
-fn get_registries_cache_path() -> Result<PathBuf, String> {
+/// Get the registries directory path (for registry.json files)
+fn get_registries_dir() -> Result<PathBuf, String> {
+    Ok(get_cache_base_dir()?.join("registries"))
+}
+
+/// Get the registries.json cache file path (shadcn directory)
+fn get_registries_catalog_path() -> Result<PathBuf, String> {
     Ok(get_cache_base_dir()?.join("registries.json"))
 }
 
-/// Get the directory for a specific registry's items
-/// Default registry maps to "ui", others use their name (e.g., "@animate-ui")
-fn get_registry_items_dir(registry_name: Option<&str>) -> Result<PathBuf, String> {
-    let registry_dir = match registry_name {
-        None => "ui".to_string(), // Default shadcn
-        Some(name) => name.to_string(), // Keep full name like "@animate-ui"
-    };
+/// Get registry directory name
+fn registry_dir_name(registry_name: Option<&str>) -> String {
+    match registry_name {
+        None => "ui".to_string(),
+        Some(name) => name.trim_start_matches('@').to_string(),
+    }
+}
 
-    Ok(get_items_dir()?.join(registry_dir))
+/// Get the path for a registry's registry.json cache
+fn get_registry_index_path(registry_name: Option<&str>) -> Result<PathBuf, String> {
+    let dir_name = registry_dir_name(registry_name);
+    Ok(get_registries_dir()?.join(&dir_name).join("registry.json"))
+}
+
+/// Get the directory for a specific registry's items
+fn get_registry_items_dir(registry_name: Option<&str>) -> Result<PathBuf, String> {
+    let dir_name = registry_dir_name(registry_name);
+    Ok(get_items_dir()?.join(&dir_name))
 }
 
 /// Get the path for a specific component cache file
@@ -63,13 +101,29 @@ fn get_component_cache_path(component_name: &str, registry_name: Option<&str>) -
     Ok(registry_dir.join(filename))
 }
 
-/// Check if a cache entry is still fresh
+/// Check if a cache file is fresh based on mtime
+fn is_file_fresh(path: &Path, ttl_hours: i64) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let Ok(elapsed) = modified.elapsed() else {
+        return false;
+    };
+    elapsed.as_secs() < (ttl_hours * 3600) as u64
+}
+
+/// Check if a cache entry is still fresh (by fetched_at timestamp)
 fn is_cache_fresh(fetched_at: i64, ttl_hours: i64) -> bool {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-
     let ttl_seconds = ttl_hours * 3600;
     now - fetched_at < ttl_seconds
 }
@@ -157,274 +211,260 @@ pub fn save_cached_component(
     Ok(())
 }
 
-/// Load cached registry catalog
+/// Load cached registry catalog (shadcn directory)
 pub fn load_cached_registry_catalog() -> Result<Option<Vec<RegistryCatalogEntry>>, String> {
-    let cache_path = match get_registries_cache_path() {
-        Ok(path) => path,
-        Err(_) => return Ok(None),
-    };
-
-    if !cache_path.exists() {
+    let cache_path = get_registries_catalog_path()?;
+    if !is_file_fresh(&cache_path, CACHE_TTL_HOURS) {
         return Ok(None);
     }
-
-    let content = match fs::read_to_string(&cache_path) {
-        Ok(c) => c,
-        Err(_) => return Ok(None),
-    };
-
-    let cached: CachedRegistryCatalog = match serde_json::from_str(&content) {
-        Ok(c) => c,
-        Err(_) => return Ok(None),
-    };
-
+    let content = fs::read_to_string(&cache_path).map_err(|e| e.to_string())?;
+    let cached: CachedRegistryCatalog = serde_json::from_str(&content).map_err(|e| e.to_string())?;
     if cached.version != CACHE_VERSION {
         return Ok(None);
     }
-
-    // Registry catalog uses longer TTL (24 hours)
-    if !is_cache_fresh(cached.fetched_at, 24) {
-        return Ok(None);
-    }
-
     Ok(Some(cached.entries))
 }
 
 /// Save registry catalog to cache
 pub fn save_cached_registry_catalog(entries: &[RegistryCatalogEntry]) -> Result<(), String> {
-    let cache_path = get_registries_cache_path()?;
-
+    let cache_path = get_registries_catalog_path()?;
     if let Some(cache_dir) = cache_path.parent() {
-        fs::create_dir_all(cache_dir)
-            .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+        fs::create_dir_all(cache_dir).map_err(|e| format!("Failed to create cache directory: {}", e))?;
     }
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    let cached = CachedRegistryCatalog {
-        version: CACHE_VERSION,
-        fetched_at: now,
-        entries: entries.to_vec(),
-    };
-
-    let json_content = serde_json::to_string_pretty(&cached)
-        .map_err(|e| format!("Failed to serialize registry catalog cache: {}", e))?;
-
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let cached = CachedRegistryCatalog { version: CACHE_VERSION, fetched_at: now, entries: entries.to_vec() };
+    let json_content = serde_json::to_string_pretty(&cached).map_err(|e| e.to_string())?;
     let temp_path = cache_path.with_extension("tmp");
-
-    fs::write(&temp_path, json_content)
-        .map_err(|e| format!("Failed to write registry catalog cache file: {}", e))?;
-
-    fs::rename(&temp_path, &cache_path)
-        .map_err(|e| format!("Failed to rename registry catalog cache file: {}", e))?;
-
+    fs::write(&temp_path, &json_content).map_err(|e| e.to_string())?;
+    fs::rename(&temp_path, &cache_path).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// List all available components for a registry from the shadcn index
-/// This fetches the components list from the registry's index endpoint
-async fn fetch_registry_components_list(
-    client: &reqwest::Client,
-    registry_name: Option<&str>,
-    _cfg: &UiConfig,
-) -> Result<Vec<String>, String> {
-    // For default shadcn registry, we need to fetch the components list
-    // The shadcn registry has an index at https://ui.shadcn.com/r/index.json
-    if registry_name.is_none() {
-        let index_url = "https://ui.shadcn.com/r/index.json";
-
-        let response = client
-            .get(index_url)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to fetch registry index: {e}"))?
-            .error_for_status()
-            .map_err(|e| format!("Registry index returned error: {e}"))?
-            .json::<serde_json::Value>()
-            .await
-            .map_err(|e| format!("Invalid registry index JSON: {e}"))?;
-
-        // Extract component names from the index
-        // The index is an array of objects with "name" fields
-        if let Some(arr) = response.as_array() {
-            let names: Vec<String> = arr
-                .iter()
-                .filter_map(|item| item.get("name")?.as_str().map(|s| s.to_string()))
-                .collect();
-
-            if !names.is_empty() {
-                return Ok(names);
-            }
-        }
-
-        // Fallback to a known list of common components if index fetch fails
-        return Ok(vec![
-            "accordion", "alert", "alert-dialog", "aspect-ratio", "avatar",
-            "badge", "button", "calendar", "card", "carousel", "checkbox",
-            "collapsible", "command", "context-menu", "dialog", "drawer",
-            "dropdown-menu", "form", "hover-card", "input", "label",
-            "menubar", "navigation-menu", "pagination", "popover", "progress",
-            "radio-group", "resizable", "scroll-area", "select", "separator",
-            "sheet", "skeleton", "slider", "sonner", "switch", "table",
-            "tabs", "textarea", "toast", "toggle", "toggle-group", "tooltip",
-        ].iter().map(|s| s.to_string()).collect());
+/// Load cached registry index (registry.json)
+fn load_cached_registry_index(registry_name: Option<&str>) -> Result<Option<Vec<RegistryIndexItem>>, String> {
+    let cache_path = get_registry_index_path(registry_name)?;
+    if !is_file_fresh(&cache_path, CACHE_TTL_HOURS) {
+        return Ok(None);
     }
-
-    // For custom registries, we'd need to fetch their index
-    // For now, we'll return an empty list since we don't know their structure
-    // They will be populated as components are requested
-    tracing::warn!(
-        "Custom registry {:?} doesn't have a known index endpoint",
-        registry_name
-    );
-    Ok(Vec::new())
+    let content = fs::read_to_string(&cache_path).map_err(|e| e.to_string())?;
+    let cached: CachedRegistryIndex = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    if cached.version != CACHE_VERSION {
+        return Ok(None);
+    }
+    Ok(Some(cached.items))
 }
 
-/// Sync all items from all registries in pyproject.toml
-/// This downloads ALL items from each registry and caches them
-pub async fn sync_all_registries(
-    app_dir: &Path,
-) -> Result<HashMap<String, Vec<String>>, String> {
-    tracing::info!("Syncing all registries from pyproject.toml");
+/// Save registry index to cache
+fn save_cached_registry_index(registry_name: Option<&str>, items: &[RegistryIndexItem]) -> Result<(), String> {
+    let cache_path = get_registry_index_path(registry_name)?;
+    if let Some(cache_dir) = cache_path.parent() {
+        fs::create_dir_all(cache_dir).map_err(|e| format!("Failed to create cache directory: {}", e))?;
+    }
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let cached = CachedRegistryIndex { version: CACHE_VERSION, fetched_at: now, items: items.to_vec() };
+    let json_content = serde_json::to_string_pretty(&cached).map_err(|e| e.to_string())?;
+    let temp_path = cache_path.with_extension("tmp");
+    fs::write(&temp_path, &json_content).map_err(|e| e.to_string())?;
+    fs::rename(&temp_path, &cache_path).map_err(|e| e.to_string())?;
+    Ok(())
+}
 
+/// Get registry.json URL for a registry
+/// Default: https://ui.shadcn.com/r/styles/new-york/registry.json
+/// Custom: replace {name} with "registry" in template
+fn get_registry_index_url(registry_name: Option<&str>, registry_config: Option<&RegistryConfig>, style: &str) -> Option<String> {
+    match (registry_name, registry_config) {
+        (None, _) => Some(format!("https://ui.shadcn.com/r/styles/{}/registry.json", style)),
+        (Some(_), Some(config)) => {
+            let template = match config {
+                RegistryConfig::Template(t) => t.clone(),
+                RegistryConfig::Advanced(a) => a.url.clone(),
+            };
+            // Replace {name} with "registry" and remove {style} if present
+            let url = template.replace("{name}", "registry").replace("{style}", style);
+            Some(url)
+        }
+        _ => None,
+    }
+}
+
+/// Fetch and cache registry index (registry.json)
+async fn fetch_and_cache_registry_index(
+    client: &reqwest::Client,
+    registry_name: Option<&str>,
+    registry_config: Option<&RegistryConfig>,
+    style: &str,
+) -> Result<Vec<RegistryIndexItem>, String> {
+    // Check cache first
+    if let Ok(Some(items)) = load_cached_registry_index(registry_name) {
+        tracing::debug!("Using cached registry index for {:?}", registry_name);
+        return Ok(items);
+    }
+
+    let url = get_registry_index_url(registry_name, registry_config, style)
+        .ok_or_else(|| format!("Cannot determine registry URL for {:?}", registry_name))?;
+
+    tracing::debug!("Fetching registry index from: {}", url);
+
+    let response = client.get(&url).send().await
+        .map_err(|e| format!("Failed to fetch registry index {}: {}", url, e))?
+        .error_for_status()
+        .map_err(|e| format!("Registry index {} returned error: {}", url, e))?;
+
+    let json_value: serde_json::Value = response.json().await
+        .map_err(|e| format!("Invalid JSON from registry index {}: {}", url, e))?;
+
+    // Parse items - can be at root level as array or in "items" field
+    let items_array = json_value.get("items")
+        .and_then(|v| v.as_array())
+        .or_else(|| json_value.as_array());
+
+    let items: Vec<RegistryIndexItem> = match items_array {
+        Some(arr) => arr.iter()
+            .filter_map(|item| {
+                let name = item.get("name")?.as_str()?.to_string();
+                Some(RegistryIndexItem {
+                    name,
+                    description: item.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    dependencies: item.get("dependencies")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                        .unwrap_or_default(),
+                    registry_dependencies: item.get("registryDependencies")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                        .unwrap_or_default(),
+                })
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
+    if !items.is_empty() {
+        let _ = save_cached_registry_index(registry_name, &items);
+        tracing::info!("Cached {} items from registry {:?}", items.len(), registry_name.unwrap_or("default"));
+    }
+
+    Ok(items)
+}
+
+/// Check if any registry.json files need refresh (older than 1 hour)
+pub fn needs_registry_refresh(registries: &HashMap<String, RegistryConfig>) -> bool {
+    // Check default registry
+    if let Ok(path) = get_registry_index_path(None) {
+        if !is_file_fresh(&path, CACHE_TTL_HOURS) {
+            return true;
+        }
+    }
+    // Check custom registries
+    for registry_name in registries.keys() {
+        if let Ok(path) = get_registry_index_path(Some(registry_name)) {
+            if !is_file_fresh(&path, CACHE_TTL_HOURS) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Sync registry.json files only (not individual items, except default shadcn)
+/// Returns true if any registry was refreshed
+pub async fn sync_registry_indexes(
+    app_dir: &Path,
+    force: bool,
+) -> Result<bool, String> {
     let metadata = read_project_metadata(app_dir)?;
     let cfg = UiConfig::from_metadata(&metadata, app_dir);
     let client = reqwest::Client::new();
+    let style = cfg.style();
+    let mut refreshed = false;
 
-    // Fetch registry catalog
-    let discovered = fetch_registry_catalog_impl(&client).await?;
-    let merged_registries = merge_registries(&cfg.registries, &discovered);
+    // Sync default registry index
+    let default_path = get_registry_index_path(None)?;
+    if force || !is_file_fresh(&default_path, CACHE_TTL_HOURS) {
+        tracing::info!("Fetching default registry index");
+        match fetch_and_cache_registry_index(&client, None, None, style).await {
+            Ok(items) => {
+                tracing::info!("Cached {} items in default registry index", items.len());
+                refreshed = true;
 
-    let merged_cfg = UiConfig {
-        root: cfg.root.clone(),
-        registries: merged_registries.clone(),
-    };
-
-    let mut synced_items: HashMap<String, Vec<String>> = HashMap::new();
-
-    // Sync default shadcn registry
-    tracing::info!("Syncing default shadcn registry");
-    match fetch_registry_components_list(&client, None, &merged_cfg).await {
-        Ok(component_names) => {
-            tracing::info!("Found {} components in default registry", component_names.len());
-
-            let mut successful = Vec::new();
-            for component_name in &component_names {
-                match resolve_component_request(&merged_cfg, None, component_name) {
-                    Ok(req) => {
-                        match fetch_component_impl(&client, &req, None, Some(component_name)).await {
-                            Ok((item, warnings)) => {
-                                if let Err(e) = save_cached_component(component_name, None, &item, &warnings) {
-                                    tracing::warn!("Failed to cache component {}: {}", component_name, e);
-                                } else {
-                                    successful.push(component_name.clone());
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to fetch component {}: {}", component_name, e);
-                            }
+                // For default shadcn registry, also prefetch all individual items
+                tracing::info!("Prefetching default registry items...");
+                for item in &items {
+                    if let Ok(req) = resolve_component_request(&cfg, None, &item.name) {
+                        if let Ok((component, warnings)) = fetch_component_impl(&client, &req, None, Some(&item.name)).await {
+                            let _ = save_cached_component(&item.name, None, &component, &warnings);
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to resolve component {}: {}", component_name, e);
                     }
                 }
             }
-
-            tracing::info!("Successfully synced {} components from default registry", successful.len());
-            synced_items.insert("default".to_string(), successful);
-        }
-        Err(e) => {
-            tracing::warn!("Failed to fetch components list for default registry: {}", e);
+            Err(e) => tracing::warn!("Failed to fetch default registry index: {}", e),
         }
     }
 
-    // For custom registries, we can't easily get a list of all components
-    // They will be populated as components are requested
-    for (registry_name, _) in &merged_registries {
-        tracing::debug!("Registry {} will be synced on-demand", registry_name);
+    // Sync custom registry indexes (registry.json only, no item prefetch)
+    for (registry_name, registry_config) in &cfg.registries {
+        let path = get_registry_index_path(Some(registry_name))?;
+        if force || !is_file_fresh(&path, CACHE_TTL_HOURS) {
+            tracing::info!("Fetching registry index for {}", registry_name);
+            match fetch_and_cache_registry_index(&client, Some(registry_name), Some(registry_config), style).await {
+                Ok(items) => {
+                    tracing::info!("Cached {} items in {} registry index", items.len(), registry_name);
+                    refreshed = true;
+                }
+                Err(e) => tracing::warn!("Failed to fetch {} registry index: {}", registry_name, e),
+            }
+        }
     }
 
-    Ok(synced_items)
+    Ok(refreshed)
 }
 
-/// Get all cached components from all registries
-/// Returns a map of registry_name -> Vec<(component_name, RegistryItem)>
-pub fn get_all_cached_components() -> Result<HashMap<String, Vec<(String, RegistryItem)>>, String> {
-    let items_dir = get_items_dir()?;
-
-    if !items_dir.exists() {
+/// Get all cached registry indexes for building search index
+pub fn get_all_registry_indexes() -> Result<HashMap<String, Vec<RegistryIndexItem>>, String> {
+    let registries_dir = get_registries_dir()?;
+    if !registries_dir.exists() {
         return Ok(HashMap::new());
     }
 
-    let mut result: HashMap<String, Vec<(String, RegistryItem)>> = HashMap::new();
+    let mut result = HashMap::new();
 
-    // Iterate through registry directories
-    let registry_dirs = fs::read_dir(&items_dir)
-        .map_err(|e| format!("Failed to read items directory: {}", e))?;
-
-    for registry_entry in registry_dirs {
-        let registry_entry = match registry_entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        let registry_path = registry_entry.path();
-        if !registry_path.is_dir() {
+    for entry in fs::read_dir(&registries_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if !path.is_dir() {
             continue;
         }
 
-        let registry_name = registry_entry.file_name().to_string_lossy().to_string();
-        let registry_key = if registry_name == "ui" {
-            "default".to_string()
-        } else {
-            registry_name.clone()
-        };
+        let registry_name = path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
 
-        let mut components = Vec::new();
-
-        // Iterate through component files
-        let component_files = match fs::read_dir(&registry_path) {
-            Ok(files) => files,
-            Err(_) => continue,
-        };
-
-        for component_entry in component_files {
-            let component_entry = match component_entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-
-            let component_path = component_entry.path();
-            if !component_path.is_file() || component_path.extension().map(|e| e != "json").unwrap_or(true) {
-                continue;
-            }
-
-            let component_name = component_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-
-            // Load the cached component
-            let registry_arg = if registry_key == "default" {
-                None
-            } else {
-                Some(registry_key.as_str())
-            };
-
-            if let Ok(Some((item, _warnings))) = load_cached_component(&component_name, registry_arg) {
-                components.push((component_name, item));
-            }
+        let index_path = path.join("registry.json");
+        if !index_path.exists() {
+            continue;
         }
 
-        if !components.is_empty() {
-            result.insert(registry_key, components);
-        }
+        let content = fs::read_to_string(&index_path).map_err(|e| e.to_string())?;
+        let cached: CachedRegistryIndex = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+
+        result.insert(registry_name, cached.items);
     }
 
     Ok(result)
+}
+
+/// State for tracking background indexing
+#[derive(Debug, Clone, Default)]
+pub struct CachePopulationState {
+    pub is_running: bool,
+}
+
+/// Shared state for cache population
+pub type SharedCacheState = Arc<Mutex<CachePopulationState>>;
+
+/// Create a new shared cache state
+pub fn new_cache_state() -> SharedCacheState {
+    Arc::new(Mutex::new(CachePopulationState::default()))
 }

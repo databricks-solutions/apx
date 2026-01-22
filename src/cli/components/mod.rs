@@ -7,6 +7,12 @@ pub mod utils;
 // Re-export models for easier access
 pub use models::{CssRules, RegistryCatalogEntry, RegistryConfig, RegistryItem, UiConfig};
 
+// Re-export cache functions
+pub use cache::{
+    new_cache_state, SharedCacheState,
+    sync_registry_indexes, get_all_registry_indexes, needs_registry_refresh,
+};
+
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};

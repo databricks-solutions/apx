@@ -1,6 +1,8 @@
 use crate::mcp::core::{McpServer, ToolResult};
 use crate::dotenv::DotenvFile;
 use crate::databricks_sdk_doc::{SDKDocIndex, SDKSource};
+use crate::cli::components::{SharedCacheState, sync_registry_indexes, needs_registry_refresh};
+use crate::search::ComponentIndex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -14,9 +16,76 @@ use tokio::sync::Mutex;
 pub struct AppContext {
     pub app_dir: PathBuf,
     pub sdk_doc_index: Arc<Mutex<Option<SDKDocIndex>>>,
+    pub cache_state: SharedCacheState,
+}
+
+/// Initialize registry indexes and search index in background
+/// This is called when the MCP server starts
+pub fn init_cache_and_index(ctx: &AppContext) {
+    let app_dir = ctx.app_dir.clone();
+    let cache_state = ctx.cache_state.clone();
+
+    tokio::spawn(async move {
+        // Mark as running
+        {
+            let mut guard = cache_state.lock().await;
+            guard.is_running = true;
+        }
+
+        tracing::info!("Syncing registry indexes on MCP start");
+
+        // Sync registry.json files (prefetches default shadcn items only)
+        match sync_registry_indexes(&app_dir, false).await {
+            Ok(refreshed) => {
+                if refreshed {
+                    tracing::info!("Registry indexes refreshed, rebuilding search index");
+                    if let Err(e) = rebuild_search_index().await {
+                        tracing::warn!("Failed to rebuild search index: {}", e);
+                    }
+                } else {
+                    // Check if search index exists, build if not
+                    if let Err(e) = ensure_search_index().await {
+                        tracing::warn!("Failed to ensure search index: {}", e);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("Failed to sync registry indexes: {}", e),
+        }
+
+        // Mark as done
+        {
+            let mut guard = cache_state.lock().await;
+            guard.is_running = false;
+        }
+    });
+}
+
+/// Rebuild the search index from registry.json files
+async fn rebuild_search_index() -> Result<(), String> {
+    let db_path = ComponentIndex::default_path()?;
+    let index = ComponentIndex::new(db_path)?;
+    let table_name = ComponentIndex::table_name("components");
+    index.build_index_from_registries(&table_name).await
+}
+
+/// Ensure search index exists, build if not
+async fn ensure_search_index() -> Result<(), String> {
+    let db_path = ComponentIndex::default_path()?;
+    let index = ComponentIndex::new(db_path)?;
+    let table_name = ComponentIndex::table_name("components");
+
+    // Check if table exists
+    if !index.table_exists_pub(&table_name).await? {
+        tracing::info!("Search index not found, building from registry indexes");
+        index.build_index_from_registries(&table_name).await?;
+    }
+    Ok(())
 }
 
 pub fn build_server(ctx: AppContext) -> McpServer<AppContext> {
+    // Initialize cache and index in background
+    init_cache_and_index(&ctx);
+
     McpServer::new(ctx)
         .resource(
             "apx://info",
@@ -520,7 +589,22 @@ async fn search_registry_components_tool(
     ctx: Arc<AppContext>,
     args: SearchRegistryComponentsArgs,
 ) -> ToolResult {
-    use crate::search::ComponentIndex;
+    use crate::common::read_project_metadata;
+    use crate::cli::components::UiConfig;
+
+    // Check if registry indexes need refresh
+    if let Ok(metadata) = read_project_metadata(&ctx.app_dir) {
+        let cfg = UiConfig::from_metadata(&metadata, &ctx.app_dir);
+        if needs_registry_refresh(&cfg.registries) {
+            tracing::info!("Registry indexes stale, refreshing...");
+            if let Ok(true) = sync_registry_indexes(&ctx.app_dir, false).await {
+                // Rebuild search index
+                if let Err(e) = rebuild_search_index().await {
+                    tracing::warn!("Failed to rebuild search index after refresh: {}", e);
+                }
+            }
+        }
+    }
 
     // Get or create index
     let db_path = match ComponentIndex::default_path() {
@@ -533,21 +617,31 @@ async fn search_registry_components_tool(
         Err(e) => return ToolResult::error(format!("Failed to initialize index: {}", e)),
     };
 
-    // Table name based on app directory (to support multiple projects)
-    let table_name = "components";
+    let table_name = ComponentIndex::table_name("components");
 
-    // Check if index exists, if not build it (which will sync all registries)
-    let search_results = match index.search(table_name, &args.query, args.limit).await {
+    // Search, building index if needed
+    let search_results = match index.search(&table_name, &args.query, args.limit).await {
         Ok(results) => results,
         Err(e) if e.contains("Index not built") => {
-            // Try to build index (this will sync all registries first)
-            tracing::info!("Index not found, syncing registries and building index...");
-            if let Err(build_err) = index.build_index(&ctx.app_dir, table_name).await {
+            // Check if indexing is running
+            let is_running = {
+                let guard = ctx.cache_state.lock().await;
+                guard.is_running
+            };
+
+            if is_running {
+                return ToolResult::error(
+                    "Component index is being built in background. Please try again shortly.".to_string()
+                );
+            }
+
+            // Build index from registry indexes
+            tracing::info!("Index not found, building from registry indexes...");
+            if let Err(build_err) = index.build_index_from_registries(&table_name).await {
                 return ToolResult::error(format!("Failed to build index: {}", build_err));
             }
 
-            // Retry search
-            match index.search(table_name, &args.query, args.limit).await {
+            match index.search(&table_name, &args.query, args.limit).await {
                 Ok(results) => results,
                 Err(e) => return ToolResult::error(format!("Search failed after building index: {}", e)),
             }
@@ -555,7 +649,6 @@ async fn search_registry_components_tool(
         Err(e) => return ToolResult::error(format!("Search failed: {}", e)),
     };
 
-    // Format results as JSON
     #[derive(serde::Serialize)]
     struct SearchResponse {
         query: String,
@@ -565,6 +658,8 @@ async fn search_registry_components_tool(
     #[derive(serde::Serialize)]
     struct SearchResultItem {
         id: String,
+        name: String,
+        registry: String,
         score: f32,
     }
 
@@ -574,6 +669,8 @@ async fn search_registry_components_tool(
             .into_iter()
             .map(|r| SearchResultItem {
                 id: r.id,
+                name: r.name,
+                registry: r.registry,
                 score: r.score,
             })
             .collect(),
@@ -587,7 +684,6 @@ async fn search_registry_components_tool(
 
 async fn add_component_tool(ctx: Arc<AppContext>, args: AddComponentArgs) -> ToolResult {
     use crate::cli::components::add::{ComponentsAddArgs, run_inner};
-    use crate::search::ComponentIndex;
 
     // Parse component ID to extract registry and component name
     let (registry, component) = if args.component_id.starts_with('@') {
@@ -615,39 +711,11 @@ async fn add_component_tool(ctx: Arc<AppContext>, args: AddComponentArgs) -> Too
     // Call run_inner (this will fetch and cache the component)
     match run_inner(add_args).await {
         Ok(()) => {
-            // After adding component, rebuild the index with updated cache
-            tracing::info!("Component added successfully, rebuilding index with updated cache");
-
-            let db_path = match ComponentIndex::default_path() {
-                Ok(path) => path,
-                Err(e) => {
-                    tracing::warn!("Failed to get database path for index rebuild: {}", e);
-                    return ToolResult::success(format!(
-                        "Successfully added component: {} (index rebuild skipped)",
-                        args.component_id
-                    ));
-                }
-            };
-
-            let index = match ComponentIndex::new(db_path) {
-                Ok(idx) => idx,
-                Err(e) => {
-                    tracing::warn!("Failed to initialize index for rebuild: {}", e);
-                    return ToolResult::success(format!(
-                        "Successfully added component: {} (index rebuild skipped)",
-                        args.component_id
-                    ));
-                }
-            };
-
-            // Rebuild index (this will sync all registries and rebuild)
-            let table_name = "components";
-            if let Err(e) = index.build_index(&ctx.app_dir, table_name).await {
-                tracing::warn!("Failed to rebuild index after adding component: {}", e);
-            } else {
-                tracing::info!("Index rebuilt successfully");
-            }
-
+            // Component added and cached - index will be updated on next search
+            // Note: We don't rebuild the entire index here as it's expensive.
+            // The component is already cached, and the next cache population
+            // cycle will include it in the index.
+            tracing::info!("Component {} added successfully", args.component_id);
             ToolResult::success(format!("Successfully added component: {}", args.component_id))
         }
         Err(e) => ToolResult::error(format!("Failed to add component: {}", e)),

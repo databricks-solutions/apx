@@ -1,5 +1,6 @@
 use clap::Args;
 use crate::cli::run_cli_async;
+use crate::cli::components::new_cache_state;
 use crate::mcp::server::{build_server, AppContext};
 use crate::databricks_sdk_doc::{SDKDocIndex, SDKSource};
 use std::sync::Arc;
@@ -40,9 +41,13 @@ pub async fn run(_args: McpArgs) -> i32 {
             }
         };
 
+        // Create cache state for background population
+        let cache_state = new_cache_state();
+
         let server = build_server(AppContext {
             app_dir,
             sdk_doc_index: Arc::new(Mutex::new(sdk_doc_index)),
+            cache_state,
         });
 
         server

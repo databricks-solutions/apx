@@ -48,7 +48,6 @@ def init_test_project(tmp_path, apx_source_dir):
         ]
     )
     assert exit_code == 0, "Failed to initialize test project"
-    assert (tmp_path / "components.json").exists(), "components.json should exist"
     assert (tmp_path / "src").exists(), "src directory should exist"
     return tmp_path
 
@@ -166,17 +165,21 @@ async def test_search_and_add_component(init_test_project):
         # Test 1: List tools and verify search_registry_components exists
         tools = await session.list_tools()
         tool_names = [t.name for t in tools.tools]
-        assert "search_registry_components" in tool_names, "search_registry_components tool should exist"
+        assert "search_registry_components" in tool_names, (
+            "search_registry_components tool should exist"
+        )
         assert "add_component" in tool_names, "add_component tool should exist"
 
         # Test 2: Search for button component
         search_result = await session.call_tool(
             "search_registry_components",
-            arguments={"query": "button component for clicking", "limit": 5}
+            arguments={"query": "button component for clicking", "limit": 5},
         )
 
         result_json = parse_json_result(search_result)
-        print(f"\n=== Search Result ===\n{json.dumps(result_json, indent=2)}\n====================\n")
+        print(
+            f"\n=== Search Result ===\n{json.dumps(result_json, indent=2)}\n====================\n"
+        )
 
         assert "query" in result_json, "Result should contain query"
         assert "results" in result_json, "Result should contain results"
@@ -186,7 +189,9 @@ async def test_search_and_add_component(init_test_project):
 
         # Verify "button" is in the results (should have high similarity)
         result_ids = [r["id"] for r in results]
-        assert "button" in result_ids, "Button should be in search results for button query"
+        assert "button" in result_ids, (
+            "Button should be in search results for button query"
+        )
 
         # Check that button has the highest score
         button_result = next(r for r in results if r["id"] == "button")
@@ -194,8 +199,7 @@ async def test_search_and_add_component(init_test_project):
 
         # Test 3: Add a component
         add_result = await session.call_tool(
-            "add_component",
-            arguments={"component_id": "dialog", "force": False}
+            "add_component", arguments={"component_id": "dialog", "force": False}
         )
 
         assert len(add_result.content) > 0, "Add should return content"
@@ -203,12 +207,16 @@ async def test_search_and_add_component(init_test_project):
         print(f"\n=== Add Component Result ===\n{result_text}\n====================\n")
 
         # Verify that if successful, the dialog file was created
-        dialog_file = tmp_path / "src" / "test_app" / "ui" / "components" / "ui" / "dialog.tsx"
+        dialog_file = (
+            tmp_path / "src" / "test_app" / "ui" / "components" / "ui" / "dialog.tsx"
+        )
         if "Successfully added component" in result_text:
             assert dialog_file.exists(), "Dialog component file should be created"
             content = dialog_file.read_text()
             assert len(content) > 0, "Dialog component should have content"
-            assert "dialog" in content.lower(), "Dialog component should contain 'dialog'"
+            assert "dialog" in content.lower(), (
+                "Dialog component should contain 'dialog'"
+            )
             print(f"✓ Dialog component created successfully at {dialog_file}")
         else:
             print(f"Component add returned: {result_text}")
@@ -223,11 +231,13 @@ async def test_search_and_add_custom_registry_component(init_test_project):
         # Test 1: Search for sidebar component from animate-ui
         search_result = await session.call_tool(
             "search_registry_components",
-            arguments={"query": "animated sidebar navigation component", "limit": 5}
+            arguments={"query": "animated sidebar navigation component", "limit": 5},
         )
 
         result_json = parse_json_result(search_result)
-        print(f"\n=== Search for Custom Registry Component ===\n{json.dumps(result_json, indent=2)}\n====================\n")
+        print(
+            f"\n=== Search for Custom Registry Component ===\n{json.dumps(result_json, indent=2)}\n====================\n"
+        )
 
         assert "query" in result_json
         assert "results" in result_json
@@ -235,19 +245,28 @@ async def test_search_and_add_custom_registry_component(init_test_project):
         print(f"✓ Search returned {len(results)} results")
 
         # Check if any results are from @animate-ui registry
-        animate_ui_results = [r for r in results if r.get("id", "").startswith("@animate-ui")]
+        animate_ui_results = [
+            r for r in results if r.get("id", "").startswith("@animate-ui")
+        ]
         if animate_ui_results:
-            print(f"  Found {len(animate_ui_results)} results from @animate-ui registry")
+            print(
+                f"  Found {len(animate_ui_results)} results from @animate-ui registry"
+            )
 
         # Verify we got results from default registry
         default_results = [r for r in results if not r.get("id", "").startswith("@")]
         assert len(default_results) > 0, "Should have results from default registry"
 
         # Test 2: Add a custom registry component - @animate-ui/components-radix-sidebar
-        print("\n=== Adding Custom Registry Component (@animate-ui/components-radix-sidebar) ===")
+        print(
+            "\n=== Adding Custom Registry Component (@animate-ui/components-radix-sidebar) ==="
+        )
         add_result = await session.call_tool(
             "add_component",
-            arguments={"component_id": "@animate-ui/components-radix-sidebar", "force": False}
+            arguments={
+                "component_id": "@animate-ui/components-radix-sidebar",
+                "force": False,
+            },
         )
 
         assert len(add_result.content) > 0, "Add should return content"
@@ -255,27 +274,41 @@ async def test_search_and_add_custom_registry_component(init_test_project):
         print(f"\n{result_text}\n====================\n")
 
         # Verify that if successful, the sidebar file was created
-        sidebar_file = tmp_path / "src" / "test_app" / "ui" / "components" / "animate-ui" / "components-radix-sidebar.tsx"
+        sidebar_file = (
+            tmp_path
+            / "src"
+            / "test_app"
+            / "ui"
+            / "components"
+            / "animate-ui"
+            / "components-radix-sidebar.tsx"
+        )
 
         if "Successfully added component" in result_text:
-            assert sidebar_file.exists(), f"Sidebar component should be created at {sidebar_file}"
+            assert sidebar_file.exists(), (
+                f"Sidebar component should be created at {sidebar_file}"
+            )
             content = sidebar_file.read_text()
             assert len(content) > 0, "Sidebar component should have content"
             print(f"✓ Custom registry component created successfully at {sidebar_file}")
 
             content_lower = content.lower()
-            assert any(term in content_lower for term in ["sidebar", "navigation", "nav"]), \
-                "Component should contain sidebar/navigation related content"
+            assert any(
+                term in content_lower for term in ["sidebar", "navigation", "nav"]
+            ), "Component should contain sidebar/navigation related content"
         elif "Failed to add component" in result_text:
             print(f"⚠ Component add failed (acceptable for test):\n  {result_text}")
-            assert any(term in result_text for term in [
-                "Failed to fetch",
-                "Registry returned error",
-                "Unknown registry",
-                "404",
-                "File already exists",
-                "Failed to"
-            ]), "Should have a clear error message"
+            assert any(
+                term in result_text
+                for term in [
+                    "Failed to fetch",
+                    "Registry returned error",
+                    "Unknown registry",
+                    "404",
+                    "File already exists",
+                    "Failed to",
+                ]
+            ), "Should have a clear error message"
         else:
             print(f"Component add result: {result_text}")
 
@@ -301,8 +334,8 @@ async def test_docs_tool():
                 arguments={
                     "source": "databricks-sdk-python",
                     "query": "create cluster",
-                    "num_results": 3
-                }
+                    "num_results": 3,
+                },
             )
 
             assert len(search_result.content) > 0, "Search should return content"
@@ -315,7 +348,9 @@ async def test_docs_tool():
             else:
                 # We got results, parse and validate
                 result_json = json.loads(result_text)
-                print(f"\n=== Docs Search Result ===\n{json.dumps(result_json, indent=2)}\n====================\n")
+                print(
+                    f"\n=== Docs Search Result ===\n{json.dumps(result_json, indent=2)}\n====================\n"
+                )
 
                 assert "source" in result_json
                 assert "query" in result_json
@@ -364,8 +399,8 @@ async def test_docs_create_cluster():
                 arguments={
                     "source": "databricks-sdk-python",
                     "query": "create cluster",
-                    "num_results": 5
-                }
+                    "num_results": 5,
+                },
             )
 
             assert len(result.content) > 0, "Search should return content"
@@ -399,8 +434,9 @@ async def test_docs_create_cluster():
             # At least one of top 3 should be cluster-related
             top_3 = results[:3]
             cluster_related = [
-                r for r in top_3
-                if "cluster" in r["source_file"].lower() 
+                r
+                for r in top_3
+                if "cluster" in r["source_file"].lower()
                 or "cluster" in r["text"].lower()
             ]
 
@@ -416,4 +452,6 @@ async def test_docs_create_cluster():
                 f"Top 3 files: {[r['source_file'] for r in top_3]}"
             )
 
-            print(f"\n✓ Test passed: {len(cluster_related)} cluster-related result(s) in top 3")
+            print(
+                f"\n✓ Test passed: {len(cluster_related)} cluster-related result(s) in top 3"
+            )

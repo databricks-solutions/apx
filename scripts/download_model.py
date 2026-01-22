@@ -36,15 +36,18 @@ def download_file(url: str, dest_path: Path, desc: Optional[str] = None) -> None
     response = requests.get(url, stream=True)
     response.raise_for_status()
 
-    total_size = int(response.headers.get('content-length', 0))
+    total_size = int(response.headers.get("content-length", 0))
 
-    with open(dest_path, 'wb') as f, tqdm(
-        desc=desc or dest_path.name,
-        total=total_size,
-        unit='B',
-        unit_scale=True,
-        unit_divisor=1024,
-    ) as pbar:
+    with (
+        open(dest_path, "wb") as f,
+        tqdm(
+            desc=desc or dest_path.name,
+            total=total_size,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+        ) as pbar,
+    ):
         for chunk in response.iter_content(chunk_size=8192):
             f.write(chunk)
             pbar.update(len(chunk))
@@ -102,7 +105,7 @@ def download_model_files(model_id: str, output_dir: Path) -> None:
     }
 
     metadata_path = output_dir / "model_info.json"
-    with open(metadata_path, 'w') as f:
+    with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
 
     print(f"✓ Created metadata file: {metadata_path.name}")

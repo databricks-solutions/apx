@@ -6,6 +6,7 @@ use crate::{bun_binary_path, cli::run_cli_async};
 use crate::common::read_project_metadata;
 
 use super::{plan_add, AddPlan, PlannedFile, collect_css_mutations, apply_css_updates, UiConfig};
+use super::cache::sync_registry_indexes;
 use crate::cli::components::utils::format_relative_path;
 
 fn resolve_app_dir(app_path: Option<PathBuf>) -> PathBuf {
@@ -196,6 +197,22 @@ pub async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
 
     for warning in &plan.warnings {
         eprintln!("\nWARNING: {}", warning);
+    }
+
+    // Sync registry indexes (registry.json files only, prefetches default shadcn items)
+    println!();
+    println!("Syncing component registries...");
+    match sync_registry_indexes(&app_dir, false).await {
+        Ok(refreshed) => {
+            if refreshed {
+                println!("Registry indexes refreshed");
+            } else {
+                println!("Registry indexes up to date");
+            }
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to sync registry indexes: {}", e);
+        }
     }
 
     Ok(())

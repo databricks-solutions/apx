@@ -1,7 +1,7 @@
-/// Semantic search functionality using embedded models.
+/// Search functionality for SDK docs and components.
 ///
-/// This module provides tokenization and embedding generation for semantic search.
-/// Models are embedded at compile time for zero-dependency runtime.
+/// - SDK docs: Hybrid vector + FTS search using embedded models
+/// - Components: FTS-only search (no embeddings needed for short text)
 
 pub mod embedded_model;
 pub mod embedder;
