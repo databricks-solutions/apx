@@ -2,6 +2,7 @@ pub mod add;
 pub mod cache;
 pub mod css_updater;
 pub mod models;
+pub mod tw_transform;
 pub mod utils;
 
 // Re-export models for easier access
@@ -18,6 +19,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 use url::Url;
+
+use crate::cli::components::css_updater::{CssMutation, CssUpdater};
+use crate::cli::components::models::TailwindConfig;
+
 
 /// Default shadcn/ui registry item template.
 ///
@@ -578,7 +583,10 @@ fn rewrite_registry_imports(content: &str) -> String {
     
     // Second pass: Transform @/ui/ → @/components/ui/
     // This handles the case where shadcn components import from "@/ui/..." shorthand
-    result.replace("@/ui/", "@/components/ui/")
+    let result = result.replace("@/ui/", "@/components/ui/");
+    
+    // Third pass: Transform Tailwind v3 class syntax to v4
+    tw_transform::transform_tailwind_v3_to_v4(&result)
 }
 
 fn apply_placeholders(template: &str, name: &str, style: &str) -> Result<String, String> {
@@ -778,8 +786,7 @@ fn render_declaration_value(value: &Value) -> Result<String, String> {
     }
 }
 
-use crate::cli::components::css_updater::{CssMutation, CssUpdater};
-use crate::cli::components::models::TailwindConfig;
+
 
 pub fn apply_css_updates(css_path: &Path, mutations: Vec<CssMutation>) -> Result<(), String> {
     let source =
