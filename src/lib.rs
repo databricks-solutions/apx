@@ -39,12 +39,6 @@ mod search;
 pub use api_generator::generate_openapi;
 pub(crate) use interop::bun_binary_path;
 
-// Export frontend module functions
-pub mod frontend {
-    pub use crate::cli::frontend::build::run_build;
-    pub use crate::cli::frontend::dev::run_dev;
-}
-
 static APP_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 pub(crate) fn set_app_dir(app_dir: PathBuf) -> Result<(), String> {
@@ -88,6 +82,9 @@ enum Commands {
     /// Components commands
     #[command(subcommand)]
     Components(ComponentsCommands),
+    /// Frontend commands
+    #[command(subcommand)]
+    Frontend(FrontendCommands),
     /// Start the MCP server
     Mcp,
     /// Development server commands
@@ -102,6 +99,14 @@ enum Commands {
 enum ComponentsCommands {
     /// Run a shadcn command
     Add(cli::components::add::ComponentsAddArgs),
+}
+
+#[derive(Subcommand)]
+enum FrontendCommands {
+    /// Run the frontend development server
+    Dev(cli::frontend::dev::DevArgs),
+    /// Build the frontend
+    Build(cli::frontend::build::BuildArgs),
 }
 
 #[derive(Subcommand)]
@@ -149,6 +154,10 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
             Some(Commands::Bun(bun_args)) => cli::bun::run(bun_args).await,
             Some(Commands::Components(components_cmd)) => match components_cmd {
                 ComponentsCommands::Add(args) => cli::components::add::run(args).await,
+            },
+            Some(Commands::Frontend(frontend_cmd)) => match frontend_cmd {
+                FrontendCommands::Dev(args) => cli::frontend::dev::run(args).await,
+                FrontendCommands::Build(args) => cli::frontend::build::run(args).await,
             },
             Some(Commands::Mcp) => cli::dev::mcp::run(cli::dev::mcp::McpArgs {}).await,
             Some(Commands::Dev(dev_cmd)) => match dev_cmd {
