@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import typer
 
-DEFAULT_BUN_VERSION = "1.3.5"
+DEFAULT_BUN_VERSION = "1.3.6"
 RELEASES_BASE_URL = "https://github.com/oven-sh/bun/releases/download"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
