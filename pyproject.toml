@@ -23,6 +23,8 @@ dev = [
     "databricks-sdk>=0.74.0",
     "docutils>=0.22.4",
     "fastapi>=0.119.0",
+    "httpx>=0.28.1",
+    "jinja2>=3.1.6",
     "mcp>=1.19.0",
     "msgpack>=1.1.2",
     "msgpack-types>=0.7.0",
@@ -54,21 +56,7 @@ dev = [
 [tool.mypy]
 exclude = ['venv', '.venv', 'src/apx/templates', 'node_modules', 'experiments']
 
-[tool.coverage.run]
-parallel = true
-source = ["src/apx"]
-omit = [
-    "tests",
-    "src/apx/templates",
-    "**/node_modules",
-    "**/__pycache__",
-    "**/.*",
-    "**/.jinja2",
-    "experiments"
-]
-
 [project.scripts]
-apx-old = "apx.__main__:deprecated_main"
 apx = "apx.__main__:main"
 
 [tool.maturin]
