@@ -11,6 +11,13 @@ name = "_core"
 # "cdylib" is necessary to produce a shared library for Python to import from.
 crate-type = ["cdylib"]
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+opt-level = "z"
+panic = "abort"
+
 [dependencies]
 pyo3 = { version = "0.27.2", features = ["extension-module", "abi3-py39"] }
 clap = { version = "4", features = ["derive"] }
@@ -48,7 +55,7 @@ biome_css_parser = "0.5.8"
 biome_css_syntax = "0.5.8"
 biome_rowan = "0.5.8"
 url = "2.5.8"
-lancedb = "0.23.1"
+lancedb = { version = "0.23.1", default-features = false }
 arrow = "56.2.0"
 tokenizers = "0.22.2"
 uuid = { version = "1.11", features = ["v4", "serde"] }
