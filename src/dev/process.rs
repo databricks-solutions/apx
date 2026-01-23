@@ -337,6 +337,8 @@ impl ProcessManager {
                 }
             }
 
+            let debounce_duration = Duration::from_millis(150);
+
             while let Some(event) = rx.recv().await {
                 if !matches!(
                     event.kind,
@@ -345,14 +347,39 @@ impl ProcessManager {
                     continue;
                 }
 
+                let mut triggered_file = None;
                 for path in &event.paths {
                     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-                    if !["pyproject.toml", "uv.lock", ".env"].contains(&file_name) {
+                    if ["pyproject.toml", "uv.lock", ".env"].contains(&file_name) {
+                        triggered_file = Some(file_name.to_string());
+                        break;
+                    }
+                }
+
+                if let Some(mut file_name) = triggered_file {
+                    // Debounce: wait for more events
+                    tokio::time::sleep(debounce_duration).await;
+
+                    // Check if we received more events during the debounce period
+                    let mut received_more = false;
+                    while let Ok(additional_event) = rx.try_recv() {
+                        received_more = true;
+                        for path in &additional_event.paths {
+                            let additional_file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            if ["pyproject.toml", "uv.lock", ".env"].contains(&additional_file_name) {
+                                file_name = additional_file_name.to_string();
+                            }
+                        }
+                    }
+
+                    // If we received more events, continue the loop to debounce again
+                    if received_more {
                         continue;
                     }
 
-                    info!("File change detected: {} - restarting backend", file_name);
+                    // No more events, proceed with restart
+                    info!("{} changed, restarting uvicorn", file_name);
 
                     // Reload .env if it exists
                     let new_vars = if let Ok(dotenv) = DotenvFile::read(&app_dir.join(".env")) {
@@ -371,7 +398,7 @@ impl ProcessManager {
                     }
 
                     // Restart uvicorn
-                    match Self::spawn_uvicorn_static(
+                    if let Err(e) = Self::spawn_uvicorn_static(
                         &app_dir,
                         &app_module,
                         &host,
@@ -386,12 +413,8 @@ impl ProcessManager {
                     )
                     .await
                     {
-                        Ok(_) => info!("Backend restarted successfully"),
-                        Err(e) => warn!("Failed to restart backend: {}", e),
+                        warn!("Failed to restart backend: {}", e);
                     }
-
-                    // Only process one file change at a time
-                    break;
                 }
             }
         });
