@@ -1,6 +1,5 @@
 import asyncio
 import os
-import shutil
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib import resources
@@ -124,54 +123,84 @@ async def run_cli_background(
                 await process.wait()
 
 
-@pytest.fixture(scope="session")
-def common_project(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Session-scoped project with both backend and frontend deps installed.
+def _init_project(
+    project_path: Path,
+    *,
+    name: str = "test-app",
+    template: str = "essential",
+    layout: str = "basic",
+    assistant: str = "cursor",
+    profile: str = "DEFAULT",
+    skip_build: bool = True,
+) -> None:
+    """Initialize an apx project with editable apx installation.
 
-    This fixture is created ONCE per test session and shared across all tests.
-    Use `isolated_project` if you need a fresh copy per test.
+    Args:
+        project_path: Path where the project will be created
+        name: Project name
+        template: Template to use (essential/stateful)
+        layout: Layout to use (basic/sidebar)
+        assistant: Assistant to configure (cursor/vscode/codex/claude)
+        profile: Databricks profile name
+        skip_build: Whether to skip the build step
     """
-    import sys
-
-    project_path = tmp_path_factory.mktemp("common_project")
-
     # Set APX_DEV_PATH environment variable for editable installation
     os.environ["APX_DEV_PATH"] = str(Path(apx_source_dir).resolve().absolute())
 
     try:
-        exit_code = run_cli(
-            [
-                "apx",
-                "init",
-                str(project_path),
-                "--assistant",
-                "cursor",
-                "--layout",
-                "basic",
-                "--template",
-                "essential",
-                "--profile",
-                "DEFAULT",
-                "--name",
-                "test-app",
-                "--skip-build",
-            ]
-        )
-        assert exit_code == 0, "Failed to initialize common_project"
-        sys.path.insert(0, str(project_path / "src"))
-        return project_path
+        args = [
+            "apx",
+            "init",
+            str(project_path),
+            "--assistant",
+            assistant,
+            "--layout",
+            layout,
+            "--template",
+            template,
+            "--profile",
+            profile,
+            "--name",
+            name,
+        ]
+        if skip_build:
+            args.append("--skip-build")
+
+        exit_code = run_cli(args)
+        assert exit_code == 0, f"Failed to initialize project at {project_path}"
     finally:
         # Clean up environment variable after initialization
         os.environ.pop("APX_DEV_PATH", None)
 
 
-@pytest.fixture
-def isolated_project(common_project: Path, tmp_path: Path) -> Path:
-    """Function-scoped project copied from common_project.
+@pytest.fixture(scope="session")
+def common_project(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Session-scoped project with both backend and frontend deps installed.
 
-    This fixture provides a fresh copy of the common_project for each test,
-    ensuring test isolation while avoiding the cost of re-running init + deps.
+    This fixture is created ONCE per test session and shared across all tests.
+    Use `isolated_project` if you need a fresh project per test with full dependencies.
+
+    WARNING: Tests using this fixture should NOT modify the project state,
+    as changes will affect other tests.
+    """
+    import sys
+
+    project_path = tmp_path_factory.mktemp("common_project")
+    _init_project(project_path)
+    sys.path.insert(0, str(project_path / "src"))
+    return project_path
+
+
+@pytest.fixture
+def isolated_project(tmp_path: Path) -> Path:
+    """Function-scoped project with full initialization.
+
+    This fixture creates a fresh project for each test with all dependencies
+    installed. Use this when tests need to modify the project or need isolation.
+
+    Note: This is slower than common_project as it runs full init each time.
     """
     project_path = tmp_path / "project"
-    shutil.copytree(common_project, project_path, dirs_exist_ok=True)
+    project_path.mkdir(parents=True, exist_ok=True)
+    _init_project(project_path)
     return project_path

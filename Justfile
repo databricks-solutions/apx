@@ -18,6 +18,9 @@ types:
     uv run mypy .
     cargo check
     uv run ty check
+
+sync:
+    RUST_LOG=debug uv sync
     
 
 check: lint types

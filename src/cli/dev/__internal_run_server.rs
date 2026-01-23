@@ -1,5 +1,6 @@
 use clap::Args;
 use std::path::PathBuf;
+use tracing::warn;
 
 use crate::cli::run_cli_async;
 use crate::set_app_dir;
@@ -18,6 +19,8 @@ pub struct InternalRunServerArgs {
     pub host: String,
     #[arg(long = "port")]
     pub port: u16,
+    #[arg(long = "skip-credentials-validation")]
+    pub skip_credentials_validation: bool,
 }
 
 pub async fn run(args: InternalRunServerArgs) -> i32 {
@@ -27,8 +30,12 @@ pub async fn run(args: InternalRunServerArgs) -> i32 {
 async fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
     set_app_dir(args.app_dir.clone())?;
     
-    // Load dotenv and validate credentials before starting server
-    validate_credentials()?;
+    // Validate credentials before starting server (warn if skipped or failed)
+    if args.skip_credentials_validation {
+        warn!("Credentials validation skipped. API proxy may not work correctly.");
+    } else if let Err(err) = validate_credentials() {
+        warn!("Credentials validation failed: {err}. API proxy may not work correctly.");
+    }
     
     let backend_port =
         find_available_port_in_range(&args.host, BACKEND_PORT_START, BACKEND_PORT_END)?;

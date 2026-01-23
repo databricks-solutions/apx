@@ -80,27 +80,27 @@ fn should_log_request(path: &str, is_ui: bool) -> bool {
 }
 
 pub struct TokenManager {
-    token: RwLock<String>,
+    token: RwLock<Option<String>>,
     fetched_at: RwLock<Instant>,
 }
 
 impl TokenManager {
-    pub fn new(initial_token: String) -> Self {
+    pub fn new(initial_token: Option<String>) -> Self {
         Self {
             token: RwLock::new(initial_token),
             fetched_at: RwLock::new(Instant::now()),
         }
     }
     
-    pub async fn get_token_refreshing_if_needed(&self) -> Result<String, String> {
+    pub async fn get_token_refreshing_if_needed(&self) -> Option<String> {
         // Check if token needs refresh
         let fetched_at = *self.fetched_at.read().await;
         if fetched_at.elapsed() >= TOKEN_REFRESH_INTERVAL {
-            self.refresh_token().await?;
+            // Try to refresh, but don't fail if it doesn't work
+            let _ = self.refresh_token().await;
         }
         
-        let token = self.token.read().await.clone();
-        Ok(token)
+        self.token.read().await.clone()
     }
     
     async fn refresh_token(&self) -> Result<(), String> {
@@ -110,7 +110,7 @@ impl TokenManager {
         let mut token = self.token.write().await;
         let mut fetched_at = self.fetched_at.write().await;
         
-        *token = new_token;
+        *token = Some(new_token);
         *fetched_at = Instant::now();
         
         debug!("OAuth access token refreshed successfully");
@@ -191,14 +191,8 @@ async fn api_proxy_handler(State(state): State<ApiProxyState>, req: Request<Body
             .unwrap_or("/")
     );
 
-    // Get OAuth access token for API requests
-    let token = match state.token_manager.get_token_refreshing_if_needed().await {
-        Ok(t) => Some(t),
-        Err(err) => {
-            warn!(error = %err, "Failed to get OAuth access token for API request");
-            None
-        }
-    };
+    // Get OAuth access token for API requests (None if not available)
+    let token = state.token_manager.get_token_refreshing_if_needed().await;
     proxy_request(
         req,
         state.client,

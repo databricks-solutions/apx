@@ -652,7 +652,7 @@ enum InstallArgs {
 }
 
 
-use toml_edit::{DocumentMut, Item, Table, ArrayOfTables, Array, Value};
+use toml_edit::{DocumentMut, Item, Table, ArrayOfTables, Array, Value, InlineTable};
 
 pub fn ensure_apx_uv_config(pyproject: &Path) -> Result<(), String> {
     let contents = fs::read_to_string(pyproject)
@@ -729,10 +729,10 @@ pub fn configure_editable_apx(pyproject: &Path, apx_path: &Path) -> Result<(), S
     let apx_path_str = apx_path.to_string_lossy().to_string();
     debug!("  Setting apx source path to: {}", apx_path_str);
     
-    let mut apx_source = Table::new();
-    apx_source.insert("path", Value::from(apx_path_str.as_str()).into());
-    apx_source.insert("editable", Value::from(true).into());
-    sources["apx"] = Item::Table(apx_source);
+    let mut apx_source = InlineTable::new();
+    apx_source.insert("path", Value::from(apx_path_str.as_str()));
+    apx_source.insert("editable", Value::from(true));
+    sources["apx"] = Item::Value(Value::InlineTable(apx_source));
 
     // --- [dependency-groups].dev ---
     let dep_groups = doc["dependency-groups"].or_insert(Item::Table(Table::new()));

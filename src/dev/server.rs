@@ -72,8 +72,14 @@ pub async fn run_server(
         "Starting dev server."
     );
 
-    // Fetch initial OAuth access token from Python
-    let initial_token = get_token()?;
+    // Fetch initial OAuth access token from Python (warn on failure, don't block startup)
+    let initial_token = match get_token() {
+        Ok(token) => Some(token),
+        Err(err) => {
+            warn!("Failed to get OAuth access token: {err}. API proxy will not forward authentication headers.");
+            None
+        }
+    };
     let token_manager = Arc::new(proxy::TokenManager::new(initial_token));
 
     // Create the single shutdown broadcast channel

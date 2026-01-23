@@ -1,4 +1,5 @@
 use clap::Args;
+use std::fs::{self, File};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -10,9 +11,10 @@ use crate::cli::run_cli_async;
 use crate::common::{ensure_dir, spinner, format_elapsed_ms};
 use crate::dev::client::{health, logs, wait_for_healthy, HealthCheckConfig};
 use crate::dev::common::{
-    find_available_port, lock_path, read_lock, write_lock,
+    find_available_port, lock_path, read_lock, remove_lock, write_lock,
     DevLock, BIND_HOST,
 };
+use crate::dev::process::ProcessManager;
 
 /// Prepare the app directory for dev server startup.
 /// Ensures the .apx directory exists.
@@ -34,6 +36,11 @@ pub struct StartArgs {
         help = "Follow logs and stop server on Ctrl+C"
     )]
     pub attached: bool,
+    #[arg(
+        long = "skip-credentials-validation",
+        help = "Skip credentials validation on startup (server will start but API proxy may not work)"
+    )]
+    pub skip_credentials_validation: bool,
 }
 
 pub async fn run(args: StartArgs) -> i32 {
@@ -54,7 +61,7 @@ async fn run_detached(args: StartArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    let _ = spawn_server(&app_dir, None).await?;
+    let _ = spawn_server(&app_dir, None, args.skip_credentials_validation).await?;
     Ok(())
 }
 
@@ -64,7 +71,7 @@ async fn run_attached(args: StartArgs) -> Result<(), String> {
         println!("✅ Dev server already running at http://localhost:{port}, attaching logs...\n");
         port
     } else {
-        spawn_server(&app_dir, None).await?
+        spawn_server(&app_dir, None, args.skip_credentials_validation).await?
     };
 
     let response = logs(port, None, true).await?;
@@ -102,13 +109,29 @@ pub async fn start_dev_server(app_dir: &Path) -> Result<u16, String> {
     if let Some(port) = resolve_existing_server(app_dir).await? {
         return Ok(port);
     }
-    spawn_server(app_dir, None).await
+    spawn_server(app_dir, None, false).await
+}
+
+/// Path to the startup log file within the .apx directory.
+fn startup_log_path(app_dir: &Path) -> PathBuf {
+    app_dir.join(".apx/startup.log")
+}
+
+/// Read and format startup log contents for error display.
+fn read_startup_log(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 /// Spawn a new dev server subprocess (does not check for existing server).
 pub(crate) async fn spawn_server(
     app_dir: &Path,
     preferred_port: Option<u16>,
+    skip_credentials_validation: bool,
 ) -> Result<u16, String> {
     let start_time = Instant::now();
     prepare_app_dir(app_dir)?;
@@ -117,14 +140,20 @@ pub(crate) async fn spawn_server(
     println!("🚀 Starting dev server...");
     let port = resolve_port(preferred_port).await?;
     let command = format!(
-        "uv run apx dev __internal__run_server --app-dir {} --host {} --port {}",
+        "uv run apx dev __internal__run_server --app-dir {} --host {} --port {}{}",
         app_dir.display(),
         BIND_HOST,
-        port
+        port,
+        if skip_credentials_validation { " --skip-credentials-validation" } else { "" }
     );
 
-    let mut child = Command::new("uv")
-        .arg("run")
+    // Create startup log file to capture early stderr
+    let startup_log = startup_log_path(app_dir);
+    let startup_file = File::create(&startup_log)
+        .map_err(|err| format!("Failed to create startup log: {err}"))?;
+
+    let mut cmd = Command::new("uv");
+    cmd.arg("run")
         .arg("apx")
         .arg("dev")
         .arg("__internal__run_server")
@@ -133,11 +162,17 @@ pub(crate) async fn spawn_server(
         .arg("--host")
         .arg(BIND_HOST)
         .arg("--port")
-        .arg(port.to_string())
+        .arg(port.to_string());
+    
+    if skip_credentials_validation {
+        cmd.arg("--skip-credentials-validation");
+    }
+    
+    let mut child = cmd
         .current_dir(app_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(startup_file))
         .env("APX_COLLECT_LOGS", "1")
         .spawn()
         .map_err(|err| format!("Failed to start dev server: {err}"))?;
@@ -147,10 +182,26 @@ pub(crate) async fn spawn_server(
     config.print_waiting = false; // Don't print, we have a spinner instead
     if let Err(e) = wait_for_healthy(port, &config).await {
         health_spinner.finish_and_clear();
-        let _ = child.kill();
+        
+        // Kill the entire process tree to avoid hanging processes
+        let pid = child.id();
+        let _ = ProcessManager::kill_process_tree_async(pid, "dev-server".to_string()).await;
+        let _ = child.kill(); // Fallback in case tree kill missed the root
+        
+        // Clean up lock file if it exists
+        let _ = remove_lock(&lock_path);
+        
+        // Read and display startup log on failure
+        if let Some(log_content) = read_startup_log(&startup_log) {
+            eprintln!("\n📋 Startup log:\n{}\n", log_content);
+        }
+        
         return Err(e);
     }
     health_spinner.finish_and_clear();
+
+    // Remove startup log on success
+    let _ = fs::remove_file(&startup_log);
 
     let lock = DevLock::new(child.id(), port, command, app_dir);
     write_lock(&lock_path, &lock)?;
