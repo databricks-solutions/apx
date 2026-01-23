@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use rand::{distributions::Alphanumeric, Rng};
 use sysinfo::{Pid, Signal, System};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::bun_binary_path;
 use crate::common::read_project_metadata;
@@ -111,7 +112,12 @@ impl ProcessManager {
         manager
             .spawn_uvicorn(app_dir, metadata.app_module)
             .await?;
-        
+
+        debug!(
+            "Starting file watcher for backend restart"
+        );
+        manager.start_backend_file_watcher();
+
         debug!(
             "Frontend and backend processes spawned"
         );
@@ -286,6 +292,111 @@ impl ProcessManager {
         });
     }
 
+    fn start_backend_file_watcher(&self) {
+        let app_dir = self.app_dir.clone();
+        let dotenv_vars = Arc::clone(&self.dotenv_vars);
+        let backend_child = Arc::clone(&self.backend_child);
+        let log_queue = Arc::clone(&self.log_queue);
+        let app_module = self.app_module.clone();
+        let host = self.host.clone();
+        let backend_port = self.backend_port;
+        let frontend_port = self.frontend_port;
+        let db_port = self.db_port;
+        let dev_server_port = self.dev_server_port;
+        let dev_token = self.dev_token.clone();
+
+        tokio::spawn(async move {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(100);
+
+            let mut watcher = match RecommendedWatcher::new(
+                move |res: Result<Event, notify::Error>| {
+                    if let Ok(event) = res {
+                        let _ = tx.blocking_send(event);
+                    }
+                },
+                notify::Config::default(),
+            ) {
+                Ok(w) => w,
+                Err(e) => {
+                    warn!("Failed to create file watcher: {}", e);
+                    return;
+                }
+            };
+
+            let watched_files = vec![
+                app_dir.join(".env"),
+                app_dir.join("pyproject.toml"),
+                app_dir.join("uv.lock"),
+            ];
+
+            for file in &watched_files {
+                if file.exists() {
+                    if let Err(e) = watcher.watch(file, RecursiveMode::NonRecursive) {
+                        warn!("Failed to watch file {:?}: {}", file, e);
+                    }
+                }
+            }
+
+            while let Some(event) = rx.recv().await {
+                if !matches!(
+                    event.kind,
+                    notify::EventKind::Modify(_) | notify::EventKind::Create(_)
+                ) {
+                    continue;
+                }
+
+                for path in &event.paths {
+                    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+                    if !["pyproject.toml", "uv.lock", ".env"].contains(&file_name) {
+                        continue;
+                    }
+
+                    info!("File change detected: {} - restarting backend", file_name);
+
+                    // Reload .env if it exists
+                    let new_vars = if let Ok(dotenv) = DotenvFile::read(&app_dir.join(".env")) {
+                        dotenv.get_vars()
+                    } else {
+                        HashMap::new()
+                    };
+
+                    // Stop the current backend process
+                    Self::stop_child_tree_static("backend", &backend_child).await;
+
+                    // Update dotenv vars
+                    {
+                        let mut vars = dotenv_vars.lock().await;
+                        *vars = new_vars.clone();
+                    }
+
+                    // Restart uvicorn
+                    match Self::spawn_uvicorn_static(
+                        &app_dir,
+                        &app_module,
+                        &host,
+                        backend_port,
+                        frontend_port,
+                        db_port,
+                        dev_server_port,
+                        &dev_token,
+                        &dotenv_vars,
+                        &backend_child,
+                        &log_queue,
+                    )
+                    .await
+                    {
+                        Ok(_) => info!("Backend restarted successfully"),
+                        Err(e) => warn!("Failed to restart backend: {}", e),
+                    }
+
+                    // Only process one file change at a time
+                    break;
+                }
+            }
+        });
+    }
+
     async fn spawn_process(
         &self,
         app_dir: &Path,
@@ -319,6 +430,110 @@ impl ProcessManager {
         self.spawn_log_reader(stderr, source, LogPipe::Error);
 
         Ok(child)
+    }
+
+    /// Static version of stop_child_tree for use in async tasks without self
+    async fn stop_child_tree_static(name: &str, child: &Arc<Mutex<Option<Child>>>) {
+        let mut guard = child.lock().await;
+        if let Some(mut child) = guard.take() {
+            let pid = child.id();
+            if let Some(pid) = pid {
+                if let Err(err) = Self::kill_process_tree_async(pid, name.to_string()).await {
+                    warn!(error = %err, process = name, pid, "Failed to kill process tree.");
+                }
+            } else {
+                warn!(process = name, "Missing PID for child process.");
+            }
+            match timeout(Duration::from_secs(2), child.wait()).await {
+                Ok(Ok(status)) => debug!(process = name, ?status, "Child process exited."),
+                Ok(Err(err)) => warn!(error = %err, process = name, "Failed to wait for child process."),
+                Err(_) => warn!(process = name, "Timed out waiting for child process to exit."),
+            }
+        } else {
+            debug!(process = name, "No child process to stop.");
+        }
+    }
+
+    /// Static version of spawn_uvicorn for use in async tasks without self
+    async fn spawn_uvicorn_static(
+        app_dir: &Path,
+        app_module: &str,
+        host: &str,
+        backend_port: u16,
+        frontend_port: u16,
+        db_port: u16,
+        dev_server_port: u16,
+        dev_token: &str,
+        dotenv_vars: &Arc<Mutex<HashMap<String, String>>>,
+        backend_child: &Arc<Mutex<Option<Child>>>,
+        log_queue: &LogQueue,
+    ) -> Result<(), String> {
+        let mut cmd = Command::new("uv");
+        cmd.args([
+            "run",
+            "uvicorn",
+            app_module,
+            "--host",
+            host,
+            "--port",
+            &backend_port.to_string(),
+            "--reload",
+        ])
+        .current_dir(app_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+        // Apply environment variables
+        cmd.env("APX_FRONTEND_PORT", frontend_port.to_string());
+        cmd.env("APX_BACKEND_PORT", backend_port.to_string());
+        cmd.env("APX_DEV_DB_PORT", db_port.to_string());
+        cmd.env("APX_DEV_SERVER_PORT", dev_server_port.to_string());
+        cmd.env("APX_DEV_SERVER_HOST", host);
+        cmd.env("APX_DEV_TOKEN", dev_token);
+
+        let vars = dotenv_vars.lock().await;
+        for (key, value) in vars.iter() {
+            cmd.env(key, value);
+        }
+        drop(vars);
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|err| format!("Failed to start app process: {err}"))?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Failed to capture app stdout".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "Failed to capture app stderr".to_string())?;
+
+        // Spawn log readers
+        let log_queue_stdout = Arc::clone(log_queue);
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let entry = LogPayload::new(LogStreamName::App, Some(LogPipe::Out), line);
+                push_log(&log_queue_stdout, entry).await;
+            }
+        });
+
+        let log_queue_stderr = Arc::clone(log_queue);
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let entry = LogPayload::new(LogStreamName::App, Some(LogPipe::Error), line);
+                push_log(&log_queue_stderr, entry).await;
+            }
+        });
+
+        let mut guard = backend_child.lock().await;
+        *guard = Some(child);
+
+        Ok(())
     }
 
     fn spawn_log_reader<R>(&self, reader: R, source: LogSource, pipe: LogPipe)
