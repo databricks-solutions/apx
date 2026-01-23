@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use super::models::{RegistryItem, RegistryCatalogEntry, RegistryConfig, UiConfig};
-use super::{resolve_component_request, fetch_component_impl};
 use crate::common::read_project_metadata;
 
 /// Current cache format version
@@ -379,7 +378,7 @@ pub async fn sync_registry_indexes(
     let style = cfg.style();
     let mut refreshed = false;
 
-    // Sync default registry index
+    // Sync default registry index (registry.json only, individual items fetched on-demand)
     let default_path = get_registry_index_path(None)?;
     if force || !is_file_fresh(&default_path, CACHE_TTL_HOURS) {
         tracing::info!("Fetching default registry index");
@@ -387,16 +386,6 @@ pub async fn sync_registry_indexes(
             Ok(items) => {
                 tracing::info!("Cached {} items in default registry index", items.len());
                 refreshed = true;
-
-                // For default shadcn registry, also prefetch all individual items
-                tracing::info!("Prefetching default registry items...");
-                for item in &items {
-                    if let Ok(req) = resolve_component_request(&cfg, None, &item.name) {
-                        if let Ok((component, warnings)) = fetch_component_impl(&client, &req, None, Some(&item.name)).await {
-                            let _ = save_cached_component(&item.name, None, &component, &warnings);
-                        }
-                    }
-                }
             }
             Err(e) => tracing::warn!("Failed to fetch default registry index: {}", e),
         }
