@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from importlib import resources
 
-from mcp.types import TextResourceContents
+from mcp.types import TextResourceContents, CallToolResult, TextContent
 from pydantic import AnyUrl
 import pytest
 from mcp.client.session import ClientSession
@@ -69,12 +69,22 @@ async def mcp_session(project_dir):
         os.chdir(original_cwd)
 
 
-def parse_json_result(result):
+def retrieve_text_content(result: CallToolResult) -> str:
+    """Retrieve text content from MCP tool result."""
+    assert len(result.content) > 0, "Result should have content"
+    _extracted = result.content[0]
+    assert isinstance(_extracted, TextContent), "Result should have text content"
+    return _extracted.text
+
+
+def parse_json_result(result: CallToolResult):
     """Parse JSON from MCP tool result."""
     assert len(result.content) > 0, "Result should have content"
-    result_text = result.content[0].text
-    assert result_text.startswith("{"), f"Expected JSON response, got: {result_text}"
-    return json.loads(result_text)
+    result_text = retrieve_text_content(result)
+    try:
+        return json.loads(result_text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse JSON: {e}") from e
 
 
 @pytest.mark.asyncio
@@ -205,7 +215,7 @@ async def test_search_and_add_component(init_test_project):
         )
 
         assert len(add_result.content) > 0, "Add should return content"
-        result_text = add_result.content[0].text
+        result_text = retrieve_text_content(add_result)
         print(f"\n=== Add Component Result ===\n{result_text}\n====================\n")
 
         # Verify that if successful, the dialog file was created
@@ -272,7 +282,7 @@ async def test_search_and_add_custom_registry_component(init_test_project):
         )
 
         assert len(add_result.content) > 0, "Add should return content"
-        result_text = add_result.content[0].text
+        result_text = retrieve_text_content(add_result)
         print(f"\n{result_text}\n====================\n")
 
         # Verify that if successful, the sidebar file was created
@@ -341,7 +351,7 @@ async def test_docs_tool():
             )
 
             assert len(search_result.content) > 0, "Search should return content"
-            result_text = search_result.content[0].text
+            result_text = retrieve_text_content(search_result)
 
             # Check if we got an error or actual results
             if "not available" in result_text or "not installed" in result_text:
@@ -406,7 +416,7 @@ async def test_docs_create_cluster():
             )
 
             assert len(result.content) > 0, "Search should return content"
-            result_text = result.content[0].text
+            result_text = retrieve_text_content(result)
 
             # Debug: Print the actual response
             print(f"\n=== Raw Response ===")
@@ -588,6 +598,7 @@ def delete_item(item_id: int):
             r for r in resources.resources if str(r.uri) == "apx://routes"
         )
         assert routes_resource.name == "api-routes"
+        assert routes_resource.description is not None
         assert "OpenAPI" in routes_resource.description
         assert routes_resource.mimeType == "application/json"
 
@@ -708,7 +719,7 @@ def delete_item(item_id: int):
         )
 
         assert len(result.content) > 0
-        result_text = result.content[0].text
+        result_text = retrieve_text_content(result)
         assert "not found" in result_text.lower(), (
             "Should return error for invalid operation ID"
         )
