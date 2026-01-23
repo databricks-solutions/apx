@@ -64,7 +64,7 @@ pub(crate) fn get_app_dir() -> Option<PathBuf> {
 #[command(
     name = "apx",
     version,
-    about = "apx is the toolkit for building Databricks Apps"
+    about = "\x1b[33mapx\x1b[0m is the toolkit for building Databricks Apps 🚀"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -73,21 +73,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new project
+    /// 🎬 Initialize a new project
     Init(cli::init::InitArgs),
-    /// Build the project
+    /// 🔨 Build the project
     Build(cli::build::BuildArgs),
-    /// Run a command using bun
+    /// 🍞 Run a command using bun
     Bun(cli::bun::BunArgs),
-    /// Components commands
+    /// 🧩 Components commands
     #[command(subcommand)]
     Components(ComponentsCommands),
-    /// Frontend commands
+    /// 🎨 Frontend commands
     #[command(subcommand)]
     Frontend(FrontendCommands),
-    /// Start the MCP server
+    /// 🔌 Start the MCP server
     Mcp,
-    /// Development server commands
+    /// 🚀 Development server commands
     #[command(subcommand)]
     Dev(DevCommands),
     /// Internal: generate OpenAPI schema and client
