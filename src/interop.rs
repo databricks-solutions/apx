@@ -2,6 +2,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::path::{Path, PathBuf};
+use tracing::{debug, warn};
 
 #[cfg(target_os = "windows")]
 const BUN_FILENAME: &str = "bun.exe";
@@ -148,25 +149,55 @@ pub(crate) fn generate_openapi_spec(
     let src_root = project_root.join("src");
     let src_root_str = src_root.to_string_lossy().to_string();
 
+    debug!("generate_openapi_spec called:");
+    debug!("  project_root: {}", project_root_str);
+    debug!("  src_root: {}", src_root_str);
+    debug!("  app_module: {}", app_module);
+    debug!("  app_slug: {}", app_slug);
+    debug!("  src_root exists: {}", src_root.exists());
+
     Python::attach(|py| -> PyResult<(String, String)> {
         let sys = py.import("sys")?;
         let path_any = sys.getattr("path")?;
         let path = path_any.cast::<PyList>()?;
+        
+        debug!("sys.path before modifications: {:?}", path.extract::<Vec<String>>());
+        
         if src_root.exists() && !path.contains(src_root_str.as_str())? {
             path.insert(0, src_root_str.as_str())?;
+            debug!("Added src_root to sys.path: {}", src_root_str);
+        } else {
+            debug!("src_root NOT added (exists: {}, already in path: {})", 
+                src_root.exists(), 
+                path.contains(src_root_str.as_str()).unwrap_or(false)
+            );
         }
+        
         if !path.contains(project_root_str.as_str())? {
             path.insert(0, project_root_str.as_str())?;
+            debug!("Added project_root to sys.path: {}", project_root_str);
+        } else {
+            debug!("project_root already in sys.path");
         }
+        
+        debug!("sys.path after modifications: {:?}", path.extract::<Vec<String>>());
 
         let (module_path, attr_name) = app_module
             .split_once(':')
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Invalid app-module format"))?;
 
+        debug!("Attempting to import module: {} (attr: {})", module_path, attr_name);
+        
         let importlib = py.import("importlib")?;
         let module = importlib.call_method1("import_module", (module_path,))?;
+        debug!("Successfully imported module: {}", module_path);
+        
         let app = module.getattr(attr_name)?;
+        debug!("Successfully got attribute: {}", attr_name);
+        
         let spec = app.call_method0("openapi")?;
+        debug!("Successfully generated OpenAPI spec");
+        
         let json = py.import("json")?;
         let dumps_kwargs = PyDict::new(py);
         dumps_kwargs.set_item("indent", 2)?;
@@ -177,6 +208,30 @@ pub(crate) fn generate_openapi_spec(
         Ok((spec_json, app_slug.to_string()))
     })
     .map_err(|err| format!("Failed to generate OpenAPI schema: {err}"))
+    .map(|(spec_json, app_slug)| {
+        // Check for missing operation_id in routes
+        if let Ok(spec_value) = serde_json::from_str::<serde_json::Value>(&spec_json) {
+            if let Some(paths) = spec_value.get("paths").and_then(|p| p.as_object()) {
+                for (path, path_value) in paths {
+                    if let Some(path_obj) = path_value.as_object() {
+                        for (method, operation_value) in path_obj {
+                            if let Some(operation_obj) = operation_value.as_object() {
+                                if !operation_obj.contains_key("operation_id") 
+                                    && !operation_obj.contains_key("operationId") {
+                                    warn!(
+                                        path = %path,
+                                        method = %method,
+                                        "Route is missing operation_id property"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (spec_json, app_slug)
+    })
 }
 
 /// Get the installed Databricks SDK version

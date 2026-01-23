@@ -19,7 +19,6 @@ use crate::interop::generate_openapi_spec;
 const APX_DIR_NAME: &str = ".apx";
 const SCHEMA_FILENAME: &str = "openapi.json";
 const ORVAL_CONFIG_FILENAME: &str = "orval.config.ts";
-const ORVAL_SCHEMA_INPUT: &str = ".apx/openapi.json";
 
 pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String> {
     let metadata = read_project_metadata(project_root)?;
@@ -72,7 +71,7 @@ pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String
 
 export default defineConfig({{
   api: {{
-    input: ".apx/openapi.json",
+    input: "./openapi.json",
     output: {{
       target: "../src/{app_slug}/ui/lib/api.ts",
       client: "react-query",
@@ -100,15 +99,21 @@ export default defineConfig({{
     }
 
     let bun_path = bun_binary_path()?;
-    debug!(bun_path = %bun_path.display(), "Running orval for API generation.");
-    let output = Command::new(bun_path)
+    let config_path_str = config_path.to_string_lossy();
+    debug!(
+        bun_path = %bun_path.display(),
+        config_path = %config_path_str,
+        cwd = %project_root.display(),
+        "Running orval for API generation: {} x --bun orval -c {}",
+        bun_path.display(),
+        config_path_str
+    );
+    let output = Command::new(&bun_path)
         .arg("x")
         .arg("--bun")
         .arg("orval")
-        .arg("-i")
-        .arg(ORVAL_SCHEMA_INPUT)
         .arg("-c")
-        .arg(config_path.to_string_lossy().as_ref())
+        .arg(config_path_str.as_ref())
         .current_dir(project_root)
         .output()
         .map_err(|err| format!("Failed to run orval: {err}"))?;

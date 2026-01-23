@@ -25,33 +25,37 @@ def e2e_init(tmp_path: Path) -> Path:
     Initialize a full e2e project for testing (skipping initial build).
     Returns the path to the initialized project.
     """
-
-    exit_code = run_cli(
-        [
-            "apx",
-            "init",
-            str(tmp_path),
-            "--assistant",
-            "cursor",
-            "--layout",
-            "basic",
-            "--template",
-            "essential",
-            "--profile",
-            "DEFAULT",
-            "--name",
-            "test-app",
-            "--apx-package",
-            str(Path(apx_source_dir)),
-            "--apx-editable",
-            "--skip-build",
-        ]
-    )
-    assert exit_code == 0
+    import os
     import sys
 
-    sys.path.insert(0, str(tmp_path / "src"))
-    return tmp_path
+    # Set APX_DEV_PATH environment variable for editable installation
+    os.environ["APX_DEV_PATH"] = str(Path(apx_source_dir))
+
+    try:
+        exit_code = run_cli(
+            [
+                "apx",
+                "init",
+                str(tmp_path),
+                "--assistant",
+                "cursor",
+                "--layout",
+                "basic",
+                "--template",
+                "essential",
+                "--profile",
+                "DEFAULT",
+                "--name",
+                "test-app",
+                "--skip-build",
+            ]
+        )
+        assert exit_code == 0
+        sys.path.insert(0, str(tmp_path / "src"))
+        return tmp_path
+    finally:
+        # Clean up environment variable after initialization
+        os.environ.pop("APX_DEV_PATH", None)
 
 
 @pytest.fixture
