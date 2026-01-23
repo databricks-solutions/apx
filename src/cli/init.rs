@@ -652,7 +652,7 @@ enum InstallArgs {
 }
 
 
-use toml_edit::{DocumentMut, Item, Table, ArrayOfTables};
+use toml_edit::{DocumentMut, Item, Table, ArrayOfTables, Array, Value};
 
 pub fn ensure_apx_uv_config(pyproject: &Path) -> Result<(), String> {
     let contents = fs::read_to_string(pyproject)
@@ -702,33 +702,108 @@ pub fn ensure_apx_uv_config(pyproject: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Configure pyproject.toml for editable apx installation.
+/// Adds apx to [tool.uv.sources] with path and editable=true,
+/// and appends "apx" to [dependency-groups].dev list.
+pub fn configure_editable_apx(pyproject: &Path, apx_path: &Path) -> Result<(), String> {
+    debug!("Configuring editable apx in pyproject.toml");
+    debug!("  pyproject path: {}", pyproject.display());
+    debug!("  apx path: {}", apx_path.display());
+    
+    let contents = fs::read_to_string(pyproject)
+        .map_err(|e| format!("Failed to read pyproject.toml: {e}"))?;
+
+    let mut doc = contents
+        .parse::<DocumentMut>()
+        .map_err(|e| format!("Invalid TOML: {e}"))?;
+
+    // --- [tool.uv.sources] ---
+    let tool = doc["tool"].or_insert(Item::Table(Table::new()));
+    let uv = tool["uv"].or_insert(Item::Table(Table::new()));
+    let sources = uv["sources"].or_insert(Item::Table(Table::new()));
+    let sources = sources
+        .as_table_mut()
+        .ok_or("tool.uv.sources is not a table")?;
+
+    // Add apx = { path = "...", editable = true }
+    let apx_path_str = apx_path.to_string_lossy().to_string();
+    debug!("  Setting apx source path to: {}", apx_path_str);
+    
+    let mut apx_source = Table::new();
+    apx_source.insert("path", Value::from(apx_path_str.as_str()).into());
+    apx_source.insert("editable", Value::from(true).into());
+    sources["apx"] = Item::Table(apx_source);
+
+    // --- [dependency-groups].dev ---
+    let dep_groups = doc["dependency-groups"].or_insert(Item::Table(Table::new()));
+    let dep_groups = dep_groups
+        .as_table_mut()
+        .ok_or("dependency-groups is not a table")?;
+
+    let dev_deps = dep_groups["dev"].or_insert(Item::Value(Value::Array(Array::new())));
+    let dev_array = dev_deps
+        .as_array_mut()
+        .ok_or("dependency-groups.dev is not an array")?;
+
+    // Check if "apx" already exists in dev dependencies
+    let apx_exists = dev_array.iter().any(|v| v.as_str() == Some("apx"));
+    if !apx_exists {
+        debug!("  Adding 'apx' to dependency-groups.dev");
+        dev_array.push("apx");
+    } else {
+        debug!("  'apx' already in dependency-groups.dev");
+    }
+
+    let output = doc.to_string();
+    debug!("  Writing updated pyproject.toml");
+    fs::write(pyproject, output)
+        .map_err(|e| format!("Failed to write pyproject.toml: {e}"))?;
+
+    debug!("  Editable apx configuration complete");
+    Ok(())
+}
+
 
 async fn setup_backend(app_path: &Path, install_args: InstallArgs) -> Result<(), String> {
     generate_metadata_file(app_path)?;
 
-    let mut base_cmd = Command::new("uv");
-    base_cmd
-        .arg("add")
-        .arg("--dev")
-        .current_dir(app_path);
+    let pyproject_path = app_path.join("pyproject.toml");
 
     match install_args {
         InstallArgs::Standard { version } => {
-            let pyproject_path = app_path.join("pyproject.toml");
             ensure_apx_uv_config(&pyproject_path)?;
             let versioned_package = format!("apx=={version}");
-            base_cmd.arg(versioned_package);
-            run_command(&mut base_cmd, "Failed to add apx package").await?;
+            
+            let mut add_cmd = Command::new("uv");
+            add_cmd
+                .arg("add")
+                .arg("--dev")
+                .arg(versioned_package)
+                .current_dir(app_path);
+            run_command(&mut add_cmd, "Failed to add apx package").await?;
         },
         InstallArgs::Editable { path } => {
             // editable path must be an existing local path
-            debug!("Installing apx package from editable path: {}", &path.display());
+            debug!("Setting up editable apx installation");
+            debug!("  app_path: {}", app_path.display());
+            debug!("  editable path: {}", path.display());
+            
             if !path.is_dir() {
                 return Err(format!("Editable path is not a directory: {}", path.display()));
             }
-            base_cmd.arg("--no-sync").arg("--editable").arg(&path);
-            run_command(&mut base_cmd, "Failed to add apx package").await?;
-            debug!("Apx package added from editable path: {}", &path.display());
+            
+            // Configure pyproject.toml with editable source
+            configure_editable_apx(&pyproject_path, &path)?;
+            debug!("pyproject.toml configured for editable apx");
+            
+            // Run uv sync to install dependencies
+            debug!("Running uv sync");
+            let mut sync_cmd = Command::new("uv");
+            sync_cmd
+                .arg("sync")
+                .current_dir(app_path);
+            run_command(&mut sync_cmd, "Failed to sync dependencies").await?;
+            debug!("uv sync completed successfully");
         },
     }
     Ok(())

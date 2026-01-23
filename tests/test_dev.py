@@ -1,106 +1,75 @@
 import asyncio
 import json
-import pytest
-from dataclasses import dataclass
-import os
 from pathlib import Path
-import subprocess
-import time
+
 import httpx
 from bs4 import BeautifulSoup
 
-
-@dataclass
-class RunApxResult:
-    code: int
-    out: str
-    err: str
+from conftest import run_cli_async, run_cli_background
 
 
-def run_apx_subprocess(args: list[str], cwd: Path) -> RunApxResult:
-    env = os.environ.copy()
-    result = subprocess.run(
-        ["uv", "run", "apx", *args],
-        cwd=str(cwd),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    return RunApxResult(code=result.returncode, out=result.stdout, err=result.stderr)
-
-
-def start_apx_logs_follow(args: list[str], cwd: Path) -> subprocess.Popen[str]:
-    env = os.environ.copy()
-    env["APX_LOG"] = "debug"
-    env["APX_COLLECT_LOGS"] = "1"
-    return subprocess.Popen(
-        ["uv", "run", "apx", *args],
-        cwd=str(cwd),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-
-def test_dev_server_start_stop_with_logs(e2e_init: Path) -> None:
+async def test_dev_server_start_stop_with_logs(isolated_project: Path) -> None:
     try:
-        print(f"Starting dev server in {e2e_init}")
-        start_result = run_apx_subprocess(["dev", "start"], e2e_init)
-        assert start_result.code == 0
+        print(f"Starting dev server in {isolated_project}")
+        start_result = await run_cli_async(["dev", "start"], cwd=isolated_project)
+        assert start_result.returncode == 0
 
         # check the server logs
-        print(f"Checking server logs in {e2e_init}")
-        logs_result = run_apx_subprocess(["dev", "logs"], e2e_init)
+        print(f"Checking server logs in {isolated_project}")
+        logs_result = await run_cli_async(["dev", "logs"], cwd=isolated_project)
         print(
-            f"logs result: {logs_result} with error: {logs_result.err} and output: {logs_result.out}"
+            f"logs result: returncode={logs_result.returncode} with error: {logs_result.stderr} and output: {logs_result.stdout}"
         )
 
-        # should contain:
         # should contain at least some lines from process manager and from server
-        assert "dev::process" in logs_result.out
-        assert "dev::server" in logs_result.out
+        assert "dev::process" in logs_result.stdout
+        assert "dev::server" in logs_result.stdout
 
-        follow_process = start_apx_logs_follow(
-            ["dev", "logs", "--follow", str(e2e_init)], e2e_init
-        )
-        time.sleep(0.2)
-        stop_result = run_apx_subprocess(["dev", "stop"], e2e_init)
-        assert stop_result.code == 0
-        try:
-            stdout, stderr = follow_process.communicate(timeout=10)
-        except subprocess.TimeoutExpired:
-            follow_process.terminate()
-            stdout, stderr = follow_process.communicate()
-        follow_result = RunApxResult(
-            code=follow_process.returncode or 0,
-            out=stdout,
-            err=stderr,
-        )
+        # Start logs follow in background with debug logging
+        env = {"APX_LOG": "debug", "APX_COLLECT_LOGS": "1"}
+        async with run_cli_background(
+            ["dev", "logs", "--follow", str(isolated_project)],
+            cwd=isolated_project,
+            env=env,
+        ) as follow_process:
+            await asyncio.sleep(0.2)
+            stop_result = await run_cli_async(["dev", "stop"], cwd=isolated_project)
+            assert stop_result.returncode == 0
 
-        assert follow_result.code == 0
+            # Wait for process to finish and collect output
+            try:
+                stdout_bytes, _ = await asyncio.wait_for(
+                    follow_process.communicate(), timeout=10
+                )
+                stdout = stdout_bytes.decode("utf-8") if stdout_bytes else ""
+            except asyncio.TimeoutError:
+                follow_process.terminate()
+                stdout_bytes, _ = await follow_process.communicate()
+                stdout = stdout_bytes.decode("utf-8") if stdout_bytes else ""
 
-        print("\n full follow result in out: \n")
-        for line in follow_result.out.split("\n"):
-            print(f" - {line}")
+            assert follow_process.returncode == 0
 
-        assert "dev::process" in follow_result.out
-        assert "dev::server" in follow_result.out
-        assert "shutdown complete" in follow_result.out
+            print("\n full follow result in out: \n")
+            for line in stdout.split("\n"):
+                print(f" - {line}")
+
+            assert "dev::process" in stdout
+            assert "dev::server" in stdout
+            assert "shutdown complete" in stdout
 
     finally:
         print("Stopping dev server as a cleanup step")
-        stop_result = run_apx_subprocess(["dev", "stop"], e2e_init)
+        stop_result = await run_cli_async(["dev", "stop"], cwd=isolated_project)
         print(
-            f"cleanup stop result: {stop_result} with error: {stop_result.err} and output: {stop_result.out}"
+            f"cleanup stop result: returncode={stop_result.returncode} with error: {stop_result.stderr} and output: {stop_result.stdout}"
         )
 
 
-def test_dev_server_refreshes_openapi(e2e_init: Path) -> None:
+async def test_dev_server_refreshes_openapi(isolated_project: Path) -> None:
     try:
-        print(f"Starting dev server in {e2e_init}")
-        start_result = run_apx_subprocess(["dev", "start"], e2e_init)
-        assert start_result.code == 0
+        print(f"Starting dev server in {isolated_project}")
+        start_result = await run_cli_async(["dev", "start"], cwd=isolated_project)
+        assert start_result.returncode == 0
 
         # replace the /src/{app_slug}/backend/router.py with a modified version that returns a different version
 
@@ -121,51 +90,48 @@ async def version():
     return VersionOut.from_metadata()
         """
 
-        (e2e_init / "src" / "test_app" / "backend" / "router.py").write_text(
+        (isolated_project / "src" / "test_app" / "backend" / "router.py").write_text(
             new_content
         )
 
         # wait for the watcher to detect changes and regenerate (poll=500ms + debounce=300ms + buffer)
-        time.sleep(2)
+        await asyncio.sleep(2)
 
         # check the server logs
-        print(f"Checking server logs in {e2e_init}")
-        logs_result = run_apx_subprocess(["dev", "logs"], e2e_init)
+        print(f"Checking server logs in {isolated_project}")
+        logs_result = await run_cli_async(["dev", "logs"], cwd=isolated_project)
         print(
-            f"logs result: {logs_result} with error: {logs_result.err} and output: {logs_result.out}"
+            f"logs result: returncode={logs_result.returncode} with error: {logs_result.stderr} and output: {logs_result.stdout}"
         )
 
         # should contain:
-        assert "regenerating OpenAPI" in logs_result.out
+        assert "regenerating OpenAPI" in logs_result.stdout
 
         # check that "currentUser" is not in the generated api.ts
-        api_ts_path = e2e_init / "src" / "test_app" / "ui" / "lib" / "api.ts"
-        deadline = time.time() + 5
-        while time.time() < deadline and not api_ts_path.exists():
-            time.sleep(0.5)
-        assert api_ts_path.exists(), (
-            f"api.ts file not found at {api_ts_path} after {time.time() - deadline} seconds"
-        )
+        api_ts_path = isolated_project / "src" / "test_app" / "ui" / "lib" / "api.ts"
+        deadline = asyncio.get_event_loop().time() + 5
+        while asyncio.get_event_loop().time() < deadline and not api_ts_path.exists():
+            await asyncio.sleep(0.5)
+        assert api_ts_path.exists(), f"api.ts file not found at {api_ts_path}"
         api_ts_content = api_ts_path.read_text()
         assert "currentUser" not in api_ts_content
 
     finally:
         print("Stopping dev server as a cleanup step")
-        stop_result = run_apx_subprocess(["dev", "stop"], e2e_init)
+        stop_result = await run_cli_async(["dev", "stop"], cwd=isolated_project)
         print(
-            f"cleanup stop result: {stop_result} with error: {stop_result.err} and output: {stop_result.out}"
+            f"cleanup stop result: returncode={stop_result.returncode} with error: {stop_result.stderr} and output: {stop_result.stdout}"
         )
 
 
-@pytest.mark.asyncio
-async def test_dev_server_proxies(e2e_init: Path) -> None:
+async def test_dev_server_proxies(isolated_project: Path) -> None:
     try:
-        print(f"Starting dev server in {e2e_init}")
-        start_result = run_apx_subprocess(["dev", "start"], e2e_init)
-        assert start_result.code == 0
+        print(f"Starting dev server in {isolated_project}")
+        start_result = await run_cli_async(["dev", "start"], cwd=isolated_project)
+        assert start_result.returncode == 0
 
         # read .apx/dev.lock to get the backend and frontend ports
-        dev_lock_path = e2e_init / ".apx" / "dev.lock"
+        dev_lock_path = isolated_project / ".apx" / "dev.lock"
         dev_lock_content = dev_lock_path.read_text()
         dev_lock_json = json.loads(dev_lock_content)
         dev_port = dev_lock_json.get("port")
@@ -190,7 +156,7 @@ async def test_dev_server_proxies(e2e_init: Path) -> None:
 
     finally:
         print("Stopping dev server as a cleanup step")
-        stop_result = run_apx_subprocess(["dev", "stop"], e2e_init)
+        stop_result = await run_cli_async(["dev", "stop"], cwd=isolated_project)
         print(
-            f"cleanup stop result: {stop_result} with error: {stop_result.err} and output: {stop_result.out}"
+            f"cleanup stop result: returncode={stop_result.returncode} with error: {stop_result.stderr} and output: {stop_result.stdout}"
         )

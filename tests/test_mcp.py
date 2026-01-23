@@ -4,52 +4,12 @@ import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from importlib import resources
 
 from mcp.types import TextResourceContents, CallToolResult, TextContent
 from pydantic import AnyUrl
 import pytest
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
-
-from apx._core import run_cli
-
-
-@pytest.fixture
-def apx_source_dir():
-    """Get the apx source directory for editable installs."""
-    return str(Path(str(resources.files("apx"))).parent.parent)
-
-
-@pytest.fixture
-def init_test_project(tmp_path, apx_source_dir):
-    """Initialize a minimal test project without dependencies."""
-    exit_code = run_cli(
-        [
-            "apx",
-            "init",
-            str(tmp_path),
-            "--skip-backend-dependencies",
-            "--skip-frontend-dependencies",
-            "--skip-build",
-            "--assistant",
-            "cursor",
-            "--layout",
-            "basic",
-            "--template",
-            "essential",
-            "--profile",
-            "DEFAULT",
-            "--name",
-            "test-app",
-            "--apx-package",
-            apx_source_dir,
-            "--apx-editable",
-        ]
-    )
-    assert exit_code == 0, "Failed to initialize test project"
-    assert (tmp_path / "src").exists(), "src directory should exist"
-    return tmp_path
 
 
 @asynccontextmanager
@@ -87,7 +47,6 @@ def parse_json_result(result: CallToolResult):
         raise ValueError(f"Failed to parse JSON: {e}") from e
 
 
-@pytest.mark.asyncio
 async def test_apx_info_resource():
     """Test that the Rust MCP server provides the apx://info resource."""
     server_params = StdioServerParameters(command="uv", args=["run", "apx", "mcp"])
@@ -123,7 +82,6 @@ async def test_apx_info_resource():
             assert "Technology Stack" in text
 
 
-@pytest.mark.asyncio
 async def test_start_tool_exists():
     """Test that the start tool is available."""
     server_params = StdioServerParameters(command="uv", args=["run", "apx", "mcp"])
@@ -145,7 +103,6 @@ async def test_start_tool_exists():
             assert "inputSchema" in dir(start_tool)
 
 
-@pytest.mark.asyncio
 async def test_mcp_server_capabilities():
     """Test that the MCP server advertises correct capabilities."""
     server_params = StdioServerParameters(command="uv", args=["run", "apx", "mcp"])
@@ -168,10 +125,9 @@ async def test_mcp_server_capabilities():
             assert hasattr(init_result.capabilities, "tools")
 
 
-@pytest.mark.asyncio
-async def test_search_and_add_component(init_test_project):
+async def test_search_and_add_component(isolated_project: Path):
     """Test search_registry_components and add_component tools."""
-    tmp_path = init_test_project
+    tmp_path = isolated_project
 
     async with mcp_session(tmp_path) as session:
         # Test 1: List tools and verify search_registry_components exists
@@ -234,10 +190,9 @@ async def test_search_and_add_component(init_test_project):
             print(f"Component add returned: {result_text}")
 
 
-@pytest.mark.asyncio
-async def test_search_and_add_custom_registry_component(init_test_project):
+async def test_search_and_add_custom_registry_component(isolated_project: Path):
     """Test search and add for custom registry components (e.g., @animate-ui)."""
-    tmp_path = init_test_project
+    tmp_path = isolated_project
 
     async with mcp_session(tmp_path) as session:
         # Test 1: Search for sidebar component from animate-ui
@@ -325,7 +280,6 @@ async def test_search_and_add_custom_registry_component(init_test_project):
             print(f"Component add result: {result_text}")
 
 
-@pytest.mark.asyncio
 async def test_docs_tool():
     """Test the docs tool for searching Databricks SDK documentation."""
     server_params = StdioServerParameters(command="uv", args=["run", "apx", "mcp"])
@@ -396,7 +350,6 @@ async def test_docs_tool():
                     print("⚠ No results found (may be normal for specific queries)")
 
 
-@pytest.mark.asyncio
 async def test_docs_create_cluster():
     """Test that 'create cluster' query returns relevant cluster creation docs in top 3."""
     server_params = StdioServerParameters(command="uv", args=["run", "apx", "mcp"])
@@ -469,10 +422,11 @@ async def test_docs_create_cluster():
             )
 
 
-@pytest.mark.asyncio
-async def test_routes_resource_and_get_route_info(e2e_init):
+async def test_routes_resource_and_get_route_info(isolated_project: Path):
     """Test routes resource and get_route_info tool with generated OpenAPI."""
-    tmp_path = e2e_init
+    from conftest import run_cli_async
+
+    tmp_path = isolated_project
     src_dir = tmp_path / "src"
     backend_dir = src_dir / "test_app" / "backend"
 
@@ -558,15 +512,16 @@ def delete_item(item_id: int):
     (src_dir / "test_app" / "_version.py").write_text('version = "0.0.0"\n')
 
     # Run the __generate_openapi CLI command
-    exit_code = run_cli(
+    result = await run_cli_async(
         [
-            "apx",
             "__generate_openapi",
             "--app-dir",
             str(tmp_path),
             "--force",
-        ]
+        ],
+        cwd=tmp_path,
     )
+    exit_code = result.returncode
 
     assert exit_code == 0, "OpenAPI generation should succeed"
 

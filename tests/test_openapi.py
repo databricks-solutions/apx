@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from apx._core import generate_openapi, run_cli
+from apx._core import generate_openapi
 
 
 def test_generate_openapi_skips_orval_when_schema_unchanged(tmp_path: Path) -> None:
@@ -66,9 +66,11 @@ def test_generate_openapi_skips_orval_when_schema_unchanged(tmp_path: Path) -> N
     assert (apx_dir / "orval.config.ts").exists()
 
 
-def test_generate_openapi_with_rich_operations(e2e_init: Path) -> None:
+async def test_generate_openapi_with_rich_operations(isolated_project: Path) -> None:
     """Test OpenAPI generation with a rich set of CRUD operations."""
-    project_root = e2e_init
+    from conftest import run_cli_async
+
+    project_root = isolated_project
     src_dir = project_root / "src"
     # The app is initialized with name "test-app" which becomes slug "test_app"
     backend_dir = src_dir / "test_app" / "backend"
@@ -159,15 +161,16 @@ def delete_item(item_id: int):
     apx_dir.mkdir(exist_ok=True)
 
     # Run the __generate_openapi CLI command
-    exit_code = run_cli(
+    result = await run_cli_async(
         [
-            "apx",
             "__generate_openapi",
             "--app-dir",
             str(project_root),
             "--force",
-        ]
+        ],
+        cwd=project_root,
     )
+    exit_code = result.returncode
 
     print(f"\n__generate_openapi exit code: {exit_code}")
 
@@ -185,8 +188,14 @@ def delete_item(item_id: int):
 
         # Print operations by method
         paths = openapi_schema.get("paths", {})
-        operations: dict[str, list[str]] = {"get": [], "post": [], "put": [], "patch": [], "delete": []}
-        for path, methods in paths.items(): 
+        operations: dict[str, list[str]] = {
+            "get": [],
+            "post": [],
+            "put": [],
+            "patch": [],
+            "delete": [],
+        }
+        for path, methods in paths.items():
             for method in ["get", "post", "put", "patch", "delete"]:
                 if method in methods:
                     operations[method].append(path)

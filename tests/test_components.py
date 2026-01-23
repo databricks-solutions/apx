@@ -5,8 +5,7 @@ import os
 import shutil
 from pathlib import Path
 import pytest
-from conftest import ApxFixture, apx_source_dir
-from apx._core import run_cli
+from conftest import apx_source_dir, run_cli_async
 
 
 SAMPLE_PYPROJECT_TOML = """
@@ -65,9 +64,7 @@ def check_file_imports(file_path: Path) -> list[str]:
 
 
 @pytest.mark.parametrize("component_name", get_cached_component_names())
-def test_component_import_rewriting(
-    component_name: str, run_apx: ApxFixture, tmp_path: Path
-):
+async def test_component_import_rewriting(component_name: str, tmp_path: Path):
     """Test that each cached component's imports are correctly rewritten."""
     app_dir = tmp_path
 
@@ -81,11 +78,14 @@ def test_component_import_rewriting(
     (ui_root / "styles" / "globals.css").write_text("/* empty */")
 
     # Add the component
-    result = run_apx(["components", "add", component_name, str(app_dir)])
+    result = await run_cli_async(
+        ["components", "add", component_name, str(app_dir)],
+        cwd=app_dir,
+    )
 
     # Component might fail for various reasons (missing deps, network, etc.)
     # We only check import rewriting if the component was successfully added
-    if result.code == 0:
+    if result.returncode == 0:
         # Check all written files for registry-prefixed imports
         violations = []
 
@@ -124,7 +124,7 @@ def test_component_cache_exists():
     )
 
 
-def test_specific_known_components(run_apx: ApxFixture, tmp_path: Path):
+async def test_specific_known_components(tmp_path: Path):
     """Test specific components known to have registry imports."""
     known_components = ["sidebar", "button", "card"]
 
@@ -140,11 +140,14 @@ def test_specific_known_components(run_apx: ApxFixture, tmp_path: Path):
     (ui_root / "styles" / "globals.css").write_text("/* empty */")
 
     for component_name in known_components:
-        result = run_apx(["components", "add", component_name, str(app_dir), "--force"])
+        result = await run_cli_async(
+            ["components", "add", component_name, str(app_dir), "--force"],
+            cwd=app_dir,
+        )
 
         # Verify it succeeded
-        assert result.code == 0, (
-            f"Failed to add {component_name}:\nstdout: {result.out}\nstderr: {result.err}"
+        assert result.returncode == 0, (
+            f"Failed to add {component_name}:\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
 
         # Check for registry-prefixed imports in all files
@@ -168,7 +171,7 @@ def test_specific_known_components(run_apx: ApxFixture, tmp_path: Path):
         )
 
 
-def test_cache_population_after_add(run_apx: ApxFixture, tmp_path: Path):
+async def test_cache_population_after_add(tmp_path: Path):
     """
     Test that after running 'add' command, the cache has:
     1. registry.json files for all registries in pyproject.toml
@@ -185,9 +188,8 @@ def test_cache_population_after_add(run_apx: ApxFixture, tmp_path: Path):
         shutil.rmtree(cache_base)
 
     # Step 2: Initialize project (skip deps)
-    exit_code = run_cli(
+    result = await run_cli_async(
         [
-            "apx",
             "init",
             str(tmp_path),
             "--skip-backend-dependencies",
@@ -206,9 +208,10 @@ def test_cache_population_after_add(run_apx: ApxFixture, tmp_path: Path):
             "--apx-package",
             apx_source_dir,
             "--apx-editable",
-        ]
+        ],
+        cwd=tmp_path,
     )
-    assert exit_code == 0, "Failed to initialize project"
+    assert result.returncode == 0, "Failed to initialize project"
 
     # Check what registries are in pyproject.toml
     pyproject_path = tmp_path / "pyproject.toml"
@@ -224,13 +227,16 @@ def test_cache_population_after_add(run_apx: ApxFixture, tmp_path: Path):
         print("No custom registries defined")
 
     # Step 3: Run add command for a single component (dialog)
-    result = run_apx(["components", "add", "dialog", str(tmp_path)])
-    assert result.code == 0, (
-        f"Failed to add dialog: stdout={result.out}, stderr={result.err}"
+    result = await run_cli_async(
+        ["components", "add", "dialog", str(tmp_path)],
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, (
+        f"Failed to add dialog: stdout={result.stdout}, stderr={result.stderr}"
     )
 
     print("\n=== Add command output ===")
-    print(result.out)
+    print(result.stdout)
 
     # Step 4: Verify cache structure
     registries_dir = cache_base / "registries"
@@ -294,14 +300,13 @@ def test_cache_population_after_add(run_apx: ApxFixture, tmp_path: Path):
     print(f"Items dir: {items_dir}")
 
 
-def test_cache_population_structure(run_apx: ApxFixture, tmp_path: Path):
+async def test_cache_population_structure(tmp_path: Path):
     """
     Test the structure and content of cached components.
     """
     # Initialize project
-    exit_code = run_cli(
+    result = await run_cli_async(
         [
-            "apx",
             "init",
             str(tmp_path),
             "--skip-backend-dependencies",
@@ -320,14 +325,18 @@ def test_cache_population_structure(run_apx: ApxFixture, tmp_path: Path):
             "--apx-package",
             apx_source_dir,
             "--apx-editable",
-        ]
+        ],
+        cwd=tmp_path,
     )
-    assert exit_code == 0, "Failed to initialize project"
+    assert result.returncode == 0, "Failed to initialize project"
 
     # Run add command
-    result = run_apx(["components", "add", "button", str(tmp_path)])
-    assert result.code == 0, (
-        f"Failed to add button: stdout={result.out}, stderr={result.err}"
+    result = await run_cli_async(
+        ["components", "add", "button", str(tmp_path)],
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, (
+        f"Failed to add button: stdout={result.stdout}, stderr={result.stderr}"
     )
 
     # Check cache structure for a specific component
