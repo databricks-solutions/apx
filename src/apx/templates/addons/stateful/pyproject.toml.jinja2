@@ -15,7 +15,6 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "apx",
     "ty>=0.0.12",
 ]
 
@@ -33,9 +32,6 @@ root = "src/{{app_slug}}/ui"
 "@animate-ui" = "https://animate-ui.com/r/{name}.json"
 "@ai-elements" = "https://registry.ai-sdk.dev/{name}.json"
 "@svgl" = "https://svgl.app/r/{name}.json"
-
-[tool.uv.sources]
-apx = { git = "https://github.com/databricks-solutions/apx.git" }
 
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning>=0.7.0"]

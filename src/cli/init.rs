@@ -2,6 +2,7 @@ use clap::{Args, ValueEnum};
 use dialoguer::{Confirm, Input, Select};
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::seq::SliceRandom;
+use tracing::debug;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,11 +15,11 @@ use crate::bun_binary_path;
 use crate::cli::run_cli_async;
 use crate::cli::components::add::run_inner as add_component;
 use crate::cli::components::add::ComponentsAddArgs;
-use crate::common::bun_install;
+use crate::common::{bun_install, read_project_metadata, write_metadata_file};
 use crate::dotenv::DotenvFile;
 use crate::interop::{list_profiles, templates_dir};
 
-const DEFAULT_APX_PACKAGE: &str = "https://github.com/databricks-solutions/apx.git";
+const APX_INDEX_URL: &str = "https://databricks-solutions.github.io/apx/simple";
 
 #[derive(ValueEnum, Clone, Debug)]
 #[value(rename_all = "lower")]
@@ -83,19 +84,6 @@ pub struct InitArgs {
         help = "The layout to use. Will prompt if not provided"
     )]
     pub layout: Option<Layout>,
-    #[arg(
-        long = "apx-package",
-        default_value = DEFAULT_APX_PACKAGE,
-        hide = true,
-        help = "The apx package to install. Used for internal testing and development."
-    )]
-    pub apx_package: String,
-    #[arg(
-        long = "apx-editable",
-        hide = true,
-        help = "Whether to install apx as editable package."
-    )]
-    pub apx_editable: bool,
     #[arg(
         long = "skip-frontend-dependencies",
         help = "Skip installing frontend dependencies (bun packages)."
@@ -322,10 +310,25 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
     let backend_task = if !args.skip_backend_dependencies {
         let app_path = app_path.clone();
-        let apx_package = args.apx_package.clone();
-        let apx_editable = args.apx_editable;
+        // if APX_DEV_PATH is set, use editable mode, otherwise use non-editable mode
+        let apx_editable = std::env::var("APX_DEV_PATH").is_ok();
         Some(tokio::spawn(async move {
-            setup_backend(&app_path, &apx_package, apx_editable).await
+            let install_args = if apx_editable {
+                // For editable mode, use APX_DEV_PATH  + check if is's a valid directory
+                let apx_path = std::env::var("APX_DEV_PATH").unwrap_or_else(|_| ".".to_string());
+                if !Path::new(&apx_path).is_dir() {
+                    return Err(format!("APX_DEV_PATH is not a valid directory: {}", &apx_path));
+                }
+                InstallArgs::Editable {
+                    path: PathBuf::from(apx_path),
+                }
+            } else {
+                // For non-editable mode, install from registry using current package version
+                InstallArgs::Standard {
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                }
+            };
+            setup_backend(&app_path, install_args).await
         }))
     } else {
         None
@@ -381,8 +384,8 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
     if !args.skip_frontend_dependencies {
         run_with_spinner_async(
-            "🎨 Bootstrapping shadcn components...",
-            "✅ Shadcn components added",
+            "🎨 Bootstrapping components...",
+            "✅ Components added",
             || async {
                 add_component(ComponentsAddArgs {
                     component: "button".to_string(),
@@ -693,65 +696,101 @@ async fn run_command(cmd: &mut Command, error_msg: &str) -> Result<(), String> {
     Err(message)
 }
 
+enum InstallArgs {
+    Standard {
+        version: String,
+    },
+    Editable {
+        path: PathBuf,
+    },
+}
 
-async fn setup_backend(app_path: &Path, apx_package: &str, apx_editable: bool) -> Result<(), String> {
-    generate_metadata_file(app_path)?;
-    if !apx_package.is_empty() {
-        let mut cmd = Command::new("uv");
-        cmd.arg("add").arg("--dev");
-        if apx_editable {
-            cmd.arg("--editable");
-        }
-        cmd.arg(apx_package).current_dir(app_path);
-        run_command(&mut cmd, "Failed to add apx package").await?;
+
+use toml_edit::{DocumentMut, Item, Table, ArrayOfTables};
+
+pub fn ensure_apx_uv_config(pyproject: &Path) -> Result<(), String> {
+    let contents = fs::read_to_string(pyproject)
+        .map_err(|e| format!("Failed to read pyproject.toml: {e}"))?;
+
+    let mut doc = contents
+        .parse::<DocumentMut>()
+        .map_err(|e| format!("Invalid TOML: {e}"))?;
+
+    // --- [[tool.uv.index]] ---
+    let tool = doc["tool"].or_insert(Item::Table(Table::new()));
+    let uv = tool["uv"].or_insert(Item::Table(Table::new()));
+
+    let indexes = uv["index"].or_insert(Item::ArrayOfTables(ArrayOfTables::new()));
+    let indexes = indexes
+        .as_array_of_tables_mut()
+        .ok_or("tool.uv.index is not an array")?;
+
+    let exists = indexes.iter().any(|tbl| {
+        tbl.get("name")
+            .and_then(|v| v.as_str())
+            == Some("apx-index")
+    });
+
+    if !exists {
+        let mut tbl = Table::new();
+        tbl["name"] = "apx-index".into();
+        tbl["url"] = APX_INDEX_URL.into();
+        indexes.push(tbl);
     }
-    let mut sync_cmd = Command::new("uv");
-    sync_cmd.arg("sync").current_dir(app_path);
-    run_command(&mut sync_cmd, "Failed to set up project").await
+
+    // --- [tool.uv.sources] ---
+    let sources = uv["sources"].or_insert(Item::Table(Table::new()));
+    let sources = sources
+        .as_table_mut()
+        .ok_or("tool.uv.sources is not a table")?;
+
+    if !sources.contains_key("apx") {
+        let mut apx = Table::new();
+        apx["index"] = "apx-index".into();
+        sources["apx"] = Item::Table(apx);
+    }
+
+    fs::write(pyproject, doc.to_string())
+        .map_err(|e| format!("Failed to write pyproject.toml: {e}"))?;
+
+    Ok(())
+}
+
+
+async fn setup_backend(app_path: &Path, install_args: InstallArgs) -> Result<(), String> {
+    generate_metadata_file(app_path)?;
+
+    let mut base_cmd = Command::new("uv");
+    base_cmd
+        .arg("add")
+        .arg("--dev")
+        .current_dir(app_path);
+
+    match install_args {
+        InstallArgs::Standard { version } => {
+            let pyproject_path = app_path.join("pyproject.toml");
+            ensure_apx_uv_config(&pyproject_path)?;
+            let versioned_package = format!("apx=={version}");
+            base_cmd.arg(versioned_package);
+            run_command(&mut base_cmd, "Failed to add apx package").await?;
+        },
+        InstallArgs::Editable { path } => {
+            // editable path must be an existing local path
+            debug!("Installing apx package from editable path: {}", &path.display());
+            if !path.is_dir() {
+                return Err(format!("Editable path is not a directory: {}", path.display()));
+            }
+            base_cmd.arg("--editable").arg(&path);
+            run_command(&mut base_cmd, "Failed to add apx package").await?;
+            debug!("Apx package added from editable path: {}", &path.display());
+        },
+    }
+    Ok(())
 }
 
 fn generate_metadata_file(app_path: &Path) -> Result<(), String> {
-    let pyproject_path = app_path.join("pyproject.toml");
-    let contents = fs::read_to_string(&pyproject_path).map_err(|err| format!("{err}"))?;
-    let value: toml::Value = contents
-        .parse()
-        .map_err(|err| format!("Failed to parse pyproject.toml: {err}"))?;
-    let metadata = value
-        .get("tool")
-        .and_then(|tool| tool.get("apx"))
-        .and_then(|apx| apx.get("metadata"))
-        .ok_or_else(|| "Missing tool.apx.metadata in pyproject.toml".to_string())?;
-
-    let app_name = metadata
-        .get("app-name")
-        .and_then(|val| val.as_str())
-        .ok_or_else(|| "Missing app-name in pyproject.toml metadata".to_string())?;
-    let app_module = metadata
-        .get("app-module")
-        .and_then(|val| val.as_str())
-        .ok_or_else(|| "Missing app-module in pyproject.toml metadata".to_string())?;
-    let app_slug = metadata
-        .get("app-slug")
-        .and_then(|val| val.as_str())
-        .ok_or_else(|| "Missing app-slug in pyproject.toml metadata".to_string())?;
-    let api_prefix = metadata
-        .get("api-prefix")
-        .and_then(|val| val.as_str())
-        .ok_or_else(|| "Missing api-prefix in pyproject.toml metadata".to_string())?;
-    let metadata_path = metadata
-        .get("metadata-path")
-        .and_then(|val| val.as_str())
-        .ok_or_else(|| "Missing metadata-path in pyproject.toml metadata".to_string())?;
-
-    let target_path = app_path.join(metadata_path);
-    let contents = [
-        format!("app_name = \"{app_name}\""),
-        format!("app_module = \"{app_module}\""),
-        format!("app_slug = \"{app_slug}\""),
-        format!("api_prefix = \"{api_prefix}\""),
-    ]
-    .join("\n");
-    fs::write(target_path, contents).map_err(|err| format!("Failed to write metadata file: {err}"))
+    let metadata = read_project_metadata(app_path)?;
+    write_metadata_file(app_path, &metadata)
 }
 
 async fn is_command_available(cmd: &str) -> bool {
