@@ -154,12 +154,7 @@ pub fn format_relative_path(path: &Path, app_dir: &Path) -> String {
 }
 
 pub fn format_relative_string(path: &Path) -> String {
-    let mut s = path.to_string_lossy().to_string();
-    if !s.starts_with('.') {
-        s.insert_str(0, "./");
-    }
-    while s.contains("././") {
-        s = s.replace("././", "./");
-    }
-    s
+    let s = path.to_string_lossy().to_string();
+    // Remove leading ./ if present
+    s.strip_prefix("./").unwrap_or(&s).to_string()
 }

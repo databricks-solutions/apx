@@ -341,7 +341,7 @@ async fn fetch_and_cache_registry_index(
 
     if !items.is_empty() {
         let _ = save_cached_registry_index(registry_name, &items);
-        tracing::info!("Cached {} items from registry {:?}", items.len(), registry_name.unwrap_or("default"));
+        tracing::debug!("Cached {} items from registry {:?}", items.len(), registry_name.unwrap_or("default"));
     }
 
     Ok(items)
@@ -381,10 +381,10 @@ pub async fn sync_registry_indexes(
     // Sync default registry index (registry.json only, individual items fetched on-demand)
     let default_path = get_registry_index_path(None)?;
     if force || !is_file_fresh(&default_path, CACHE_TTL_HOURS) {
-        tracing::info!("Fetching default registry index");
+        tracing::debug!("Fetching default registry index");
         match fetch_and_cache_registry_index(&client, None, None, style).await {
             Ok(items) => {
-                tracing::info!("Cached {} items in default registry index", items.len());
+                tracing::debug!("Cached {} items in default registry index", items.len());
                 refreshed = true;
             }
             Err(e) => tracing::warn!("Failed to fetch default registry index: {}", e),
@@ -395,10 +395,10 @@ pub async fn sync_registry_indexes(
     for (registry_name, registry_config) in &cfg.registries {
         let path = get_registry_index_path(Some(registry_name))?;
         if force || !is_file_fresh(&path, CACHE_TTL_HOURS) {
-            tracing::info!("Fetching registry index for {}", registry_name);
+            tracing::debug!("Fetching registry index for {}", registry_name);
             match fetch_and_cache_registry_index(&client, Some(registry_name), Some(registry_config), style).await {
                 Ok(items) => {
-                    tracing::info!("Cached {} items in {} registry index", items.len(), registry_name);
+                    tracing::debug!("Cached {} items in {} registry index", items.len(), registry_name);
                     refreshed = true;
                 }
                 Err(e) => tracing::warn!("Failed to fetch {} registry index: {}", registry_name, e),

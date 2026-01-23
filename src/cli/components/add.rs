@@ -1,9 +1,10 @@
 use clap::Args;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tokio::process::Command;
 
 use crate::{bun_binary_path, cli::run_cli_async};
-use crate::common::read_project_metadata;
+use crate::common::{read_project_metadata, spinner, format_elapsed_ms};
 
 use super::{plan_add, AddPlan, PlannedFile, collect_css_mutations, apply_css_updates, UiConfig};
 use super::cache::sync_registry_indexes;
@@ -108,6 +109,7 @@ pub async fn run(args: ComponentsAddArgs) -> i32 {
 }
 
 pub async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
+    let start_time = Instant::now();
     let app_dir = resolve_app_dir(args.app_path);
     
     // Load metadata from pyproject.toml
@@ -133,6 +135,9 @@ pub async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
         (args.registry, args.component.clone())
     };
 
+    // Print component name in yellow
+    println!("✨ Adding component \x1b[33m{}\x1b[0m", component);
+
     let plan = plan_add(
         &client,
         &app_dir,
@@ -156,64 +161,52 @@ pub async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
         }
     }
 
-    if !written_paths.is_empty() {
-        println!("Written:");
-        for path in &written_paths {
-            println!("  {}", format_relative_path(path, &app_dir));
-        }
-    }
-
-    if !unchanged_paths.is_empty() {
-        println!("Unchanged:");
-        for path in &unchanged_paths {
-            println!("  {}", format_relative_path(path, &app_dir));
-        }
-    }
-
+    // Install dependencies with spinner
     if !plan.component_deps.is_empty() {
         let deps: Vec<String> = plan.component_deps.iter().cloned().collect();
-        println!();
-        println!("Installing dependencies:");
-        println!("  {}", deps.join(" "));
+        let spinner = spinner("📦 Installing dependencies...");
         bun_add(&app_dir, &deps).await?;
-        println!("Dependencies installed");
+        spinner.finish_and_clear();
+        println!("✅ Dependencies installed");
     }
 
     // Apply CSS updates automatically
     let css_mutations = collect_css_mutations(&plan.components);
-    if !css_mutations.is_empty() {
+    let css_updated = if !css_mutations.is_empty() {
         let css_path = app_dir.join(cfg.css_path());
         match apply_css_updates(&css_path, css_mutations) {
-            Ok(()) => {
-                println!();
-                println!("Updated CSS file: {}", format_relative_path(&css_path, &app_dir));
-            }
+            Ok(()) => Some(format_relative_path(&css_path, &app_dir)),
             Err(e) => {
-                eprintln!("\nWARNING: Failed to automatically update CSS: {}", e);
-                eprintln!("You may need to manually add CSS variables to your CSS file.");
+                eprintln!("\n⚠️  WARNING: Failed to automatically update CSS: {}", e);
+                eprintln!("   You may need to manually add CSS variables to your CSS file.");
+                None
             }
         }
+    } else {
+        None
+    };
+
+    // Sync registry indexes silently (only debug logs)
+    let _ = sync_registry_indexes(&app_dir, false).await;
+
+    // Print summary
+    println!();
+    if !written_paths.is_empty() {
+        println!("📄 Files added:");
+        for path in &written_paths {
+            println!("   • {}", format_relative_path(path, &app_dir));
+        }
+    }
+
+    if let Some(css_path) = css_updated {
+        println!("🎨 CSS file updated: {}", css_path);
     }
 
     for warning in &plan.warnings {
-        eprintln!("\nWARNING: {}", warning);
+        eprintln!("\n⚠️  WARNING: {}", warning);
     }
 
-    // Sync registry indexes (registry.json files only, prefetches default shadcn items)
-    println!();
-    println!("Syncing component registries...");
-    match sync_registry_indexes(&app_dir, false).await {
-        Ok(refreshed) => {
-            if refreshed {
-                println!("Registry indexes refreshed");
-            } else {
-                println!("Registry indexes up to date");
-            }
-        }
-        Err(e) => {
-            eprintln!("Warning: Failed to sync registry indexes: {}", e);
-        }
-    }
+    println!("\n🎉 Component added in {}\n", format_elapsed_ms(start_time));
 
     Ok(())
 }

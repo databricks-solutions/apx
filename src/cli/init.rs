@@ -1,12 +1,11 @@
 use clap::{Args, ValueEnum};
 use dialoguer::{Confirm, Input, Select};
-use indicatif::{ProgressBar, ProgressStyle};
 use rand::seq::SliceRandom;
 use tracing::debug;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tera::Context;
 use tokio::process::Command;
 use walkdir::WalkDir;
@@ -15,7 +14,7 @@ use crate::bun_binary_path;
 use crate::cli::run_cli_async;
 use crate::cli::components::add::run_inner as add_component;
 use crate::cli::components::add::ComponentsAddArgs;
-use crate::common::{bun_install, read_project_metadata, write_metadata_file};
+use crate::common::{bun_install, read_project_metadata, write_metadata_file, spinner, format_elapsed_ms, run_with_spinner, run_with_spinner_async};
 use crate::dotenv::DotenvFile;
 use crate::interop::{list_profiles, templates_dir};
 
@@ -489,59 +488,6 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn run_with_spinner<F>(description: &str, success_message: &str, f: F) -> Result<(), String>
-where
-    F: FnOnce() -> Result<(), String>,
-{
-    let spinner = spinner(description);
-    let start = Instant::now();
-    let result = f();
-    spinner.finish_and_clear();
-    if result.is_ok() {
-        println!("{} ({})", success_message, format_elapsed_ms(start));
-    }
-    result
-}
-
-async fn run_with_spinner_async<F, Fut>(
-    description: &str,
-    success_message: &str,
-    f: F,
-) -> Result<(), String>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
-{
-    let spinner = spinner(description);
-    let start = Instant::now();
-    let result = f().await;
-    spinner.finish_and_clear();
-    if result.is_ok() {
-        println!("{} ({})", success_message, format_elapsed_ms(start));
-    }
-    result
-}
-
-fn spinner(message: &str) -> ProgressBar {
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::with_template("{spinner} {msg}")
-            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
-    );
-    spinner.enable_steady_tick(Duration::from_millis(80));
-    spinner.set_message(message.to_string());
-    spinner
-}
-
-fn format_elapsed_ms(start: Instant) -> String {
-    let elapsed = start.elapsed();
-    if elapsed.as_secs() == 0 {
-        return format!("{}ms", elapsed.as_millis());
-    }
-    let seconds = elapsed.as_secs();
-    let remaining_ms = elapsed.subsec_millis();
-    format!("{seconds}s {remaining_ms}ms")
-}
 
 fn normalize_app_name(app_name: &str) -> Result<String, String> {
     let normalized = app_name.to_lowercase().replace(' ', "-").replace('_', "-");

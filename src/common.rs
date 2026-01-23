@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tokio::process::Command;
+use indicatif::{ProgressBar, ProgressStyle};
 
 const DEFAULT_API_PREFIX: &str = "/api";
 const PYPROJECT_FILENAME: &str = "pyproject.toml";
@@ -133,4 +135,59 @@ fn get_metadata_string(metadata: &toml::Value, key: &str) -> Result<String, Stri
         .and_then(|val| val.as_str())
         .map(|val| val.to_string())
         .ok_or_else(|| format!("Missing {key} in pyproject.toml metadata"))
+}
+
+// Spinner utilities for CLI operations
+pub fn spinner(message: &str) -> ProgressBar {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner} {msg}")
+            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+    );
+    spinner.enable_steady_tick(Duration::from_millis(80));
+    spinner.set_message(message.to_string());
+    spinner
+}
+
+pub fn format_elapsed_ms(start: Instant) -> String {
+    let elapsed = start.elapsed();
+    if elapsed.as_secs() == 0 {
+        return format!("{}ms", elapsed.as_millis());
+    }
+    let seconds = elapsed.as_secs();
+    let remaining_ms = elapsed.subsec_millis();
+    format!("{seconds}s {remaining_ms}ms")
+}
+
+pub fn run_with_spinner<F>(description: &str, success_message: &str, f: F) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let spinner = spinner(description);
+    let start = Instant::now();
+    let result = f();
+    spinner.finish_and_clear();
+    if result.is_ok() {
+        println!("{} ({})", success_message, format_elapsed_ms(start));
+    }
+    result
+}
+
+pub async fn run_with_spinner_async<F, Fut>(
+    description: &str,
+    success_message: &str,
+    f: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let spinner = spinner(description);
+    let start = Instant::now();
+    let result = f().await;
+    spinner.finish_and_clear();
+    if result.is_ok() {
+        println!("{} ({})", success_message, format_elapsed_ms(start));
+    }
+    result
 }
