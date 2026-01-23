@@ -50,6 +50,7 @@ dev = [
     "types-pygments>=2.19.0.20250809",
     "types-pyyaml>=6.0.12.20250915",
     "types-requests>=2.32.4.20250913",
+    "types-tqdm>=4.67.0.20250809",
     "types-ujson>=5.10.0.20250822",
 ]
 

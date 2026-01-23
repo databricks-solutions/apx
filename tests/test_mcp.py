@@ -419,10 +419,10 @@ async def test_docs_create_cluster():
             result_text = retrieve_text_content(result)
 
             # Debug: Print the actual response
-            print(f"\n=== Raw Response ===")
+            print("\n=== Raw Response ===")
             print(f"Response text: {result_text[:500]}...")
             print(f"Response length: {len(result_text)}")
-            print(f"===================\n")
+            print("===================\n")
 
             # Skip if SDK not available
             if "not available" in result_text or "not installed" in result_text:
@@ -432,14 +432,14 @@ async def test_docs_create_cluster():
             try:
                 result_json = json.loads(result_text)
             except json.JSONDecodeError as e:
-                print(f"\n=== JSON Parse Error ===")
+                print("\n=== JSON Parse Error ===")
                 print(f"Error: {e}")
                 print(f"Full response text:\n{result_text}")
-                print(f"=======================\n")
+                print("=======================\n")
                 raise
             results = result_json["results"]
 
-            print(f"\n=== Test: 'create cluster' relevance ===")
+            print("\n=== Test: 'create cluster' relevance ===")
             print(f"Query: {result_json['query']}")
             print(f"Total results: {len(results)}")
 
@@ -452,7 +452,7 @@ async def test_docs_create_cluster():
                 or "cluster" in r["text"].lower()
             ]
 
-            print(f"\nTop 3 results:")
+            print("\nTop 3 results:")
             for i, r in enumerate(top_3, 1):
                 print(f"  {i}. Score: {r['score']:.3f}, File: {r['source_file']}")
                 is_cluster = "✓ cluster-related" if r in cluster_related else ""
@@ -677,7 +677,7 @@ def delete_item(item_id: int):
         assert "ListItemsQueryError" in example
 
         print(
-            f"✓ Query example validated (includes standard/suspense hooks and type hints)"
+            "✓ Query example validated (includes standard/suspense hooks and type hints)"
         )
         print(f"Example code:\n{example}\n")
 
@@ -708,7 +708,7 @@ def delete_item(item_id: int):
         assert "CreateItemMutationResult" in example
         assert "CreateItemMutationError" in example
 
-        print(f"✓ Mutation example validated (includes type hints)")
+        print("✓ Mutation example validated (includes type hints)")
         print(f"Example code:\n{example}\n")
 
         # Test 6: Test with non-existent operation ID

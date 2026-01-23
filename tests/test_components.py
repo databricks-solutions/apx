@@ -3,7 +3,6 @@
 import json
 import os
 import shutil
-import time
 from pathlib import Path
 import pytest
 from conftest import ApxFixture, apx_source_dir
@@ -214,7 +213,7 @@ def test_cache_population_after_add(run_apx: ApxFixture, tmp_path: Path):
     # Check what registries are in pyproject.toml
     pyproject_path = tmp_path / "pyproject.toml"
     pyproject_content = pyproject_path.read_text()
-    print(f"\n=== pyproject.toml registries section ===")
+    print("\n=== pyproject.toml registries section ===")
     if "[tool.apx.ui.registries]" in pyproject_content:
         start = pyproject_content.find("[tool.apx.ui.registries]")
         end = pyproject_content.find("\n[", start + 1)
@@ -230,7 +229,7 @@ def test_cache_population_after_add(run_apx: ApxFixture, tmp_path: Path):
         f"Failed to add dialog: stdout={result.out}, stderr={result.err}"
     )
 
-    print(f"\n=== Add command output ===")
+    print("\n=== Add command output ===")
     print(result.out)
 
     # Step 4: Verify cache structure
@@ -289,7 +288,7 @@ def test_cache_population_after_add(run_apx: ApxFixture, tmp_path: Path):
                 print(f"    (items prefetched: {items_count})")
                 # Items should be 0 or minimal (only fetched on-demand)
 
-    print(f"\n=== Cache Structure ===")
+    print("\n=== Cache Structure ===")
     print(f"Cache base: {cache_base}")
     print(f"Registries dir: {registries_dir}")
     print(f"Items dir: {items_dir}")
@@ -349,7 +348,7 @@ def test_cache_population_structure(run_apx: ApxFixture, tmp_path: Path):
         assert "files" in item, "Item should have files"
         assert item["name"] == "button", "Item name should be 'button'"
 
-        print(f"\n=== Cached Component Structure ===")
+        print("\n=== Cached Component Structure ===")
         print(f"Version: {content['version']}")
         print(f"Fetched at: {content['fetched_at']}")
         print(f"Item name: {item['name']}")

@@ -185,13 +185,13 @@ def delete_item(item_id: int):
 
         # Print operations by method
         paths = openapi_schema.get("paths", {})
-        operations = {"get": [], "post": [], "put": [], "patch": [], "delete": []}
-        for path, methods in paths.items():
+        operations: dict[str, list[str]] = {"get": [], "post": [], "put": [], "patch": [], "delete": []}
+        for path, methods in paths.items(): 
             for method in ["get", "post", "put", "patch", "delete"]:
                 if method in methods:
                     operations[method].append(path)
 
-        print(f"\nOperations by method:")
+        print("\nOperations by method:")
         for method, paths_list in operations.items():
             if paths_list:
                 print(f"  {method.upper()}: {paths_list}")
