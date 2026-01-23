@@ -82,7 +82,7 @@ function getBrowserLoggingScript(): string {
 // APX Plugin - handles browser logging and dev middleware
 function apxPlugin(): Plugin {
   const isDevMode = mode === "dev";
-  
+
   // Dev-only config (only read env vars if in dev mode)
   let frontendPort: number;
   let devServerPort: number;
@@ -98,11 +98,11 @@ function apxPlugin(): Plugin {
 
   return {
     name: "apx-plugin",
-    
+
     // Inject browser logging script in dev mode
     transformIndexHtml(html) {
       if (!isDevMode) return html;
-      
+
       return {
         html,
         tags: [

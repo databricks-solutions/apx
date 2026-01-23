@@ -12,12 +12,10 @@ use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 use crate::bun_binary_path;
-use crate::common::read_project_metadata;
+use crate::common::{read_project_metadata, APX_DIR_NAME, OPENAPI_SCHEMA_FILENAME};
 use crate::dev::common::Shutdown;
 use crate::interop::generate_openapi_spec;
 
-const APX_DIR_NAME: &str = ".apx";
-const SCHEMA_FILENAME: &str = "openapi.json";
 const ORVAL_CONFIG_FILENAME: &str = "orval.config.ts";
 
 pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String> {
@@ -29,7 +27,7 @@ pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String
         generate_openapi_spec(project_root, &app_module, &app_slug)?;
 
     let apx_dir = project_root.join(APX_DIR_NAME);
-    let schema_path = apx_dir.join(SCHEMA_FILENAME);
+    let schema_path = apx_dir.join(OPENAPI_SCHEMA_FILENAME);
     let config_path = apx_dir.join(ORVAL_CONFIG_FILENAME);
     debug!(
         apx_dir = %apx_dir.display(),

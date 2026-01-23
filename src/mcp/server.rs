@@ -3,6 +3,7 @@ use crate::dotenv::DotenvFile;
 use crate::databricks_sdk_doc::{SDKDocIndex, SDKSource};
 use crate::cli::components::{SharedCacheState, sync_registry_indexes, needs_registry_refresh};
 use crate::search::ComponentIndex;
+use crate::common::{APX_DIR_NAME, OPENAPI_SCHEMA_FILENAME};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -94,6 +95,13 @@ pub fn build_server(ctx: AppContext) -> McpServer<AppContext> {
             "text/plain",
             apx_info_resource,
         )
+        .resource(
+            "apx://routes",
+            "api-routes",
+            "List of API routes from OpenAPI schema",
+            "application/json",
+            routes_resource,
+        )
         .tool(
             "start",
             "Start development server and return the URL",
@@ -144,12 +152,96 @@ pub fn build_server(ctx: AppContext) -> McpServer<AppContext> {
             "Search Databricks SDK documentation for relevant code examples and API references",
             docs_tool,
         )
+        .tool(
+            "get_route_info",
+            "Get code example for using a specific API route",
+            get_route_info_tool,
+        )
 }
 
 // --- Resources ---
 
 async fn apx_info_resource(_ctx: Arc<AppContext>) -> Result<String, String> {
     Ok(APX_INFO_CONTENT.to_string())
+}
+
+#[derive(Serialize)]
+struct RouteInfo {
+    id: String,
+    method: String,
+    path: String,
+    description: String,
+}
+
+async fn routes_resource(ctx: Arc<AppContext>) -> Result<String, String> {
+    let openapi_path = ctx.app_dir.join(APX_DIR_NAME).join(OPENAPI_SCHEMA_FILENAME);
+    
+    if !openapi_path.exists() {
+        return Err(format!(
+            "OpenAPI schema not found at {}. Run 'apx __generate_openapi' first.",
+            openapi_path.display()
+        ));
+    }
+    
+    let openapi_content = std::fs::read_to_string(&openapi_path)
+        .map_err(|e| format!("Failed to read OpenAPI schema: {}", e))?;
+    
+    let openapi: Value = serde_json::from_str(&openapi_content)
+        .map_err(|e| format!("Failed to parse OpenAPI schema: {}", e))?;
+    
+    let routes = parse_openapi_operations(&openapi)?;
+    
+    serde_json::to_string_pretty(&routes)
+        .map_err(|e| format!("Failed to serialize routes: {}", e))
+}
+
+fn parse_openapi_operations(openapi: &Value) -> Result<Vec<RouteInfo>, String> {
+    let mut routes = Vec::new();
+    
+    let paths = openapi
+        .get("paths")
+        .and_then(|p| p.as_object())
+        .ok_or_else(|| "OpenAPI schema missing 'paths' object".to_string())?;
+    
+    for (path, path_item) in paths {
+        let methods_obj = path_item
+            .as_object()
+            .ok_or_else(|| format!("Path '{}' is not an object", path))?;
+        
+        for (method, operation) in methods_obj {
+            // Skip non-HTTP method keys like "parameters", "summary", etc.
+            let method_upper = method.to_uppercase();
+            if !matches!(method_upper.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS") {
+                continue;
+            }
+            
+            let operation_obj = operation.as_object().ok_or_else(|| {
+                format!("Operation '{}' at path '{}' is not an object", method, path)
+            })?;
+            
+            let operation_id = operation_obj
+                .get("operationId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            
+            let description = operation_obj
+                .get("summary")
+                .or_else(|| operation_obj.get("description"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            
+            routes.push(RouteInfo {
+                id: operation_id,
+                method: method_upper,
+                path: path.clone(),
+                description,
+            });
+        }
+    }
+    
+    Ok(routes)
 }
 
 // --- Tools ---
@@ -254,6 +346,12 @@ pub struct DocsArgs {
 
 fn default_docs_limit() -> usize {
     5
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct GetRouteInfoArgs {
+    /// Operation ID from the OpenAPI schema (e.g., "listItems", "createItem")
+    pub operation_id: String,
 }
 
 async fn start_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
@@ -778,6 +876,166 @@ async fn docs_tool(ctx: Arc<AppContext>, args: DocsArgs) -> ToolResult {
             }
         }
         Err(e) => ToolResult::error(e),
+    }
+}
+
+async fn get_route_info_tool(ctx: Arc<AppContext>, args: GetRouteInfoArgs) -> ToolResult {
+    let openapi_path = ctx.app_dir.join(APX_DIR_NAME).join(OPENAPI_SCHEMA_FILENAME);
+    
+    if !openapi_path.exists() {
+        return ToolResult::error(format!(
+            "OpenAPI schema not found at {}. Run 'apx __generate_openapi' first.",
+            openapi_path.display()
+        ));
+    }
+    
+    let openapi_content = match std::fs::read_to_string(&openapi_path) {
+        Ok(content) => content,
+        Err(e) => return ToolResult::error(format!("Failed to read OpenAPI schema: {}", e)),
+    };
+    
+    let openapi: Value = match serde_json::from_str(&openapi_content) {
+        Ok(spec) => spec,
+        Err(e) => return ToolResult::error(format!("Failed to parse OpenAPI schema: {}", e)),
+    };
+    
+    // Find the operation by operationId
+    let paths = match openapi.get("paths").and_then(|p| p.as_object()) {
+        Some(p) => p,
+        None => return ToolResult::error("OpenAPI schema missing 'paths' object".to_string()),
+    };
+    
+    let mut found_method = None;
+    for (_, path_item) in paths {
+        if let Some(methods_obj) = path_item.as_object() {
+            for (method, operation) in methods_obj {
+                if let Some(operation_obj) = operation.as_object() {
+                    if let Some(op_id) = operation_obj.get("operationId").and_then(|v| v.as_str()) {
+                        if op_id == args.operation_id {
+                            found_method = Some(method.to_uppercase());
+                            break;
+                        }
+                    }
+                }
+            }
+            if found_method.is_some() {
+                break;
+            }
+        }
+    }
+    
+    let method = match found_method {
+        Some(m) => m,
+        None => return ToolResult::error(format!("Operation ID '{}' not found in OpenAPI schema", args.operation_id)),
+    };
+    
+    // Generate the appropriate code example based on the HTTP method
+    let example = if method == "GET" {
+        generate_query_example(&args.operation_id)
+    } else {
+        generate_mutation_example(&args.operation_id)
+    };
+    
+    #[derive(Serialize)]
+    struct RouteInfoResponse {
+        operation_id: String,
+        method: String,
+        example: String,
+    }
+    
+    let response = RouteInfoResponse {
+        operation_id: args.operation_id,
+        method,
+        example,
+    };
+    
+    match serde_json::to_string_pretty(&response) {
+        Ok(json) => ToolResult::success(json),
+        Err(e) => ToolResult::error(format!("Failed to serialize response: {}", e)),
+    }
+}
+
+fn generate_query_example(operation_id: &str) -> String {
+    // Convert operationId to PascalCase for the hook name
+    let capitalized = capitalize_first(operation_id);
+    let hook_name = format!("use{}", capitalized);
+    let suspense_hook_name = format!("{}Suspense", hook_name);
+    let result_type = format!("{}QueryResult", capitalized);
+    let error_type = format!("{}QueryError", capitalized);
+    
+    format!(
+        r#"// Standard query hook
+import {{ {hook_name} }} from "@/lib/api";
+import selector from "@/lib/selector";
+
+const Component = () => {{
+  const {{ data, isLoading, error }} = {hook_name}(selector());
+  
+  if (isLoading) return <div>Loading...</div>;
+  if (error) return <div>Error: {{error.message}}</div>;
+  
+  return <div>{{/* render data */}}</div>;
+}};
+
+// Suspense query hook (use with React Suspense boundary)
+import {{ {suspense_hook_name} }} from "@/lib/api";
+import selector from "@/lib/selector";
+
+const SuspenseComponent = () => {{
+  // No loading/error states needed - handled by Suspense boundary
+  const {{ data }} = {suspense_hook_name}(selector());
+  return <div>{{/* render data */}}</div>;
+}};
+
+// Usage with Suspense boundary:
+// <Suspense fallback={{<Loading />}}>
+//   <SuspenseComponent />
+// </Suspense>
+
+// Available types for this query:
+// import type {{ {result_type}, {error_type} }} from "@/lib/api";"#,
+        hook_name = hook_name,
+        suspense_hook_name = suspense_hook_name,
+        result_type = result_type,
+        error_type = error_type
+    )
+}
+
+fn generate_mutation_example(operation_id: &str) -> String {
+    // Convert operationId to PascalCase for the hook name
+    let capitalized = capitalize_first(operation_id);
+    let hook_name = format!("use{}", capitalized);
+    let body_type = format!("{}MutationBody", capitalized);
+    let result_type = format!("{}MutationResult", capitalized);
+    let error_type = format!("{}MutationError", capitalized);
+    
+    format!(
+        r#"import {{ {hook_name} }} from "@/lib/api";
+
+const Component = () => {{
+  const {{ mutate, isPending }} = {hook_name}();
+  
+  const handleSubmit = () => {{
+    mutate({{ data: {{ /* request body */ }} }});
+  }};
+  
+  return <button onClick={{handleSubmit}}>Submit</button>;
+}};
+
+// Available types for this mutation:
+// import type {{ {body_type}, {result_type}, {error_type} }} from "@/lib/api";"#,
+        hook_name = hook_name,
+        body_type = body_type,
+        result_type = result_type,
+        error_type = error_type
+    )
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
     }
 }
 
