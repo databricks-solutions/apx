@@ -26,16 +26,13 @@ sync:
 check: lint types
 
 test *args:
-    uv run pytest tests/ -s -v --cov=src/apx {{args}} -n auto
+    uv run pytest tests/ -s -v --cov=src/apx {{args}} -n 4
 
 # add-commit-push with a message
 pm message:
     git add .
     git commit -m "{{message}}"
     git push
-
-get-version:
-    uvx uv-dynamic-versioning
 
 
 gen folder profile *args: develop
