@@ -780,7 +780,7 @@ async fn setup_backend(app_path: &Path, install_args: InstallArgs) -> Result<(),
             if !path.is_dir() {
                 return Err(format!("Editable path is not a directory: {}", path.display()));
             }
-            base_cmd.arg("--editable").arg(&path);
+            base_cmd.arg("--no-sync").arg("--editable").arg(&path);
             run_command(&mut base_cmd, "Failed to add apx package").await?;
             debug!("Apx package added from editable path: {}", &path.display());
         },
