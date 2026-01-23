@@ -217,12 +217,12 @@ pub fn handle_log_payload(data: &str) -> bool {
     }
 }
 
-/// Format a timestamp in milliseconds to `HH:MM:SS.mmm` format (12 chars).
+/// Format a timestamp in milliseconds to `YYYY-MM-DD HH:MM:SS.mmm` format.
 fn format_timestamp(timestamp_ms: i64) -> String {
     let datetime = Utc.timestamp_millis_opt(timestamp_ms).single();
     match datetime {
-        Some(dt) => dt.format("%H:%M:%S%.3f").to_string(),
-        None => "??:??:??.???".to_string(),
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+        None => "????-??-?? ??:??:??.???".to_string(),
     }
 }
 
