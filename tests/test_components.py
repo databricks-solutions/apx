@@ -8,6 +8,14 @@ import pytest
 from conftest import apx_source_dir, run_cli_async
 
 
+def get_cache_base_dir() -> Path:
+    """Get the cache base directory, respecting APX_CACHE_DIR env var."""
+    cache_dir = os.environ.get("APX_CACHE_DIR")
+    if cache_dir:
+        return Path(cache_dir)
+    return Path.home() / ".apx" / "cache"
+
+
 SAMPLE_PYPROJECT_TOML = """
 [project]
 name = "test-app"
@@ -30,21 +38,6 @@ root = "src/test_app/ui"
 """
 
 
-def get_cached_component_names():
-    """Get list of component names from cache."""
-    cache_dir = Path.home() / ".apx" / "cache" / "components" / "items" / "ui"
-    if not cache_dir.exists():
-        return []
-
-    components = []
-    for file in cache_dir.glob("*.json"):
-        # Extract component name from filename (e.g., "button.json" -> "button")
-        component_name = file.stem
-        components.append(component_name)
-
-    return sorted(components)
-
-
 def check_file_imports(file_path: Path) -> list[str]:
     """Check if a file contains registry-prefixed imports."""
     if not file_path.exists():
@@ -63,7 +56,7 @@ def check_file_imports(file_path: Path) -> list[str]:
     return violations
 
 
-@pytest.mark.parametrize("component_name", get_cached_component_names())
+@pytest.mark.parametrize("component_name", ["sidebar", "button", "card"])
 async def test_component_import_rewriting(component_name: str, tmp_path: Path):
     """Test that each cached component's imports are correctly rewritten."""
     app_dir = tmp_path
@@ -106,22 +99,6 @@ async def test_component_import_rewriting(component_name: str, tmp_path: Path):
             f"Component '{component_name}' has registry-prefixed imports that should be rewritten:\n"
             + "\n".join(violations)
         )
-
-
-def test_component_cache_exists():
-    """Verify that component cache exists and has components."""
-    cache_dir = Path.home() / ".apx" / "cache" / "components" / "items" / "ui"
-
-    # Skip test if cache doesn't exist
-    if not cache_dir.exists():
-        pytest.skip(
-            "Component cache directory does not exist. Run 'apx components sync' first."
-        )
-
-    components = get_cached_component_names()
-    assert len(components) > 0, (
-        "No cached components found. Run 'apx components sync' first."
-    )
 
 
 async def test_specific_known_components(tmp_path: Path):
@@ -179,11 +156,11 @@ async def test_cache_population_after_add(tmp_path: Path):
     3. Custom registries have registry.json but items are fetched on-demand
 
     Cache structure:
-    - ~/.apx/cache/components/registries/{name}/registry.json
-    - ~/.apx/cache/components/items/ui/*.json (default shadcn items prefetched)
+    - {APX_CACHE_DIR}/components/registries/{name}/registry.json
+    - {APX_CACHE_DIR}/components/items/ui/*.json (default shadcn items prefetched)
     """
     # Step 1: Clear existing cache
-    cache_base = Path.home() / ".apx" / "cache" / "components"
+    cache_base = get_cache_base_dir() / "components"
     if cache_base.exists():
         shutil.rmtree(cache_base)
 
@@ -340,9 +317,7 @@ async def test_cache_population_structure(tmp_path: Path):
     )
 
     # Check cache structure for a specific component
-    cache_file = (
-        Path.home() / ".apx" / "cache" / "components" / "items" / "ui" / "button.json"
-    )
+    cache_file = get_cache_base_dir() / "components" / "items" / "ui" / "button.json"
 
     if cache_file.exists():
         content = json.loads(cache_file.read_text())

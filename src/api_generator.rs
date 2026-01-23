@@ -170,8 +170,9 @@ pub fn start_openapi_watcher(
     tokio::spawn(async move {
         let _watcher = watcher;
         let mut pending = needs_initial_generation;
+        let mut is_initial_generation = needs_initial_generation;
         let mut debounce: Option<Pin<Box<Sleep>>> = if needs_initial_generation {
-            info!("OpenAPI schema not found, generating on startup...");
+            info!("OpenAPI schema not found, will generate on startup");
             // Start with a short debounce to allow server to fully initialize
             Some(Box::pin(tokio::time::sleep(Duration::from_millis(500))))
         } else {
@@ -250,6 +251,15 @@ pub fn start_openapi_watcher(
                     debounce = None;
                     if pending {
                         pending = false;
+                        let is_initial = is_initial_generation;
+                        is_initial_generation = false;
+                        
+                        if is_initial {
+                            info!("Running initial OpenAPI generation...");
+                        } else {
+                            info!("Running OpenAPI regeneration...");
+                        }
+                        
                         let output = TokioCommand::new("uv")
                             .arg("run")
                             .arg("apx")
@@ -262,10 +272,16 @@ pub fn start_openapi_watcher(
                         match output {
                             Ok(Ok(result)) if result.status.success() => {
                                 let stdout = String::from_utf8_lossy(&result.stdout);
-                                if stdout.contains("regenerated") {
-                                    info!("OpenAPI regenerated");
+                                if is_initial {
+                                    if stdout.contains("regenerated") {
+                                        info!("Initial OpenAPI generated successfully");
+                                    } else {
+                                        info!("Initial OpenAPI generation complete (unchanged)");
+                                    }
+                                } else if stdout.contains("regenerated") {
+                                    info!("OpenAPI regenerated successfully");
                                 } else {
-                                    info!("OpenAPI unchanged, skipped");
+                                    info!("OpenAPI regeneration skipped (unchanged)");
                                 }
                             }
                             Ok(Ok(result)) => {
@@ -275,11 +291,12 @@ pub fn start_openapi_watcher(
                                     status = %result.status,
                                     stdout = %stdout,
                                     stderr = %stderr,
-                                    "OpenAPI regeneration failed."
+                                    "OpenAPI {} failed.",
+                                    if is_initial { "generation" } else { "regeneration" }
                                 );
                             }
                             Ok(Err(err)) => warn!("Failed to spawn OpenAPI generation: {err}"),
-                            Err(_) => warn!("OpenAPI regeneration timed out."),
+                            Err(_) => warn!("OpenAPI {} timed out.", if is_initial { "generation" } else { "regeneration" }),
                         }
                     }
                 }

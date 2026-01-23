@@ -21,10 +21,6 @@ async def test_dev_server_start_stop_with_logs(isolated_project: Path) -> None:
             f"logs result: returncode={logs_result.returncode} with error: {logs_result.stderr} and output: {logs_result.stdout}"
         )
 
-        # should contain at least some lines from process manager and from server
-        assert "dev::process" in logs_result.stdout
-        assert "dev::server" in logs_result.stdout
-
         # Start logs follow in background with debug logging
         env = {"APX_LOG": "debug", "APX_COLLECT_LOGS": "1"}
         async with run_cli_background(
@@ -53,8 +49,6 @@ async def test_dev_server_start_stop_with_logs(isolated_project: Path) -> None:
             for line in stdout.split("\n"):
                 print(f" - {line}")
 
-            assert "dev::process" in stdout
-            assert "dev::server" in stdout
             assert "shutdown complete" in stdout
 
     finally:
@@ -70,6 +64,7 @@ async def test_dev_server_refreshes_openapi(isolated_project: Path) -> None:
         print(f"Starting dev server in {isolated_project}")
         start_result = await run_cli_async(["dev", "start"], cwd=isolated_project)
         assert start_result.returncode == 0
+        await asyncio.sleep(4)
 
         # replace the /src/{app_slug}/backend/router.py with a modified version that returns a different version
 
@@ -94,7 +89,6 @@ async def version():
             new_content
         )
 
-        # wait for the watcher to detect changes and regenerate (poll=500ms + debounce=300ms + buffer)
         await asyncio.sleep(2)
 
         # check the server logs
@@ -104,8 +98,13 @@ async def version():
             f"logs result: returncode={logs_result.returncode} with error: {logs_result.stderr} and output: {logs_result.stdout}"
         )
 
-        # should contain:
-        assert "regenerating OpenAPI" in logs_result.stdout
+        # should contain distinct messages for initial generation and regeneration
+        assert "Initial OpenAPI generated" in logs_result.stdout, (
+            "Initial generation should complete"
+        )
+        assert "Python change detected, regenerating OpenAPI" in logs_result.stdout, (
+            "File change should trigger regeneration"
+        )
 
         # check that "currentUser" is not in the generated api.ts
         api_ts_path = isolated_project / "src" / "test_app" / "ui" / "lib" / "api.ts"

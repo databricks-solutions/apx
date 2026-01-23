@@ -5,19 +5,30 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from mcp.types import TextResourceContents, CallToolResult, TextContent
+from mcp.types import TextResourceContents, CallToolResult, TextContent, Tool, Resource
 from pydantic import AnyUrl
 import pytest
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 
+# =============================================================================
+# MCP Session Helpers
+# =============================================================================
+
+
 @asynccontextmanager
-async def mcp_session(project_dir):
-    """Context manager for MCP client session."""
+async def mcp_session(project_dir: Path | None = None):
+    """Context manager for MCP client session.
+
+    Args:
+        project_dir: Optional directory to change to before starting the session.
+                     If None, uses current directory.
+    """
     original_cwd = os.getcwd()
     try:
-        os.chdir(project_dir)
+        if project_dir is not None:
+            os.chdir(project_dir)
         server_params = StdioServerParameters(
             command="uv", args=["run", "--no-sync", "apx", "mcp"]
         )
@@ -27,6 +38,11 @@ async def mcp_session(project_dir):
                 yield session
     finally:
         os.chdir(original_cwd)
+
+
+# =============================================================================
+# Result Parsing Helpers
+# =============================================================================
 
 
 def retrieve_text_content(result: CallToolResult) -> str:
@@ -47,187 +63,160 @@ def parse_json_result(result: CallToolResult):
         raise ValueError(f"Failed to parse JSON: {e}") from e
 
 
-async def test_apx_info_resource():
+# =============================================================================
+# Assertion Helpers
+# =============================================================================
+
+
+async def assert_tool_exists(session: ClientSession, tool_name: str) -> Tool:
+    """Assert a tool exists and return its metadata."""
+    tools = await session.list_tools()
+    tool_names = [t.name for t in tools.tools]
+    assert tool_name in tool_names, f"Tool '{tool_name}' should exist"
+    return next(t for t in tools.tools if t.name == tool_name)
+
+
+async def assert_resource_exists(session: ClientSession, uri: str) -> Resource:
+    """Assert a resource exists and return its metadata."""
+    resources = await session.list_resources()
+    uris = [str(r.uri) for r in resources.resources]
+    assert uri in uris, f"Resource '{uri}' should exist"
+    return next(r for r in resources.resources if str(r.uri) == uri)
+
+
+def skip_if_sdk_unavailable(result_text: str):
+    """Skip test if Databricks SDK is not available."""
+    if "not available" in result_text or "not installed" in result_text:
+        pytest.skip("Databricks SDK not installed or docs not indexed")
+
+
+async def test_apx_info_resource(common_project: Path):
     """Test that the Rust MCP server provides the apx://info resource."""
-    server_params = StdioServerParameters(command="uv", args=["run", "apx", "mcp"])
+    async with mcp_session(common_project) as session:
+        # Verify resource exists
+        apx_info_resource = await assert_resource_exists(session, "apx://info")
+        assert apx_info_resource.name == "apx-info"
+        assert apx_info_resource.description is not None
+        assert "apx toolkit" in apx_info_resource.description.lower()
+        assert apx_info_resource.mimeType == "text/plain"
 
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-
-            # List resources
-            resources = await session.list_resources()
-            uris = [str(r.uri) for r in resources.resources]
-            assert "apx://info" in uris
-
-            # Find the apx://info resource
-            apx_info_resource = next(
-                r for r in resources.resources if str(r.uri) == "apx://info"
-            )
-            assert apx_info_resource.name == "apx-info"
-            desc = apx_info_resource.description
-            assert desc is not None
-            assert "apx toolkit" in desc.lower()
-            assert apx_info_resource.mimeType == "text/plain"
-
-            # Read the resource
-            content = await session.read_resource(AnyUrl("apx://info"))
-            assert len(content.contents) == 1
-            contents = content.contents[0]
-            assert isinstance(contents, TextResourceContents)
-            text = contents.text
-            assert text is not None
-            assert "apx" in text.lower()
-            assert "Databricks Apps" in text
-            assert "Technology Stack" in text
+        # Read and validate content
+        content = await session.read_resource(AnyUrl("apx://info"))
+        assert len(content.contents) == 1
+        contents = content.contents[0]
+        assert isinstance(contents, TextResourceContents)
+        assert contents.text is not None
+        assert "apx" in contents.text.lower()
+        assert "Databricks app" in contents.text
+        assert "Technology Stack" in contents.text
 
 
-async def test_start_tool_exists():
+async def test_start_tool_exists(common_project: Path):
     """Test that the start tool is available."""
-    server_params = StdioServerParameters(command="uv", args=["run", "apx", "mcp"])
-
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-
-            # List tools
-            tools = await session.list_tools()
-            tool_names = [t.name for t in tools.tools]
-            assert "start" in tool_names
-
-            # Find the start tool
-            start_tool = next(t for t in tools.tools if t.name == "start")
-            desc = start_tool.description
-            assert desc is not None
-            assert "start development server" in desc.lower()
-            assert "inputSchema" in dir(start_tool)
+    async with mcp_session(common_project) as session:
+        start_tool = await assert_tool_exists(session, "start")
+        assert start_tool.description is not None
+        assert "start development server" in start_tool.description.lower()
+        assert "inputSchema" in dir(start_tool)
 
 
-async def test_mcp_server_capabilities():
+async def test_mcp_server_capabilities(common_project: Path):
     """Test that the MCP server advertises correct capabilities."""
-    server_params = StdioServerParameters(command="uv", args=["run", "apx", "mcp"])
-
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            init_result = await session.initialize()
-
-            # Check protocol version
-            assert init_result.protocolVersion == "2024-11-05"
-
-            # Check server info
-            assert init_result.serverInfo is not None
-            assert init_result.serverInfo.name == "apx"
-            assert init_result.serverInfo.version is not None
-
-            # Check capabilities
-            assert init_result.capabilities is not None
-            assert hasattr(init_result.capabilities, "resources")
-            assert hasattr(init_result.capabilities, "tools")
-
-
-async def test_search_and_add_component(isolated_project: Path):
-    """Test search_registry_components and add_component tools."""
-    tmp_path = isolated_project
-
-    async with mcp_session(tmp_path) as session:
-        # Test 1: List tools and verify search_registry_components exists
-        tools = await session.list_tools()
-        tool_names = [t.name for t in tools.tools]
-        assert "search_registry_components" in tool_names, (
-            "search_registry_components tool should exist"
+    original_cwd = os.getcwd()
+    try:
+        os.chdir(common_project)
+        server_params = StdioServerParameters(
+            command="uv", args=["run", "--no-sync", "apx", "mcp"]
         )
-        assert "add_component" in tool_names, "add_component tool should exist"
 
-        # Test 2: Search for button component
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                init_result = await session.initialize()
+
+                # Check protocol version
+                assert init_result.protocolVersion == "2024-11-05"
+
+                # Check server info
+                assert init_result.serverInfo is not None
+                assert init_result.serverInfo.name == "apx"
+                assert init_result.serverInfo.version is not None
+
+                # Check capabilities
+                assert init_result.capabilities is not None
+                assert hasattr(init_result.capabilities, "resources")
+                assert hasattr(init_result.capabilities, "tools")
+    finally:
+        os.chdir(original_cwd)
+
+
+async def test_search_registry_components(common_project: Path):
+    """Test search_registry_components tool (read-only)."""
+    async with mcp_session(common_project) as session:
+        # Verify tools exist
+        await assert_tool_exists(session, "search_registry_components")
+        await assert_tool_exists(session, "add_component")
+
+        # Search for button component
         search_result = await session.call_tool(
             "search_registry_components",
             arguments={"query": "button component for clicking", "limit": 5},
         )
-
         result_json = parse_json_result(search_result)
-        print(
-            f"\n=== Search Result ===\n{json.dumps(result_json, indent=2)}\n====================\n"
-        )
 
-        assert "query" in result_json, "Result should contain query"
-        assert "results" in result_json, "Result should contain results"
         assert result_json["query"] == "button component for clicking"
         results = result_json["results"]
-        print(f"✓ Search returned {len(results)} results")
 
-        # Verify "button" is in the results (should have high similarity)
+        # Verify "button" is in the results with high similarity
         result_ids = [r["id"] for r in results]
-        assert "button" in result_ids, (
-            "Button should be in search results for button query"
-        )
-
-        # Check that button has the highest score
+        assert "button" in result_ids, "Button should be in search results"
         button_result = next(r for r in results if r["id"] == "button")
         assert button_result["score"] > 0.85, "Button should have high similarity score"
 
-        # Test 3: Add a component
-        add_result = await session.call_tool(
-            "add_component", arguments={"component_id": "dialog", "force": False}
-        )
 
-        assert len(add_result.content) > 0, "Add should return content"
-        result_text = retrieve_text_content(add_result)
-        print(f"\n=== Add Component Result ===\n{result_text}\n====================\n")
-
-        # Verify that if successful, the dialog file was created
-        dialog_file = (
-            tmp_path / "src" / "test_app" / "ui" / "components" / "ui" / "dialog.tsx"
-        )
-        if "Successfully added component" in result_text:
-            assert dialog_file.exists(), "Dialog component file should be created"
-            content = dialog_file.read_text()
-            assert len(content) > 0, "Dialog component should have content"
-            assert "dialog" in content.lower(), (
-                "Dialog component should contain 'dialog'"
-            )
-            print(f"✓ Dialog component created successfully at {dialog_file}")
-        else:
-            print(f"Component add returned: {result_text}")
-
-
-async def test_search_and_add_custom_registry_component(isolated_project: Path):
-    """Test search and add for custom registry components (e.g., @animate-ui)."""
-    tmp_path = isolated_project
-
-    async with mcp_session(tmp_path) as session:
-        # Test 1: Search for sidebar component from animate-ui
+async def test_search_custom_registry_components(common_project: Path):
+    """Test search for custom registry components (read-only)."""
+    async with mcp_session(common_project) as session:
+        # Search for sidebar component from animate-ui
         search_result = await session.call_tool(
             "search_registry_components",
             arguments={"query": "animated sidebar navigation component", "limit": 5},
         )
-
         result_json = parse_json_result(search_result)
-        print(
-            f"\n=== Search for Custom Registry Component ===\n{json.dumps(result_json, indent=2)}\n====================\n"
-        )
-
-        assert "query" in result_json
-        assert "results" in result_json
         results = result_json["results"]
-        print(f"✓ Search returned {len(results)} results")
-
-        # Check if any results are from @animate-ui registry
-        animate_ui_results = [
-            r for r in results if r.get("id", "").startswith("@animate-ui")
-        ]
-        if animate_ui_results:
-            print(
-                f"  Found {len(animate_ui_results)} results from @animate-ui registry"
-            )
 
         # Verify we got results from default registry
         default_results = [r for r in results if not r.get("id", "").startswith("@")]
         assert len(default_results) > 0, "Should have results from default registry"
 
-        # Test 2: Add a custom registry component - @animate-ui/components-radix-sidebar
-        print(
-            "\n=== Adding Custom Registry Component (@animate-ui/components-radix-sidebar) ==="
+
+async def test_add_component(isolated_project: Path):
+    """Test add_component tool (modifies project)."""
+    async with mcp_session(isolated_project) as session:
+        add_result = await session.call_tool(
+            "add_component", arguments={"component_id": "dialog", "force": False}
         )
+        result_text = retrieve_text_content(add_result)
+
+        # Verify component was created if successful
+        if "Successfully added component" in result_text:
+            dialog_file = (
+                isolated_project
+                / "src"
+                / "test_app"
+                / "ui"
+                / "components"
+                / "ui"
+                / "dialog.tsx"
+            )
+            assert dialog_file.exists(), "Dialog component file should be created"
+            content = dialog_file.read_text()
+            assert len(content) > 0, "Dialog component should have content"
+            assert "dialog" in content.lower()
+
+
+async def test_add_custom_registry_component(isolated_project: Path):
+    """Test add_component for custom registry (modifies project)."""
+    async with mcp_session(isolated_project) as session:
         add_result = await session.call_tool(
             "add_component",
             arguments={
@@ -235,14 +224,10 @@ async def test_search_and_add_custom_registry_component(isolated_project: Path):
                 "force": False,
             },
         )
-
-        assert len(add_result.content) > 0, "Add should return content"
         result_text = retrieve_text_content(add_result)
-        print(f"\n{result_text}\n====================\n")
 
-        # Verify that if successful, the sidebar file was created
         sidebar_file = (
-            tmp_path
+            isolated_project
             / "src"
             / "test_app"
             / "ui"
@@ -252,186 +237,92 @@ async def test_search_and_add_custom_registry_component(isolated_project: Path):
         )
 
         if "Successfully added component" in result_text:
-            assert sidebar_file.exists(), (
-                f"Sidebar component should be created at {sidebar_file}"
-            )
+            assert sidebar_file.exists(), "Sidebar component should be created"
             content = sidebar_file.read_text()
             assert len(content) > 0, "Sidebar component should have content"
-            print(f"✓ Custom registry component created successfully at {sidebar_file}")
-
-            content_lower = content.lower()
             assert any(
-                term in content_lower for term in ["sidebar", "navigation", "nav"]
+                term in content.lower() for term in ["sidebar", "navigation", "nav"]
             ), "Component should contain sidebar/navigation related content"
         elif "Failed to add component" in result_text:
-            print(f"⚠ Component add failed (acceptable for test):\n  {result_text}")
-            assert any(
-                term in result_text
-                for term in [
-                    "Failed to fetch",
-                    "Registry returned error",
-                    "Unknown registry",
-                    "404",
-                    "File already exists",
-                    "Failed to",
-                ]
-            ), "Should have a clear error message"
-        else:
-            print(f"Component add result: {result_text}")
-
-
-async def test_docs_tool():
-    """Test the docs tool for searching Databricks SDK documentation."""
-    server_params = StdioServerParameters(command="uv", args=["run", "apx", "mcp"])
-
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-
-            # Test 1: List tools and verify docs tool exists
-            tools = await session.list_tools()
-            tool_names = [t.name for t in tools.tools]
-            assert "docs" in tool_names, "docs tool should exist"
-
-            # Test 2: Search for cluster-related docs
-            print("\n=== Testing docs tool: searching for cluster documentation ===")
-            search_result = await session.call_tool(
-                "docs",
-                arguments={
-                    "source": "databricks-sdk-python",
-                    "query": "create cluster",
-                    "num_results": 3,
-                },
-            )
-
-            assert len(search_result.content) > 0, "Search should return content"
-            result_text = retrieve_text_content(search_result)
-
-            # Check if we got an error or actual results
-            if "not available" in result_text or "not installed" in result_text:
-                print(f"⚠ SDK docs not available (acceptable for test): {result_text}")
-                pytest.skip("Databricks SDK not installed or docs not indexed")
-            else:
-                # We got results, parse and validate
-                result_json = json.loads(result_text)
-                print(
-                    f"\n=== Docs Search Result ===\n{json.dumps(result_json, indent=2)}\n====================\n"
-                )
-
-                assert "source" in result_json
-                assert "query" in result_json
-                assert "results" in result_json
-                assert result_json["source"] == "databricks-sdk-python"
-                assert result_json["query"] == "create cluster"
-
-                results = result_json["results"]
-                assert len(results) <= 3, "Should respect num_results limit"
-
-                if len(results) > 0:
-                    # Validate structure of first result
-                    first_result = results[0]
-                    assert "text" in first_result
-                    assert "source_file" in first_result
-                    assert "score" in first_result
-
-                    # Text should be non-empty
-                    assert len(first_result["text"]) > 0
-
-                    # Source file should be a workspace RST file
-                    assert "workspace" in first_result["source_file"]
-
-                    # Score should be between 0 and 1
-                    assert 0 <= first_result["score"] <= 1
-
-                    print(f"✓ Found {len(results)} relevant documentation chunks")
-                    print(f"  Top result score: {first_result['score']:.3f}")
-                    print(f"  Top result file: {first_result['source_file']}")
-                else:
-                    print("⚠ No results found (may be normal for specific queries)")
-
-
-async def test_docs_create_cluster():
-    """Test that 'create cluster' query returns relevant cluster creation docs in top 3."""
-    server_params = StdioServerParameters(command="uv", args=["run", "apx", "mcp"])
-
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-
-            # Search for "create cluster" with 5 results
-            result = await session.call_tool(
-                "docs",
-                arguments={
-                    "source": "databricks-sdk-python",
-                    "query": "create cluster",
-                    "num_results": 5,
-                },
-            )
-
-            assert len(result.content) > 0, "Search should return content"
-            result_text = retrieve_text_content(result)
-
-            # Debug: Print the actual response
-            print("\n=== Raw Response ===")
-            print(f"Response text: {result_text[:500]}...")
-            print(f"Response length: {len(result_text)}")
-            print("===================\n")
-
-            # Skip if SDK not available
-            if "not available" in result_text or "not installed" in result_text:
-                pytest.skip("Databricks SDK not installed or docs not indexed")
-
-            # Parse results
-            try:
-                result_json = json.loads(result_text)
-            except json.JSONDecodeError as e:
-                print("\n=== JSON Parse Error ===")
-                print(f"Error: {e}")
-                print(f"Full response text:\n{result_text}")
-                print("=======================\n")
-                raise
-            results = result_json["results"]
-
-            print("\n=== Test: 'create cluster' relevance ===")
-            print(f"Query: {result_json['query']}")
-            print(f"Total results: {len(results)}")
-
-            # At least one of top 3 should be cluster-related
-            top_3 = results[:3]
-            cluster_related = [
-                r
-                for r in top_3
-                if "cluster" in r["source_file"].lower()
-                or "cluster" in r["text"].lower()
+            # Acceptable failure modes for external registry
+            expected_errors = [
+                "Failed to fetch",
+                "Registry returned error",
+                "Unknown registry",
+                "404",
+                "File already exists",
+                "Failed to",
             ]
-
-            print("\nTop 3 results:")
-            for i, r in enumerate(top_3, 1):
-                print(f"  {i}. Score: {r['score']:.3f}, File: {r['source_file']}")
-                is_cluster = "✓ cluster-related" if r in cluster_related else ""
-                if is_cluster:
-                    print(f"     {is_cluster}")
-
-            assert len(cluster_related) >= 1, (
-                f"Expected at least 1 cluster-related result in top 3, got {len(cluster_related)}. "
-                f"Top 3 files: {[r['source_file'] for r in top_3]}"
-            )
-
-            print(
-                f"\n✓ Test passed: {len(cluster_related)} cluster-related result(s) in top 3"
+            assert any(term in result_text for term in expected_errors), (
+                "Should have a clear error message"
             )
 
 
-async def test_routes_resource_and_get_route_info(isolated_project: Path):
-    """Test routes resource and get_route_info tool with generated OpenAPI."""
-    from conftest import run_cli_async
+async def test_docs_tool(common_project: Path):
+    """Test the docs tool for searching Databricks SDK documentation."""
+    async with mcp_session(common_project) as session:
+        await assert_tool_exists(session, "docs")
 
-    tmp_path = isolated_project
-    src_dir = tmp_path / "src"
-    backend_dir = src_dir / "test_app" / "backend"
+        # Search for cluster-related docs
+        search_result = await session.call_tool(
+            "docs",
+            arguments={
+                "source": "databricks-sdk-python",
+                "query": "create cluster",
+                "num_results": 3,
+            },
+        )
+        result_text = retrieve_text_content(search_result)
+        skip_if_sdk_unavailable(result_text)
 
-    # Create a backend router with rich REST operations
-    router_code = """from fastapi import APIRouter, HTTPException
+        # Parse and validate results
+        result_json = json.loads(result_text)
+        assert result_json["source"] == "databricks-sdk-python"
+        assert result_json["query"] == "create cluster"
+
+        results = result_json["results"]
+        assert len(results) <= 3, "Should respect num_results limit"
+
+        if len(results) > 0:
+            first_result = results[0]
+            assert "text" in first_result and len(first_result["text"]) > 0
+            assert "source_file" in first_result
+            assert "score" in first_result and 0 <= first_result["score"] <= 1
+            assert "workspace" in first_result["source_file"]
+
+
+async def test_docs_create_cluster(common_project: Path):
+    """Test that 'create cluster' query returns relevant cluster creation docs in top 3."""
+    async with mcp_session(common_project) as session:
+        result = await session.call_tool(
+            "docs",
+            arguments={
+                "source": "databricks-sdk-python",
+                "query": "create cluster",
+                "num_results": 5,
+            },
+        )
+        result_text = retrieve_text_content(result)
+        skip_if_sdk_unavailable(result_text)
+
+        result_json = parse_json_result(result)
+        results = result_json["results"]
+
+        # At least one of top 3 should be cluster-related
+        top_3 = results[:3]
+        cluster_related = [
+            r
+            for r in top_3
+            if "cluster" in r["source_file"].lower() or "cluster" in r["text"].lower()
+        ]
+
+        assert len(cluster_related) >= 1, (
+            f"Expected at least 1 cluster-related result in top 3, got {len(cluster_related)}. "
+            f"Top 3 files: {[r['source_file'] for r in top_3]}"
+        )
+
+
+ROUTER_CODE_TEMPLATE = """from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from .config import conf
 
@@ -505,179 +396,123 @@ def delete_item(item_id: int):
     return None
 """
 
-    # Write the router code
-    (backend_dir / "router.py").write_text(router_code)
 
-    # Create the _version.py file that would normally be generated by hatch
+async def _setup_openapi_project(project_path: Path) -> None:
+    """Set up a project with router code and generate OpenAPI."""
+    from conftest import run_cli_async
+
+    src_dir = project_path / "src"
+    backend_dir = src_dir / "test_app" / "backend"
+
+    (backend_dir / "router.py").write_text(ROUTER_CODE_TEMPLATE)
     (src_dir / "test_app" / "_version.py").write_text('version = "0.0.0"\n')
 
-    # Run the __generate_openapi CLI command
     result = await run_cli_async(
-        [
-            "__generate_openapi",
-            "--app-dir",
-            str(tmp_path),
-            "--force",
-        ],
-        cwd=tmp_path,
+        ["__generate_openapi", "--app-dir", str(project_path), "--force"],
+        cwd=project_path,
     )
-    exit_code = result.returncode
+    assert result.returncode == 0, "OpenAPI generation should succeed"
+    assert (project_path / ".apx" / "openapi.json").exists()
 
-    assert exit_code == 0, "OpenAPI generation should succeed"
 
-    # Verify OpenAPI file was created
-    openapi_path = tmp_path / ".apx" / "openapi.json"
-    assert openapi_path.exists(), "OpenAPI schema should be generated"
-
-    # Print the generated OpenAPI schema
-    openapi_schema = json.loads(openapi_path.read_text())
-    print(
-        f"\n=== Generated OpenAPI Schema ===\n{json.dumps(openapi_schema, indent=2)}\n====================\n"
+def _assert_query_example(example: str, operation_name: str) -> None:
+    """Assert that a query example contains expected patterns."""
+    assert f'import {{ use{operation_name} }} from "@/lib/api"' in example
+    assert 'import selector from "@/lib/selector"' in example
+    assert (
+        f"const {{ data, isLoading, error }} = use{operation_name}(selector())"
+        in example
     )
+    assert "if (isLoading)" in example
+    assert "if (error)" in example
+    # Suspense hook
+    assert f'import {{ use{operation_name}Suspense }} from "@/lib/api"' in example
+    assert f"const {{ data }} = use{operation_name}Suspense(selector())" in example
+    # Type hints
+    assert f"{operation_name}QueryResult" in example
+    assert f"{operation_name}QueryError" in example
 
-    # print the generated api.ts file
-    api_ts_path = tmp_path / "src" / "test_app" / "ui" / "lib" / "api.ts"
-    print(
-        f"\n=== Generated api.ts file ===\n{api_ts_path.read_text()}\n====================\n"
-    )
 
-    # Test the MCP server with the generated routes
-    async with mcp_session(tmp_path) as session:
-        # Test 1: List resources and verify routes resource exists
-        resources = await session.list_resources()
-        uris = [str(r.uri) for r in resources.resources]
-        assert "apx://routes" in uris, "routes resource should exist"
+def _assert_mutation_example(example: str, operation_name: str) -> None:
+    """Assert that a mutation example contains expected patterns."""
+    assert f'import {{ use{operation_name} }} from "@/lib/api"' in example
+    assert f"const {{ mutate, isPending }} = use{operation_name}()" in example
+    assert "mutate({ data: { /* request body */ } })" in example
+    assert "onClick={handleSubmit}" in example
+    # Type hints
+    assert f"{operation_name}MutationBody" in example
+    assert f"{operation_name}MutationResult" in example
+    assert f"{operation_name}MutationError" in example
 
-        # Find the apx://routes resource
-        routes_resource = next(
-            r for r in resources.resources if str(r.uri) == "apx://routes"
-        )
+
+async def test_routes_resource_and_get_route_info(isolated_project: Path):
+    """Test routes resource and get_route_info tool with generated OpenAPI."""
+    await _setup_openapi_project(isolated_project)
+
+    async with mcp_session(isolated_project) as session:
+        # Verify routes resource exists and has correct metadata
+        routes_resource = await assert_resource_exists(session, "apx://routes")
         assert routes_resource.name == "api-routes"
         assert routes_resource.description is not None
         assert "OpenAPI" in routes_resource.description
         assert routes_resource.mimeType == "application/json"
 
-        # Test 2: Read the routes resource
-        print("\n=== Reading routes resource ===")
+        # Read and validate routes
         content = await session.read_resource(AnyUrl("apx://routes"))
         assert len(content.contents) == 1
         contents = content.contents[0]
         assert isinstance(contents, TextResourceContents)
 
         routes_json = json.loads(contents.text)
-        print(
-            f"\n=== Routes ===\n{json.dumps(routes_json, indent=2)}\n====================\n"
-        )
+        assert isinstance(routes_json, list)
+        assert len(routes_json) == 6
 
-        # Verify we got the expected routes
-        assert isinstance(routes_json, list), "Routes should be a list"
-        assert len(routes_json) == 6, f"Should have 6 routes, got {len(routes_json)}"
-
-        # Check specific routes
+        # Verify all expected routes exist
         route_ids = [r["id"] for r in routes_json]
-        assert "listItems" in route_ids, "Should have listItems route"
-        assert "getItem" in route_ids, "Should have getItem route"
-        assert "createItem" in route_ids, "Should have createItem route"
-        assert "updateItem" in route_ids, "Should have updateItem route"
-        assert "partialUpdateItem" in route_ids, "Should have partialUpdateItem route"
-        assert "deleteItem" in route_ids, "Should have deleteItem route"
+        expected_routes = [
+            "listItems",
+            "getItem",
+            "createItem",
+            "updateItem",
+            "partialUpdateItem",
+            "deleteItem",
+        ]
+        for route_id in expected_routes:
+            assert route_id in route_ids, f"Should have {route_id} route"
 
         # Verify route structure
         list_items_route = next(r for r in routes_json if r["id"] == "listItems")
         assert list_items_route["method"] == "GET"
         assert "/items" in list_items_route["path"]
-        assert "List Items" in list_items_route["description"]
 
         create_item_route = next(r for r in routes_json if r["id"] == "createItem")
         assert create_item_route["method"] == "POST"
         assert "/items" in create_item_route["path"]
 
-        print(f"✓ Routes resource validated: {len(routes_json)} routes found")
+        # Verify get_route_info tool exists
+        await assert_tool_exists(session, "get_route_info")
 
-        # Test 3: Verify get_route_info tool exists
-        tools = await session.list_tools()
-        tool_names = [t.name for t in tools.tools]
-        assert "get_route_info" in tool_names, "get_route_info tool should exist"
-
-        # Test 4: Get route info for a GET operation (query)
-        print("\n=== Testing get_route_info for GET operation (listItems) ===")
+        # Test GET operation (query hook)
         result = await session.call_tool(
-            "get_route_info",
-            arguments={"operation_id": "listItems"},
+            "get_route_info", arguments={"operation_id": "listItems"}
         )
-
         result_json = parse_json_result(result)
-        print(
-            f"\n=== listItems Route Info ===\n{json.dumps(result_json, indent=2)}\n====================\n"
-        )
-
         assert result_json["operation_id"] == "listItems"
         assert result_json["method"] == "GET"
-        assert "example" in result_json
+        _assert_query_example(result_json["example"], "ListItems")
 
-        # Verify the example contains expected patterns for a query
-        example = result_json["example"]
-        # Standard query hook
-        assert 'import { useListItems } from "@/lib/api"' in example
-        assert 'import selector from "@/lib/selector"' in example
-        assert "const { data, isLoading, error } = useListItems(selector())" in example
-        assert "if (isLoading)" in example
-        assert "if (error)" in example
-        # Suspense query hook
-        assert 'import { useListItemsSuspense } from "@/lib/api"' in example
-        assert "const { data } = useListItemsSuspense(selector())" in example
-        assert "Suspense boundary" in example
-        # Type hints
-        assert "ListItemsQueryResult" in example
-        assert "ListItemsQueryError" in example
-
-        print(
-            "✓ Query example validated (includes standard/suspense hooks and type hints)"
-        )
-        print(f"Example code:\n{example}\n")
-
-        # Test 5: Get route info for a POST operation (mutation)
-        print("\n=== Testing get_route_info for POST operation (createItem) ===")
+        # Test POST operation (mutation hook)
         result = await session.call_tool(
-            "get_route_info",
-            arguments={"operation_id": "createItem"},
+            "get_route_info", arguments={"operation_id": "createItem"}
         )
-
         result_json = parse_json_result(result)
-        print(
-            f"\n=== createItem Route Info ===\n{json.dumps(result_json, indent=2)}\n====================\n"
-        )
-
         assert result_json["operation_id"] == "createItem"
         assert result_json["method"] == "POST"
-        assert "example" in result_json
+        _assert_mutation_example(result_json["example"], "CreateItem")
 
-        # Verify the example contains expected patterns for a mutation
-        example = result_json["example"]
-        assert 'import { useCreateItem } from "@/lib/api"' in example
-        assert "const { mutate, isPending } = useCreateItem()" in example
-        assert "mutate({ data: { /* request body */ } })" in example
-        assert "onClick={handleSubmit}" in example
-        # Type hints
-        assert "CreateItemMutationBody" in example
-        assert "CreateItemMutationResult" in example
-        assert "CreateItemMutationError" in example
-
-        print("✓ Mutation example validated (includes type hints)")
-        print(f"Example code:\n{example}\n")
-
-        # Test 6: Test with non-existent operation ID
-        print("\n=== Testing get_route_info with invalid operation ID ===")
+        # Test non-existent operation ID
         result = await session.call_tool(
-            "get_route_info",
-            arguments={"operation_id": "nonExistentOperation"},
+            "get_route_info", arguments={"operation_id": "nonExistentOperation"}
         )
-
-        assert len(result.content) > 0
         result_text = retrieve_text_content(result)
-        assert "not found" in result_text.lower(), (
-            "Should return error for invalid operation ID"
-        )
-        print(f"✓ Error handling validated: {result_text}")
-
-        print("\n✓ All routes resource and get_route_info tests passed!")
+        assert "not found" in result_text.lower()

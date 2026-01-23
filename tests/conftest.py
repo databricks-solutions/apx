@@ -10,6 +10,21 @@ import pytest
 from apx._core import run_cli
 
 
+# Session-scoped temporary cache directory for parallel test safety
+@pytest.fixture(scope="session", autouse=True)
+def apx_cache_dir(tmp_path_factory: pytest.TempPathFactory):
+    """Create a temporary cache directory for the test session.
+
+    This sets APX_CACHE_DIR environment variable to isolate tests from
+    the user's real cache and avoid parallel test conflicts.
+    """
+    cache_dir = tmp_path_factory.mktemp("apx_cache")
+    os.environ["APX_CACHE_DIR"] = str(cache_dir)
+    yield cache_dir
+    # Clean up environment variable after session
+    os.environ.pop("APX_CACHE_DIR", None)
+
+
 @dataclass
 class CliResult:
     returncode: int

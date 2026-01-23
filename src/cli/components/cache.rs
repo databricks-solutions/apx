@@ -51,11 +51,19 @@ pub struct RegistryIndexItem {
     pub registry_dependencies: Vec<String>,
 }
 
-/// Get the base cache directory path (~/.apx/cache/components/)
+/// Get the base cache directory path
+/// 
+/// Uses APX_CACHE_DIR environment variable if set, otherwise defaults to ~/.apx/cache.
+/// Returns the path to the components subdirectory.
 fn get_cache_base_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| "Could not determine home directory".to_string())?;
-    Ok(home.join(".apx").join("cache").join("components"))
+    let cache_root = if let Ok(cache_dir) = std::env::var("APX_CACHE_DIR") {
+        PathBuf::from(cache_dir)
+    } else {
+        let home = dirs::home_dir()
+            .ok_or_else(|| "Could not determine home directory".to_string())?;
+        home.join(".apx").join("cache")
+    };
+    Ok(cache_root.join("components"))
 }
 
 /// Get the registry items directory path
