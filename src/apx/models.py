@@ -664,3 +664,114 @@ class McpDatabricksAppsLogsResponse(CommandResult):
 
     app_name: str
     resolved_from_databricks_yml: bool = False
+
+
+# ============================================================================
+# Lakebase MCP Response Models
+# ============================================================================
+
+
+class LakebaseInstanceInfo(BaseModel):
+    """Information about a Databricks Lakebase database instance."""
+
+    name: str = Field(description="Instance name")
+    state: str = Field(description="Instance state (RUNNING, STOPPED, PENDING, etc.)")
+    capacity: str = Field(description="Current capacity tier (CU_1, CU_2, etc.)")
+    read_write_dns: str | None = Field(
+        default=None, description="Read-write DNS endpoint"
+    )
+    read_only_dns: str | None = Field(
+        default=None, description="Read-only DNS endpoint"
+    )
+    creator: str | None = Field(default=None, description="Creator of the instance")
+    created_time: str | None = Field(default=None, description="Creation timestamp")
+
+
+class LakebaseListInstancesResponse(BaseModel):
+    """Response for list_database_instances tool."""
+
+    instances: list[LakebaseInstanceInfo] = Field(
+        default_factory=list, description="List of database instances"
+    )
+    total_count: int = Field(description="Total number of instances")
+
+
+class LakebaseCapacityInfo(BaseModel):
+    """Capacity/scaling information for a Lakebase instance."""
+
+    instance_name: str = Field(description="Name of the database instance")
+    current_capacity: str = Field(description="Current capacity tier")
+    available_capacities: list[str] = Field(
+        default_factory=list, description="Available capacity options"
+    )
+
+
+class LakebaseCapacityUpdateResponse(BaseModel):
+    """Response for set_instance_capacity tool."""
+
+    status: str = Field(description="Status of the operation (success, error)")
+    instance_name: str = Field(description="Name of the instance")
+    previous_capacity: str = Field(description="Previous capacity tier")
+    new_capacity: str = Field(description="New capacity tier")
+    message: str | None = Field(default=None, description="Additional status message")
+
+
+class LakebaseSqlResult(BaseModel):
+    """Result of SQL execution against a Lakebase instance."""
+
+    success: bool = Field(description="Whether the query executed successfully")
+    rows_affected: int | None = Field(
+        default=None, description="Number of rows affected (for write operations)"
+    )
+    columns: list[str] = Field(
+        default_factory=list, description="Column names in result"
+    )
+    rows: list[dict[str, JsonValue]] = Field(
+        default_factory=list, description="Result rows as list of dicts"
+    )
+    error: str | None = Field(default=None, description="Error message if failed")
+
+
+class LakebaseTableInfo(BaseModel):
+    """Information about a table in a Lakebase database."""
+
+    table_schema: str = Field(description="Schema name (e.g., 'public')")
+    table_name: str = Field(description="Table name")
+    table_type: str = Field(description="Table type (BASE TABLE, VIEW, etc.)")
+
+
+class LakebaseTablesResponse(BaseModel):
+    """Response for get_lakebase_tables tool."""
+
+    instance_name: str = Field(description="Name of the database instance")
+    database_name: str = Field(description="Name of the database")
+    tables: list[LakebaseTableInfo] = Field(
+        default_factory=list, description="List of tables"
+    )
+    total_count: int = Field(description="Total number of tables")
+
+
+class LakebaseColumnInfo(BaseModel):
+    """Information about a column in a table."""
+
+    column_name: str = Field(description="Column name")
+    data_type: str = Field(description="Data type")
+    is_nullable: bool = Field(description="Whether the column allows NULL")
+    column_default: str | None = Field(default=None, description="Default value")
+    ordinal_position: int = Field(description="Position of column in table")
+
+
+class LakebaseTableSchemaResponse(BaseModel):
+    """Response for describe_lakebase_table tool."""
+
+    instance_name: str = Field(description="Name of the database instance")
+    database_name: str = Field(description="Name of the database")
+    table_schema: str = Field(description="Schema name")
+    table_name: str = Field(description="Table name")
+    columns: list[LakebaseColumnInfo] = Field(
+        default_factory=list, description="List of columns"
+    )
+    primary_key: list[str] = Field(
+        default_factory=list, description="Primary key column names"
+    )
+    indexes: list[str] = Field(default_factory=list, description="Index names")

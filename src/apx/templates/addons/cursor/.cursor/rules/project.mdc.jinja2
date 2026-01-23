@@ -13,6 +13,7 @@ alwaysApply: true
 - If agent has access to native browser tool, use it to verify changes on the frontend. If such tool is not present or is not working, use playwright mcp to automate browser actions (e.g. screenshots, clicks, etc.).
 - Avoid unnecessary restarts of the development servers
 - **Databricks SDK:** Use the apx MCP tools (`search_databricks_sdk`, `get_method_spec`, `get_model_spec`) to look up Databricks SDK methods and models instead of guessing or hallucinating API signatures.
+- **Lakebase:** Use the apx MCP Lakebase tools (`list_database_instances`, `get_database_instance`, `get_lakebase_tables`, `describe_lakebase_table`, `run_lakebase_sql`, `get_instance_capacity`, `set_instance_capacity`) for Databricks Lakebase database operations. Use `read_only=True` (default) for SELECT queries; only set `read_only=False` for writes when explicitly requested. Never change instance capacity without user confirmation.
 
 ## Package Management
 - **Frontend:** Always use `bun` (never `npm`)

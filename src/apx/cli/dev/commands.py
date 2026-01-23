@@ -439,6 +439,11 @@ def dev_mcp():
 
     This command should be run from the project root directory.
     """
+    # Load .env file if it exists (for DATABRICKS_CONFIG_PROFILE, etc.)
+    dotenv_path = Path.cwd() / ".env"
+    if dotenv_path.exists():
+        load_dotenv(dotenv_path)
+
     from apx.mcp import run_mcp_server
 
     run_mcp_server()

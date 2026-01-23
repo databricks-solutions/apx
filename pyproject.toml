@@ -36,6 +36,9 @@ classifiers = [
     "Framework :: Hatch",
 ]
 
+[project.optional-dependencies]
+lakebase = ["psycopg[binary]>=3.2.0"]
+
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning>=0.7.0"]
 build-backend = "hatchling.build"
@@ -54,6 +57,7 @@ dev = [
     "docutils>=0.22.4",
     "fastapi>=0.119.0",
     "mypy>=1.18.2",
+    "psycopg[binary]>=3.2.0",
     "pydantic-settings>=2.11.0",
     "pytest>=8.4.2",
     "pytest-asyncio>=0.24.0",
