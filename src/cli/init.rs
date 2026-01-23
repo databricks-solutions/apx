@@ -121,9 +121,6 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     if !is_command_available("uv").await {
         return Err("uv is not installed. Please install uv to continue.".to_string());
     }
-    if !is_command_available("git").await {
-        return Err("git is not installed. Please install git to continue.".to_string());
-    }
 
     let bun_path = bun_binary_path()?;
     if !bun_path.exists() {
@@ -285,10 +282,14 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
         },
     )?;
 
-    if is_in_git_repo(&app_path).await? {
-        println!("Skipping git init (already in a git repository)");
+    // Git initialization logic
+    if !is_command_available("git").await {
+        println!("⚠️  Git is not available - skipping git initialization");
+    } else if is_in_git_repo(&app_path).await? {
+        println!("✓ Already in a git repository - skipping git initialization");
     } else {
-        run_with_spinner_async(
+        // Try to initialize git repository
+        let git_result = run_with_spinner_async(
             "🔧 Initializing git repository...",
             "✅ Git repository initialized",
             || async {
@@ -310,7 +311,13 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
                 Ok(())
             },
         )
-        .await?;
+        .await;
+
+        // If git initialization failed, warn but continue
+        if let Err(err) = git_result {
+            println!("⚠️  Git initialization failed: {}", err);
+            println!("   Continuing with project setup...");
+        }
     }
 
     let backend_task = if !args.skip_backend_dependencies {
