@@ -2,16 +2,16 @@ use clap::Args;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::cli::dev::logs::stream_logs;
 use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
-use crate::common::ensure_dir;
+use crate::common::{ensure_dir, spinner, format_elapsed_ms};
 use crate::dev::client::{health, logs, wait_for_healthy, HealthCheckConfig};
 use crate::dev::common::{
     find_available_port, lock_path, read_lock, write_lock,
-    DevLock, BIND_HOST, CLIENT_HOST,
+    DevLock, BIND_HOST,
 };
 
 /// Prepare the app directory for dev server startup.
@@ -50,10 +50,7 @@ pub async fn run(args: StartArgs) -> i32 {
 async fn run_detached(args: StartArgs) -> Result<(), String> {
     let app_dir = resolve_app_dir(&args);
     if let Some(port) = resolve_existing_server(&app_dir).await? {
-        println!(
-            "Dev server already at http://{CLIENT_HOST}:{port}, status: healthy",
-            port = port
-        );
+        println!("✅ Dev server already running at http://localhost:{port}\n");
         return Ok(());
     }
 
@@ -64,10 +61,7 @@ async fn run_detached(args: StartArgs) -> Result<(), String> {
 async fn run_attached(args: StartArgs) -> Result<(), String> {
     let app_dir = resolve_app_dir(&args);
     let port = if let Some(port) = resolve_existing_server(&app_dir).await? {
-        println!(
-            "Dev server already at http://{CLIENT_HOST}:{port}, attaching logs",
-            port = port
-        );
+        println!("✅ Dev server already running at http://localhost:{port}, attaching logs...\n");
         port
     } else {
         spawn_server(&app_dir, None).await?
@@ -96,10 +90,7 @@ async fn resolve_existing_server(app_dir: &Path) -> Result<Option<u16>, String> 
     if is_healthy {
         Ok(Some(lock.port))
     } else {
-        println!(
-            "Dev server already at http://{CLIENT_HOST}:{port}, status: unreachable",
-            port = lock.port
-        );
+        println!("⚠️  Dev server unreachable at http://localhost:{}", lock.port);
         Ok(None)
     }
 }
@@ -119,10 +110,11 @@ pub(crate) async fn spawn_server(
     app_dir: &Path,
     preferred_port: Option<u16>,
 ) -> Result<u16, String> {
+    let start_time = Instant::now();
     prepare_app_dir(app_dir)?;
     let lock_path = lock_path(app_dir);
 
-    println!("Starting dev server...");
+    println!("🚀 Starting dev server...");
     let port = resolve_port(preferred_port).await?;
     let command = format!(
         "uv run apx dev __internal__run_server --app-dir {} --host {} --port {}",
@@ -150,15 +142,20 @@ pub(crate) async fn spawn_server(
         .spawn()
         .map_err(|err| format!("Failed to start dev server: {err}"))?;
 
-    if let Err(e) = wait_for_healthy(port, &HealthCheckConfig::default()).await {
+    let health_spinner = spinner("⏳ Waiting for dev server to become healthy...");
+    let mut config = HealthCheckConfig::default();
+    config.print_waiting = false; // Don't print, we have a spinner instead
+    if let Err(e) = wait_for_healthy(port, &config).await {
+        health_spinner.finish_and_clear();
         let _ = child.kill();
         return Err(e);
     }
+    health_spinner.finish_and_clear();
 
     let lock = DevLock::new(child.id(), port, command, app_dir);
     write_lock(&lock_path, &lock)?;
 
-    println!("Dev server started at http://{CLIENT_HOST}:{port}");
+    println!("✅ Dev server started at http://localhost:{port} in {}\n", format_elapsed_ms(start_time));
     Ok(port)
 }
 
@@ -176,11 +173,11 @@ async fn resolve_port(preferred_port: Option<u16>) -> Result<u16, String> {
                 return Ok(port);
             }
             if attempt == 0 {
-                println!("Waiting for port {port} to become available...");
+                println!("⏳ Waiting for port {port} to become available...");
             }
             tokio::time::sleep(Duration::from_millis(PORT_WAIT_INTERVAL_MS)).await;
         }
-        println!("Port {port} still in use, finding alternative...");
+        println!("⚠️  Port {port} still in use, finding alternative...");
     }
     find_available_port(BIND_HOST)
 }

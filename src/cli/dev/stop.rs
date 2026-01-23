@@ -1,7 +1,9 @@
 use clap::Args;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::cli::run_cli_async;
+use crate::common::{spinner, format_elapsed_ms};
 use crate::dev::client::stop as stop_server;
 use crate::dev::common::{lock_path, read_lock, remove_lock};
 use crate::dev::process::ProcessManager;
@@ -30,22 +32,26 @@ async fn run_inner(args: StopArgs) -> Result<(), String> {
 
 /// Stop the dev server for the given app directory.
 pub async fn stop_dev_server(app_dir: &Path) -> Result<(), String> {
+    let start_time = Instant::now();
     let lock_path = lock_path(app_dir);
     debug!(path = %lock_path.display(), "Checking for dev server lockfile.");
     if !lock_path.exists() {
         debug!("No dev server lockfile found.");
-        println!("No dev server lockfile found.");
+        println!("⚠️  No dev server running\n");
         return Ok(());
     }
 
     let lock = read_lock(&lock_path)?;
     debug!(port = lock.port, pid = lock.pid, "Loaded dev server lockfile.");
 
+    let stop_spinner = spinner("🛑 Stopping dev server...");
+
     // Try graceful shutdown first via HTTP request
     match stop_server(lock.port).await {
         Ok(()) => {
             debug!("Dev server stopped gracefully via HTTP.");
-            println!("Dev server stopped.");
+            stop_spinner.finish_and_clear();
+            println!("✅ Dev server stopped in {}\n", format_elapsed_ms(start_time));
             return Ok(());
         }
         Err(err) => {
@@ -55,17 +61,18 @@ pub async fn stop_dev_server(app_dir: &Path) -> Result<(), String> {
 
     // Fall back to killing the process tree if graceful stop failed
     let kill_result = ProcessManager::kill_process_tree(lock.pid, "dev-server");
+    stop_spinner.finish_and_clear();
     match kill_result {
         Ok(()) => {
             debug!("Dev server process tree killed; removing lockfile.");
             remove_lock(&lock_path)?;
-            println!("Dev server stopped.");
+            println!("✅ Dev server stopped in {}\n", format_elapsed_ms(start_time));
             Ok(())
         }
         Err(err) => {
             warn!(error = %err, pid = lock.pid, "Failed to kill dev server process tree.");
             remove_lock(&lock_path)?;
-            println!("Dev server already stopped.");
+            println!("✅ Dev server already stopped\n");
             Ok(())
         }
     }

@@ -45,7 +45,7 @@ async fn run_async(args: LogsArgs) -> Result<(), String> {
     debug!(path = %lock_path.display(), "Checking for dev server lockfile.");
     if !lock_path.exists() {
         debug!("No dev server lockfile found.");
-        println!("No dev server lockfile found.");
+        println!("⚠️  No dev server running\n");
         return Ok(());
     }
 
@@ -59,6 +59,10 @@ async fn run_async(args: LogsArgs) -> Result<(), String> {
             "Logs request failed with status {}",
             response.status()
         ));
+    }
+
+    if args.follow {
+        println!("📜 Streaming logs...\n");
     }
 
     stream_logs(response, args.follow).await
@@ -205,7 +209,7 @@ pub fn process_line(line: &str, data_lines: &mut Vec<String>, follow: bool) -> O
 }
 
 pub fn handle_log_payload(data: &str) -> bool {
-    match format_log_payload(data) {
+    match format_log_payload(data, true) {  // colorize for terminal output
         Ok((line, should_exit)) => {
             println!("{line}");
             should_exit
@@ -228,7 +232,7 @@ fn format_timestamp(timestamp_ms: i64) -> String {
 
 /// Format a log payload into a formatted line.
 /// Returns (formatted_line, should_exit).
-pub fn format_log_payload_struct(payload: &LogPayload) -> (String, bool) {
+pub fn format_log_payload_struct(payload: &LogPayload, colorize: bool) -> (String, bool) {
     // Fixed-width source names (3 chars)
     let source = match payload.stream {
         LogStreamName::App => "app",
@@ -236,21 +240,38 @@ pub fn format_log_payload_struct(payload: &LogPayload) -> (String, bool) {
         LogStreamName::Apx => "apx",
         LogStreamName::Db => " db",
     };
+    
     // Fixed-width channel names (3 chars)
     let channel = match payload.pipe {
         Some(LogPipe::Out) => "out",
         Some(LogPipe::Error) => "err",
         None => "---",
     };
+    
     let timestamp = format_timestamp(payload.timestamp);
-    let line = format!("{timestamp} | {source} | {channel} | {}", payload.message);
+    
+    let line = if colorize {
+        // Color codes for terminal output
+        let color_code = match payload.stream {
+            LogStreamName::App => "\x1b[36m", // cyan
+            LogStreamName::Ui => "\x1b[35m",  // magenta
+            LogStreamName::Apx => "\x1b[33m", // yellow
+            LogStreamName::Db => "\x1b[32m",  // green
+        };
+        let reset = "\x1b[0m";
+        format!("{color_code}{timestamp} | {source} | {channel} | {}{reset}", payload.message)
+    } else {
+        // Plain text for MCP and other non-terminal outputs
+        format!("{timestamp} | {source} | {channel} | {}", payload.message)
+    };
+    
     let should_exit = payload.stream == LogStreamName::Apx && payload.message == APX_SHUTDOWN_MESSAGE;
     (line, should_exit)
 }
 
-fn format_log_payload(data: &str) -> Result<(String, bool), String> {
+fn format_log_payload(data: &str, colorize: bool) -> Result<(String, bool), String> {
     let payload = decode_log_payload(data)?;
-    Ok(format_log_payload_struct(&payload))
+    Ok(format_log_payload_struct(&payload, colorize))
 }
 
 fn process_line_collect(
@@ -286,7 +307,7 @@ fn flush_log_payload(data_lines: &mut Vec<String>, output: &mut Vec<String>) {
     }
     let data = data_lines.join("\n");
     data_lines.clear();
-    match format_log_payload(&data) {
+    match format_log_payload(&data, false) {  // no colors for MCP/non-terminal output
         Ok((line, _)) => output.push(line),
         Err(err) => {
             warn!(error = %err, raw = data, "Failed to parse log payload.");
