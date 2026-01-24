@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 // JSON-RPC constants
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -350,7 +351,7 @@ impl<C: Send + Sync + 'static> McpServer<C> {
         })
     }
 
-    pub async fn run_stdio(self) -> Result<(), String> {
+    pub async fn run_stdio(self, shutdown_tx: broadcast::Sender<()>) -> Result<(), String> {
         let stdin = tokio::io::stdin();
         let mut stdout = tokio::io::stdout();
         let mut reader = BufReader::new(stdin);
@@ -359,7 +360,11 @@ impl<C: Send + Sync + 'static> McpServer<C> {
         loop {
             line.clear();
             match reader.read_line(&mut line).await {
-                Ok(0) => break,
+                Ok(0) => {
+                    // EOF - signal shutdown to background tasks
+                    let _ = shutdown_tx.send(());
+                    break;
+                }
                 Ok(_) => {
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
@@ -370,7 +375,11 @@ impl<C: Send + Sync + 'static> McpServer<C> {
                         self.write_response(&mut stdout, &response).await?;
                     }
                 }
-                Err(e) => return Err(format!("Error reading from stdin: {}", e)),
+                Err(e) => {
+                    // Error - signal shutdown to background tasks
+                    let _ = shutdown_tx.send(());
+                    return Err(format!("Error reading from stdin: {}", e));
+                }
             }
         }
 

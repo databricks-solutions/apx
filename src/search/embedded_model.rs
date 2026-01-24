@@ -1,9 +1,9 @@
-/// Embedded model files for all-MiniLM-L6-v2 sentence transformer.
-///
-/// These files are embedded at compile time from assets/models/all-MiniLM-L6-v2/
-/// The model produces 384-dimensional embeddings for semantic search.
+//! Embedded model files for all-MiniLM-L6-v2 sentence transformer.
+//!
+//! These files are embedded at compile time from assets/models/all-MiniLM-L6-v2/
+//! The model produces 384-dimensional embeddings for semantic search.
 
-/// Tokenizer configuration (JSON format)
+// Tokenizer configuration (JSON format)
 pub const TOKENIZER_JSON: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/models/all-MiniLM-L6-v2/tokenizer.json"

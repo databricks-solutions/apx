@@ -1,9 +1,9 @@
-/// Reusable hybrid search infrastructure for combining vector and FTS search
-/// 
-/// This module provides common utilities for implementing hybrid search that combines:
-/// - Vector (semantic) search via embeddings
-/// - Full-Text Search (FTS) for exact keyword matches
-/// - Reciprocal Rank Fusion (RRF) for merging results
+//! Reusable hybrid search infrastructure for combining vector and FTS search
+//!
+//! This module provides common utilities for implementing hybrid search that combines:
+//! - Vector (semantic) search via embeddings
+//! - Full-Text Search (FTS) for exact keyword matches
+//! - Reciprocal Rank Fusion (RRF) for merging results
 
 use std::collections::HashMap;
 use arrow::array::{Array, StringArray};

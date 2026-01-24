@@ -29,8 +29,12 @@ async def mcp_session(project_dir: Path | None = None):
     try:
         if project_dir is not None:
             os.chdir(project_dir)
+        _env = os.environ.copy()
+        _env["APX_LOG"] = "debug"
         server_params = StdioServerParameters(
-            command="uv", args=["run", "--no-sync", "apx", "mcp"]
+            command="uv",
+            args=["run", "--no-sync", "apx", "mcp"],
+            env=_env,
         )
         async with stdio_client(server_params) as (read, write):
             async with ClientSession(read, write) as session:
@@ -60,7 +64,7 @@ def parse_json_result(result: CallToolResult):
     try:
         return json.loads(result_text)
     except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse JSON: {e}") from e
+        raise ValueError(f"Failed to parse JSON: {e} from {result_text}") from e
 
 
 # =============================================================================

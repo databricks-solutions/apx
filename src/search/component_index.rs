@@ -126,9 +126,38 @@ impl ComponentIndex {
         common::table_exists(&self.db_path, table_name).await
     }
 
-    /// Check if the index table exists (public)
-    pub async fn table_exists_pub(&self, table_name: &str) -> Result<bool, String> {
-        self.table_exists(table_name).await
+    /// Validate that the index is usable by attempting a count query
+    /// Returns Ok(true) if valid, Ok(false) if table doesn't exist, Err if corrupted
+    pub async fn validate_index(&self, table_name: &str) -> Result<bool, String> {
+        use futures_util::StreamExt;
+        
+        if !self.table_exists(table_name).await? {
+            return Ok(false);
+        }
+
+        // Try to open the table and do a simple query to verify data files exist
+        let table = match common::get_table(&self.db_path, table_name).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("Failed to open table {}: {}", table_name, e);
+                return Err(format!("Index corrupted: {}", e));
+            }
+        };
+
+        // Try to count rows - this will fail if data files are missing
+        let mut stream = table
+            .query()
+            .limit(1)
+            .execute()
+            .await
+            .map_err(|e| format!("Index validation failed: {}", e))?;
+
+        // Try to read at least one batch to verify data accessibility
+        match stream.next().await {
+            Some(Ok(_)) => Ok(true),
+            Some(Err(e)) => Err(format!("Index data corrupted: {}", e)),
+            None => Ok(true), // Empty table is valid
+        }
     }
 
     /// Build index from registry.json files with embeddings for hybrid search

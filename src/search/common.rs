@@ -1,4 +1,4 @@
-/// Common utilities for working with LanceDB indices
+//! Common utilities for working with LanceDB indices
 
 use lancedb::{connect, Connection, Table};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

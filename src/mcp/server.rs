@@ -11,22 +11,50 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex, Notify};
+
+/// State for tracking index readiness
+#[derive(Clone)]
+pub struct IndexState {
+    /// Notifies waiters when component index is ready
+    pub component_ready: Arc<Notify>,
+    /// Notifies waiters when SDK docs index is ready
+    pub sdk_ready: Arc<Notify>,
+    /// Whether component indexing has completed (for late subscribers)
+    pub component_indexed: Arc<AtomicBool>,
+    /// Whether SDK indexing has completed (for late subscribers)
+    pub sdk_indexed: Arc<AtomicBool>,
+}
+
+impl IndexState {
+    pub fn new() -> Self {
+        Self {
+            component_ready: Arc::new(Notify::new()),
+            sdk_ready: Arc::new(Notify::new()),
+            component_indexed: Arc::new(AtomicBool::new(false)),
+            sdk_indexed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
 
 pub struct AppContext {
     pub app_dir: PathBuf,
     pub sdk_doc_index: Arc<Mutex<Option<SDKDocIndex>>>,
     pub cache_state: SharedCacheState,
     pub embedder: Arc<Embedder>,
+    pub index_state: IndexState,
+    pub shutdown_tx: broadcast::Sender<()>,
 }
 
 /// Initialize registry indexes and search index in background
 /// This is called when the MCP server starts
-pub fn init_cache_and_index(ctx: &AppContext) {
+pub fn init_cache_and_index(ctx: &AppContext, mut shutdown_rx: broadcast::Receiver<()>) {
     let app_dir = ctx.app_dir.clone();
     let cache_state = ctx.cache_state.clone();
+    let index_state = ctx.index_state.clone();
 
     tokio::spawn(async move {
         // Mark as running
@@ -37,23 +65,57 @@ pub fn init_cache_and_index(ctx: &AppContext) {
 
         tracing::info!("Syncing registry indexes on MCP start");
 
-        // Sync registry.json files (prefetches default shadcn items only)
-        match sync_registry_indexes(&app_dir, false).await {
-            Ok(refreshed) => {
+        // Check for shutdown during sync
+        let sync_result = tokio::select! {
+            result = sync_registry_indexes(&app_dir, false) => Some(result),
+            _ = shutdown_rx.recv() => {
+                tracing::info!("Shutdown signal received during registry sync, stopping component index build");
+                None
+            }
+        };
+
+        match sync_result {
+            Some(Ok(refreshed)) => {
                 if refreshed {
                     tracing::info!("Registry indexes refreshed, rebuilding search index");
-                    if let Err(e) = rebuild_search_index().await {
+                    
+                    // Check for shutdown during rebuild
+                    let rebuild_result = tokio::select! {
+                        result = rebuild_search_index() => Some(result),
+                        _ = shutdown_rx.recv() => {
+                            tracing::info!("Shutdown signal received during search index rebuild, stopping");
+                            None
+                        }
+                    };
+
+                    if let Some(Err(e)) = rebuild_result {
                         tracing::warn!("Failed to rebuild search index: {}", e);
                     }
                 } else {
                     // Check if search index exists, build if not
-                    if let Err(e) = ensure_search_index().await {
+                    let ensure_result = tokio::select! {
+                        result = ensure_search_index() => Some(result),
+                        _ = shutdown_rx.recv() => {
+                            tracing::info!("Shutdown signal received during search index check, stopping");
+                            None
+                        }
+                    };
+
+                    if let Some(Err(e)) = ensure_result {
                         tracing::warn!("Failed to ensure search index: {}", e);
                     }
                 }
             }
-            Err(e) => tracing::warn!("Failed to sync registry indexes: {}", e),
+            Some(Err(e)) => tracing::warn!("Failed to sync registry indexes: {}", e),
+            None => {
+                // Shutdown was signaled during sync
+            }
         }
+
+        // Mark indexing as complete
+        index_state.component_indexed.store(true, Ordering::SeqCst);
+        index_state.component_ready.notify_waiters();
+        tracing::debug!("Component index ready");
 
         // Mark as done
         {
@@ -74,26 +136,64 @@ async fn rebuild_search_index() -> Result<(), String> {
     index.build_index_from_registries(&table_name, &embedder).await
 }
 
-/// Ensure search index exists, build if not
+/// Ensure search index exists and is valid, build/rebuild if needed
 async fn ensure_search_index() -> Result<(), String> {
     let db_path = ComponentIndex::default_path()?;
     let index = ComponentIndex::new(db_path)?;
     let table_name = ComponentIndex::table_name("components");
 
-    // Check if table exists
-    if !index.table_exists_pub(&table_name).await? {
-        tracing::info!("Search index not found, building from registry indexes");
-        
-        // Initialize embedder for index building
-        let embedder = Embedder::new()?;
-        index.build_index_from_registries(&table_name, &embedder).await?;
+    // Validate the index - this checks both existence and data integrity
+    match index.validate_index(&table_name).await {
+        Ok(true) => {
+            tracing::debug!("Search index validated successfully");
+            Ok(())
+        }
+        Ok(false) => {
+            // Index doesn't exist, build it
+            tracing::info!("Search index not found, building from registry indexes");
+            let embedder = Embedder::new()?;
+            index.build_index_from_registries(&table_name, &embedder).await
+        }
+        Err(e) => {
+            // Index is corrupted, rebuild it
+            tracing::warn!("Search index corrupted ({}), rebuilding...", e);
+            let embedder = Embedder::new()?;
+            index.build_index_from_registries(&table_name, &embedder).await
+        }
     }
-    Ok(())
+}
+
+/// Wait for an index to be ready with timeout
+async fn wait_for_index_ready(
+    ready_notify: &Notify,
+    is_ready: &AtomicBool,
+    timeout_secs: u64,
+    index_name: &str,
+) -> Result<(), String> {
+    // Check if already ready
+    if is_ready.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    // Wait with timeout
+    match tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        ready_notify.notified(),
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(_) => Err(format!(
+            "{} index is still building after {}s timeout. Please try again.",
+            index_name, timeout_secs
+        )),
+    }
 }
 
 pub fn build_server(ctx: AppContext) -> McpServer<AppContext> {
     // Initialize cache and index in background
-    init_cache_and_index(&ctx);
+    let shutdown_rx = ctx.shutdown_tx.subscribe();
+    init_cache_and_index(&ctx, shutdown_rx);
 
     McpServer::new(ctx)
         .resource(
@@ -698,6 +798,18 @@ async fn search_registry_components_tool(
     use crate::common::read_project_metadata;
     use crate::cli::components::UiConfig;
 
+    // Wait for component index to be ready (30 second timeout)
+    if let Err(e) = wait_for_index_ready(
+        &ctx.index_state.component_ready,
+        &ctx.index_state.component_indexed,
+        30,
+        "Component",
+    )
+    .await
+    {
+        return ToolResult::error(e);
+    }
+
     // Check if registry indexes need refresh
     if let Ok(metadata) = read_project_metadata(&ctx.app_dir) {
         let cfg = UiConfig::from_metadata(&metadata, &ctx.app_dir);
@@ -725,41 +837,9 @@ async fn search_registry_components_tool(
 
     let table_name = ComponentIndex::table_name("components");
 
-    // Search, building index if needed
+    // Search - index should be ready at this point
     let search_results = match index.search(&table_name, &args.query, args.limit, &ctx.embedder).await {
         Ok(results) => results,
-        Err(e) if e.contains("Index not built") => {
-            // Wait for background indexing to complete (up to 10 seconds)
-            let mut waited = 0;
-            while waited < 10 {
-                let is_running = {
-                    let guard = ctx.cache_state.lock().await;
-                    guard.is_running
-                };
-                if !is_running {
-                    break;
-                }
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                waited += 1;
-            }
-
-            // Try to search again, or build index if still not available
-            match index.search(&table_name, &args.query, args.limit, &ctx.embedder).await {
-                Ok(results) => results,
-                Err(_) => {
-                    // Build index from registry indexes
-                    tracing::info!("Index not found, building from registry indexes...");
-                    if let Err(build_err) = index.build_index_from_registries(&table_name, &ctx.embedder).await {
-                        return ToolResult::error(format!("Failed to build index: {}", build_err));
-                    }
-
-                    match index.search(&table_name, &args.query, args.limit, &ctx.embedder).await {
-                        Ok(results) => results,
-                        Err(e) => return ToolResult::error(format!("Search failed after building index: {}", e)),
-                    }
-                }
-            }
-        }
         Err(e) => return ToolResult::error(format!("Search failed: {}", e)),
     };
 
@@ -837,6 +917,18 @@ async fn add_component_tool(ctx: Arc<AppContext>, args: AddComponentArgs) -> Too
 }
 
 async fn docs_tool(ctx: Arc<AppContext>, args: DocsArgs) -> ToolResult {
+    // Wait for SDK index to be ready (30 second timeout)
+    if let Err(e) = wait_for_index_ready(
+        &ctx.index_state.sdk_ready,
+        &ctx.index_state.sdk_indexed,
+        30,
+        "SDK documentation",
+    )
+    .await
+    {
+        return ToolResult::error(e);
+    }
+
     // Get the SDK doc index
     let index_guard = ctx.sdk_doc_index.lock().await;
 
