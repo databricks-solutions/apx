@@ -200,10 +200,13 @@ impl ComponentIndex {
         tracing::info!("Generating embeddings for {} components", records_data.len());
 
         // Generate embeddings for all texts
+        let embed_start = std::time::Instant::now();
         let texts: Vec<String> = records_data.iter().map(|(_, _, _, text)| text.clone()).collect();
         let embeddings = embedder.embed_batch(&texts)?;
+        tracing::info!("Embedding generation took {:?}", embed_start.elapsed());
 
         // Create final records with embeddings
+        let records_start = std::time::Instant::now();
         let records: Vec<ComponentRecord> = records_data
             .into_iter()
             .zip(embeddings.into_iter())
@@ -213,6 +216,7 @@ impl ComponentIndex {
                 ComponentRecord { id, name, registry, text, embedding }
             })
             .collect();
+        tracing::debug!("Record creation took {:?}", records_start.elapsed());
 
         tracing::info!("Indexing {} components with embeddings", records.len());
 

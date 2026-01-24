@@ -2,14 +2,15 @@
 """
 Download tokenizer and embedding model for semantic search.
 
-This script downloads the all-MiniLM-L6-v2 model, which is a lightweight
-English sentence embedding model (22MB) that's industry standard for
-semantic search and similarity tasks.
+This script downloads the bge-small-en-v1.5 model in ONNX format, which is
+a high-quality English sentence embedding model optimized for semantic search
+and similarity tasks.
 
 Model details:
 - 384-dimensional embeddings
-- Max sequence length: 256 tokens
-- Performance: Good balance between speed and quality
+- Max sequence length: 512 tokens
+- ONNX fp32 format for efficient inference
+- Model size: ~133 MB
 """
 
 import json
@@ -26,7 +27,7 @@ except ImportError:
     sys.exit(1)
 
 
-MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
+MODEL_ID = "BAAI/bge-small-en-v1.5"
 HUGGINGFACE_URL = "https://huggingface.co"
 
 
@@ -63,7 +64,7 @@ def download_model_files(model_id: str, output_dir: Path) -> None:
         "tokenizer.json",
         "tokenizer_config.json",
         "config.json",
-        "model.safetensors",  # Using safetensors format (safer and faster)
+        "onnx/model.onnx",  # ONNX fp32 format for efficient inference
         "special_tokens_map.json",
         "vocab.txt",
     ]
@@ -74,7 +75,12 @@ def download_model_files(model_id: str, output_dir: Path) -> None:
 
     for filename in files_to_download:
         url = f"{base_url}/{filename}"
-        dest_path = output_dir / filename
+        
+        # Handle nested paths (e.g., onnx/model.onnx)
+        if "/" in filename:
+            dest_path = output_dir / filename.replace("/", "_")
+        else:
+            dest_path = output_dir / filename
 
         # Skip if file already exists
         if dest_path.exists():
@@ -82,12 +88,14 @@ def download_model_files(model_id: str, output_dir: Path) -> None:
             continue
 
         try:
+            # Create parent directory if needed
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
             download_file(url, dest_path, desc=f"Downloading {filename}")
             print(f"✓ Downloaded {filename}")
         except Exception as e:
             print(f"✗ Failed to download {filename}: {e}")
             # Some files might be optional
-            if filename in ["tokenizer.json", "config.json", "model.safetensors"]:
+            if filename in ["tokenizer.json", "config.json", "onnx/model.onnx"]:
                 raise
 
     print()
@@ -99,8 +107,8 @@ def download_model_files(model_id: str, output_dir: Path) -> None:
         "model_id": model_id,
         "model_type": "sentence-transformer",
         "embedding_dim": 384,
-        "max_seq_length": 256,
-        "description": "all-MiniLM-L6-v2 - Lightweight English sentence embeddings",
+        "max_seq_length": 512,
+        "description": "bge-small-en-v1.5 - High-quality English sentence embeddings (ONNX fp32)",
     }
 
     metadata_path = output_dir / "model_info.json"
@@ -119,7 +127,7 @@ def main():
     models_dir = project_root / "assets" / "models"
 
     # Model-specific directory
-    model_dir = models_dir / "all-MiniLM-L6-v2"
+    model_dir = models_dir / "bge-small-en-v1.5"
 
     try:
         download_model_files(MODEL_ID, model_dir)

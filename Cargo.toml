@@ -59,10 +59,11 @@ lancedb = { version = "0.23.1", default-features = false }
 arrow = "56.2.0"
 tokenizers = "0.22.2"
 uuid = { version = "1.11", features = ["v4", "serde"] }
-candle-core = "0.9.1"
-candle-nn = "0.9.1"
-candle-transformers = "0.9.1"
-safetensors = "0.7.0"
 zip = "2.2"
 lance-index = "1.0.1"
 toml_edit = "0.24.0"
+ort = {version = "2.0.0-rc.11", default-features = false, features = ["ndarray", "download-binaries", "tls-rustls"]}
+ndarray = "0.17.2"
+
+[dev-dependencies]
+tempfile = "3.15"

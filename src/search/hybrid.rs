@@ -223,3 +223,58 @@ mod tests {
         assert!((score - 0.05).abs() < 0.001);
     }
 }
+
+#[cfg(test)]
+mod indexing_tests {
+    use crate::search::component_index::ComponentIndex;
+    use crate::search::embedder::Embedder;
+    use std::time::Instant;
+
+    #[tokio::test]
+    async fn test_index_three_registries_under_10_seconds() {
+        use tempfile::tempdir;
+
+        // Initialize tracing for debug output
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_test_writer()
+            .try_init();
+
+        // Create temp directory for test DB
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let db_path = temp_dir.path().to_path_buf();
+        
+        // Initialize embedder
+        let embedder_start = Instant::now();
+        let embedder = Embedder::new().expect("Failed to create embedder");
+        println!("Embedder initialization took {:?}", embedder_start.elapsed());
+
+        let index = ComponentIndex::new(db_path).expect("Failed to create index");
+        
+        let table_name = ComponentIndex::table_name("test_components");
+        
+        let start = Instant::now();
+        
+        // Build index from registries (default, ai-elements, animate-ui, etc.)
+        // Note: This requires registry caches to be populated
+        index.build_index_from_registries(&table_name, &embedder)
+            .await
+            .expect("Failed to build index");
+        
+        let elapsed = start.elapsed();
+        
+        println!("Indexing completed in {:?}", elapsed);
+        
+        assert!(
+            elapsed.as_secs() < 10,
+            "Indexing took {:?}, expected under 10 seconds",
+            elapsed
+        );
+        
+        // Verify the index was created
+        assert!(
+            index.validate_index(&table_name).await.expect("Failed to validate index"),
+            "Index should be valid after building"
+        );
+    }
+}

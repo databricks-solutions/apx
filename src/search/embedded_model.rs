@@ -1,26 +1,27 @@
-//! Embedded model files for all-MiniLM-L6-v2 sentence transformer.
+//! Embedded model files for bge-small-en-v1.5 sentence transformer.
 //!
-//! These files are embedded at compile time from assets/models/all-MiniLM-L6-v2/
+//! These files are embedded at compile time from assets/models/bge-small-en-v1.5/
 //! The model produces 384-dimensional embeddings for semantic search.
 
 // Tokenizer configuration (JSON format)
 pub const TOKENIZER_JSON: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/assets/models/all-MiniLM-L6-v2/tokenizer.json"
+    "/assets/models/bge-small-en-v1.5/tokenizer.json"
 ));
 
 /// Model configuration (JSON format)
+#[allow(dead_code)]
 pub const CONFIG_JSON: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/assets/models/all-MiniLM-L6-v2/config.json"
+    "/assets/models/bge-small-en-v1.5/config.json"
 ));
 
-/// Model weights in safetensors format
-pub const MODEL_SAFETENSORS: &[u8] = include_bytes!(concat!(
+/// Model weights in ONNX format
+pub const MODEL_ONNX: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/assets/models/all-MiniLM-L6-v2/model.safetensors"
+    "/assets/models/bge-small-en-v1.5/onnx_model.onnx"
 ));
 
 /// Model metadata
 pub const EMBEDDING_DIM: usize = 384;
-pub const MAX_SEQ_LENGTH: usize = 256;
+pub const MAX_SEQ_LENGTH: usize = 512;
