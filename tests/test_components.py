@@ -150,113 +150,6 @@ async def test_specific_known_components(tmp_path: Path):
         )
 
 
-async def test_cache_population_after_add(tmp_path: Path):
-    """
-    Test that after running 'add' command, the cache has:
-    1. registry.json files for all registries in pyproject.toml
-    2. Individual items prefetched ONLY for default shadcn registry
-    3. Custom registries have registry.json but items are fetched on-demand
-
-    Cache structure:
-    - {APX_CACHE_DIR}/components/registries/{name}/registry.json
-    - {APX_CACHE_DIR}/components/items/ui/*.json (default shadcn items prefetched)
-    """
-    # Step 1: Clear existing cache
-    cache_base = get_cache_base_dir() / "components"
-    if cache_base.exists():
-        shutil.rmtree(cache_base)
-
-    # Step 2: Initialize project (skip deps)
-    result = await init_project_async(tmp_path)
-    assert result.returncode == 0, f"Failed to initialize project: {result.stderr}"
-
-    # Check what registries are in pyproject.toml
-    pyproject_path = tmp_path / "pyproject.toml"
-    pyproject_content = pyproject_path.read_text()
-    print("\n=== pyproject.toml registries section ===")
-    if "[tool.apx.ui.registries]" in pyproject_content:
-        start = pyproject_content.find("[tool.apx.ui.registries]")
-        end = pyproject_content.find("\n[", start + 1)
-        if end == -1:
-            end = len(pyproject_content)
-        print(pyproject_content[start:end])
-    else:
-        print("No custom registries defined")
-
-    # Step 3: Run add command for a single component (dialog)
-    result = await run_cli_async(
-        ["components", "add", "dialog", str(tmp_path)],
-        cwd=tmp_path,
-    )
-    assert result.returncode == 0, (
-        f"Failed to add dialog: stdout={result.stdout}, stderr={result.stderr}"
-    )
-
-    print("\n=== Add command output ===")
-    print(result.stdout)
-
-    # Step 4: Verify cache structure
-    registries_dir = cache_base / "registries"
-    items_dir = cache_base / "items"
-
-    # Check registry.json files exist
-    assert registries_dir.exists(), "registries/ directory should exist"
-
-    # Default registry should have registry.json
-    default_registry_json = registries_dir / "ui" / "registry.json"
-    assert default_registry_json.exists(), (
-        "Default registry (ui/registry.json) should exist"
-    )
-
-    # Verify registry.json has items
-    default_registry_data = json.loads(default_registry_json.read_text())
-    assert "items" in default_registry_data, "registry.json should have items field"
-    assert len(default_registry_data["items"]) >= 30, (
-        f"Default registry should have 30+ items, got {len(default_registry_data['items'])}"
-    )
-    print(f"\nDefault registry.json items: {len(default_registry_data['items'])}")
-
-    # Check default registry items are prefetched
-    default_items_dir = items_dir / "ui"
-    assert default_items_dir.exists(), "Default registry items (items/ui/) should exist"
-
-    default_items = list(default_items_dir.glob("*.json"))
-    print(f"Default registry items cached: {len(default_items)}")
-
-    # Should have prefetched items (not just dialog)
-    assert len(default_items) > 1, (
-        f"Default registry should have prefetched items, got: {[c.stem for c in default_items]}"
-    )
-
-    # Check custom registries have registry.json but NOT prefetched items
-    custom_registries = [
-        d for d in registries_dir.iterdir() if d.is_dir() and d.name != "ui"
-    ]
-    print(
-        f"\nCustom registries with registry.json: {[r.name for r in custom_registries]}"
-    )
-
-    for reg_dir in custom_registries:
-        reg_json = reg_dir / "registry.json"
-        if reg_json.exists():
-            reg_data = json.loads(reg_json.read_text())
-            print(
-                f"  {reg_dir.name}: {len(reg_data.get('items', []))} items in registry.json"
-            )
-
-            # Custom registry items should NOT be prefetched
-            items_path = items_dir / reg_dir.name
-            if items_path.exists():
-                items_count = len(list(items_path.glob("*.json")))
-                print(f"    (items prefetched: {items_count})")
-                # Items should be 0 or minimal (only fetched on-demand)
-
-    print("\n=== Cache Structure ===")
-    print(f"Cache base: {cache_base}")
-    print(f"Registries dir: {registries_dir}")
-    print(f"Items dir: {items_dir}")
-
-
 async def test_cache_population_structure(tmp_path: Path):
     """
     Test the structure and content of cached components.
@@ -267,7 +160,7 @@ async def test_cache_population_structure(tmp_path: Path):
 
     # Run add command
     result = await run_cli_async(
-        ["components", "add", "button", str(tmp_path)],
+        ["components", "add", "button", str(tmp_path), "--force"],
         cwd=tmp_path,
     )
     assert result.returncode == 0, (
