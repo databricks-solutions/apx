@@ -130,7 +130,7 @@ pub async fn status(port: u16) -> Result<StatusResponse, String> {
         .send()
         .await
         .map_err(|err| {
-            warn!(error = %err, "Status request failed.");
+            debug!(error = %err, "Status request failed.");
             format!("Status request failed: {err}")
         })?;
     
