@@ -42,9 +42,24 @@ pub async fn wait_for_healthy(port: u16, config: &HealthCheckConfig) -> Result<(
     tokio::time::sleep(Duration::from_millis(config.initial_delay_ms)).await;
 
     for attempt in 0..config.retry_count {
-        match health(port).await {
-            Ok(true) => return Ok(()),
-            Ok(false) | Err(_) => {
+        match status(port).await {
+            Ok(status_response) if status_response.status == "ok" => return Ok(()),
+            Ok(status_response) => {
+                // Log which services aren't ready yet (only on first attempt and if debugging)
+                if attempt == 0 {
+                    debug!(
+                        "Services not ready - frontend: {}, backend: {}, db: {}",
+                        status_response.frontend_status, 
+                        status_response.backend_status,
+                        status_response.db_status
+                    );
+                    if config.print_waiting {
+                        println!("Waiting for dev server to become healthy...");
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(config.retry_delay_ms)).await;
+            }
+            Err(_) => {
                 // Only print status on first attempt
                 if attempt == 0 && config.print_waiting {
                     println!("Waiting for dev server to become healthy...");
@@ -62,8 +77,10 @@ pub async fn wait_for_healthy(port: u16, config: &HealthCheckConfig) -> Result<(
 
 #[derive(Debug, Deserialize)]
 pub struct StatusResponse {
+    pub status: String,
     pub frontend_status: String,
     pub backend_status: String,
+    pub db_status: String,
 }
 
 fn build_client() -> Result<reqwest::Client, String> {

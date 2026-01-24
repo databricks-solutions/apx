@@ -119,7 +119,7 @@ impl ProcessManager {
         manager.start_backend_file_watcher();
 
         debug!(
-            "Frontend and backend processes spawned"
+            "Frontend and backend processes spawned, services will become healthy as they start listening"
         );
         Ok(manager)
     }
@@ -171,9 +171,9 @@ impl ProcessManager {
         let one_minute_ago = chrono::Utc::now().timestamp_millis() - 60_000;
         let (_, logs) = self.logs_since_timestamp(one_minute_ago).await;
 
-        let frontend_status = Self::status_for_child(&self.frontend_child, &logs, LogSource::Ui).await;
-        let backend_status = Self::status_for_child(&self.backend_child, &logs, LogSource::App).await;
-        let db_status = Self::status_for_child(&self.db_child, &logs, LogSource::Db).await;
+        let frontend_status = Self::status_for_child(&self.frontend_child, &logs, LogSource::Ui, "localhost", self.frontend_port).await;
+        let backend_status = Self::status_for_child(&self.backend_child, &logs, LogSource::App, &self.host, self.backend_port).await;
+        let db_status = Self::status_for_child(&self.db_child, &logs, LogSource::Db, &self.host, self.db_port).await;
         (frontend_status, backend_status, db_status)
     }
 
@@ -749,23 +749,23 @@ impl ProcessManager {
 
     async fn status_for_child(
         child: &Arc<Mutex<Option<Child>>>,
-        logs: &[LogPayload],
-        source: LogSource,
+        _logs: &[LogPayload],
+        _source: LogSource,
+        host: &str,
+        port: u16,
     ) -> String {
         let mut guard = child.lock().await;
         match guard.as_mut() {
             None => "stopped".to_string(),
             Some(process) => match process.try_wait() {
                 Ok(None) => {
-                    // Process is running, check for errors in logs
-                    let has_errors = logs.iter().any(|log| {
-                        log.stream == LogStreamName::from(source) && log.pipe == Some(LogPipe::Error)
-                    });
+                    // Process is running, check if port is accepting connections
+                    let port_ready = tokio::net::TcpStream::connect((host, port)).await.is_ok();
                     
-                    if has_errors {
-                        "degraded, please check the logs".to_string()
-                    } else {
+                    if port_ready {
                         "healthy".to_string()
+                    } else {
+                        "starting".to_string()
                     }
                 }
                 Ok(Some(_)) => "stopped".to_string(),

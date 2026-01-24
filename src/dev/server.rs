@@ -208,10 +208,18 @@ fn start_env_watcher(
 
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
     let (frontend_status, backend_status, db_status) = state.process_manager.status().await;
+    
+    // Determine overall status - all services must be healthy
+    let all_healthy = frontend_status == "healthy" 
+        && backend_status == "healthy" 
+        && db_status == "healthy";
+    
+    let status = if all_healthy { "ok" } else { "starting" };
+    
     (
         StatusCode::OK,
         Json(HealthResponse {
-            status: "ok",
+            status,
             frontend_status,
             backend_status,
             db_status,

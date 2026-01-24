@@ -224,9 +224,8 @@ async function runDev() {
   const server = await createServer(config);
   await server.listen();
 
-  console.log("[APX] APX_DEV_SERVER_PORT:", devServerPort);
-  console.log("[APX] APX_DEV_SERVER_HOST:", devServerHost);
-  console.log("[APX] APX_FRONTEND_PORT:", frontendPort);
+  server.printUrls();
+  console.log("[APX:READY] Frontend server listening on port", frontendPort);
 }
 
 async function runBuild() {
