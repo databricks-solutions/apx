@@ -1,9 +1,16 @@
+from typing import Callable, Awaitable
 import asyncio
 import json
 from pathlib import Path
 
 import httpx
 from bs4 import BeautifulSoup
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
 
 from conftest import run_cli_async, run_cli_background
 
@@ -136,17 +143,38 @@ async def test_dev_server_proxies(isolated_project: Path) -> None:
         dev_port = dev_lock_json.get("port")
         assert dev_port is not None
 
+        print(
+            f"Dev server started at http://localhost:{dev_port}, using it to test proxies"
+        )
+
         # let the frontend/backend processes start
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
         http_client = httpx.AsyncClient()
-        backend_response = await http_client.get(
-            f"http://localhost:{dev_port}/api/version"
+
+        with_retry = retry(
+            stop=stop_after_attempt(5),
+            wait=wait_exponential(multiplier=1, min=1, max=10),
+            retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
         )
+
+        @with_retry
+        async def fetch_backend() -> httpx.Response:
+            resp = await http_client.get(f"http://localhost:{dev_port}/api/version")
+            resp.raise_for_status()
+            return resp
+
+        backend_response = await fetch_backend()
         assert backend_response.status_code == 200
         assert backend_response.json().get("version") is not None
 
-        frontend_response = await http_client.get(f"http://localhost:{dev_port}/")
+        @with_retry
+        async def fetch_frontend() -> httpx.Response:
+            resp = await http_client.get(f"http://localhost:{dev_port}/")
+            resp.raise_for_status()
+            return resp
+
+        frontend_response = await fetch_frontend()
         assert frontend_response.status_code == 200
         # verify response is a valid HTML page
         soup = BeautifulSoup(frontend_response.text, "html.parser")

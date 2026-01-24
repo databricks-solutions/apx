@@ -3,6 +3,7 @@ use crate::cli::run_cli_async;
 use crate::cli::components::new_cache_state;
 use crate::mcp::server::{build_server, AppContext};
 use crate::databricks_sdk_doc::{SDKDocIndex, SDKSource};
+use crate::search::embedder::Embedder;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -44,10 +45,20 @@ pub async fn run(_args: McpArgs) -> i32 {
         // Create cache state for background population
         let cache_state = new_cache_state();
 
+        // Initialize embedder for component search
+        let embedder = match Embedder::new() {
+            Ok(emb) => Arc::new(emb),
+            Err(e) => {
+                tracing::error!("Failed to initialize embedder: {}. Component search will not work.", e);
+                return Err(format!("Failed to initialize embedder: {}", e));
+            }
+        };
+
         let server = build_server(AppContext {
             app_dir,
             sdk_doc_index: Arc::new(Mutex::new(sdk_doc_index)),
             cache_state,
+            embedder,
         });
 
         server

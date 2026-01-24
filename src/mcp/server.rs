@@ -3,6 +3,7 @@ use crate::dotenv::DotenvFile;
 use crate::databricks_sdk_doc::{SDKDocIndex, SDKSource};
 use crate::cli::components::{SharedCacheState, sync_registry_indexes, needs_registry_refresh};
 use crate::search::ComponentIndex;
+use crate::search::embedder::Embedder;
 use crate::common::{APX_DIR_NAME, OPENAPI_SCHEMA_FILENAME};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,6 +19,7 @@ pub struct AppContext {
     pub app_dir: PathBuf,
     pub sdk_doc_index: Arc<Mutex<Option<SDKDocIndex>>>,
     pub cache_state: SharedCacheState,
+    pub embedder: Arc<Embedder>,
 }
 
 /// Initialize registry indexes and search index in background
@@ -66,7 +68,10 @@ async fn rebuild_search_index() -> Result<(), String> {
     let db_path = ComponentIndex::default_path()?;
     let index = ComponentIndex::new(db_path)?;
     let table_name = ComponentIndex::table_name("components");
-    index.build_index_from_registries(&table_name).await
+    
+    // Initialize embedder for index building
+    let embedder = Embedder::new()?;
+    index.build_index_from_registries(&table_name, &embedder).await
 }
 
 /// Ensure search index exists, build if not
@@ -78,7 +83,10 @@ async fn ensure_search_index() -> Result<(), String> {
     // Check if table exists
     if !index.table_exists_pub(&table_name).await? {
         tracing::info!("Search index not found, building from registry indexes");
-        index.build_index_from_registries(&table_name).await?;
+        
+        // Initialize embedder for index building
+        let embedder = Embedder::new()?;
+        index.build_index_from_registries(&table_name, &embedder).await?;
     }
     Ok(())
 }
@@ -718,7 +726,7 @@ async fn search_registry_components_tool(
     let table_name = ComponentIndex::table_name("components");
 
     // Search, building index if needed
-    let search_results = match index.search(&table_name, &args.query, args.limit).await {
+    let search_results = match index.search(&table_name, &args.query, args.limit, &ctx.embedder).await {
         Ok(results) => results,
         Err(e) if e.contains("Index not built") => {
             // Wait for background indexing to complete (up to 10 seconds)
@@ -736,16 +744,16 @@ async fn search_registry_components_tool(
             }
 
             // Try to search again, or build index if still not available
-            match index.search(&table_name, &args.query, args.limit).await {
+            match index.search(&table_name, &args.query, args.limit, &ctx.embedder).await {
                 Ok(results) => results,
                 Err(_) => {
                     // Build index from registry indexes
                     tracing::info!("Index not found, building from registry indexes...");
-                    if let Err(build_err) = index.build_index_from_registries(&table_name).await {
+                    if let Err(build_err) = index.build_index_from_registries(&table_name, &ctx.embedder).await {
                         return ToolResult::error(format!("Failed to build index: {}", build_err));
                     }
 
-                    match index.search(&table_name, &args.query, args.limit).await {
+                    match index.search(&table_name, &args.query, args.limit, &ctx.embedder).await {
                         Ok(results) => results,
                         Err(e) => return ToolResult::error(format!("Search failed after building index: {}", e)),
                     }

@@ -26,7 +26,7 @@ sync:
 check: lint types
 
 test *args:
-    uv run pytest tests/ -s -v --cov=src/apx {{args}} -n 4
+    uv run pytest tests/ -s -v {{args}} -n 4
 
 # add-commit-push with a message
 pm message:
