@@ -5,7 +5,7 @@ import os
 import shutil
 from pathlib import Path
 import pytest
-from conftest import apx_source_dir, run_cli_async
+from conftest import run_cli_async, init_project_async
 
 
 def get_cache_base_dir() -> Path:
@@ -38,6 +38,27 @@ root = "src/test_app/ui"
 """
 
 
+def setup_minimal_project(app_dir: Path) -> Path:
+    """Set up a minimal project structure for component testing.
+
+    Creates:
+    - pyproject.toml with SAMPLE_PYPROJECT_TOML content
+    - UI directory structure with styles/globals.css
+
+    Args:
+        app_dir: The directory to set up the project in
+
+    Returns:
+        Path to the UI root directory
+    """
+    (app_dir / "pyproject.toml").write_text(SAMPLE_PYPROJECT_TOML)
+    ui_root = app_dir / "src" / "test_app" / "ui"
+    ui_root.mkdir(parents=True)
+    (ui_root / "styles").mkdir()
+    (ui_root / "styles" / "globals.css").write_text("/* empty */")
+    return ui_root
+
+
 def check_file_imports(file_path: Path) -> list[str]:
     """Check if a file contains registry-prefixed imports."""
     if not file_path.exists():
@@ -56,45 +77,49 @@ def check_file_imports(file_path: Path) -> list[str]:
     return violations
 
 
+def find_import_violations(
+    ui_root: Path, extensions: tuple[str, ...] = (".tsx", ".ts", ".jsx", ".js")
+) -> list[str]:
+    """Find all registry-prefixed import violations in the UI directory.
+
+    Args:
+        ui_root: The UI root directory to scan
+        extensions: File extensions to check
+
+    Returns:
+        List of violation strings in format "relative/path: Line N: content"
+    """
+    violations = []
+    for root, dirs, files in os.walk(ui_root):
+        for file in files:
+            if file.endswith(extensions):
+                file_path = Path(root) / file
+                file_violations = check_file_imports(file_path)
+                if file_violations:
+                    violations.extend(
+                        [
+                            f"{file_path.relative_to(ui_root)}: {v}"
+                            for v in file_violations
+                        ]
+                    )
+    return violations
+
+
 @pytest.mark.parametrize("component_name", ["sidebar", "button", "card"])
 async def test_component_import_rewriting(component_name: str, tmp_path: Path):
     """Test that each cached component's imports are correctly rewritten."""
-    app_dir = tmp_path
-
-    # Create pyproject.toml
-    (app_dir / "pyproject.toml").write_text(SAMPLE_PYPROJECT_TOML)
-
-    # Create UI directory structure
-    ui_root = app_dir / "src" / "test_app" / "ui"
-    ui_root.mkdir(parents=True)
-    (ui_root / "styles").mkdir()
-    (ui_root / "styles" / "globals.css").write_text("/* empty */")
+    ui_root = setup_minimal_project(tmp_path)
 
     # Add the component
     result = await run_cli_async(
-        ["components", "add", component_name, str(app_dir)],
-        cwd=app_dir,
+        ["components", "add", component_name, str(tmp_path)],
+        cwd=tmp_path,
     )
 
     # Component might fail for various reasons (missing deps, network, etc.)
     # We only check import rewriting if the component was successfully added
     if result.returncode == 0:
-        # Check all written files for registry-prefixed imports
-        violations = []
-
-        for root, dirs, files in os.walk(ui_root):
-            for file in files:
-                if file.endswith((".tsx", ".ts", ".jsx", ".js")):
-                    file_path = Path(root) / file
-                    file_violations = check_file_imports(file_path)
-                    if file_violations:
-                        violations.extend(
-                            [
-                                f"{file_path.relative_to(ui_root)}: {v}"
-                                for v in file_violations
-                            ]
-                        )
-
+        violations = find_import_violations(ui_root)
         assert not violations, (
             f"Component '{component_name}' has registry-prefixed imports that should be rewritten:\n"
             + "\n".join(violations)
@@ -104,22 +129,12 @@ async def test_component_import_rewriting(component_name: str, tmp_path: Path):
 async def test_specific_known_components(tmp_path: Path):
     """Test specific components known to have registry imports."""
     known_components = ["sidebar", "button", "card"]
-
-    app_dir = tmp_path
-
-    # Create pyproject.toml
-    (app_dir / "pyproject.toml").write_text(SAMPLE_PYPROJECT_TOML)
-
-    # Create UI directory structure
-    ui_root = app_dir / "src" / "test_app" / "ui"
-    ui_root.mkdir(parents=True)
-    (ui_root / "styles").mkdir()
-    (ui_root / "styles" / "globals.css").write_text("/* empty */")
+    ui_root = setup_minimal_project(tmp_path)
 
     for component_name in known_components:
         result = await run_cli_async(
-            ["components", "add", component_name, str(app_dir), "--force"],
-            cwd=app_dir,
+            ["components", "add", component_name, str(tmp_path), "--force"],
+            cwd=tmp_path,
         )
 
         # Verify it succeeded
@@ -128,20 +143,7 @@ async def test_specific_known_components(tmp_path: Path):
         )
 
         # Check for registry-prefixed imports in all files
-        violations = []
-        for root, dirs, files in os.walk(ui_root):
-            for file in files:
-                if file.endswith((".tsx", ".ts")):
-                    file_path = Path(root) / file
-                    file_violations = check_file_imports(file_path)
-                    if file_violations:
-                        violations.extend(
-                            [
-                                f"{file_path.relative_to(ui_root)}: {v}"
-                                for v in file_violations
-                            ]
-                        )
-
+        violations = find_import_violations(ui_root, extensions=(".tsx", ".ts"))
         assert not violations, (
             f"Component '{component_name}' has registry-prefixed imports:\n"
             + "\n".join(violations)
@@ -165,30 +167,8 @@ async def test_cache_population_after_add(tmp_path: Path):
         shutil.rmtree(cache_base)
 
     # Step 2: Initialize project (skip deps)
-    result = await run_cli_async(
-        [
-            "init",
-            str(tmp_path),
-            "--skip-backend-dependencies",
-            "--skip-frontend-dependencies",
-            "--skip-build",
-            "--assistant",
-            "cursor",
-            "--layout",
-            "basic",
-            "--template",
-            "essential",
-            "--profile",
-            "DEFAULT",
-            "--name",
-            "test-app",
-            "--apx-package",
-            apx_source_dir,
-            "--apx-editable",
-        ],
-        cwd=tmp_path,
-    )
-    assert result.returncode == 0, "Failed to initialize project"
+    result = await init_project_async(tmp_path)
+    assert result.returncode == 0, f"Failed to initialize project: {result.stderr}"
 
     # Check what registries are in pyproject.toml
     pyproject_path = tmp_path / "pyproject.toml"
@@ -282,30 +262,8 @@ async def test_cache_population_structure(tmp_path: Path):
     Test the structure and content of cached components.
     """
     # Initialize project
-    result = await run_cli_async(
-        [
-            "init",
-            str(tmp_path),
-            "--skip-backend-dependencies",
-            "--skip-frontend-dependencies",
-            "--skip-build",
-            "--assistant",
-            "cursor",
-            "--layout",
-            "basic",
-            "--template",
-            "essential",
-            "--profile",
-            "DEFAULT",
-            "--name",
-            "test-app",
-            "--apx-package",
-            apx_source_dir,
-            "--apx-editable",
-        ],
-        cwd=tmp_path,
-    )
-    assert result.returncode == 0, "Failed to initialize project"
+    result = await init_project_async(tmp_path)
+    assert result.returncode == 0, f"Failed to initialize project: {result.stderr}"
 
     # Run add command
     result = await run_cli_async(

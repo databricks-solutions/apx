@@ -138,6 +138,53 @@ async def run_cli_background(
                 await process.wait()
 
 
+def _build_init_args(
+    project_path: Path,
+    *,
+    name: str = "test-app",
+    template: str = "essential",
+    layout: str = "basic",
+    assistant: str = "cursor",
+    profile: str = "DEFAULT",
+    skip_build: bool = True,
+    skip_dependencies: bool = False,
+) -> list[str]:
+    """Build CLI arguments for init command.
+
+    Args:
+        project_path: Path where the project will be created
+        name: Project name
+        template: Template to use (essential/stateful)
+        layout: Layout to use (basic/sidebar)
+        assistant: Assistant to configure (cursor/vscode/codex/claude)
+        profile: Databricks profile name
+        skip_build: Whether to skip the build step
+        skip_dependencies: Whether to skip both backend and frontend dependencies
+
+    Returns:
+        List of CLI arguments (without 'apx' prefix for async, with for sync)
+    """
+    args = [
+        "init",
+        str(project_path),
+        "--assistant",
+        assistant,
+        "--layout",
+        layout,
+        "--template",
+        template,
+        "--profile",
+        profile,
+        "--name",
+        name,
+    ]
+    if skip_build:
+        args.append("--skip-build")
+    if skip_dependencies:
+        args.extend(["--skip-backend-dependencies", "--skip-frontend-dependencies"])
+    return args
+
+
 def _init_project(
     project_path: Path,
     *,
@@ -148,7 +195,7 @@ def _init_project(
     profile: str = "DEFAULT",
     skip_build: bool = True,
 ) -> None:
-    """Initialize an apx project with editable apx installation.
+    """Initialize an apx project with editable apx installation (synchronous).
 
     Args:
         project_path: Path where the project will be created
@@ -163,29 +210,68 @@ def _init_project(
     os.environ["APX_DEV_PATH"] = str(Path(apx_source_dir).resolve().absolute())
 
     try:
-        args = [
-            "apx",
-            "init",
-            str(project_path),
-            "--assistant",
-            assistant,
-            "--layout",
-            layout,
-            "--template",
-            template,
-            "--profile",
-            profile,
-            "--name",
-            name,
-        ]
-        if skip_build:
-            args.append("--skip-build")
+        args = ["apx"] + _build_init_args(
+            project_path,
+            name=name,
+            template=template,
+            layout=layout,
+            assistant=assistant,
+            profile=profile,
+            skip_build=skip_build,
+        )
 
         exit_code = run_cli(args)
         assert exit_code == 0, f"Failed to initialize project at {project_path}"
     finally:
         # Clean up environment variable after initialization
         os.environ.pop("APX_DEV_PATH", None)
+
+
+async def init_project_async(
+    project_path: Path,
+    *,
+    name: str = "test-app",
+    template: str = "essential",
+    layout: str = "basic",
+    assistant: str = "cursor",
+    profile: str = "DEFAULT",
+    skip_build: bool = True,
+    skip_dependencies: bool = True,
+) -> CliResult:
+    """Initialize an apx project with editable apx installation (async).
+
+    This is the async version that uses run_cli_async. Editable apx installation
+    is controlled via the APX_DEV_PATH environment variable.
+
+    Args:
+        project_path: Path where the project will be created
+        name: Project name
+        template: Template to use (essential/stateful)
+        layout: Layout to use (basic/sidebar)
+        assistant: Assistant to configure (cursor/vscode/codex/claude)
+        profile: Databricks profile name
+        skip_build: Whether to skip the build step
+        skip_dependencies: Whether to skip both backend and frontend dependencies
+
+    Returns:
+        CliResult with returncode, stdout, stderr
+    """
+    args = _build_init_args(
+        project_path,
+        name=name,
+        template=template,
+        layout=layout,
+        assistant=assistant,
+        profile=profile,
+        skip_build=skip_build,
+        skip_dependencies=skip_dependencies,
+    )
+
+    # Set APX_DEV_PATH for editable installation
+    env = {"APX_DEV_PATH": str(Path(apx_source_dir).resolve().absolute())}
+
+    result = await run_cli_async(args, cwd=project_path, env=env)
+    return result
 
 
 @pytest.fixture(scope="session")
