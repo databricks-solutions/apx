@@ -77,7 +77,8 @@ async fn run_attached(args: StartArgs) -> Result<(), String> {
     let response = logs(port, None, true).await?;
     let _ = stream_logs(response, true).await;
 
-    stop_dev_server(&app_dir).await
+    stop_dev_server(&app_dir).await?;
+    Ok(())
 }
 
 fn resolve_app_dir(args: &StartArgs) -> PathBuf {

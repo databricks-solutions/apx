@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::dev::start::spawn_server;
 use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
-use crate::dev::common::{lock_path, read_lock, CLIENT_HOST};
+use crate::dev::common::{lock_path, read_lock};
 
 #[derive(Args, Debug, Clone)]
 pub struct RestartArgs {
@@ -35,20 +35,18 @@ pub async fn restart_dev_server(app_dir: &Path) -> Result<u16, String> {
     let preferred_port = if lock_path.exists() {
         let lock = read_lock(&lock_path)?;
         println!(
-            "Found existing dev server at http://{CLIENT_HOST}:{port}",
+            "Found existing dev server at http://localhost:{port}",
             port = lock.port
         );
+        stop_dev_server(app_dir).await?;
         Some(lock.port)
     } else {
-        println!("No existing dev server found, starting fresh...");
         None
     };
-    
-    println!("Stopping dev server...");
-    stop_dev_server(app_dir).await?;
+
     let port = spawn_server(app_dir, preferred_port, false).await?;
     println!(
-        "Dev server restarted at http://{CLIENT_HOST}:{port}",
+        "✅ Dev server restarted at http://localhost:{port}\n",
         port = port
     );
     Ok(port)

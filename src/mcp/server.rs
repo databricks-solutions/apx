@@ -379,19 +379,19 @@ async fn stop_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
     use crate::cli::dev::stop::stop_dev_server;
 
     match stop_dev_server(&ctx.app_dir).await {
-        Ok(()) => ToolResult::success("Dev server stopped".to_string()),
+        Ok(true) => ToolResult::success("Dev server stopped".to_string()),
+        Ok(false) => ToolResult::success("No dev server running".to_string()),
         Err(e) => ToolResult::error(e),
     }
 }
 
 async fn restart_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
     use crate::cli::dev::restart::restart_dev_server;
-    use crate::dev::common::CLIENT_HOST;
 
     match restart_dev_server(&ctx.app_dir).await {
         Ok(port) => ToolResult::success(format!(
-            "Dev server restarted at http://{}:{}",
-            CLIENT_HOST, port
+            "Dev server restarted at http://localhost:{}",
+            port
         )),
         Err(e) => ToolResult::error(e),
     }

@@ -7,6 +7,14 @@ use crate::cli::run_cli_async;
 
 use super::common::prepare_frontend_args;
 
+/// Environment variables required for frontend dev mode
+const DEV_REQUIRED_ENV_VARS: &[&str] = &[
+    "APX_FRONTEND_PORT",
+    "APX_DEV_SERVER_PORT",
+    "APX_DEV_SERVER_HOST",
+    "APX_DEV_TOKEN",
+];
+
 #[derive(Args, Debug, Clone)]
 pub struct DevArgs {
     #[arg(
@@ -21,6 +29,22 @@ pub async fn run(args: DevArgs) -> i32 {
 }
 
 async fn run_inner(args: DevArgs) -> Result<(), String> {
+    // Check required environment variables
+    let missing_vars: Vec<&str> = DEV_REQUIRED_ENV_VARS
+        .iter()
+        .filter(|var| std::env::var(var).is_err())
+        .copied()
+        .collect();
+
+    if !missing_vars.is_empty() {
+        eprintln!("⚠️  Note: This command is intended for internal use by the dev server.");
+        eprintln!("   Use `apx dev start` to run the full development environment.\n");
+        return Err(format!(
+            "Missing required environment variables: {}",
+            missing_vars.join(", ")
+        ));
+    }
+
     let app_path = args
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));

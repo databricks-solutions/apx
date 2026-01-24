@@ -89,7 +89,7 @@ async fn run_inner(args: BuildArgs) -> Result<(), String> {
 }
 
 async fn build_ui(app_path: &Path) -> Result<(), String> {
-    crate::cli::frontend::build::run_build(app_path).await
+    crate::cli::frontend::build::run_build(app_path, true).await
 }
 
 async fn build_wheel(app_path: &Path, build_path: &Path) -> Result<(), String> {
