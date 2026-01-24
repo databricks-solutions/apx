@@ -1,6 +1,7 @@
 use crate::mcp::core::{McpServer, ToolResult};
 use crate::dotenv::DotenvFile;
-use crate::databricks_sdk_doc::{SDKDocIndex, SDKSource};
+use crate::databricks_sdk_doc::SDKSource;
+use crate::search::docs_index::SDKDocsIndex;
 use crate::cli::components::{SharedCacheState, sync_registry_indexes, needs_registry_refresh};
 use crate::search::ComponentIndex;
 use crate::search::embedder::Embedder;
@@ -42,7 +43,7 @@ impl IndexState {
 
 pub struct AppContext {
     pub app_dir: PathBuf,
-    pub sdk_doc_index: Arc<Mutex<Option<SDKDocIndex>>>,
+    pub sdk_doc_index: Arc<Mutex<Option<SDKDocsIndex>>>,
     pub cache_state: SharedCacheState,
     pub embedder: Arc<Embedder>,
     pub index_state: IndexState,

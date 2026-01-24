@@ -75,7 +75,7 @@ def download_model_files(model_id: str, output_dir: Path) -> None:
 
     for filename in files_to_download:
         url = f"{base_url}/{filename}"
-        
+
         # Handle nested paths (e.g., onnx/model.onnx)
         if "/" in filename:
             dest_path = output_dir / filename.replace("/", "_")

@@ -2,7 +2,8 @@ use clap::Args;
 use crate::cli::run_cli_async;
 use crate::cli::components::new_cache_state;
 use crate::mcp::server::{build_server, AppContext, IndexState};
-use crate::databricks_sdk_doc::{SDKDocIndex, SDKSource};
+use crate::databricks_sdk_doc::SDKSource;
+use crate::search::docs_index::SDKDocsIndex;
 use crate::search::embedder::Embedder;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -13,7 +14,7 @@ pub struct McpArgs {}
 
 /// Spawn SDK doc indexing as a background task
 fn spawn_sdk_indexing(
-    sdk_doc_index: Arc<Mutex<Option<SDKDocIndex>>>,
+    sdk_doc_index: Arc<Mutex<Option<SDKDocsIndex>>>,
     index_state: IndexState,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) {
@@ -23,7 +24,7 @@ fn spawn_sdk_indexing(
         // Create index
         let index_result = tokio::select! {
             result = async {
-                SDKDocIndex::new()
+                SDKDocsIndex::new()
             } => Some(result),
             _ = shutdown_rx.recv() => {
                 tracing::info!("Shutdown signal received during SDK doc index initialization");
