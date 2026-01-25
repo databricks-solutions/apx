@@ -1,18 +1,19 @@
+//! Component registry indexing and search using LanceDB with Full-Text Search.
+
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::index::scalar::FullTextSearchQuery;
 use std::path::PathBuf;
-use arrow::array::{StringArray, ArrayRef, Float32Array, FixedSizeListArray};
+use arrow::array::{StringArray, ArrayRef};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::{RecordBatch, RecordBatchIterator};
+use futures_util::StreamExt;
 
 use crate::cli::components::get_all_registry_indexes;
-use crate::search::embedder::Embedder;
-use crate::search::embedded_model::EMBEDDING_DIM;
 use super::common;
 
-const SCHEMA_VERSION: u32 = 4; // v4: Added vector embeddings for hybrid search
+const SCHEMA_VERSION: u32 = 1; // v1: Pure FTS (no embeddings)
 
-/// Component record for LanceDB storage (Hybrid: Vector + FTS)
+/// Component record for LanceDB storage (FTS only)
 #[derive(Debug, Clone)]
 pub struct ComponentRecord {
     /// Component ID: either "component-name" or "@registry-name/component-name"
@@ -23,8 +24,6 @@ pub struct ComponentRecord {
     pub registry: String,
     /// Full searchable text (name + description)
     pub text: String,
-    /// Embedding vector for semantic search
-    pub embedding: [f32; EMBEDDING_DIM],
 }
 
 /// Search result with component details
@@ -48,18 +47,6 @@ fn records_to_batch(records: Vec<ComponentRecord>) -> Result<RecordBatch, String
         Field::new("name", DataType::Utf8, false),
         Field::new("registry", DataType::Utf8, false),
         Field::new("text", DataType::Utf8, false),
-        Field::new(
-            "embedding",
-            DataType::FixedSizeList(
-                std::sync::Arc::new(Field::new(
-                    "item",
-                    DataType::Float32,
-                    true,
-                )),
-                EMBEDDING_DIM as i32,
-            ),
-            false,
-        ),
     ]);
 
     let id_array = StringArray::from(
@@ -75,21 +62,6 @@ fn records_to_batch(records: Vec<ComponentRecord>) -> Result<RecordBatch, String
         records.iter().map(|r| r.text.as_str()).collect::<Vec<_>>()
     );
 
-    // Create embedding array
-    let mut embedding_values: Vec<f32> = Vec::with_capacity(records.len() * EMBEDDING_DIM);
-    for record in &records {
-        embedding_values.extend_from_slice(&record.embedding);
-    }
-
-    let values = Float32Array::from(embedding_values);
-    let field = Field::new("item", DataType::Float32, true);
-    let embedding_array = FixedSizeListArray::try_new(
-        std::sync::Arc::new(field),
-        EMBEDDING_DIM as i32,
-        std::sync::Arc::new(values),
-        None,
-    ).map_err(|e| format!("Failed to create fixed size list array: {e}"))?;
-
     RecordBatch::try_new(
         std::sync::Arc::new(schema),
         vec![
@@ -97,7 +69,6 @@ fn records_to_batch(records: Vec<ComponentRecord>) -> Result<RecordBatch, String
             std::sync::Arc::new(name_array) as ArrayRef,
             std::sync::Arc::new(registry_array) as ArrayRef,
             std::sync::Arc::new(text_array) as ArrayRef,
-            std::sync::Arc::new(embedding_array) as ArrayRef,
         ],
     )
     .map_err(|e| format!("Failed to create record batch: {e}"))
@@ -129,8 +100,6 @@ impl ComponentIndex {
     /// Validate that the index is usable by attempting a count query
     /// Returns Ok(true) if valid, Ok(false) if table doesn't exist, Err if corrupted
     pub async fn validate_index(&self, table_name: &str) -> Result<bool, String> {
-        use futures_util::StreamExt;
-        
         if !self.table_exists(table_name).await? {
             return Ok(false);
         }
@@ -160,9 +129,9 @@ impl ComponentIndex {
         }
     }
 
-    /// Build index from registry.json files with embeddings for hybrid search
-    pub async fn build_index_from_registries(&self, table_name: &str, embedder: &Embedder) -> Result<(), String> {
-        tracing::info!("Building component hybrid index from registry indexes");
+    /// Build index from registry.json files using Full-Text Search
+    pub async fn build_index_from_registries(&self, table_name: &str) -> Result<(), String> {
+        tracing::info!("Building component FTS index from registry indexes");
 
         // Load all registry indexes
         let all_indexes = get_all_registry_indexes()
@@ -174,7 +143,7 @@ impl ComponentIndex {
         }
 
         // Convert to records with enriched text
-        let mut records_data: Vec<(String, String, String, String)> = Vec::new();
+        let mut records: Vec<ComponentRecord> = Vec::new();
 
         for (registry_name, items) in all_indexes {
             let is_default = registry_name == "ui";
@@ -186,39 +155,18 @@ impl ComponentIndex {
                     (format!("@{}/{}", registry_name, item.name), registry_name.clone())
                 };
 
-                // Enrich text for better semantic search
+                // Enrich text for better FTS
                 let text = match &item.description {
                     Some(desc) if !desc.is_empty() => 
                         format!("{} {} ui component shadcn", item.name, desc),
                     _ => format!("{} ui component shadcn", item.name),
                 };
 
-                records_data.push((id, item.name, registry, text));
+                records.push(ComponentRecord { id, name: item.name, registry, text });
             }
         }
 
-        tracing::info!("Generating embeddings for {} components", records_data.len());
-
-        // Generate embeddings for all texts
-        let embed_start = std::time::Instant::now();
-        let texts: Vec<String> = records_data.iter().map(|(_, _, _, text)| text.clone()).collect();
-        let embeddings = embedder.embed_batch(&texts)?;
-        tracing::info!("Embedding generation took {:?}", embed_start.elapsed());
-
-        // Create final records with embeddings
-        let records_start = std::time::Instant::now();
-        let records: Vec<ComponentRecord> = records_data
-            .into_iter()
-            .zip(embeddings.into_iter())
-            .map(|((id, name, registry, text), emb)| {
-                let embedding: [f32; EMBEDDING_DIM] = emb.try_into()
-                    .expect("Embedding should have correct length");
-                ComponentRecord { id, name, registry, text, embedding }
-            })
-            .collect();
-        tracing::debug!("Record creation took {:?}", records_start.elapsed());
-
-        tracing::info!("Indexing {} components with embeddings", records.len());
+        tracing::info!("Indexing {} components", records.len());
 
         // Create table
         let conn = common::get_connection(&self.db_path).await?;
@@ -239,7 +187,7 @@ impl ComponentIndex {
             .await
             .map_err(|e| format!("Failed to create table: {e}"))?;
 
-        // Create FTS index on text column for hybrid search
+        // Create FTS index on text column
         tracing::info!("Creating FTS index on text column");
         table.create_index(
             &["text"],
@@ -249,96 +197,36 @@ impl ComponentIndex {
             .await
             .map_err(|e| format!("Failed to create FTS index: {e}"))?;
 
-        tracing::info!("Component hybrid index built successfully (vector + FTS)");
+        tracing::info!("Component FTS index built successfully");
         Ok(())
     }
 
-    /// Search for components using hybrid vector + FTS search with RRF
+    /// Search for components using Full-Text Search
     pub async fn search(
         &self,
         table_name: &str,
         query: &str,
         limit: usize,
-        embedder: &Embedder,
     ) -> Result<Vec<SearchResult>, String> {
-        use std::collections::HashMap;
-        use futures_util::StreamExt;
-        use crate::search::hybrid::{HybridSearchConfig, compute_rrf_score};
-
         if !self.table_exists(table_name).await? {
             return Err("Index not built. Please ensure components are indexed.".to_string());
         }
 
         let table = common::get_table(&self.db_path, table_name).await?;
-        
-        // Configuration for hybrid search
-        let config = HybridSearchConfig::default();
-        let candidate_pool = (limit * config.candidate_pool_multiplier).max(50);
 
-        // Embed query for vector search
-        let query_embedding = embedder.embed(query)?;
-
-        // === Vector Search ===
-        let mut vector_results = table
-            .query()
-            .nearest_to(query_embedding)
-            .map_err(|e| format!("Failed to create vector query: {}", e))?
-            .limit(candidate_pool)
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to execute vector search: {}", e))?;
-
-        // Candidate storage: id -> (name, registry, vector_rank, fts_rank)
-        let mut candidates: HashMap<String, (String, String, Option<usize>, Option<usize>)> = HashMap::new();
-        let mut rank = 0;
-
-        while let Some(batch_result) = vector_results.next().await {
-            let batch = batch_result.map_err(|e| format!("Failed to read vector batch: {}", e))?;
-
-            let id_array = batch
-                .column_by_name("id")
-                .ok_or("Missing id column")?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or("Failed to downcast id column")?;
-
-            let name_array = batch
-                .column_by_name("name")
-                .ok_or("Missing name column")?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or("Failed to downcast name column")?;
-
-            let registry_array = batch
-                .column_by_name("registry")
-                .ok_or("Missing registry column")?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or("Failed to downcast registry column")?;
-
-            for i in 0..batch.num_rows() {
-                let id = id_array.value(i).to_string();
-                let name = name_array.value(i).to_string();
-                let registry = registry_array.value(i).to_string();
-                
-                candidates.insert(id, (name, registry, Some(rank + i), None));
-            }
-            rank += batch.num_rows();
-        }
-
-        tracing::debug!("Vector search returned {} candidates", candidates.len());
-
-        // === FTS Search ===
+        // Execute FTS search
         let fts_query = FullTextSearchQuery::new(query.to_string());
         let mut fts_results = table
             .query()
             .full_text_search(fts_query)
-            .limit(candidate_pool)
+            .limit(limit)
             .execute()
             .await
             .map_err(|e| format!("Failed to execute FTS search: {}", e))?;
 
-        let mut fts_rank = 0;
+        let mut results = Vec::new();
+        let mut rank = 0;
+
         while let Some(batch_result) = fts_results.next().await {
             let batch = batch_result.map_err(|e| format!("Failed to read FTS batch: {}", e))?;
 
@@ -364,88 +252,30 @@ impl ComponentIndex {
                 .ok_or("Failed to downcast registry column")?;
 
             for i in 0..batch.num_rows() {
-                let id = id_array.value(i).to_string();
-                let name = name_array.value(i).to_string();
+                // Simple rank-based scoring (higher rank = lower score)
+                // Boost default registry results
                 let registry = registry_array.value(i).to_string();
-                let r = fts_rank + i;
+                let registry_boost = if registry.is_empty() { 0.1 } else { 0.0 };
+                let score = (1.0 / (1.0 + rank as f32)) + registry_boost;
                 
-                if let Some(existing) = candidates.get_mut(&id) {
-                    // Already in vector results, add FTS rank
-                    existing.3 = Some(r);
-                } else {
-                    // New candidate from FTS only
-                    candidates.insert(id, (name, registry, None, Some(r)));
-                }
+                results.push(SearchResult {
+                    id: id_array.value(i).to_string(),
+                    name: name_array.value(i).to_string(),
+                    registry,
+                    score,
+                });
+                rank += 1;
             }
-            fts_rank += batch.num_rows();
         }
 
-        tracing::debug!("FTS search added candidates, total now: {}", candidates.len());
-
-        // === RRF with Registry Boost ===
-        let mut scored_results: Vec<(f32, String, String, String)> = candidates
-            .into_iter()
-            .map(|(id, (name, registry, vec_rank, fts_rank))| {
-                // Base RRF score
-                let rrf_score = compute_rrf_score(vec_rank, fts_rank, &config);
-                
-                // Registry boost: default (empty registry) gets priority
-                let registry_boost = if registry.is_empty() {
-                    0.02  // Boost default shadcn/ui registry
-                } else {
-                    0.0
-                };
-                
-                let final_score = rrf_score + registry_boost;
-                
-                tracing::debug!(
-                    "RRF: id='{}' vec_rank={:?} fts_rank={:?} rrf={:.4} boost={:.4} final={:.4}",
-                    id, vec_rank, fts_rank, rrf_score, registry_boost, final_score
-                );
-                
-                (final_score, id, name, registry)
-            })
-            .collect();
-
-        // Sort by final score (descending)
-        scored_results.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        
-        // Normalize scores to 0-1 range for better interpretability
-        // Top score becomes ~1.0, lowest becomes proportionally smaller
-        let max_score = scored_results.first().map(|(s, _, _, _)| *s).unwrap_or(1.0);
-        let min_score = scored_results.last().map(|(s, _, _, _)| *s).unwrap_or(0.0);
-        let score_range = max_score - min_score;
-        
-        let mut normalized_results: Vec<(f32, String, String, String)> = scored_results
-            .into_iter()
-            .map(|(score, id, name, registry)| {
-                // Normalize to 0-1 range, with top result close to 1.0
-                let normalized = if score_range > 0.0 {
-                    0.3 + 0.7 * ((score - min_score) / score_range)  // Range: [0.3, 1.0]
-                } else {
-                    1.0  // Single result or all same score
-                };
-                (normalized, id, name, registry)
-            })
-            .collect();
-        
-        normalized_results.truncate(limit);
-
-        let search_results: Vec<SearchResult> = normalized_results
-            .into_iter()
-            .map(|(score, id, name, registry)| SearchResult {
-                id,
-                name,
-                registry,
-                score,
-            })
-            .collect();
+        // Re-sort by score after applying registry boost
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
         tracing::info!(
-            "Hybrid search for '{}': {} results (from {} candidates)", 
-            query, search_results.len(), candidate_pool
+            "FTS search for '{}': {} results", 
+            query, results.len()
         );
 
-        Ok(search_results)
+        Ok(results)
     }
 }

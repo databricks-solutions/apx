@@ -4,7 +4,6 @@ use crate::cli::components::new_cache_state;
 use crate::mcp::server::{build_server, AppContext, IndexState};
 use crate::databricks_sdk_doc::SDKSource;
 use crate::search::docs_index::SDKDocsIndex;
-use crate::search::embedder::Embedder;
 use crate::interop::get_databricks_sdk_version;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -126,15 +125,6 @@ pub async fn run(_args: McpArgs) -> i32 {
         // Create cache state for background population
         let cache_state = new_cache_state();
 
-        // Initialize embedder for component search
-        let embedder = match Embedder::new() {
-            Ok(emb) => Arc::new(emb),
-            Err(e) => {
-                tracing::error!("Failed to initialize embedder: {}. Component search will not work.", e);
-                return Err(format!("Failed to initialize embedder: {}", e));
-            }
-        };
-
         // Pre-compute SDK version synchronously before spawning async task
         // This avoids Python GIL issues when calling PyO3 from async context
         let sdk_version = match get_databricks_sdk_version() {
@@ -165,7 +155,6 @@ pub async fn run(_args: McpArgs) -> i32 {
             app_dir,
             sdk_doc_index,
             cache_state,
-            embedder,
             index_state,
             shutdown_tx: shutdown_tx.clone(),
         });

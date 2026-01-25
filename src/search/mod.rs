@@ -1,12 +1,9 @@
-/// Search functionality for SDK docs and components.
-///
-/// - SDK docs: Hybrid vector + FTS search using embedded models
-/// - Components: Hybrid vector + FTS search using embedded models
-pub mod embedded_model;
-pub mod embedder;
-pub mod component_index;
+//! Search functionality for SDK docs and components.
+//!
+//! Uses LanceDB with Full-Text Search (FTS) for all search operations.
+
 pub mod common;
-pub mod hybrid;
+pub mod component_index;
 pub mod docs_index;
 
 pub use component_index::ComponentIndex;

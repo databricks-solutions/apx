@@ -1,39 +1,8 @@
 //! Common utilities for working with LanceDB indices
 
 use lancedb::{connect, Connection, Table};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fs;
 use std::path::Path;
-
-use super::embedded_model::EMBEDDING_DIM;
-
-/// Serde serialization module for fixed-size embedding arrays
-pub mod serde_arrays {
-    use super::*;
-
-    pub fn serialize<S>(arr: &[f32; EMBEDDING_DIM], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        arr.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<[f32; EMBEDDING_DIM], D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let vec = Vec::<f32>::deserialize(deserializer)?;
-        let arr: [f32; EMBEDDING_DIM] = vec.try_into()
-            .map_err(|v: Vec<f32>| {
-                serde::de::Error::custom(format!(
-                    "Expected array of length {}, got {}",
-                    EMBEDDING_DIM,
-                    v.len()
-                ))
-            })?;
-        Ok(arr)
-    }
-}
 
 /// Get a LanceDB connection for a given database path
 pub async fn get_connection(db_path: &Path) -> Result<Connection, String> {

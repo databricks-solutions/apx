@@ -4,7 +4,6 @@ use crate::databricks_sdk_doc::SDKSource;
 use crate::search::docs_index::SDKDocsIndex;
 use crate::cli::components::{SharedCacheState, sync_registry_indexes, needs_registry_refresh};
 use crate::search::ComponentIndex;
-use crate::search::embedder::Embedder;
 use crate::common::{APX_DIR_NAME, OPENAPI_SCHEMA_FILENAME};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -45,7 +44,6 @@ pub struct AppContext {
     pub app_dir: PathBuf,
     pub sdk_doc_index: Arc<Mutex<Option<SDKDocsIndex>>>,
     pub cache_state: SharedCacheState,
-    pub embedder: Arc<Embedder>,
     pub index_state: IndexState,
     pub shutdown_tx: broadcast::Sender<()>,
 }
@@ -132,9 +130,7 @@ async fn rebuild_search_index() -> Result<(), String> {
     let index = ComponentIndex::new(db_path)?;
     let table_name = ComponentIndex::table_name("components");
     
-    // Initialize embedder for index building
-    let embedder = Embedder::new()?;
-    index.build_index_from_registries(&table_name, &embedder).await
+    index.build_index_from_registries(&table_name).await
 }
 
 /// Ensure search index exists and is valid, build/rebuild if needed
@@ -152,14 +148,12 @@ async fn ensure_search_index() -> Result<(), String> {
         Ok(false) => {
             // Index doesn't exist, build it
             tracing::info!("Search index not found, building from registry indexes");
-            let embedder = Embedder::new()?;
-            index.build_index_from_registries(&table_name, &embedder).await
+            index.build_index_from_registries(&table_name).await
         }
         Err(e) => {
             // Index is corrupted, rebuild it
             tracing::warn!("Search index corrupted ({}), rebuilding...", e);
-            let embedder = Embedder::new()?;
-            index.build_index_from_registries(&table_name, &embedder).await
+            index.build_index_from_registries(&table_name).await
         }
     }
 }
@@ -839,7 +833,7 @@ async fn search_registry_components_tool(
     let table_name = ComponentIndex::table_name("components");
 
     // Search - index should be ready at this point
-    let search_results = match index.search(&table_name, &args.query, args.limit, &ctx.embedder).await {
+    let search_results = match index.search(&table_name, &args.query, args.limit).await {
         Ok(results) => results,
         Err(e) => return ToolResult::error(format!("Search failed: {}", e)),
     };

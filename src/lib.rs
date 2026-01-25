@@ -33,6 +33,7 @@ mod dev;
 pub mod dotenv;
 mod interop;
 mod mcp;
+mod sources;
 
 mod search;
 
