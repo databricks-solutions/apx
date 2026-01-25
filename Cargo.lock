@@ -170,6 +170,7 @@ dependencies = [
  "ort",
  "pyo3",
  "rand 0.8.5",
+ "rayon",
  "reqwest 0.13.1",
  "rmp-serde",
  "schemars 1.2.0",

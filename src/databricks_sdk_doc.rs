@@ -3,10 +3,12 @@
 //! This module handles downloading, caching, and parsing SDK documentation
 //! from GitHub. The actual indexing and search is handled by `search::docs_index`.
 
+use rayon::prelude::*;
 use serde::Deserialize;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use crate::common::Timer;
 
 const GITHUB_REPO: &str = "databricks/databricks-sdk-py";
 
@@ -42,7 +44,11 @@ fn get_cache_path(version: &str) -> PathBuf {
 fn is_cached(version: &str) -> bool {
     let cache_path = get_cache_path(version);
     let docs_path = cache_path.join("docs");
-    docs_path.exists() && docs_path.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false)
+    let exists = docs_path.exists();
+    let has_files = docs_path.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false);
+    tracing::debug!("is_cached: version={}, cache_path={:?}, docs_path={:?}, exists={}, has_files={}", 
+        version, cache_path, docs_path, exists, has_files);
+    exists && has_files
 }
 
 /// Get GitHub zipball URL for a specific version
@@ -52,17 +58,20 @@ fn get_github_zipball_url(version: &str) -> String {
 
 /// Download and extract SDK repository
 pub async fn download_and_extract_sdk(version: &str) -> Result<PathBuf, String> {
+    let download_timer = Timer::start(format!("download_sdk_v{}", version));
     let cache_path = get_cache_path(version);
     let docs_path = cache_path.join("docs");
 
     if is_cached(version) {
         tracing::debug!("SDK docs already cached at {:?}", docs_path);
+        download_timer.lap("Using cached SDK docs");
         return Ok(docs_path);
     }
 
     tracing::info!("Downloading Databricks SDK v{} from GitHub", version);
     let url = get_github_zipball_url(version);
 
+    let http_timer = Timer::start("http_download");
     let response = reqwest::get(&url)
         .await
         .map_err(|e| format!("Failed to download SDK: {}", e))?;
@@ -75,15 +84,17 @@ pub async fn download_and_extract_sdk(version: &str) -> Result<PathBuf, String> 
         .bytes()
         .await
         .map_err(|e| format!("Failed to read response: {}", e))?;
+    http_timer.lap(&format!("Downloaded {} MB", bytes.len() / 1_048_576));
 
     // Extract ZIP
-    tracing::info!("Extracting SDK archive");
+    let extract_timer = Timer::start("zip_extraction");
     fs::create_dir_all(&cache_path)
         .map_err(|e| format!("Failed to create cache directory: {}", e))?;
 
     let cursor = Cursor::new(bytes.to_vec());
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| format!("Failed to read ZIP archive: {}", e))?;
+    tracing::debug!("download_and_extract_sdk: ZIP archive has {} files", archive.len());
 
     // Find root folder name
     let root_folder = if archive.len() > 0 {
@@ -127,7 +138,8 @@ pub async fn download_and_extract_sdk(version: &str) -> Result<PathBuf, String> 
         }
     }
 
-    tracing::info!("SDK docs extracted to {:?}", docs_path);
+    extract_timer.lap(&format!("Extracted {} files", archive.len()));
+    download_timer.finish();
     Ok(docs_path)
 }
 
@@ -387,95 +399,123 @@ fn load_rst_from_dir(
         return Ok(());
     }
     
-    for entry in walkdir::WalkDir::new(dir_path)
+    // Collect all valid RST file paths first
+    let rst_paths: Vec<PathBuf> = walkdir::WalkDir::new(dir_path)
         .into_iter()
         .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        
-        // Only .rst files, skip index.rst
-        if path.extension().and_then(|s| s.to_str()) != Some("rst") {
-            continue;
-        }
-        if path.file_stem().and_then(|s| s.to_str()) == Some("index") {
-            continue;
-        }
-
-        let content = fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read {:?}: {}", path, e))?;
-
-        let relative_path = path.strip_prefix(docs_path)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string();
-
-        let (text, service, entity, operation, symbols) = extract_metadata(&relative_path, &content);
-
-        if !text.is_empty() {
-            files.push(ParsedDocFile {
+        .filter_map(|entry| {
+            let path = entry.path();
+            
+            // Only .rst files, skip index.rst
+            if path.extension().and_then(|s| s.to_str()) != Some("rst") {
+                return None;
+            }
+            if path.file_stem().and_then(|s| s.to_str()) == Some("index") {
+                return None;
+            }
+            
+            Some(path.to_path_buf())
+        })
+        .collect();
+    
+    // Process files in parallel
+    let parsed_files: Vec<ParsedDocFile> = rst_paths.par_iter()
+        .filter_map(|path| {
+            let content = fs::read_to_string(path).ok()?;
+            
+            let relative_path = path.strip_prefix(docs_path)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
+            
+            let (text, service, entity, operation, symbols) = extract_metadata(&relative_path, &content);
+            
+            if text.is_empty() {
+                return None;
+            }
+            
+            Some(ParsedDocFile {
                 relative_path,
                 text,
                 service,
                 entity,
                 operation,
                 symbols,
-            });
-        }
-    }
+            })
+        })
+        .collect();
+    
+    files.extend(parsed_files);
     
     Ok(())
 }
 
 /// Load all documentation files (RST from workspace/dbdataclasses, MD from root)
 pub fn load_doc_files(docs_path: &Path) -> Result<Vec<ParsedDocFile>, String> {
+    let load_timer = Timer::start("load_all_doc_files");
     let mut files = Vec::new();
 
     // Load RST from workspace/ and dbdataclasses/
+    let rst_timer = Timer::start("load_rst_files");
     load_rst_from_dir(&docs_path.join("workspace"), docs_path, &mut files)?;
+    let workspace_count = files.len();
     load_rst_from_dir(&docs_path.join("dbdataclasses"), docs_path, &mut files)?;
+    let dbdataclasses_count = files.len() - workspace_count;
+    rst_timer.lap(&format!("Loaded {} RST files (workspace: {}, dbdataclasses: {})", 
+        workspace_count + dbdataclasses_count, workspace_count, dbdataclasses_count));
 
-    // Load markdown files from docs root
-    for entry in fs::read_dir(docs_path)
+    // Load markdown files from docs root - collect paths first
+    let md_paths: Vec<PathBuf> = fs::read_dir(docs_path)
         .map_err(|e| format!("Failed to read docs directory: {}", e))?
-    {
-        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
-        let path = entry.path();
-
-        if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("md") {
-            continue;
-        }
-
-        let content = fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read {:?}: {}", path, e))?;
-
-        let text = md_to_text(&content);
-        if text.is_empty() {
-            continue;
-        }
-
-        let relative_path = path.strip_prefix(docs_path)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .to_string();
-
-        let file_stem = path.file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-
-        files.push(ParsedDocFile {
-            relative_path,
-            text,
-            service: file_stem.clone(),
-            entity: String::new(),
-            operation: String::new(),
-            symbols: format!("{} guide documentation", file_stem),
-        });
-    }
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            
+            if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("md") {
+                return None;
+            }
+            
+            Some(path)
+        })
+        .collect();
+    
+    // Process markdown files in parallel
+    let md_files: Vec<ParsedDocFile> = md_paths.par_iter()
+        .filter_map(|path| {
+            let content = fs::read_to_string(path).ok()?;
+            let text = md_to_text(&content);
+            
+            if text.is_empty() {
+                return None;
+            }
+            
+            let relative_path = path.strip_prefix(docs_path)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
+            
+            let file_stem = path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            
+            Some(ParsedDocFile {
+                relative_path,
+                text,
+                service: file_stem.clone(),
+                entity: String::new(),
+                operation: String::new(),
+                symbols: format!("{} guide documentation", file_stem),
+            })
+        })
+        .collect();
+    
+    files.extend(md_files);
 
     if files.is_empty() {
         return Err("No documentation files found".to_string());
     }
 
+    load_timer.finish();
     Ok(files)
 }

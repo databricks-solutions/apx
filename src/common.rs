@@ -195,3 +195,37 @@ where
     }
     result
 }
+
+/// Timer utility for measuring and logging elapsed time
+pub struct Timer {
+    start: Instant,
+    label: String,
+}
+
+impl Timer {
+    /// Start a new timer with a label
+    pub fn start(label: impl Into<String>) -> Self {
+        let label = label.into();
+        tracing::debug!("⏱️  [{}] Starting...", label);
+        Self {
+            start: Instant::now(),
+            label,
+        }
+    }
+    
+    /// Log elapsed time and return duration in milliseconds
+    pub fn lap(&self, step: &str) -> u128 {
+        let elapsed = self.start.elapsed();
+        let ms = elapsed.as_millis();
+        tracing::info!("⏱️  [{}] {} took {}ms ({:.2}s)", self.label, step, ms, elapsed.as_secs_f64());
+        ms
+    }
+    
+    /// Log final elapsed time
+    pub fn finish(self) -> u128 {
+        let elapsed = self.start.elapsed();
+        let ms = elapsed.as_millis();
+        tracing::info!("⏱️  [{}] COMPLETED in {}ms ({:.2}s)", self.label, ms, elapsed.as_secs_f64());
+        ms
+    }
+}

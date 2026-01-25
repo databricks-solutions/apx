@@ -213,16 +213,20 @@ pub(crate) fn generate_openapi_spec(
 
 /// Get the installed Databricks SDK version
 pub(crate) fn get_databricks_sdk_version() -> Result<Option<String>, String> {
+    debug!("get_databricks_sdk_version: Starting Python interop call");
     Python::attach(|py| {
+        debug!("get_databricks_sdk_version: Inside Python::attach");
         // Try to import databricks.sdk and get its version
         let importlib = py.import("importlib.metadata");
 
         match importlib {
             Ok(module) => {
+                debug!("get_databricks_sdk_version: importlib.metadata imported successfully");
                 let version_fn = module
                     .getattr("version")
                     .map_err(|e| format!("Failed to get version function: {e}"))?;
 
+                debug!("get_databricks_sdk_version: Calling version('databricks-sdk')");
                 let version = version_fn.call1(("databricks-sdk",));
 
                 match version {
@@ -230,16 +234,19 @@ pub(crate) fn get_databricks_sdk_version() -> Result<Option<String>, String> {
                         let version_str: String = v
                             .extract()
                             .map_err(|e| format!("Failed to extract version string: {e}"))?;
+                        debug!("get_databricks_sdk_version: Found version {}", version_str);
                         Ok(Some(version_str))
                     }
-                    Err(_) => {
+                    Err(e) => {
                         // databricks-sdk not installed
+                        debug!("get_databricks_sdk_version: databricks-sdk not installed: {}", e);
                         Ok(None)
                     }
                 }
             }
-            Err(_) => {
+            Err(e) => {
                 // importlib.metadata not available
+                debug!("get_databricks_sdk_version: importlib.metadata not available: {}", e);
                 Ok(None)
             }
         }

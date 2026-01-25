@@ -1,17 +1,23 @@
 use ort::session::Session;
 use ort::value::Tensor;
 use ndarray::{Array2, Axis};
-use tokenizers::Tokenizer;
-use std::sync::{Arc, Mutex};
+use rayon::prelude::*;
+use tokenizers::{Tokenizer, Encoding};
+use std::sync::Mutex;
 
+use crate::common::Timer;
 use super::embedded_model::{
     MODEL_ONNX, TOKENIZER_JSON, EMBEDDING_DIM, MAX_SEQ_LENGTH,
 };
 
+/// Batch size for ONNX inference (larger = fewer batches = less overhead)
+const INFERENCE_BATCH_SIZE: usize = 128;
+
 /// Thread-safe embedding generator using bge-small-en-v1.5
+/// Architecture: tokenize ALL texts first, then batch ONNX inference
 pub struct Embedder {
-    tokenizer: Arc<Tokenizer>,
-    session: Arc<Mutex<Session>>,
+    tokenizer: Tokenizer,
+    session: Mutex<Session>,
 }
 
 impl Embedder {
@@ -21,63 +27,85 @@ impl Embedder {
         let tokenizer = Tokenizer::from_bytes(TOKENIZER_JSON)
             .map_err(|e| format!("Failed to load tokenizer: {e}"))?;
 
-        // Load ONNX model from embedded bytes
+        // Create single ONNX session with full CPU utilization
+        let num_cpus = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(4);
+        
+        tracing::info!(
+            "Creating ONNX session with {} intra-op threads",
+            num_cpus
+        );
+
         let session = Session::builder()
             .map_err(|e| format!("Failed to create session builder: {e}"))?
+            .with_intra_threads(num_cpus)
+            .map_err(|e| format!("Failed to set intra threads: {e}"))?
             .commit_from_memory(MODEL_ONNX)
             .map_err(|e| format!("Failed to load ONNX model: {e}"))?;
 
         Ok(Self {
-            tokenizer: Arc::new(tokenizer),
-            session: Arc::new(Mutex::new(session)),
+            tokenizer,
+            session: Mutex::new(session),
         })
     }
 
-    /// Generate embeddings for a batch of texts using true batching
-    /// Returns a Vec of embeddings, each of dimension EMBEDDING_DIM
+    /// Generate embeddings for a batch of texts using optimized pipeline:
+    /// 1. Tokenize ALL texts upfront (single pass, no parallelism contention)
+    /// 2. Batch encodings for ONNX inference
+    /// 3. Run inference with full CPU utilization per batch
     pub fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
 
-        let start = std::time::Instant::now();
         let total_texts = texts.len();
+        let batch_timer = Timer::start(format!("embed_batch[{} texts]", total_texts));
         
-        // Process in smaller batches for efficiency (32 texts per batch)
-        const BATCH_SIZE: usize = 32;
+        // Step 1: Tokenize ALL texts upfront (this is the key optimization)
+        let tokenize_timer = Timer::start("tokenize_all");
+        let encodings = self.tokenizer
+            .encode_batch(texts.to_vec(), true)
+            .map_err(|e| format!("Batch tokenization failed: {e}"))?;
+        tokenize_timer.lap(&format!("Tokenized all {} texts", total_texts));
         
-        if total_texts > BATCH_SIZE {
-            tracing::info!("embed_batch: Processing {} texts in batches of {}", total_texts, BATCH_SIZE);
-            let mut all_embeddings = Vec::with_capacity(total_texts);
+        // Step 2: Process in batches for ONNX inference
+        let num_batches = (total_texts + INFERENCE_BATCH_SIZE - 1) / INFERENCE_BATCH_SIZE;
+        tracing::info!(
+            "embed_batch: Processing {} texts in {} batches of {} (tokenization done)",
+            total_texts, num_batches, INFERENCE_BATCH_SIZE
+        );
+        
+        let mut all_embeddings = Vec::with_capacity(total_texts);
+        
+        // Acquire session lock once for all batches (avoid lock contention)
+        let mut session = self.session.lock().unwrap();
+        
+        for (batch_idx, encoding_batch) in encodings.chunks(INFERENCE_BATCH_SIZE).enumerate() {
+            let inference_timer = Timer::start(format!("inference_batch_{}", batch_idx + 1));
             
-            for (i, chunk) in texts.chunks(BATCH_SIZE).enumerate() {
-                let chunk_start = std::time::Instant::now();
-                let chunk_embeddings = self.embed_batch_internal(chunk)?;
-                all_embeddings.extend(chunk_embeddings);
-                tracing::debug!("embed_batch: Batch {}/{} ({} texts) took {:?}", 
-                    i + 1, (total_texts + BATCH_SIZE - 1) / BATCH_SIZE, chunk.len(), chunk_start.elapsed());
-            }
+            let batch_embeddings = self.run_inference_on_encodings(&mut session, encoding_batch)?;
             
-            tracing::info!("embed_batch: Total time for {} texts: {:?}", total_texts, start.elapsed());
-            return Ok(all_embeddings);
+            inference_timer.lap(&format!(
+                "Batch {}/{} ({} texts)",
+                batch_idx + 1, num_batches, encoding_batch.len()
+            ));
+            
+            all_embeddings.extend(batch_embeddings);
         }
-
-        self.embed_batch_internal(texts)
+        
+        batch_timer.lap(&format!("Generated {} embeddings", all_embeddings.len()));
+        Ok(all_embeddings)
     }
-
-    /// Internal batch processing for a small number of texts
-    fn embed_batch_internal(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-        let batch_size = texts.len();
-        tracing::debug!("embed_batch_internal: Processing {} texts", batch_size);
-
-        // Tokenize all texts
-        let tokenize_start = std::time::Instant::now();
-        let encodings: Vec<_> = texts.iter()
-            .map(|text| self.tokenizer.encode(text.as_str(), true))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Tokenization failed: {e}"))?;
-        tracing::debug!("embed_batch: Tokenization took {:?}", tokenize_start.elapsed());
-
+    
+    /// Run ONNX inference on pre-tokenized encodings
+    fn run_inference_on_encodings(
+        &self,
+        session: &mut Session,
+        encodings: &[Encoding],
+    ) -> Result<Vec<Vec<f32>>, String> {
+        let batch_size = encodings.len();
+        
         // Find max sequence length for padding (capped at MAX_SEQ_LENGTH)
         let max_len = encodings.iter()
             .map(|e| e.get_ids().len().min(MAX_SEQ_LENGTH))
@@ -85,20 +113,17 @@ impl Embedder {
             .unwrap_or(0);
 
         // Prepare padded batched inputs
-        let prep_start = std::time::Instant::now();
+        let prep_timer = Timer::start("input_preparation");
         let mut input_ids_flat: Vec<i64> = Vec::with_capacity(batch_size * max_len);
         let mut attention_mask_flat: Vec<i64> = Vec::with_capacity(batch_size * max_len);
         let mut token_type_ids_flat: Vec<i64> = Vec::with_capacity(batch_size * max_len);
 
-        for encoding in &encodings {
-            let mut ids = encoding.get_ids().to_vec();
-            if ids.len() > MAX_SEQ_LENGTH {
-                ids.truncate(MAX_SEQ_LENGTH);
-            }
-            let actual_len = ids.len();
+        for encoding in encodings {
+            let ids = encoding.get_ids();
+            let actual_len = ids.len().min(MAX_SEQ_LENGTH);
 
             // Add input_ids with padding
-            input_ids_flat.extend(ids.iter().map(|&x| x as i64));
+            input_ids_flat.extend(ids.iter().take(actual_len).map(|&x| x as i64));
             input_ids_flat.extend(std::iter::repeat(0i64).take(max_len - actual_len));
 
             // Add attention_mask (1 for real tokens, 0 for padding)
@@ -108,33 +133,27 @@ impl Embedder {
             // Add token_type_ids (all zeros)
             token_type_ids_flat.extend(std::iter::repeat(0i64).take(max_len));
         }
-        tracing::debug!("embed_batch: Input preparation took {:?}", prep_start.elapsed());
+        prep_timer.lap(&format!("Prepared {} inputs", batch_size));
 
-        // Create batched ndarray inputs with shape [batch_size, max_len]
-        let tensor_start = std::time::Instant::now();
+        // Create batched ndarray inputs
+        let tensor_timer = Timer::start("tensor_creation");
         let input_ids_array = Array2::from_shape_vec((batch_size, max_len), input_ids_flat)
             .map_err(|e| format!("Failed to create input_ids array: {e}"))?;
-
         let attention_mask_array = Array2::from_shape_vec((batch_size, max_len), attention_mask_flat)
             .map_err(|e| format!("Failed to create attention_mask array: {e}"))?;
-
         let token_type_ids_array = Array2::from_shape_vec((batch_size, max_len), token_type_ids_flat)
             .map_err(|e| format!("Failed to create token_type_ids array: {e}"))?;
 
-        // Create tensors from arrays
         let input_ids_tensor = Tensor::from_array(input_ids_array)
             .map_err(|e| format!("Failed to create input_ids tensor: {e}"))?;
-        
         let attention_mask_tensor = Tensor::from_array(attention_mask_array)
             .map_err(|e| format!("Failed to create attention_mask tensor: {e}"))?;
-
         let token_type_ids_tensor = Tensor::from_array(token_type_ids_array)
             .map_err(|e| format!("Failed to create token_type_ids tensor: {e}"))?;
-        tracing::debug!("embed_batch: Tensor creation took {:?}", tensor_start.elapsed());
+        tensor_timer.finish();
 
-        // Run batched inference
-        let inference_start = std::time::Instant::now();
-        let mut session = self.session.lock().unwrap();
+        // Run ONNX inference
+        let inference_timer = Timer::start("onnx_inference");
         let outputs = session
             .run(ort::inputs![
                 "input_ids" => input_ids_tensor,
@@ -142,10 +161,10 @@ impl Embedder {
                 "token_type_ids" => token_type_ids_tensor,
             ])
             .map_err(|e| format!("Model forward pass failed: {e}"))?;
-        tracing::debug!("embed_batch: Inference took {:?}", inference_start.elapsed());
+        inference_timer.finish();
 
-        // Extract embeddings
-        let extract_start = std::time::Instant::now();
+        // Extract and post-process embeddings
+        let postprocess_timer = Timer::start("post_processing");
         let embeddings_tensor = outputs[0]
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("Failed to extract embeddings: {e}"))?;
@@ -153,7 +172,6 @@ impl Embedder {
         let (shape, data) = embeddings_tensor;
         let shape_dims = shape.as_ref();
 
-        // Shape should be [batch_size, seq_len, hidden_dim]
         if shape_dims.len() != 3 || shape_dims[0] as usize != batch_size {
             return Err(format!(
                 "Unexpected embedding shape: {:?}, expected [{}, {}, 384]",
@@ -163,48 +181,41 @@ impl Embedder {
 
         let seq_len_output = shape_dims[1] as usize;
         let hidden_dim = shape_dims[2] as usize;
-
-        // Process each sample in the batch
-        let mut all_embeddings = Vec::with_capacity(batch_size);
         let stride = seq_len_output * hidden_dim;
 
-        for (i, encoding) in encodings.iter().enumerate() {
-            // Get the embeddings for this sample
-            let sample_start = i * stride;
-            let sample_data = &data[sample_start..sample_start + stride];
+        // Process each sample (parallel post-processing is fine - it's cheap)
+        let all_embeddings: Vec<Vec<f32>> = encodings.par_iter()
+            .enumerate()
+            .map(|(i, encoding)| {
+                let sample_start = i * stride;
+                let sample_data = &data[sample_start..sample_start + stride];
+                let actual_len = encoding.get_ids().len().min(MAX_SEQ_LENGTH);
 
-            // Get actual sequence length (excluding padding)
-            let actual_len = encoding.get_ids().len().min(MAX_SEQ_LENGTH);
+                let embeddings_array = Array2::from_shape_vec((seq_len_output, hidden_dim), sample_data.to_vec())
+                    .map_err(|e| format!("Failed to reshape embeddings: {e}"))?;
 
-            // Reshape to [seq_len, hidden_dim] and take only non-padded tokens
-            let embeddings_array = Array2::from_shape_vec((seq_len_output, hidden_dim), sample_data.to_vec())
-                .map_err(|e| format!("Failed to reshape embeddings: {e}"))?;
+                let actual_embeddings = embeddings_array.slice_axis(
+                    Axis(0),
+                    ndarray::Slice::from(0..actual_len)
+                );
+                let pooled = actual_embeddings.mean_axis(Axis(0))
+                    .ok_or_else(|| "Failed to perform mean pooling".to_string())?;
 
-            // Mean pooling over actual tokens only (not padding)
-            // Use slice_axis to avoid the s! macro which requires unsafe
-            let actual_embeddings = embeddings_array.slice_axis(
-                Axis(0),
-                ndarray::Slice::from(0..actual_len)
-            );
-            let pooled = actual_embeddings.mean_axis(Axis(0))
-                .ok_or_else(|| "Failed to perform mean pooling".to_string())?;
+                let normalized = self.normalize_ndarray(&pooled.view())?;
+                let embedding_vec: Vec<f32> = normalized.to_vec();
 
-            // L2 normalize
-            let normalized = self.normalize_ndarray(&pooled.view())?;
-            let embedding_vec: Vec<f32> = normalized.to_vec();
+                if embedding_vec.len() != EMBEDDING_DIM {
+                    return Err(format!(
+                        "Unexpected embedding dimension: got {}, expected {}",
+                        embedding_vec.len(), EMBEDDING_DIM
+                    ));
+                }
 
-            if embedding_vec.len() != EMBEDDING_DIM {
-                return Err(format!(
-                    "Unexpected embedding dimension: got {}, expected {}",
-                    embedding_vec.len(),
-                    EMBEDDING_DIM
-                ));
-            }
-
-            all_embeddings.push(embedding_vec);
-        }
-        tracing::debug!("embed_batch_internal: Post-processing took {:?}", extract_start.elapsed());
-
+                Ok(embedding_vec)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        
+        postprocess_timer.lap(&format!("Post-processed {} embeddings", batch_size));
         Ok(all_embeddings)
     }
 
