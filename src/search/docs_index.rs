@@ -355,14 +355,20 @@ impl SDKDocsIndex {
             })
             .collect();
 
-        // Create table
+        // Acquire WRITE lock for all DB write operations
         let db_timer = Timer::start("database_operations");
-        tracing::debug!("build_index: Getting LanceDB connection at {:?}", self.db_path);
-        let conn = common::get_connection(&self.db_path).await?;
-        db_timer.lap("Connected to LanceDB");
+        tracing::debug!("build_index: Acquiring WRITE lock for table creation");
+        let (conn, _lock) = common::get_connection_for_write(&self.db_path).await?;
+        db_timer.lap("Connected to LanceDB with WRITE lock");
 
-        // Drop existing table if it exists
-        if self.table_exists(table_name).await? {
+        // Drop existing table if it exists (check without separate lock since we hold it)
+        let table_names = conn
+            .table_names()
+            .execute()
+            .await
+            .map_err(|e| format!("Failed to list tables: {}", e))?;
+        
+        if table_names.contains(&table_name.to_string()) {
             tracing::debug!("Dropping existing table: {}", table_name);
             conn.drop_table(table_name, &[])
                 .await
@@ -400,11 +406,13 @@ impl SDKDocsIndex {
 
         db_timer.finish();
         overall_timer.finish();
+        tracing::debug!("build_index: Releasing WRITE lock");
 
         Ok(())
     }
 
     /// Search for relevant documentation chunks using Full-Text Search
+    /// This is a READ operation - no write lock needed, can run in parallel with other reads.
     pub async fn search(
         &self,
         source: &SDKSource,
@@ -418,30 +426,65 @@ impl SDKDocsIndex {
 
                 let table_name = Self::table_name(&version);
 
-                if !self.table_exists(&table_name).await? {
+                // Get connection for read (no write lock needed)
+                tracing::debug!("search: Starting search for query '{}'", query);
+                let conn = common::get_connection(&self.db_path).await?;
+
+                // Check table exists
+                let table_names = conn
+                    .table_names()
+                    .execute()
+                    .await
+                    .map_err(|e| format!("Failed to list tables: {}", e))?;
+                
+                if !table_names.contains(&table_name.to_string()) {
                     return Err(format!(
                         "SDK docs not indexed for version {}. Index will be built on next server start.",
                         version
                     ));
                 }
 
-                let table = common::get_table(&self.db_path, &table_name).await?;
+                // Open table
+                let table = conn.open_table(&table_name)
+                    .execute()
+                    .await
+                    .map_err(|e| format!("Failed to open table: {}", e))?;
 
                 // Execute FTS search
+                tracing::debug!("search: Executing FTS query");
                 let fts_query = FullTextSearchQuery::new(query.to_string());
-                let mut fts_results = table
+                let mut fts_results = match table
                     .query()
                     .full_text_search(fts_query)
                     .limit(limit)
                     .execute()
                     .await
-                    .map_err(|e| format!("Failed to execute FTS search: {}", e))?;
+                {
+                    Ok(results) => {
+                        tracing::debug!("search: FTS query executed successfully, reading results");
+                        results
+                    }
+                    Err(e) => {
+                        tracing::error!("search: FTS query execution failed: {}", e);
+                        return Err(format!("Failed to execute FTS search: {}", e));
+                    }
+                };
 
                 let mut results = Vec::new();
                 let mut rank = 0;
 
+                tracing::debug!("search: Reading result batches");
                 while let Some(batch_result) = fts_results.next().await {
-                    let batch = batch_result.map_err(|e| format!("Failed to read FTS batch: {}", e))?;
+                    let batch = match batch_result {
+                        Ok(b) => {
+                            tracing::debug!("search: Got batch with {} rows", b.num_rows());
+                            b
+                        }
+                        Err(e) => {
+                            tracing::error!("search: Failed to read FTS batch: {}", e);
+                            return Err(format!("Failed to read FTS batch: {}", e));
+                        }
+                    };
                     
                     let text_array = batch
                         .column_by_name("text")

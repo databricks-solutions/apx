@@ -93,19 +93,32 @@ impl ComponentIndex {
     }
 
     /// Check if the index table exists (internal)
+    #[allow(dead_code)]
     async fn table_exists(&self, table_name: &str) -> Result<bool, String> {
         common::table_exists(&self.db_path, table_name).await
     }
 
     /// Validate that the index is usable by attempting a count query
     /// Returns Ok(true) if valid, Ok(false) if table doesn't exist, Err if corrupted
+    /// This is a read operation - no write lock needed.
     pub async fn validate_index(&self, table_name: &str) -> Result<bool, String> {
-        if !self.table_exists(table_name).await? {
+        tracing::debug!("validate_index: Checking table '{}'", table_name);
+        let conn = common::get_connection(&self.db_path).await?;
+
+        // Check table exists
+        let table_names = conn
+            .table_names()
+            .execute()
+            .await
+            .map_err(|e| format!("Failed to list tables: {}", e))?;
+        
+        if !table_names.contains(&table_name.to_string()) {
+            tracing::debug!("validate_index: Table '{}' does not exist", table_name);
             return Ok(false);
         }
 
         // Try to open the table and do a simple query to verify data files exist
-        let table = match common::get_table(&self.db_path, table_name).await {
+        let table = match conn.open_table(table_name).execute().await {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!("Failed to open table {}: {}", table_name, e);
@@ -123,13 +136,20 @@ impl ComponentIndex {
 
         // Try to read at least one batch to verify data accessibility
         match stream.next().await {
-            Some(Ok(_)) => Ok(true),
+            Some(Ok(_)) => {
+                tracing::debug!("validate_index: Table '{}' is valid", table_name);
+                Ok(true)
+            }
             Some(Err(e)) => Err(format!("Index data corrupted: {}", e)),
-            None => Ok(true), // Empty table is valid
+            None => {
+                tracing::debug!("validate_index: Table '{}' is valid (empty)", table_name);
+                Ok(true) // Empty table is valid
+            }
         }
     }
 
     /// Build index from registry.json files using Full-Text Search
+    /// This is a WRITE operation - requires exclusive write lock.
     pub async fn build_index_from_registries(&self, table_name: &str) -> Result<(), String> {
         tracing::info!("Building component FTS index from registry indexes");
 
@@ -168,11 +188,20 @@ impl ComponentIndex {
 
         tracing::info!("Indexing {} components", records.len());
 
-        // Create table
-        let conn = common::get_connection(&self.db_path).await?;
+        // Acquire WRITE lock for all DB write operations
+        tracing::debug!("build_index_from_registries: Acquiring WRITE lock");
+        let (conn, _lock) = common::get_connection_for_write(&self.db_path).await?;
+        tracing::debug!("build_index_from_registries: WRITE lock acquired");
 
-        // Drop existing table
-        if self.table_exists(table_name).await? {
+        // Check and drop existing table while holding lock
+        let table_names = conn
+            .table_names()
+            .execute()
+            .await
+            .map_err(|e| format!("Failed to list tables: {}", e))?;
+        
+        if table_names.contains(&table_name.to_string()) {
+            tracing::debug!("Dropping existing table: {}", table_name);
             conn.drop_table(table_name, &[])
                 .await
                 .map_err(|e| format!("Failed to drop existing table: {e}"))?;
@@ -197,29 +226,51 @@ impl ComponentIndex {
             .await
             .map_err(|e| format!("Failed to create FTS index: {e}"))?;
 
+        tracing::debug!("build_index_from_registries: Releasing WRITE lock");
         tracing::info!("Component FTS index built successfully");
         Ok(())
     }
 
     /// Search for components using Full-Text Search
+    /// This is a READ operation - no write lock needed, can run in parallel with other reads.
     pub async fn search(
         &self,
         table_name: &str,
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>, String> {
-        if !self.table_exists(table_name).await? {
+        tracing::debug!("search: Starting search for query '{}'", query);
+        let conn = common::get_connection(&self.db_path).await?;
+
+        // Check table exists
+        let table_names = conn
+            .table_names()
+            .execute()
+            .await
+            .map_err(|e| format!("Failed to list tables: {}", e))?;
+        
+        if !table_names.contains(&table_name.to_string()) {
             return Err("Index not built. Please ensure components are indexed.".to_string());
         }
 
-        let table = common::get_table(&self.db_path, table_name).await?;
+        // Open table
+        let table = conn.open_table(table_name)
+            .execute()
+            .await
+            .map_err(|e| format!("Failed to open table: {}", e))?;
 
-        // Execute FTS search
+        // Extract query terms for name matching (lowercase, split on whitespace)
+        let query_lower = query.to_lowercase();
+        let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
+
+        // Execute FTS search - fetch more results for better reranking
+        tracing::debug!("search: Executing FTS query");
+        let fts_limit = (limit * 3).max(30);
         let fts_query = FullTextSearchQuery::new(query.to_string());
         let mut fts_results = table
             .query()
             .full_text_search(fts_query)
-            .limit(limit)
+            .limit(fts_limit)
             .execute()
             .await
             .map_err(|e| format!("Failed to execute FTS search: {}", e))?;
@@ -252,15 +303,33 @@ impl ComponentIndex {
                 .ok_or("Failed to downcast registry column")?;
 
             for i in 0..batch.num_rows() {
-                // Simple rank-based scoring (higher rank = lower score)
-                // Boost default registry results
+                let name = name_array.value(i).to_string();
                 let registry = registry_array.value(i).to_string();
-                let registry_boost = if registry.is_empty() { 0.1 } else { 0.0 };
-                let score = (1.0 / (1.0 + rank as f32)) + registry_boost;
-                
+                let name_lower = name.to_lowercase();
+
+                // Base score from FTS rank (higher rank = lower base score)
+                let base_score = 1.0 / (1.0 + rank as f32);
+
+                // Registry boost: strongly prefer default (shadcn) components
+                // Empty registry = default shadcn/ui registry
+                let registry_boost = if registry.is_empty() { 0.5 } else { 0.0 };
+
+                // Name match boost: significant boost if component name matches a query term
+                let name_match_boost = if query_terms.iter().any(|term| *term == name_lower) {
+                    // Exact name match (e.g., query contains "button" and name is "button")
+                    2.0
+                } else if query_terms.iter().any(|term| name_lower.contains(term) || term.contains(&name_lower)) {
+                    // Partial name match
+                    0.3
+                } else {
+                    0.0
+                };
+
+                let score = base_score + registry_boost + name_match_boost;
+
                 results.push(SearchResult {
                     id: id_array.value(i).to_string(),
-                    name: name_array.value(i).to_string(),
+                    name,
                     registry,
                     score,
                 });
@@ -268,8 +337,11 @@ impl ComponentIndex {
             }
         }
 
-        // Re-sort by score after applying registry boost
+        // Re-sort by score after applying boosts
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Truncate to requested limit
+        results.truncate(limit);
 
         tracing::info!(
             "FTS search for '{}': {} results", 

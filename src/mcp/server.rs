@@ -16,6 +16,12 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::sync::{broadcast, Mutex, Notify};
 
+/// Parameters for SDK indexing, pre-computed synchronously to avoid Python GIL issues
+pub struct SdkIndexParams {
+    pub sdk_version: Option<String>,
+    pub sdk_doc_index: Arc<Mutex<Option<SDKDocsIndex>>>,
+}
+
 /// State for tracking index readiness
 #[derive(Clone)]
 pub struct IndexState {
@@ -48,9 +54,17 @@ pub struct AppContext {
     pub shutdown_tx: broadcast::Sender<()>,
 }
 
-/// Initialize registry indexes and search index in background
-/// This is called when the MCP server starts
-pub fn init_cache_and_index(ctx: &AppContext, mut shutdown_rx: broadcast::Receiver<()>) {
+/// Initialize all indexes in background (component index, then SDK docs index)
+/// 
+/// All database operations are done sequentially in a single task to avoid
+/// Lance's internal task conflicts when multiple connections access the database.
+/// 
+/// This is called when the MCP server starts.
+pub fn init_all_indexes(
+    ctx: &AppContext,
+    mut shutdown_rx: broadcast::Receiver<()>,
+    sdk_params: Option<SdkIndexParams>,
+) {
     let app_dir = ctx.app_dir.clone();
     let cache_state = ctx.cache_state.clone();
     let index_state = ctx.index_state.clone();
@@ -62,13 +76,16 @@ pub fn init_cache_and_index(ctx: &AppContext, mut shutdown_rx: broadcast::Receiv
             guard.is_running = true;
         }
 
+        // ============================================
+        // Phase 1: Component Index
+        // ============================================
         tracing::info!("Syncing registry indexes on MCP start");
 
         // Check for shutdown during sync
         let sync_result = tokio::select! {
             result = sync_registry_indexes(&app_dir, false) => Some(result),
             _ = shutdown_rx.recv() => {
-                tracing::info!("Shutdown signal received during registry sync, stopping component index build");
+                tracing::info!("Shutdown signal received during registry sync, stopping");
                 None
             }
         };
@@ -111,10 +128,105 @@ pub fn init_cache_and_index(ctx: &AppContext, mut shutdown_rx: broadcast::Receiv
             }
         }
 
-        // Mark indexing as complete
+        // Mark component indexing as complete
         index_state.component_indexed.store(true, Ordering::SeqCst);
         index_state.component_ready.notify_waiters();
         tracing::debug!("Component index ready");
+
+        // ============================================
+        // Phase 2: SDK Docs Index (after component index)
+        // ============================================
+        if let Some(params) = sdk_params {
+            tracing::info!("Initializing Databricks SDK documentation index");
+            
+            let version = match params.sdk_version {
+                Some(v) => {
+                    tracing::debug!("Using pre-computed SDK version: {}", v);
+                    v
+                }
+                None => {
+                    tracing::warn!("Databricks SDK not installed. The docs tool will not be available.");
+                    index_state.sdk_indexed.store(true, Ordering::SeqCst);
+                    index_state.sdk_ready.notify_waiters();
+                    
+                    // Mark as done
+                    let mut guard = cache_state.lock().await;
+                    guard.is_running = false;
+                    return;
+                }
+            };
+            
+            // Create SDK docs index
+            let index_result = tokio::select! {
+                result = async { SDKDocsIndex::new() } => Some(result),
+                _ = shutdown_rx.recv() => {
+                    tracing::info!("Shutdown signal received during SDK doc index initialization");
+                    None
+                }
+            };
+
+            let mut index = match index_result {
+                Some(Ok(idx)) => {
+                    tracing::debug!("SDKDocsIndex created successfully");
+                    idx
+                }
+                Some(Err(e)) => {
+                    tracing::warn!("Failed to initialize SDK doc index: {}. The docs tool will not be available.", e);
+                    index_state.sdk_indexed.store(true, Ordering::SeqCst);
+                    index_state.sdk_ready.notify_waiters();
+                    
+                    let mut guard = cache_state.lock().await;
+                    guard.is_running = false;
+                    return;
+                }
+                None => {
+                    index_state.sdk_indexed.store(true, Ordering::SeqCst);
+                    index_state.sdk_ready.notify_waiters();
+                    
+                    let mut guard = cache_state.lock().await;
+                    guard.is_running = false;
+                    return;
+                }
+            };
+
+            // Bootstrap the index
+            tracing::info!("Bootstrapping SDK docs (this may download SDK if not cached)");
+            let bootstrap_start = std::time::Instant::now();
+            let bootstrap_result = tokio::select! {
+                result = index.bootstrap_with_version(&SDKSource::DatabricksSdkPython, &version) => Some(result),
+                _ = shutdown_rx.recv() => {
+                    tracing::info!("Shutdown signal received during SDK doc bootstrapping");
+                    None
+                }
+            };
+            tracing::debug!("SDK bootstrap completed in {:?}", bootstrap_start.elapsed());
+
+            match bootstrap_result {
+                Some(Ok(true)) => {
+                    tracing::info!("SDK docs indexed successfully");
+                    *params.sdk_doc_index.lock().await = Some(index);
+                }
+                Some(Ok(false)) => {
+                    tracing::info!("SDK docs already indexed");
+                    *params.sdk_doc_index.lock().await = Some(index);
+                }
+                Some(Err(e)) => {
+                    tracing::warn!("Failed to bootstrap SDK docs: {}. The docs tool will not be available.", e);
+                }
+                None => {
+                    tracing::debug!("Shutdown during SDK bootstrap");
+                }
+            }
+
+            // Mark SDK indexing as complete
+            index_state.sdk_indexed.store(true, Ordering::SeqCst);
+            index_state.sdk_ready.notify_waiters();
+            tracing::debug!("SDK doc index ready");
+        } else {
+            // No SDK params, mark as ready immediately
+            index_state.sdk_indexed.store(true, Ordering::SeqCst);
+            index_state.sdk_ready.notify_waiters();
+        }
 
         // Mark as done
         {
@@ -158,37 +270,46 @@ async fn ensure_search_index() -> Result<(), String> {
     }
 }
 
-/// Wait for an index to be ready with timeout
+/// Wait for an index to be ready with timeout (15 seconds)
 async fn wait_for_index_ready(
     ready_notify: &Notify,
     is_ready: &AtomicBool,
-    timeout_secs: u64,
     index_name: &str,
 ) -> Result<(), String> {
+    const TIMEOUT_SECS: u64 = 15;
+    
     // Check if already ready
     if is_ready.load(Ordering::SeqCst) {
         return Ok(());
     }
 
+    tracing::debug!("Waiting up to {}s for {} index to be ready", TIMEOUT_SECS, index_name);
+
     // Wait with timeout
     match tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
+        Duration::from_secs(TIMEOUT_SECS),
         ready_notify.notified(),
     )
     .await
     {
-        Ok(_) => Ok(()),
-        Err(_) => Err(format!(
-            "{} index is still building after {}s timeout. Please try again.",
-            index_name, timeout_secs
-        )),
+        Ok(_) => {
+            tracing::debug!("{} index is now ready", index_name);
+            Ok(())
+        }
+        Err(_) => {
+            tracing::warn!("{} index not ready after {}s timeout", index_name, TIMEOUT_SECS);
+            Err(format!(
+                "{} index is not yet ready, please rerun the query in 5 seconds",
+                index_name
+            ))
+        }
     }
 }
 
-pub fn build_server(ctx: AppContext) -> McpServer<AppContext> {
-    // Initialize cache and index in background
+pub fn build_server(ctx: AppContext, sdk_params: Option<SdkIndexParams>) -> McpServer<AppContext> {
+    // Initialize all indexes in background (component + SDK docs, sequentially)
     let shutdown_rx = ctx.shutdown_tx.subscribe();
-    init_cache_and_index(&ctx, shutdown_rx);
+    init_all_indexes(&ctx, shutdown_rx, sdk_params);
 
     McpServer::new(ctx)
         .resource(
@@ -793,11 +914,10 @@ async fn search_registry_components_tool(
     use crate::common::read_project_metadata;
     use crate::cli::components::UiConfig;
 
-    // Wait for component index to be ready (30 second timeout)
+    // Wait for component index to be ready (15 second timeout)
     if let Err(e) = wait_for_index_ready(
         &ctx.index_state.component_ready,
         &ctx.index_state.component_indexed,
-        30,
         "Component",
     )
     .await
@@ -912,11 +1032,10 @@ async fn add_component_tool(ctx: Arc<AppContext>, args: AddComponentArgs) -> Too
 }
 
 async fn docs_tool(ctx: Arc<AppContext>, args: DocsArgs) -> ToolResult {
-    // Wait for SDK index to be ready (30 second timeout)
+    // Wait for SDK index to be ready (15 second timeout)
     if let Err(e) = wait_for_index_ready(
         &ctx.index_state.sdk_ready,
         &ctx.index_state.sdk_indexed,
-        30,
         "SDK documentation",
     )
     .await
