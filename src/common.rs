@@ -16,11 +16,22 @@ pub const OPENAPI_SCHEMA_FILENAME: &str = "openapi.json";
 pub struct ProjectMetadata {
     pub app_name: String,
     pub app_slug: String,
-    pub app_module: String,
+    pub app_entrypoint: String,
     pub api_prefix: String,
     pub metadata_path: PathBuf,
     pub ui_root: PathBuf,
     pub ui_registries: HashMap<String, String>,
+}
+
+impl ProjectMetadata {
+    /// Returns the dist directory path (always __dist__ in the same folder as _metadata.py)
+    pub fn dist_dir(&self, project_root: &Path) -> PathBuf {
+        let metadata_abs = project_root.join(&self.metadata_path);
+        metadata_abs
+            .parent()
+            .unwrap_or(project_root)
+            .join("__dist__")
+    }
 }
 
 pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, String> {
@@ -42,7 +53,7 @@ pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, Str
 
     let app_name = get_metadata_string(metadata, "app-name")?;
     let app_slug = get_metadata_string(metadata, "app-slug")?;
-    let app_module = get_metadata_string(metadata, "app-module")?;
+    let app_entrypoint = get_metadata_string(metadata, "app-entrypoint")?;
     let api_prefix = metadata
         .get("api-prefix")
         .and_then(|val| val.as_str())
@@ -75,7 +86,7 @@ pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, Str
     Ok(ProjectMetadata {
         app_name,
         app_slug,
-        app_module,
+        app_entrypoint,
         api_prefix,
         metadata_path: PathBuf::from(metadata_path),
         ui_root: PathBuf::from(ui_root),
@@ -88,21 +99,47 @@ pub fn write_metadata_file(
     metadata: &ProjectMetadata,
 ) -> Result<(), String> {
     let target_path = project_root.join(&metadata.metadata_path);
+    tracing::debug!(
+        "Writing metadata file to {}",
+        target_path.display()
+    );
+
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| format!("Failed to create metadata directory: {err}"))?;
     }
 
     let contents = [
+        "from pathlib import Path".to_string(),
+        String::new(),
         format!("app_name = \"{}\"", metadata.app_name),
-        format!("app_module = \"{}\"", metadata.app_module),
+        format!("app_entrypoint = \"{}\"", metadata.app_entrypoint),
         format!("app_slug = \"{}\"", metadata.app_slug),
         format!("api_prefix = \"{}\"", metadata.api_prefix),
+        "dist_dir = Path(__file__).parent / \"__dist__\"".to_string(),
     ]
     .join("\n");
 
     fs::write(&target_path, contents)
-        .map_err(|err| format!("Failed to write metadata file: {err}"))
+        .map_err(|err| format!("Failed to write metadata file: {err}"))?;
+
+    tracing::debug!("Metadata file written successfully");
+
+    // Create __dist__ directory and .gitignore
+    let dist_dir = metadata.dist_dir(project_root);
+    tracing::debug!(
+        "Creating dist directory at {}",
+        dist_dir.display()
+    );
+    ensure_dir(&dist_dir)?;
+
+    let gitignore_path = dist_dir.join(".gitignore");
+    fs::write(&gitignore_path, "*\n")
+        .map_err(|err| format!("Failed to write __dist__ .gitignore: {err}"))?;
+
+    tracing::debug!("Dist directory and .gitignore created successfully");
+
+    Ok(())
 }
 
 pub fn ensure_dir(path: &Path) -> Result<(), String> {

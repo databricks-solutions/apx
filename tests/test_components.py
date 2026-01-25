@@ -26,7 +26,7 @@ dependencies = []
 [tool.apx.metadata]
 app-name = "Test App"
 app-slug = "test_app"
-app-module = "test_app.backend.app:app"
+app-entrypoint = "test_app.backend.app:app"
 api-prefix = "/api"
 metadata-path = "src/test_app/_metadata.py"
 

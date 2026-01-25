@@ -2,6 +2,7 @@ use clap::Args;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
+use tracing::debug;
 
 use crate::bun_binary_path;
 use crate::cli::run_cli_async;
@@ -43,6 +44,12 @@ async fn run_inner(args: BuildArgs) -> Result<(), String> {
 
     println!("Building project in {}", app_path.display());
 
+    // Generate metadata file FIRST (this also creates __dist__ directory with .gitignore)
+    debug!("Generating metadata file as first build step");
+    let metadata = read_project_metadata(&app_path)?;
+    write_metadata_file(&app_path, &metadata)?;
+
+    // Set up build directory
     if build_dir.exists() {
         fs::remove_dir_all(&build_dir)
             .map_err(|err| format!("Failed to remove build directory: {err}"))?;
@@ -50,17 +57,6 @@ async fn run_inner(args: BuildArgs) -> Result<(), String> {
     ensure_dir(&build_dir)?;
     fs::write(build_dir.join(".gitignore"), "*\n")
         .map_err(|err| format!("Failed to write build .gitignore: {err}"))?;
-
-    let metadata = read_project_metadata(&app_path)?;
-    write_metadata_file(&app_path, &metadata)?;
-
-    let dist_dir = app_path
-        .join("src")
-        .join(&metadata.app_slug)
-        .join("__dist__");
-    ensure_dir(&dist_dir)?;
-    fs::write(dist_dir.join(".gitignore"), "*\n")
-        .map_err(|err| format!("Failed to write __dist__ .gitignore: {err}"))?;
 
     generate_openapi(&app_path, false)?;
 

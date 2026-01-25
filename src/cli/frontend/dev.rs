@@ -1,9 +1,11 @@
 use clap::Args;
 use std::path::{Path, PathBuf};
 use tokio::process::Child;
+use tracing::debug;
 
 use crate::bun_binary_path;
 use crate::cli::run_cli_async;
+use crate::common::{read_project_metadata, write_metadata_file};
 
 use super::common::prepare_frontend_args;
 
@@ -70,6 +72,11 @@ async fn run_inner(args: DevArgs) -> Result<(), String> {
 /// Run frontend in dev mode
 /// Returns the spawned child process for the caller to manage
 pub async fn run_dev(app_dir: &Path) -> Result<Child, String> {
+    // Generate metadata file FIRST
+    debug!("Generating metadata file before starting frontend dev server");
+    let metadata = read_project_metadata(app_dir)?;
+    write_metadata_file(app_dir, &metadata)?;
+
     let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "dev")?;
     let bun_path = bun_binary_path()?;
 

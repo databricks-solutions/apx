@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::common::{ensure_dir, read_project_metadata};
+use crate::common::read_project_metadata;
 use crate::interop::frontend_entrypoint_path;
 
 /// Prepare arguments for running the frontend entrypoint
@@ -14,14 +14,10 @@ pub fn prepare_frontend_args(
 
     // 2. Resolve all paths to absolute
     let ui_root_abs = app_dir.join(&metadata.ui_root);
-    let out_dir_abs = app_dir
-        .join("src")
-        .join(&metadata.app_slug)
-        .join("__dist__");
+    let out_dir_abs = metadata.dist_dir(app_dir);
     let public_dir_abs = ui_root_abs.join("public");
 
-    // Ensure __dist__ directory exists
-    ensure_dir(&out_dir_abs)?;
+    // Note: __dist__ directory is created by write_metadata_file()
 
     // 3. Get entrypoint.ts path from Python package (same as bun binary)
     let entrypoint = frontend_entrypoint_path()?;

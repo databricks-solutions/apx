@@ -61,7 +61,7 @@ pub struct ProcessManager {
     host: String,
     dev_token: String,
     app_dir: PathBuf,
-    app_module: String,
+    app_entrypoint: String,
     dotenv_vars: Arc<Mutex<HashMap<String, String>>>,
 }
 
@@ -79,7 +79,7 @@ impl ProcessManager {
 
         let dotenv = DotenvFile::read(&app_dir.join(".env"))?;
         let dotenv_vars = Arc::new(Mutex::new(dotenv.get_vars()));
-        let app_module = metadata.app_module.clone();
+        let app_entrypoint = metadata.app_entrypoint.clone();
 
         let dev_token = Self::generate_dev_token();
         let manager = Self {
@@ -94,7 +94,7 @@ impl ProcessManager {
             host: host.to_string(),
             dev_token,
             app_dir: app_dir.to_path_buf(),
-            app_module,
+            app_entrypoint,
             dotenv_vars,
         };
 
@@ -110,7 +110,7 @@ impl ProcessManager {
             "Spawning uvicorn process"
         );
         manager
-            .spawn_uvicorn(app_dir, metadata.app_module)
+            .spawn_uvicorn(app_dir, metadata.app_entrypoint)
             .await?;
 
         debug!(
@@ -186,7 +186,7 @@ impl ProcessManager {
             let mut vars = self.dotenv_vars.lock().await;
             *vars = new_vars;
         }
-        self.spawn_uvicorn(&self.app_dir, self.app_module.clone())
+        self.spawn_uvicorn(&self.app_dir, self.app_entrypoint.clone())
             .await
     }
 
@@ -208,7 +208,7 @@ impl ProcessManager {
     async fn spawn_uvicorn(
         &self,
         app_dir: &Path,
-        app_module: String,
+        app_entrypoint: String,
     ) -> Result<(), String> {
         let child = self.spawn_process(
             app_dir,
@@ -216,7 +216,7 @@ impl ProcessManager {
             vec![
                 "run".to_string(),
                 "uvicorn".to_string(),
-                app_module,
+                app_entrypoint,
                 "--host".to_string(),
                 self.host.clone(),
                 "--port".to_string(),
@@ -297,7 +297,7 @@ impl ProcessManager {
         let dotenv_vars = Arc::clone(&self.dotenv_vars);
         let backend_child = Arc::clone(&self.backend_child);
         let log_queue = Arc::clone(&self.log_queue);
-        let app_module = self.app_module.clone();
+        let app_entrypoint = self.app_entrypoint.clone();
         let host = self.host.clone();
         let backend_port = self.backend_port;
         let frontend_port = self.frontend_port;
@@ -400,7 +400,7 @@ impl ProcessManager {
                     // Restart uvicorn
                     if let Err(e) = Self::spawn_uvicorn_static(
                         &app_dir,
-                        &app_module,
+                        &app_entrypoint,
                         &host,
                         backend_port,
                         frontend_port,
@@ -480,7 +480,7 @@ impl ProcessManager {
     /// Static version of spawn_uvicorn for use in async tasks without self
     async fn spawn_uvicorn_static(
         app_dir: &Path,
-        app_module: &str,
+        app_entrypoint: &str,
         host: &str,
         backend_port: u16,
         frontend_port: u16,
@@ -495,7 +495,7 @@ impl ProcessManager {
         cmd.args([
             "run",
             "uvicorn",
-            app_module,
+            app_entrypoint,
             "--host",
             host,
             "--port",

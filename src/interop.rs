@@ -142,7 +142,7 @@ pub(crate) fn get_forwarded_user_header() -> Result<String, String> {
 
 pub(crate) fn generate_openapi_spec(
     project_root: &Path,
-    app_module: &str,
+    app_entrypoint: &str,
     app_slug: &str,
 ) -> Result<(String, String), String> {
     let project_root_str = project_root.to_string_lossy().to_string();
@@ -152,7 +152,7 @@ pub(crate) fn generate_openapi_spec(
     debug!("generate_openapi_spec called:");
     debug!("  project_root: {}", project_root_str);
     debug!("  src_root: {}", src_root_str);
-    debug!("  app_module: {}", app_module);
+    debug!("  app_entrypoint: {}", app_entrypoint);
     debug!("  app_slug: {}", app_slug);
     debug!("  src_root exists: {}", src_root.exists());
 
@@ -182,9 +182,9 @@ pub(crate) fn generate_openapi_spec(
         
         debug!("sys.path after modifications: {:?}", path.extract::<Vec<String>>());
 
-        let (module_path, attr_name) = app_module
+        let (module_path, attr_name) = app_entrypoint
             .split_once(':')
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Invalid app-module format"))?;
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Invalid app-entrypoint format"))?;
 
         debug!("Attempting to import module: {} (attr: {})", module_path, attr_name);
         

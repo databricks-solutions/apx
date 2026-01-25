@@ -21,10 +21,10 @@ const ORVAL_CONFIG_FILENAME: &str = "orval.config.ts";
 pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String> {
     let metadata = read_project_metadata(project_root)?;
     let app_slug = metadata.app_slug;
-    let app_module = metadata.app_module;
+    let app_entrypoint = metadata.app_entrypoint;
 
     let (spec_json, app_slug) =
-        generate_openapi_spec(project_root, &app_module, &app_slug)?;
+        generate_openapi_spec(project_root, &app_entrypoint, &app_slug)?;
 
     let apx_dir = project_root.join(APX_DIR_NAME);
     let schema_path = apx_dir.join(OPENAPI_SCHEMA_FILENAME);
