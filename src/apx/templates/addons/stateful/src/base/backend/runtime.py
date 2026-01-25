@@ -1,16 +1,17 @@
 from functools import cached_property
-from databricks.sdk.errors import NotFound
-from sqlalchemy import Engine
-from .config import conf, AppConfig
+
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import NotFound
+from sqlalchemy import Engine, create_engine, event
 from sqlmodel import SQLModel, Session, text
-from sqlalchemy import create_engine, event
+
+from .config import AppConfig
 from .logger import logger
 
 
 class Runtime:
-    def __init__(self) -> None:
-        self.config: AppConfig = conf
+    def __init__(self, config: AppConfig) -> None:
+        self.config = config
 
     @cached_property
     def ws(self) -> WorkspaceClient:
@@ -81,6 +82,3 @@ class Runtime:
         logger.info("Initializing database models")
         SQLModel.metadata.create_all(self.engine)
         logger.info("Database models initialized successfully")
-
-
-rt = Runtime()

@@ -82,9 +82,9 @@ from .models import VersionOut
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.iam import User as UserOut
 from .dependencies import get_obo_ws
-from .config import conf
+from .._metadata import api_prefix
 
-api = APIRouter(prefix=conf.api_prefix)
+api = APIRouter(prefix=api_prefix)
 
 
 @api.get("/version", response_model=VersionOut, operation_id="version")

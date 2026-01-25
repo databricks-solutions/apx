@@ -1,12 +1,14 @@
 from typing import Annotated
-from fastapi import APIRouter, Depends
-from .models import VersionOut
+
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.iam import User as UserOut
-from .dependencies import get_obo_ws
-from .config import conf
+from fastapi import APIRouter, Depends
 
-api = APIRouter(prefix=conf.api_prefix)
+from .._metadata import api_prefix
+from .dependencies import get_obo_ws
+from .models import VersionOut
+
+api = APIRouter(prefix=api_prefix)
 
 
 @api.get("/version", response_model=VersionOut, operation_id="version")

@@ -1,10 +1,12 @@
 from importlib import resources
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
-from pydantic import Field
-from dotenv import load_dotenv
-from .._metadata import app_name, app_slug, api_prefix
 from typing import ClassVar
+
+from dotenv import load_dotenv
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .._metadata import app_name, app_slug
 
 # project root is the parent of the src folder
 project_root = Path(__file__).parent.parent.parent.parent
@@ -19,11 +21,7 @@ class AppConfig(BaseSettings):
         env_file=env_file, env_prefix=f"{app_slug.upper()}_", extra="ignore"
     )
     app_name: str = Field(default=app_name)
-    api_prefix: str = Field(default=api_prefix)
 
     @property
     def static_assets_path(self) -> Path:
         return Path(str(resources.files(app_slug))).joinpath("__dist__")
-
-
-conf = AppConfig()

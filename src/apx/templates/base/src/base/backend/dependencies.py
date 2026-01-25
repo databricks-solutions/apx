@@ -1,6 +1,27 @@
-from databricks.sdk import WorkspaceClient
-from fastapi import Header
+from functools import lru_cache
 from typing import Annotated
+
+from databricks.sdk import WorkspaceClient
+from fastapi import Depends, Header
+
+from .config import AppConfig
+from .runtime import Runtime
+
+
+@lru_cache
+def get_config() -> AppConfig:
+    return AppConfig()
+
+
+ConfigDep = Annotated[AppConfig, Depends(get_config)]
+
+
+@lru_cache
+def get_runtime(config: AppConfig = Depends(get_config)) -> Runtime:
+    return Runtime(config)
+
+
+RuntimeDep = Annotated[Runtime, Depends(get_runtime)]
 
 
 def get_obo_ws(
