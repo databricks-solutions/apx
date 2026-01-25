@@ -11,9 +11,6 @@ lint:
 build *args:
     uvx maturin build {{args}}
 
-develop *args:
-    uvx maturin develop {{args}}
-
 types:
     uv run mypy .
     cargo check
@@ -35,7 +32,7 @@ pm message:
     git push
 
 
-gen folder profile *args: develop
+gen folder profile *args: sync
     rm -rf /tmp/{{folder}}
     RUST_LOG=DEBUG APX_DEV_PATH="{{justfile_directory()}}" uv run --no-sync apx init /tmp/{{folder}} -p {{profile}}  {{args}}
     cd /tmp/{{folder}} && uv run apx dev check
