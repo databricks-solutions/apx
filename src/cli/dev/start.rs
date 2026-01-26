@@ -13,8 +13,8 @@ use crate::common::{ensure_dir, spinner, format_elapsed_ms, run_preflight_checks
 use crate::dev::client::{health, logs, stop_with_logs, wait_for_healthy, HealthCheckConfig};
 use tracing::debug;
 use crate::dev::common::{
-    find_available_port, lock_path, read_lock, remove_lock, write_lock,
-    DevLock, BIND_HOST,
+    lock_path, read_lock, remove_lock, reserve_port_in_range, write_lock, DevLock, BIND_HOST,
+    DEV_PORT_END, DEV_PORT_START,
 };
 use crate::dev::process::ProcessManager;
 
@@ -283,5 +283,10 @@ async fn resolve_port(preferred_port: Option<u16>) -> Result<u16, String> {
         }
         println!("⚠️  Port {port} still in use, finding alternative...");
     }
-    find_available_port(BIND_HOST)
+    // Use randomized port selection to reduce collision probability
+    // when multiple dev servers start simultaneously
+    let reserved = reserve_port_in_range(BIND_HOST, DEV_PORT_START, DEV_PORT_END)?;
+    // Return just the port number - the subprocess will bind to it
+    // The reserved listener is dropped here, but the subprocess starts immediately after
+    Ok(reserved.port)
 }

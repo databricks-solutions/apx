@@ -23,7 +23,7 @@ sync:
 check: lint types
 
 test *args:
-    uv run pytest tests/ -s -v {{args}} -n 4
+    uv run pytest tests/ -s -v -n 4 --html=.reports/report.html {{args}} 
 
 # add-commit-push with a message
 pm message:

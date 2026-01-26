@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -58,16 +57,24 @@ struct StopQuery {
     persist_logs: Option<bool>,
 }
 
+/// Run the dev server with a pre-bound listener.
+/// The listener is passed in to avoid TOCTOU race conditions with port allocation.
 pub async fn run_server(
     app_dir: PathBuf,
-    host: String,
-    port: u16,
+    listener: tokio::net::TcpListener,
     backend_port: u16,
     frontend_port: u16,
     db_port: u16,
 ) -> Result<(), String> {
     let apx_log_queue = apx_log_queue();
     clear_apx_log_queue(&apx_log_queue);
+
+    // Extract port and host from the pre-bound listener
+    let local_addr = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to get listener address: {e}"))?;
+    let port = local_addr.port();
+    let host = local_addr.ip().to_string();
 
     debug!(
         app_dir = %app_dir.display(),
@@ -143,13 +150,7 @@ pub async fn run_server(
         .merge(api_utils_router)
         .merge(ui_router);
 
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .map_err(|err| format!("Invalid bind address: {err}"))?;
-
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|err| format!("Failed to bind server: {err}"))?;
+    // Listener is already bound, use it directly
 
     // Clone what we need for the shutdown handler
     let mut shutdown_rx = shutdown_tx.subscribe();
