@@ -6,9 +6,7 @@ use tracing::debug;
 
 use crate::bun_binary_path;
 use crate::cli::run_cli_async;
-use crate::common::{
-    bun_install, ensure_dir, read_project_metadata, write_metadata_file,
-};
+use crate::common::{ensure_dir, run_preflight_checks};
 use crate::generate_openapi;
 
 const DEFAULT_BUILD_DIR: &str = ".build";
@@ -44,10 +42,10 @@ async fn run_inner(args: BuildArgs) -> Result<(), String> {
 
     println!("Building project in {}", app_path.display());
 
-    // Generate metadata file FIRST (this also creates __dist__ directory with .gitignore)
-    debug!("Generating metadata file as first build step");
-    let metadata = read_project_metadata(&app_path)?;
-    write_metadata_file(&app_path, &metadata)?;
+    // Run preflight checks: generate _metadata.py, __dist__, uv sync, version file, bun install if needed
+    debug!("Running preflight checks before build");
+    let bun_path = bun_binary_path()?;
+    let _preflight = run_preflight_checks(&app_path, &bun_path).await?;
 
     // Set up build directory
     if build_dir.exists() {
@@ -63,12 +61,6 @@ async fn run_inner(args: BuildArgs) -> Result<(), String> {
     if args.skip_ui_build {
         println!("Skipping UI build");
     } else {
-        // before the UI build, check if the node_modules directory exists, and if it doesn't, run `bun install`
-        let node_modules_dir = app_path.join("node_modules");
-        if !node_modules_dir.exists() {
-            let bun_path = bun_binary_path()?;
-            bun_install(app_path.as_path(), bun_path.as_path()).await?;
-        }
         build_ui(&app_path).await?;
     }
 

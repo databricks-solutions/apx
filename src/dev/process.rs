@@ -74,8 +74,10 @@ impl ProcessManager {
         frontend_port: u16,
         db_port: u16,
     ) -> Result<Self, String> {
-        let metadata = read_project_metadata(app_dir)?;
         let bun_path = Self::ensure_bun_path()?;
+        
+        // Note: Preflight checks (metadata, uv sync, bun install) are done client-side in start.rs
+        let metadata = read_project_metadata(app_dir)?;
 
         let dotenv = DotenvFile::read(&app_dir.join(".env"))?;
         let dotenv_vars = Arc::new(Mutex::new(dotenv.get_vars()));

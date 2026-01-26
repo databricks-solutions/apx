@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::bun_binary_path;
 use crate::cli::dev::logs::stream_logs;
 use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
-use crate::common::{ensure_dir, spinner, format_elapsed_ms};
+use crate::common::{ensure_dir, spinner, format_elapsed_ms, run_preflight_checks};
 use crate::dev::client::{health, logs, wait_for_healthy, HealthCheckConfig};
 use crate::dev::common::{
     find_available_port, lock_path, read_lock, remove_lock, write_lock,
@@ -128,6 +129,37 @@ fn read_startup_log(path: &Path) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// Run preflight checks and display progress.
+async fn run_preflight(app_dir: &Path) -> Result<(), String> {
+    println!("🛫 Preflight check started...");
+    let preflight_start = Instant::now();
+    
+    let bun_path = bun_binary_path()?;
+    let preflight_spinner = spinner("  Running preflight checks...");
+    
+    let result = run_preflight_checks(app_dir, &bun_path).await;
+    preflight_spinner.finish_and_clear();
+    
+    match result {
+        Ok(preflight) => {
+            println!("  ✓ verified project layout ({}ms)", preflight.layout_ms);
+            println!("  ✓ uv sync ({}ms)", preflight.uv_sync_ms);
+            println!("  ✓ version file ({}ms)", preflight.version_ms);
+            if let Some(bun_ms) = preflight.bun_install_ms {
+                println!("  ✓ bun install ({}ms)", bun_ms);
+            } else {
+                println!("  ✓ node_modules (cached)");
+            }
+            println!("✅ Ready for takeoff! ({})\n", format_elapsed_ms(preflight_start));
+            Ok(())
+        }
+        Err(e) => {
+            println!("❌ Preflight check failed\n");
+            Err(e)
+        }
+    }
+}
+
 /// Spawn a new dev server subprocess (does not check for existing server).
 pub(crate) async fn spawn_server(
     app_dir: &Path,
@@ -136,6 +168,10 @@ pub(crate) async fn spawn_server(
 ) -> Result<u16, String> {
     let start_time = Instant::now();
     prepare_app_dir(app_dir)?;
+    
+    // Run preflight checks (generates _metadata.py, _version.py, installs deps)
+    run_preflight(app_dir).await?;
+    
     let lock_path = lock_path(app_dir);
 
     println!("🚀 Starting dev server...");
