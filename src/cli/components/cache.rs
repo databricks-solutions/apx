@@ -1,10 +1,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
+use tracing::warn;
 use super::models::{RegistryItem, RegistryCatalogEntry, RegistryConfig, UiConfig};
 use crate::common::read_project_metadata;
 
@@ -13,6 +14,45 @@ const CACHE_VERSION: u8 = 2;
 
 /// Cache TTL in hours
 const CACHE_TTL_HOURS: i64 = 1;
+
+/// Retry configuration for HTTP requests
+const MAX_RETRIES: u32 = 5;
+const INITIAL_DELAY_MS: u64 = 125;
+
+/// Execute an async operation with exponential backoff retry.
+///
+/// Retries up to 5 times with delays: 125ms, 250ms, 500ms, 1000ms, 2000ms (~4 seconds total).
+async fn fetch_with_retry<T, F, Fut>(
+    operation: F,
+    operation_name: &str,
+) -> Result<T, String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let mut last_error = String::new();
+    for attempt in 0..MAX_RETRIES {
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_error = e;
+                if attempt < MAX_RETRIES - 1 {
+                    let delay = INITIAL_DELAY_MS * (1 << attempt);
+                    warn!(
+                        attempt = attempt + 1,
+                        max_retries = MAX_RETRIES,
+                        delay_ms = delay,
+                        operation = operation_name,
+                        error = %last_error,
+                        "HTTP request failed, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+            }
+        }
+    }
+    Err(format!("{}: {} (after {} retries)", operation_name, last_error, MAX_RETRIES))
+}
 
 /// Cached component item
 #[derive(Debug, Serialize, Deserialize)]
@@ -313,13 +353,22 @@ async fn fetch_and_cache_registry_index(
 
     tracing::debug!("Fetching registry index from: {}", url);
 
-    let response = client.get(&url).send().await
-        .map_err(|e| format!("Failed to fetch registry index {}: {}", url, e))?
-        .error_for_status()
-        .map_err(|e| format!("Registry index {} returned error: {}", url, e))?;
-
-    let json_value: serde_json::Value = response.json().await
-        .map_err(|e| format!("Invalid JSON from registry index {}: {}", url, e))?;
+    // HTTP fetch with retry
+    let json_value: serde_json::Value = fetch_with_retry(
+        || {
+            let url = url.clone();
+            async move {
+                client.get(&url).send().await
+                    .map_err(|e| format!("Failed to fetch registry index {}: {}", url, e))?
+                    .error_for_status()
+                    .map_err(|e| format!("Registry index {} returned error: {}", url, e))?
+                    .json::<serde_json::Value>().await
+                    .map_err(|e| format!("Invalid JSON from registry index {}: {}", url, e))
+            }
+        },
+        &format!("fetch registry index from {}", url),
+    )
+    .await?;
 
     // Parse items - can be at root level as array or in "items" field
     let items_array = json_value.get("items")

@@ -17,7 +17,8 @@ pub use cache::{
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use tracing::debug;
+use std::time::Duration;
+use tracing::{debug, warn};
 use url::Url;
 
 use crate::cli::components::css_updater::{CssMutation, CssUpdater};
@@ -34,6 +35,45 @@ use crate::cli::components::models::TailwindConfig;
 pub const SHADCN_REGISTRY_ITEM_TEMPLATE: &str =
     "https://ui.shadcn.com/r/styles/{style}/{name}.json";
 
+/// Retry configuration for HTTP requests
+const MAX_RETRIES: u32 = 5;
+const INITIAL_DELAY_MS: u64 = 125;
+
+/// Execute an async operation with exponential backoff retry.
+///
+/// Retries up to 5 times with delays: 125ms, 250ms, 500ms, 1000ms, 2000ms (~4 seconds total).
+async fn fetch_with_retry<T, F, Fut>(
+    operation: F,
+    operation_name: &str,
+) -> Result<T, String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let mut last_error = String::new();
+    for attempt in 0..MAX_RETRIES {
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_error = e;
+                if attempt < MAX_RETRIES - 1 {
+                    let delay = INITIAL_DELAY_MS * (1 << attempt);
+                    warn!(
+                        attempt = attempt + 1,
+                        max_retries = MAX_RETRIES,
+                        delay_ms = delay,
+                        operation = operation_name,
+                        error = %last_error,
+                        "HTTP request failed, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+            }
+        }
+    }
+    Err(format!("{}: {} (after {} retries)", operation_name, last_error, MAX_RETRIES))
+}
+
 pub async fn fetch_registry_catalog_impl(
     client: &reqwest::Client,
 ) -> Result<Vec<RegistryCatalogEntry>, String> {
@@ -42,18 +82,24 @@ pub async fn fetch_registry_catalog_impl(
         return Ok(catalog);
     }
 
-    // Direct HTTP fetch (original implementation)
+    // HTTP fetch with retry
     let url = "https://ui.shadcn.com/r/registries.json";
-    let catalog = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch registry catalog: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Registry catalog returned error: {e}"))?
-        .json::<Vec<RegistryCatalogEntry>>()
-        .await
-        .map_err(|e| format!("Invalid registry catalog JSON: {e}"))?;
+    let catalog = fetch_with_retry(
+        || async {
+            client
+                .get(url)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to fetch registry catalog: {e}"))?
+                .error_for_status()
+                .map_err(|e| format!("Registry catalog returned error: {e}"))?
+                .json::<Vec<RegistryCatalogEntry>>()
+                .await
+                .map_err(|e| format!("Invalid registry catalog JSON: {e}"))
+        },
+        "fetch registry catalog",
+    )
+    .await?;
 
     // Save to cache (non-fatal on error)
     let _ = cache::save_cached_registry_catalog(&catalog);
@@ -272,21 +318,33 @@ pub(crate) async fn fetch_http_component(
     client: &reqwest::Client,
     req: &ResolvedRequest,
 ) -> Result<(RegistryItem, Vec<String>), String> {
-    let mut rb = client.get(req.url.clone());
+    let url = req.url.clone();
+    let headers = req.headers.clone();
+    let url_str = url.to_string();
 
-    for (k, v) in &req.headers {
-        rb = rb.header(k, v);
-    }
-
-    let value = rb
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch component: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Registry returned error: {e}"))?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| format!("Invalid component spec: {e}"))?;
+    // HTTP fetch with retry
+    let value = fetch_with_retry(
+        || {
+            let url = url.clone();
+            let headers = headers.clone();
+            async move {
+                let mut rb = client.get(url);
+                for (k, v) in &headers {
+                    rb = rb.header(k, v);
+                }
+                rb.send()
+                    .await
+                    .map_err(|e| format!("Failed to fetch component: {e}"))?
+                    .error_for_status()
+                    .map_err(|e| format!("Registry returned error: {e}"))?
+                    .json::<serde_json::Value>()
+                    .await
+                    .map_err(|e| format!("Invalid component spec: {e}"))
+            }
+        },
+        &format!("fetch component from {}", url_str),
+    )
+    .await?;
 
     let warnings = detect_forbidden_fields(&value);
 
