@@ -18,7 +18,10 @@ ConfigDep = Annotated[AppConfig, Depends(get_config)]
 
 
 @lru_cache
-def get_runtime(config: AppConfig = Depends(get_config)) -> Runtime:
+def get_runtime(config: AppConfig | None = None) -> Runtime:
+    # Handle direct calls outside of FastAPI's DI context (e.g., from lifespan)
+    if config is None:
+        config = get_config()
     return Runtime(config)
 
 

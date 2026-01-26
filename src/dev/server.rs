@@ -7,6 +7,8 @@ use axum::Json;
 use axum::Router;
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -49,6 +51,11 @@ struct HealthResponse {
 struct LogsQuery {
     since: Option<i64>,
     follow: Option<bool>,
+}
+
+#[derive(serde::Deserialize)]
+struct StopQuery {
+    persist_logs: Option<bool>,
 }
 
 pub async fn run_server(
@@ -361,11 +368,76 @@ async fn browser_logs(
     StatusCode::OK
 }
 
-async fn stop(State(state): State<AppState>) -> StatusCode {
+async fn stop(
+    State(state): State<AppState>,
+    Query(query): Query<StopQuery>,
+) -> StatusCode {
     debug!("Received dev server stop request.");
+
+    // If persist_logs requested, dump all logs to startup.log before stopping
+    if query.persist_logs.unwrap_or(false) {
+        debug!("persist_logs=true, dumping logs to startup.log");
+        if let Err(e) = dump_logs_to_file(&state).await {
+            warn!("Failed to persist logs: {}", e);
+        }
+    }
+
     // Send the shutdown signal - all subscribers will react appropriately
     let _ = state.shutdown_tx.send(Shutdown::Stop);
     StatusCode::OK
+}
+
+/// Dump all subprocess logs to .apx/startup.log for debugging startup failures.
+async fn dump_logs_to_file(state: &AppState) -> Result<(), String> {
+    debug!("Persisting subprocess logs to startup.log");
+
+    // Collect all logs from process_manager and apx_log_queue
+    let (_, app_logs) = state.process_manager.logs_since_index(0).await;
+    let (_, apx_logs) = apx_log_queue_since(&state.apx_log_queue, 0);
+
+    debug!(
+        app_log_count = app_logs.len(),
+        apx_log_count = apx_logs.len(),
+        "Collected logs from queues"
+    );
+
+    // Merge and sort by timestamp
+    let mut all_logs = app_logs;
+    all_logs.extend(apx_logs);
+    all_logs.sort_by_key(|log| log.timestamp);
+
+    debug!(total_logs = all_logs.len(), "Merged and sorted logs");
+
+    // Append to startup.log
+    let log_path = state.process_manager.app_dir().join(".apx/startup.log");
+    debug!(path = %log_path.display(), "Opening startup.log for append");
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| format!("Failed to open startup.log: {}", e))?;
+
+    writeln!(file, "\n--- Subprocess Logs ---")
+        .map_err(|e| format!("Failed to write to startup.log: {}", e))?;
+
+    for log in &all_logs {
+        let stream = format!("{:?}", log.stream).to_lowercase();
+        let pipe = log
+            .pipe
+            .map(|p| format!("{:?}", p).to_lowercase())
+            .unwrap_or_default();
+        writeln!(file, "[{}:{}] {}", stream, pipe, log.message)
+            .map_err(|e| format!("Failed to write log entry: {}", e))?;
+    }
+
+    debug!(
+        logs_written = all_logs.len(),
+        path = %log_path.display(),
+        "Successfully persisted subprocess logs"
+    );
+
+    Ok(())
 }
 
 async fn send_log_payload(

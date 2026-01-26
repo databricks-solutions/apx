@@ -10,7 +10,8 @@ use crate::cli::dev::logs::stream_logs;
 use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
 use crate::common::{ensure_dir, spinner, format_elapsed_ms, run_preflight_checks};
-use crate::dev::client::{health, logs, wait_for_healthy, HealthCheckConfig};
+use crate::dev::client::{health, logs, stop_with_logs, wait_for_healthy, HealthCheckConfig};
+use tracing::debug;
 use crate::dev::common::{
     find_available_port, lock_path, read_lock, remove_lock, write_lock,
     DevLock, BIND_HOST,
@@ -219,20 +220,35 @@ pub(crate) async fn spawn_server(
     config.print_waiting = false; // Don't print, we have a spinner instead
     if let Err(e) = wait_for_healthy(port, &config).await {
         health_spinner.finish_and_clear();
-        
-        // Kill the entire process tree to avoid hanging processes
+
+        // Try graceful shutdown with log persistence (5 second timeout)
+        // This dumps subprocess logs to startup.log before stopping
+        debug!("Health checks failed, attempting graceful shutdown with log persistence.");
+        let shutdown_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            stop_with_logs(port, true),
+        )
+        .await;
+
+        match shutdown_result {
+            Ok(Ok(())) => debug!("Graceful shutdown completed."),
+            Ok(Err(err)) => debug!("Graceful shutdown failed: {}", err),
+            Err(_) => debug!("Graceful shutdown timed out."),
+        }
+
+        // Kill any remaining processes (in case graceful shutdown failed or timed out)
         let pid = child.id();
         let _ = ProcessManager::kill_process_tree_async(pid, "dev-server".to_string()).await;
         let _ = child.kill(); // Fallback in case tree kill missed the root
-        
+
         // Clean up lock file if it exists
         let _ = remove_lock(&lock_path);
-        
-        // Read and display startup log on failure
+
+        // Read and display startup log on failure (now includes subprocess logs)
         if let Some(log_content) = read_startup_log(&startup_log) {
             eprintln!("\n📋 Startup log:\n{}\n", log_content);
         }
-        
+
         return Err(e);
     }
     health_spinner.finish_and_clear();

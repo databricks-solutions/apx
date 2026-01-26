@@ -128,14 +128,23 @@ async def run_cli_background(
     try:
         yield process
     finally:
-        # Ensure process is terminated
+        # Kill process - don't wait() as it deadlocks with PIPE due to pipe buffering
+        # The OS will clean up the zombie process
+        print(f"[cleanup] Starting cleanup, returncode={process.returncode}")
         if process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+            print("[cleanup] Killing process...")
+            process.kill()
+            # Don't call wait() - it deadlocks when stdout/stderr use PIPE
+            # See: https://github.com/python/cpython/issues/119710
+        
+        # Close the transport to avoid "Event loop is closed" warning in __del__
+        try:
+            transport = getattr(process, "_transport", None)
+            if transport is not None:
+                transport.close()
+        except Exception:
+            pass  # Ignore any errors during transport cleanup
+        print("[cleanup] Cleanup complete")
 
 
 def _build_init_args(

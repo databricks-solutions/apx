@@ -29,6 +29,7 @@ dev = [
     "msgpack>=1.1.2",
     "msgpack-types>=0.7.0",
     "mypy>=1.18.2",
+    "psycopg[binary,pool]>=3.3.2",
     "pydantic-settings>=2.11.0",
     "pytest>=8.4.2",
     "pytest-asyncio>=0.24.0",

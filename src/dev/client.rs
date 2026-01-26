@@ -157,9 +157,25 @@ pub async fn status(port: u16) -> Result<StatusResponse, String> {
 /// Request the dev server to stop gracefully.
 /// Returns Ok(()) if the server acknowledged the stop request, Err otherwise.
 pub async fn stop(port: u16) -> Result<(), String> {
+    stop_with_options(port, false).await
+}
+
+/// Request the dev server to stop gracefully with optional log persistence.
+/// When `persist_logs` is true, the server will dump all subprocess logs to
+/// .apx/startup.log before shutting down (useful for debugging startup failures).
+pub async fn stop_with_logs(port: u16, persist_logs: bool) -> Result<(), String> {
+    stop_with_options(port, persist_logs).await
+}
+
+async fn stop_with_options(port: u16, persist_logs: bool) -> Result<(), String> {
     let client = build_client()?;
-    let url = build_url(CLIENT_HOST, port, "/_apx/stop");
-    debug!(%url, "Sending dev server stop request.");
+    let path = if persist_logs {
+        "/_apx/stop?persist_logs=true"
+    } else {
+        "/_apx/stop"
+    };
+    let url = build_url(CLIENT_HOST, port, path);
+    debug!(%url, persist_logs, "Sending dev server stop request.");
     let response = client
         .get(url)
         .timeout(Duration::from_secs(STOP_TIMEOUT_SECS))

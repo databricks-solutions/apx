@@ -7,13 +7,18 @@ from .._metadata import app_name, dist_dir
 from .router import api
 from .dependencies import get_runtime
 from .utils import add_not_found_handler
+from .logger import logger
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    runtime = get_runtime()
-    runtime.validate_db()
-    runtime.initialize_models()
+    try:
+        runtime = get_runtime()
+        runtime.validate_db()
+        runtime.initialize_models()
+    except Exception as e:
+        logger.error(f"Failed to initialize application: {e}", exc_info=True)
+        raise
     yield
 
 
