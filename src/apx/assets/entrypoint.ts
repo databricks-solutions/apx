@@ -207,6 +207,14 @@ async function runDev() {
   const devServerPort = parseInt(process.env.APX_DEV_SERVER_PORT!);
   const devServerHost = process.env.APX_DEV_SERVER_HOST!;
 
+  console.log("[APX] Starting frontend dev server...");
+  console.log(
+    "[APX] Config: port=%d, devServerPort=%d, devServerHost=%s",
+    frontendPort,
+    devServerPort,
+    devServerHost,
+  );
+
   const config: InlineConfig = {
     ...createBaseConfig(),
     server: {
@@ -221,11 +229,39 @@ async function runDev() {
     },
   };
 
+  console.log("[APX] Creating vite server...");
   const server = await createServer(config);
+
+  console.log("[APX] Starting to listen...");
   await server.listen();
 
   server.printUrls();
   console.log("[APX:READY] Frontend server listening on port", frontendPort);
+
+  // Handle graceful shutdown
+  const shutdown = async (signal: string) => {
+    console.log(`[APX] Received ${signal}, shutting down frontend server...`);
+    try {
+      await server.close();
+      console.log("[APX] Frontend server closed gracefully");
+      process.exit(0);
+    } catch (err) {
+      console.error("[APX] Error during shutdown:", err);
+      process.exit(1);
+    }
+  };
+
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+
+  // Log if the server has any errors after startup
+  server.httpServer?.on("error", (err) => {
+    console.error("[APX] HTTP server error:", err);
+  });
+
+  server.httpServer?.on("close", () => {
+    console.log("[APX] HTTP server closed");
+  });
 }
 
 async function runBuild() {

@@ -317,17 +317,24 @@ async fn proxy_http(
     let response = match builder.body(body_bytes).send().await {
         Ok(response) => response,
         Err(err) => {
-            warn!(error = %err, "Proxy request failed.");
-            if should_log {
-                let elapsed = start.elapsed().as_millis();
-                info!(
-                    "<~ {} {} {} 502 [{}ms]",
-                    target_name,
-                    method,
-                    path_and_query,
-                    elapsed
-                );
-            }
+            warn!(
+                target = target_name,
+                host = %host,
+                port = target_port,
+                path = %path_and_query,
+                error = %err,
+                "Proxy request failed - could not connect to upstream server."
+            );
+            let elapsed = start.elapsed().as_millis();
+            // Always log proxy failures to help debug connectivity issues
+            info!(
+                "<~ {} {} {} 502 [{}ms] (connection failed: {})",
+                target_name,
+                method,
+                path_and_query,
+                elapsed,
+                err
+            );
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };

@@ -131,6 +131,9 @@ async def version():
 
 
 async def test_dev_server_proxies(isolated_project: Path) -> None:
+    test_failed = False
+    failure_exception: BaseException | None = None
+
     try:
         print(f"Starting dev server in {isolated_project}")
         start_result = await run_cli_async(["dev", "start"], cwd=isolated_project)
@@ -181,9 +184,51 @@ async def test_dev_server_proxies(isolated_project: Path) -> None:
         assert soup.find("title") is not None
         assert soup.find("html") is not None
 
+    except Exception as e:
+        test_failed = True
+        failure_exception = e
+
     finally:
+        if test_failed:
+            print("\n" + "=" * 60)
+            print("TEST FAILED - Collecting debug logs")
+            print("=" * 60)
+
+            # Collect dev server logs
+            print("\n--- Dev Server Logs ---")
+            logs_result = await run_cli_async(["dev", "logs"], cwd=isolated_project)
+            print(f"logs returncode: {logs_result.returncode}")
+            if logs_result.stdout:
+                print("stdout:")
+                for line in logs_result.stdout.split("\n"):
+                    print(f"  {line}")
+            if logs_result.stderr:
+                print("stderr:")
+                for line in logs_result.stderr.split("\n"):
+                    print(f"  {line}")
+
+            # Check dev.lock contents
+            dev_lock_path = isolated_project / ".apx" / "dev.lock"
+            if dev_lock_path.exists():
+                print("\n--- dev.lock contents ---")
+                print(dev_lock_path.read_text())
+
+            # Check status
+            print("\n--- Dev Server Status ---")
+            status_result = await run_cli_async(["dev", "status"], cwd=isolated_project)
+            print(f"status returncode: {status_result.returncode}")
+            if status_result.stdout:
+                print(f"stdout: {status_result.stdout}")
+            if status_result.stderr:
+                print(f"stderr: {status_result.stderr}")
+
+            print("=" * 60 + "\n")
+
         print("Stopping dev server as a cleanup step")
         stop_result = await run_cli_async(["dev", "stop"], cwd=isolated_project)
         print(
             f"cleanup stop result: returncode={stop_result.returncode} with error: {stop_result.stderr} and output: {stop_result.stdout}"
         )
+
+        if test_failed and failure_exception:
+            raise failure_exception

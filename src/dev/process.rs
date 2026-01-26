@@ -678,7 +678,48 @@ impl ProcessManager {
 
         let root_start_time = root_process.start_time();
         let parents = Self::build_parent_map(&sys);
+        
+        // Log the process tree we're about to signal
+        debug!(
+            process = label,
+            root_pid = ?root_pid,
+            root_name = ?root_process.name(),
+            "Sending {:?} to process tree", signal
+        );
+        Self::log_process_tree(&sys, &parents, root_pid, root_start_time, label, 0);
+        
         Self::send_signal_tree_recursive(&sys, &parents, root_pid, root_start_time, signal, label);
+    }
+    
+    /// Log the process tree for debugging.
+    fn log_process_tree(
+        sys: &System,
+        parents: &HashMap<Pid, Vec<Pid>>,
+        pid: Pid,
+        root_start_time: u64,
+        label: &str,
+        depth: usize,
+    ) {
+        if let Some(process) = sys.process(pid) {
+            let process_start_time = process.start_time();
+            if process_start_time >= root_start_time {
+                let indent = "  ".repeat(depth);
+                debug!(
+                    process = label,
+                    "{}{:?} ({:?}) - started at {}",
+                    indent,
+                    pid,
+                    process.name(),
+                    process_start_time
+                );
+            }
+        }
+        
+        if let Some(children) = parents.get(&pid) {
+            for child_pid in children {
+                Self::log_process_tree(sys, parents, *child_pid, root_start_time, label, depth + 1);
+            }
+        }
     }
 
     /// Async wrapper for send_signal_to_tree that runs on a blocking thread.
