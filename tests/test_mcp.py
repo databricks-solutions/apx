@@ -328,9 +328,9 @@ async def test_docs_create_cluster(common_project: Path):
 
 ROUTER_CODE_TEMPLATE = """from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from .config import conf
+from .._metadata import api_prefix
 
-api = APIRouter(prefix=conf.api_prefix)
+api = APIRouter(prefix=api_prefix)
 
 class Item(BaseModel):
     id: int
