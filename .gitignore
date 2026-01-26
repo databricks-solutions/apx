@@ -48,3 +48,4 @@ target/
 .cursor/plans
 
 /assets/models
+.reports

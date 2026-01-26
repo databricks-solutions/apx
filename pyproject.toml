@@ -33,6 +33,7 @@ dev = [
     "pydantic-settings>=2.11.0",
     "pytest>=8.4.2",
     "pytest-asyncio>=0.24.0",
+    "pytest-html>=4.2.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.14.0",
     "sqlmodel>=0.0.27",
@@ -88,3 +89,4 @@ exclude = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+generate_report_on_test = true
