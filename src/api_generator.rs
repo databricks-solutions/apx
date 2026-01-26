@@ -188,7 +188,7 @@ pub fn start_openapi_watcher(
                 // React to shutdown signal
                 result = shutdown_rx.recv() => {
                     match result {
-                        Ok(Shutdown::Stop) | Err(_) => {
+                        Ok(Shutdown::Stop { .. }) | Err(_) => {
                             debug!("OpenAPI watcher stopping.");
                             break;
                         }

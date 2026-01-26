@@ -180,6 +180,30 @@ pub fn ui_router(frontend_port: u16, dev_token: &str) -> Result<Router, String> 
         .with_state(state))
 }
 
+/// Creates the API utilities proxy router for FastAPI docs and OpenAPI schema
+/// Routes: /docs, /redoc, /openapi.json - proxied directly to backend without /api prefix
+pub fn api_utils_router(backend_port: u16, token_manager: Arc<TokenManager>) -> Result<Router, String> {
+    let forwarded_user_header = match get_forwarded_user_header() {
+        Ok(value) => Some(value),
+        Err(err) => {
+            warn!(error = %err, "Failed to get forwarded user header for API utilities proxy");
+            None
+        }
+    };
+    let state = ApiProxyState {
+        client: build_proxy_client()?,
+        host: "0.0.0.0".to_string(),
+        port: backend_port,
+        token_manager,
+        forwarded_user_header,
+    };
+    Ok(Router::new()
+        .route("/docs", any(api_utils_proxy_handler))
+        .route("/redoc", any(api_utils_proxy_handler))
+        .route("/openapi.json", any(api_utils_proxy_handler))
+        .with_state(state))
+}
+
 async fn api_proxy_handler(State(state): State<ApiProxyState>, req: Request<Body>) -> Response {
     let original_uri = req.uri().clone();
     // Reconstruct path with /api prefix since nest strips it
@@ -190,6 +214,31 @@ async fn api_proxy_handler(State(state): State<ApiProxyState>, req: Request<Body
             .map(|pq| pq.as_str())
             .unwrap_or("/")
     );
+
+    // Get OAuth access token for API requests (None if not available)
+    let token = state.token_manager.get_token_refreshing_if_needed().await;
+    proxy_request(
+        req,
+        state.client,
+        state.host,
+        state.port,
+        path_and_query,
+        None,
+        token,
+        state.forwarded_user_header.clone(),
+        "api",
+    )
+    .await
+}
+
+async fn api_utils_proxy_handler(State(state): State<ApiProxyState>, req: Request<Body>) -> Response {
+    // Pass through path directly without /api prefix (for /docs, /redoc, /openapi.json)
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/")
+        .to_string();
 
     // Get OAuth access token for API requests (None if not available)
     let token = state.token_manager.get_token_refreshing_if_needed().await;

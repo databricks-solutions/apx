@@ -31,9 +31,13 @@ class Runtime:
         # Check if we're in local dev mode with APX_DEV_DB_PORT
         if self._dev_db_port:
             logger.info(f"Using local dev database at localhost:{self._dev_db_port}")
-            pg_user = "postgres"
-            pg_password = os.environ.get("APX_DEV_DB_PWD", "postgres")
-            return f"postgresql+psycopg://{pg_user}:{pg_password}@localhost:{self._dev_db_port}/postgres?sslmode=disable"
+            username = "postgres"
+            password = os.environ.get("APX_DEV_DB_PWD")
+            if password is None:
+                raise ValueError(
+                    "APX server didn't provide a password, please check the dev server logs"
+                )
+            return f"postgresql+psycopg://{username}:{password}@localhost:{self._dev_db_port}/postgres?sslmode=disable"
 
         # Production mode: use Databricks Database
         logger.info(
@@ -57,16 +61,15 @@ class Runtime:
         )
         cparams["password"] = cred.token
 
-    @property
+    @cached_property
     def engine(self) -> Engine:
         # In dev mode: no SSL, no password callback, single connection (PGlite limit)
         # In production: require SSL and use Databricks credential callback
         if self._dev_db_port:
             engine = create_engine(
                 self.engine_url,
-                pool_recycle=45 * 60,
-                pool_size=1,
-                max_overflow=0,  # PGlite only supports one connection
+                pool_recycle=10,
+                pool_size=4,
             )
         else:
             engine = create_engine(

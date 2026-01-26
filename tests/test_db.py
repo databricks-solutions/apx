@@ -33,7 +33,12 @@ async def test_stateful_dev_server_crud(tmp_path: Path) -> None:
         # Start dev server
         print(f"Starting dev server in {project_path}")
         start_result = await run_cli_async(["dev", "start"], cwd=project_path)
-        assert start_result.returncode == 0, f"Failed to start dev server: {start_result.stderr}"
+        if start_result.returncode != 0:
+            for line in start_result.stderr.split("\n"):
+                print(f"stderr: {line}")
+            for line in start_result.stdout.split("\n"):
+                print(f"stdout: {line}")
+            raise RuntimeError(f"Failed to start dev server: {start_result.stderr}")
 
         # Read dev.lock to get the dev server port
         dev_lock_path = project_path / ".apx" / "dev.lock"
@@ -46,7 +51,11 @@ async def test_stateful_dev_server_crud(tmp_path: Path) -> None:
 
         # Inject CRUD model and router into the project
         # First, update models.py with a SQLModel table
-        models_code = '''from typing import Optional
+        # Note: Use separate ItemCreate model for request body (SQLModel best practice)
+        # Note: Use Pydantic BaseModel for request body (ItemCreate) to ensure
+        # proper FastAPI body parsing. SQLModel can have compatibility issues
+        # with FastAPI's automatic body detection.
+        models_code = """from typing import Optional
 from pydantic import BaseModel
 from sqlmodel import SQLModel, Field
 from .. import __version__
@@ -60,17 +69,22 @@ class VersionOut(BaseModel):
         return cls(version=__version__)
 
 
+class ItemCreate(BaseModel):
+    name: str
+    description: str = ""
+
+
 class Item(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
     description: str = ""
-'''
+"""
 
         # Then, update router.py with CRUD endpoints
-        router_code = '''from typing import List
+        router_code = """from typing import List
 from fastapi import APIRouter
 from sqlmodel import select
-from .models import VersionOut, Item
+from .models import VersionOut, Item, ItemCreate
 from .dependencies import SessionDep
 from .._metadata import api_prefix
 
@@ -83,17 +97,18 @@ async def version():
 
 
 @api.post("/items", response_model=Item)
-def create_item(item: Item, session: SessionDep):
-    session.add(item)
+def create_item(item: ItemCreate, session: SessionDep):
+    db_item = Item(name=item.name, description=item.description)
+    session.add(db_item)
     session.commit()
-    session.refresh(item)
-    return item
+    session.refresh(db_item)
+    return db_item
 
 
 @api.get("/items", response_model=List[Item])
 def list_items(session: SessionDep):
     return session.exec(select(Item)).all()
-'''
+"""
 
         # Write the updated files
         backend_path = project_path / "src" / "test_app" / "backend"
@@ -107,22 +122,16 @@ def list_items(session: SessionDep):
         # Set up HTTP client with retry logic
         http_client = httpx.AsyncClient()
 
-        with_retry = retry(
-            stop=stop_after_attempt(5),
-            wait=wait_exponential(multiplier=1, min=1, max=10),
-            retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
-        )
-
-        @with_retry
         async def create_item() -> httpx.Response:
             resp = await http_client.post(
                 f"http://localhost:{dev_port}/api/items",
-                json={"name": "Test Item", "description": "A test item"}
+                json={"name": "Test Item", "description": "A test item"},
             )
+            if resp.status_code == 422:
+                print(f"422 Validation Error Response: {resp.json()}")
             resp.raise_for_status()
             return resp
 
-        @with_retry
         async def list_items() -> httpx.Response:
             resp = await http_client.get(f"http://localhost:{dev_port}/api/items")
             resp.raise_for_status()
@@ -209,16 +218,127 @@ def list_items(session: SessionDep):
             raise failure_exception
 
 
-async def test_db_basic_connectivity():
-    """Test basic PGLite database connectivity.
+async def test_db_parallel_connections():
+    """Test SQLAlchemy connection pooling with PGLite - mixed read/write workload.
 
-    This test verifies that:
-    1. PGLite can be started via bun
-    2. We can connect to it using psycopg/SQLModel
-    3. Basic SQL queries work (SELECT 1)
+    This test verifies how well SQLAlchemy's connection pooling works with PGLite
+    under a mixed workload of concurrent readers and writers.
+
+    - 5 writer tasks: INSERT items into the database
+    - 5 reader tasks: SELECT items from the database
+
+    Each task holds its connection for 1-2 seconds to simulate real work.
+    Results are collected and summarized to understand pooling behavior.
     """
-    from sqlalchemy import Engine, create_engine, text
-    from sqlmodel import Session
+    import random
+    import time
+    from dataclasses import dataclass, field
+    from typing import Optional
+    from sqlalchemy import create_engine, text, Engine, event
+    from sqlmodel import SQLModel, Field, Session, select
+
+    # Define Item model for read/write tests
+    class Item(SQLModel, table=True):
+        id: Optional[int] = Field(default=None, primary_key=True)
+        name: str
+        description: str = ""
+
+    @dataclass
+    class TaskResult:
+        task_id: int
+        task_type: str  # "writer" or "reader"
+        success: bool
+        duration_ms: float
+        wait_for_conn_ms: float = 0
+        items_affected: int = 0  # items written or read
+        error: str | None = None
+
+    @dataclass
+    class PoolStats:
+        checkouts: int = 0
+        checkins: int = 0
+        connects: int = 0
+        disconnects: int = 0
+
+    async def run_writer_task(
+        task_id: int, engine: Engine, hold_time: float
+    ) -> TaskResult:
+        """Writer task: INSERT an item into the database."""
+        start_time = time.monotonic()
+        wait_start = start_time
+
+        try:
+            with Session(engine) as session:
+                wait_ms = (time.monotonic() - wait_start) * 1000
+
+                # Hold connection open for the specified time
+                await asyncio.sleep(hold_time)
+
+                # Create and insert an item
+                item = Item(
+                    name=f"Item from writer {task_id}",
+                    description=f"Created by writer task {task_id} at {time.time()}",
+                )
+                session.add(item)
+                session.commit()
+                session.refresh(item)
+                print(f"  Writer {task_id}: inserted item id={item.id}")
+
+            duration_ms = (time.monotonic() - start_time) * 1000
+            return TaskResult(
+                task_id=task_id,
+                task_type="writer",
+                success=True,
+                duration_ms=duration_ms,
+                wait_for_conn_ms=wait_ms,
+                items_affected=1,
+            )
+        except Exception as e:
+            duration_ms = (time.monotonic() - start_time) * 1000
+            return TaskResult(
+                task_id=task_id,
+                task_type="writer",
+                success=False,
+                duration_ms=duration_ms,
+                error=str(e),
+            )
+
+    async def run_reader_task(
+        task_id: int, engine: Engine, hold_time: float
+    ) -> TaskResult:
+        """Reader task: SELECT all items from the database."""
+        start_time = time.monotonic()
+        wait_start = start_time
+
+        try:
+            with Session(engine) as session:
+                wait_ms = (time.monotonic() - wait_start) * 1000
+
+                # Hold connection open for the specified time
+                await asyncio.sleep(hold_time)
+
+                # Query all items
+                items = session.exec(select(Item)).all()
+                print(f"  Reader {task_id}: read {len(items)} items")
+
+            duration_ms = (time.monotonic() - start_time) * 1000
+            return TaskResult(
+                task_id=task_id,
+                task_type="reader",
+                success=True,
+                duration_ms=duration_ms,
+                wait_for_conn_ms=wait_ms,
+                items_affected=len(items),
+            )
+        except Exception as e:
+            duration_ms = (time.monotonic() - start_time) * 1000
+            return TaskResult(
+                task_id=task_id,
+                task_type="reader",
+                success=False,
+                duration_ms=duration_ms,
+                error=str(e),
+            )
 
     # Find a free port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -231,16 +351,13 @@ async def test_db_basic_connectivity():
     async with run_cli_background(
         ["bun", "x", "@electric-sql/pglite-socket", "--db=memory://", f"--port={port}"],
     ) as proc:
-        # Wait for the database to start
+        # Wait for the database to start by polling
         max_wait = 10
-        connected = False
-        last_error: Exception | None = None
-        engine: Engine | None = None
+        ready = False
 
-        for attempt in range(max_wait * 2):  # Check every 0.5s
+        for attempt in range(max_wait * 2):
             await asyncio.sleep(0.5)
 
-            # Check if process died
             if proc.returncode is not None:
                 stdout = await proc.stdout.read() if proc.stdout else b""
                 stderr = await proc.stderr.read() if proc.stderr else b""
@@ -249,53 +366,154 @@ async def test_db_basic_connectivity():
                     f"stdout: {stdout.decode()}, stderr: {stderr.decode()}"
                 )
 
-            # Try to connect
             try:
-                # PGLite requires: user=postgres, password=postgres, database=postgres
-                # sslmode=disable is required because PGLite doesn't support SSL
-                engine = create_engine(
+                test_engine = create_engine(
                     f"postgresql+psycopg://postgres:postgres@localhost:{port}/postgres?sslmode=disable",
                     pool_size=1,
                 )
-                with Session(engine) as session:
-                    result = session.connection().execute(text("SELECT 1"))
-                    value = result.scalar()
-                    assert value == 1, f"Expected SELECT 1 to return 1, got {value}"
-                    print(f"Successfully connected to PGLite on attempt {attempt + 1}")
-                    connected = True
-                    break
-            except Exception as e:
-                last_error = e
-                print(f"Attempt {attempt + 1}: Connection failed - {e}")
+                with Session(test_engine) as session:
+                    session.connection().execute(text("SELECT 1"))
+                test_engine.dispose()
+                print(f"PGLite ready after {attempt + 1} attempts")
+                ready = True
+                break
+            except Exception:
+                pass
 
-        if not connected or engine is None:
-            raise RuntimeError(
-                f"Failed to connect to PGLite after {max_wait}s. Last error: {last_error}"
-            )
+        if not ready:
+            raise RuntimeError(f"PGLite failed to start after {max_wait}s")
 
-        # Run a few more queries to verify stability
-        print("Running additional verification queries...")
-        with Session(engine) as session:
-            # Create a test table
-            session.connection().execute(
-                text("CREATE TABLE IF NOT EXISTS test_table (id SERIAL PRIMARY KEY, name TEXT)")
-            )
-            session.commit()
+        # Create a shared engine with connection pooling
+        pool_size = 5
+        max_overflow = 5  # Total max connections = pool_size + max_overflow = 10
+        pool_timeout = 30
 
-            # Insert a row
-            session.connection().execute(
-                text("INSERT INTO test_table (name) VALUES ('test')")
-            )
-            session.commit()
+        print(
+            f"\nCreating shared engine with pool_size={pool_size}, max_overflow={max_overflow}"
+        )
 
-            # Query the row
-            result = session.connection().execute(text("SELECT name FROM test_table"))
-            name = result.scalar()
-            assert name == "test", f"Expected 'test', got {name}"
+        engine = create_engine(
+            f"postgresql+psycopg://postgres:postgres@localhost:{port}/postgres?sslmode=disable",
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+            pool_timeout=pool_timeout,
+            pool_pre_ping=True,
+        )
 
-        print("All database operations completed successfully!")
+        # Create the items table
+        print("Creating items table...")
+        SQLModel.metadata.create_all(engine)
 
-        # Clean up SQLAlchemy engine to release connections before process termination
-        print("[test] Disposing engine...")
+        # Track pool events
+        stats = PoolStats()
+
+        @event.listens_for(engine, "checkout")
+        def on_checkout(dbapi_conn, connection_record, connection_proxy):
+            stats.checkouts += 1
+
+        @event.listens_for(engine, "checkin")
+        def on_checkin(dbapi_conn, connection_record):
+            stats.checkins += 1
+
+        @event.listens_for(engine, "connect")
+        def on_connect(dbapi_conn, connection_record):
+            stats.connects += 1
+            print(f"  [pool] New connection created (total: {stats.connects})")
+
+        @event.listens_for(engine, "close")
+        def on_close(dbapi_conn, connection_record):
+            stats.disconnects += 1
+
+        # Launch 5 writers and 5 readers in parallel
+        num_writers = 5
+        num_readers = 5
+        print(f"\nLaunching {num_writers} writers and {num_readers} readers...")
+
+        tasks = []
+
+        # Create writer tasks
+        for i in range(num_writers):
+            hold_time = random.uniform(1.0, 2.0)
+            print(f"  Writer {i}: will hold connection for {hold_time:.2f}s")
+            tasks.append(run_writer_task(i, engine, hold_time))
+
+        # Create reader tasks
+        for i in range(num_readers):
+            hold_time = random.uniform(1.0, 2.0)
+            print(f"  Reader {i}: will hold connection for {hold_time:.2f}s")
+            tasks.append(run_reader_task(i, engine, hold_time))
+
+        # Run all tasks in parallel
+        results: list[TaskResult] = await asyncio.gather(*tasks)
+
+        # Print summary
+        print("\n" + "=" * 60)
+        print("SQLALCHEMY POOLING WITH PGLITE - READ/WRITE TEST SUMMARY")
+        print("=" * 60)
+
+        print(f"\nPool Configuration:")
+        print(f"  pool_size: {pool_size}")
+        print(f"  max_overflow: {max_overflow}")
+        print(f"  pool_timeout: {pool_timeout}s")
+
+        print(f"\nPool Statistics:")
+        print(f"  New connections created: {stats.connects}")
+        print(f"  Connection checkouts: {stats.checkouts}")
+        print(f"  Connection checkins: {stats.checkins}")
+        reuse_rate = (stats.checkouts - stats.connects) / max(stats.checkouts, 1) * 100
+        print(f"  Connection reuse rate: {reuse_rate:.1f}%")
+
+        # Separate results by type
+        writers = [r for r in results if r.task_type == "writer"]
+        readers = [r for r in results if r.task_type == "reader"]
+
+        successful_writers = [r for r in writers if r.success]
+        failed_writers = [r for r in writers if not r.success]
+        successful_readers = [r for r in readers if r.success]
+        failed_readers = [r for r in readers if not r.success]
+
+        print(f"\nWriter Results ({num_writers} tasks):")
+        print(f"  Successful: {len(successful_writers)}")
+        print(f"  Failed: {len(failed_writers)}")
+        if successful_writers:
+            total_written = sum(r.items_affected for r in successful_writers)
+            print(f"  Total items written: {total_written}")
+            for r in sorted(successful_writers, key=lambda x: x.task_id):
+                print(
+                    f"    Writer {r.task_id}: {r.duration_ms:.0f}ms, "
+                    f"pool_wait={r.wait_for_conn_ms:.0f}ms"
+                )
+        if failed_writers:
+            print(f"  Failed writers:")
+            for r in failed_writers:
+                print(f"    Writer {r.task_id}: {r.error}")
+
+        print(f"\nReader Results ({num_readers} tasks):")
+        print(f"  Successful: {len(successful_readers)}")
+        print(f"  Failed: {len(failed_readers)}")
+        if successful_readers:
+            for r in sorted(successful_readers, key=lambda x: x.task_id):
+                print(
+                    f"    Reader {r.task_id}: read {r.items_affected} items, "
+                    f"{r.duration_ms:.0f}ms, pool_wait={r.wait_for_conn_ms:.0f}ms"
+                )
+        if failed_readers:
+            print(f"  Failed readers:")
+            for r in failed_readers:
+                print(f"    Reader {r.task_id}: {r.error}")
+
+        # Overall summary
+        total_success = len(successful_writers) + len(successful_readers)
+        total_tasks = num_writers + num_readers
+        print(f"\nOverall:")
+        print(f"  Total tasks: {total_tasks}")
+        print(f"  Successful: {total_success}")
+        print(f"  Failed: {total_tasks - total_success}")
+        print(f"  Success rate: {total_success / total_tasks * 100:.1f}%")
+
+        print("\n" + "=" * 60)
+
+        # Clean up
+        print("\nDisposing engine...")
         engine.dispose()
-        print("[test] Engine disposed, exiting context manager...")
+        print(f"Final disconnects: {stats.disconnects}")

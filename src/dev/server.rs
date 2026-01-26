@@ -108,6 +108,13 @@ pub async fn run_server(
         warn!("Failed to start OpenAPI watcher: {err}");
     }
 
+    // Start filesystem watcher to stop server if project folder or lock file is removed
+    start_filesystem_watcher(
+        shutdown_tx.subscribe(),
+        shutdown_tx.clone(),
+        app_dir.clone(),
+    );
+
     let state = AppState {
         shutdown_tx: shutdown_tx.clone(),
         process_manager: Arc::clone(&process_manager),
@@ -115,7 +122,10 @@ pub async fn run_server(
     };
 
     // API router - proxied to backend with token manager
-    let api_router = proxy::api_router(backend_port, token_manager)?;
+    let api_router = proxy::api_router(backend_port, Arc::clone(&token_manager))?;
+
+    // API utilities router - proxied to backend for FastAPI docs (/docs, /redoc, /openapi.json)
+    let api_utils_router = proxy::api_utils_router(backend_port, token_manager)?;
 
     // APX internal router
     let apx_router = Router::new()
@@ -130,6 +140,7 @@ pub async fn run_server(
     let app = Router::new()
         .nest("/api", api_router)
         .nest("/_apx", apx_router)
+        .merge(api_utils_router)
         .merge(ui_router);
 
     let addr: SocketAddr = format!("{host}:{port}")
@@ -143,15 +154,33 @@ pub async fn run_server(
     // Clone what we need for the shutdown handler
     let mut shutdown_rx = shutdown_tx.subscribe();
     let lock = lock_path(&app_dir);
+    let shutdown_apx_log_queue = Arc::clone(&apx_log_queue);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             // Wait for Stop signal
             match shutdown_rx.recv().await {
-                Ok(Shutdown::Stop) => {
+                Ok(Shutdown::Stop { persist_logs }) => {
                     debug!("Stop signal received, shutting down server.");
                     // ProcessManager owns all process termination
                     process_manager.stop().await;
+
+                    // After processes stop, wait for log readers to drain final output
+                    if persist_logs {
+                        debug!("Waiting for log readers to drain...");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+
+                        // Now persist logs - processes are stopped and output is drained
+                        if let Err(e) = persist_logs_to_file(
+                            &process_manager,
+                            &shutdown_apx_log_queue,
+                        )
+                        .await
+                        {
+                            warn!("Failed to persist logs: {}", e);
+                        }
+                    }
+
                     // Remove lock file after processes are stopped
                     let _ = remove_lock(&lock);
                     debug!("Server shutdown complete.");
@@ -182,7 +211,7 @@ fn start_env_watcher(
                 biased;
                 result = shutdown_rx.recv() => {
                     match result {
-                        Ok(Shutdown::Stop) | Err(_) => {
+                        Ok(Shutdown::Stop { .. }) | Err(_) => {
                             debug!(".env watcher stopping.");
                             break;
                         }
@@ -207,6 +236,41 @@ fn start_env_watcher(
                     }
                     last_vars = current_vars;
                     has_loaded = true;
+                }
+            }
+        }
+    });
+}
+
+/// Start the filesystem watcher that stops the server if the project folder
+/// or the lock file is removed.
+fn start_filesystem_watcher(
+    mut shutdown_rx: broadcast::Receiver<Shutdown>,
+    shutdown_tx: broadcast::Sender<Shutdown>,
+    app_dir: PathBuf,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                result = shutdown_rx.recv() => {
+                    match result {
+                        Ok(Shutdown::Stop { .. }) | Err(_) => {
+                            debug!("Filesystem watcher stopping.");
+                            break;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                    // Check if project folder was removed
+                    if !app_dir.exists() {
+                        warn!(
+                            "Project folder '{}' was removed, stopping dev server.",
+                            app_dir.display()
+                        );
+                        let _ = shutdown_tx.send(Shutdown::Stop { persist_logs: false });
+                        break;
+                    }
                 }
             }
         }
@@ -272,7 +336,7 @@ async fn logs(
                 // React to shutdown signal
                 result = shutdown_rx.recv() => {
                     match result {
-                        Ok(Shutdown::Stop) => {
+                        Ok(Shutdown::Stop { .. }) => {
                             // Flush any remaining logs before sending shutdown message (merged and sorted)
                             let (_, final_logs) = state.process_manager.logs_since_index(app_len).await;
                             let (_, final_apx_logs) = apx_log_queue_since(&state.apx_log_queue, apx_len);
@@ -372,28 +436,26 @@ async fn stop(
     State(state): State<AppState>,
     Query(query): Query<StopQuery>,
 ) -> StatusCode {
-    debug!("Received dev server stop request.");
+    let persist_logs = query.persist_logs.unwrap_or(false);
+    debug!(persist_logs, "Received dev server stop request.");
 
-    // If persist_logs requested, dump all logs to startup.log before stopping
-    if query.persist_logs.unwrap_or(false) {
-        debug!("persist_logs=true, dumping logs to startup.log");
-        if let Err(e) = dump_logs_to_file(&state).await {
-            warn!("Failed to persist logs: {}", e);
-        }
-    }
-
-    // Send the shutdown signal - all subscribers will react appropriately
-    let _ = state.shutdown_tx.send(Shutdown::Stop);
+    // Send the shutdown signal with persist_logs flag
+    // Log persistence happens AFTER processes stop in the graceful_shutdown handler
+    let _ = state.shutdown_tx.send(Shutdown::Stop { persist_logs });
     StatusCode::OK
 }
 
-/// Dump all subprocess logs to .apx/startup.log for debugging startup failures.
-async fn dump_logs_to_file(state: &AppState) -> Result<(), String> {
+/// Persist all subprocess logs to .apx/startup.log for debugging startup failures.
+/// This should be called AFTER processes have stopped to ensure all output is captured.
+async fn persist_logs_to_file(
+    process_manager: &ProcessManager,
+    apx_log_queue: &SyncLogQueue,
+) -> Result<(), String> {
     debug!("Persisting subprocess logs to startup.log");
 
     // Collect all logs from process_manager and apx_log_queue
-    let (_, app_logs) = state.process_manager.logs_since_index(0).await;
-    let (_, apx_logs) = apx_log_queue_since(&state.apx_log_queue, 0);
+    let (_, app_logs) = process_manager.logs_since_index(0).await;
+    let (_, apx_logs) = apx_log_queue_since(apx_log_queue, 0);
 
     debug!(
         app_log_count = app_logs.len(),
@@ -409,7 +471,7 @@ async fn dump_logs_to_file(state: &AppState) -> Result<(), String> {
     debug!(total_logs = all_logs.len(), "Merged and sorted logs");
 
     // Append to startup.log
-    let log_path = state.process_manager.app_dir().join(".apx/startup.log");
+    let log_path = process_manager.app_dir().join(".apx/startup.log");
     debug!(path = %log_path.display(), "Opening startup.log for append");
 
     let mut file = OpenOptions::new()

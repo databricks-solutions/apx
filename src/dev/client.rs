@@ -84,7 +84,6 @@ pub struct StatusResponse {
 }
 
 fn build_client() -> Result<reqwest::Client, String> {
-    debug!("Building dev HTTP client.");
     reqwest::Client::builder()
         .no_gzip()
         .no_brotli()

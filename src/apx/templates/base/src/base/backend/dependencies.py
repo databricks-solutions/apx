@@ -1,24 +1,39 @@
-from functools import lru_cache
 from typing import Annotated
 
 from databricks.sdk import WorkspaceClient
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Request
 
 from .config import AppConfig
 from .runtime import Runtime
 
 
-@lru_cache
-def get_config() -> AppConfig:
-    return AppConfig()
+def get_config(request: Request) -> AppConfig:
+    """
+    Returns the AppConfig instance from app.state.
+    The config is initialized during application lifespan startup.
+    """
+    if not hasattr(request.app.state, "config"):
+        raise RuntimeError(
+            "AppConfig not initialized. "
+            "Ensure app.state.config is set during application lifespan startup."
+        )
+    return request.app.state.config
 
 
 ConfigDep = Annotated[AppConfig, Depends(get_config)]
 
 
-@lru_cache
-def get_runtime(config: AppConfig = Depends(get_config)) -> Runtime:
-    return Runtime(config)
+def get_runtime(request: Request) -> Runtime:
+    """
+    Returns the Runtime instance from app.state.
+    The runtime is initialized during application lifespan startup.
+    """
+    if not hasattr(request.app.state, "runtime"):
+        raise RuntimeError(
+            "Runtime not initialized. "
+            "Ensure app.state.runtime is set during application lifespan startup."
+        )
+    return request.app.state.runtime
 
 
 RuntimeDep = Annotated[Runtime, Depends(get_runtime)]

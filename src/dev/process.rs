@@ -691,6 +691,9 @@ impl ProcessManager {
         cmd.env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string());
         cmd.env("APX_DEV_SERVER_HOST", self.host.clone());
         cmd.env("APX_DEV_TOKEN", self.dev_token.clone());
+        // Force Python to flush stdout/stderr immediately (no buffering)
+        // This ensures error output is captured before process termination
+        cmd.env("PYTHONUNBUFFERED", "1");
         if include_dotenv {
             let vars = self.dotenv_vars.lock().await;
             for (key, value) in vars.iter() {

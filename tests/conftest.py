@@ -136,7 +136,7 @@ async def run_cli_background(
             process.kill()
             # Don't call wait() - it deadlocks when stdout/stderr use PIPE
             # See: https://github.com/python/cpython/issues/119710
-        
+
         # Close the transport to avoid "Event loop is closed" warning in __del__
         try:
             transport = getattr(process, "_transport", None)

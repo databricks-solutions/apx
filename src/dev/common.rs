@@ -11,7 +11,8 @@ use crate::common::ensure_dir;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shutdown {
     /// Stop the entire dev server
-    Stop,
+    /// `persist_logs` indicates whether to dump subprocess logs to startup.log
+    Stop { persist_logs: bool },
 }
 
 pub const DEV_LOCK_DIR: &str = ".apx";

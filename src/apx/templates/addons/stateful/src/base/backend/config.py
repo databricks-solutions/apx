@@ -44,3 +44,6 @@ class AppConfig(BaseSettings):
     @property
     def static_assets_path(self) -> Path:
         return Path(str(resources.files(app_slug))).joinpath("__dist__")
+
+    def __hash__(self) -> int:
+        return hash(self.app_name)

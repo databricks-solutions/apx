@@ -4,21 +4,27 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .._metadata import app_name, dist_dir
+from .config import AppConfig
 from .router import api
-from .dependencies import get_runtime
+from .runtime import Runtime
 from .utils import add_not_found_handler
 from .logger import logger
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        runtime = get_runtime()
-        runtime.validate_db()
-        runtime.initialize_models()
-    except Exception as e:
-        logger.error(f"Failed to initialize application: {e}", exc_info=True)
-        raise
+    # Initialize config and runtime, store in app.state for dependency injection
+    config = AppConfig()
+    logger.info(f"Starting app with configuration:\n{config}")
+
+    runtime = Runtime(config)
+    runtime.validate_db()
+    runtime.initialize_models()
+
+    # Store in app.state for access via dependencies
+    app.state.config = config
+    app.state.runtime = runtime
+
     yield
 
 
