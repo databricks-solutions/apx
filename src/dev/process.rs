@@ -5,19 +5,20 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
-use rand::{distributions::Alphanumeric, Rng};
+use rand::{Rng, distributions::Alphanumeric};
 use sysinfo::{Pid, Signal, System};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
 use crate::bun_binary_path;
 use crate::common::read_project_metadata;
+use crate::dev::common::CLIENT_HOST;
 use crate::dev::logging::{
-    log_queue_since, log_queue_since_timestamp, push_log, LogPayload, LogPipe, LogQueue,
-    LogStreamName,
+    LogPayload, LogPipe, LogQueue, LogStreamName, log_queue_since, log_queue_since_timestamp,
+    push_log,
 };
 use crate::dotenv::DotenvFile;
 
@@ -60,6 +61,7 @@ pub struct ProcessManager {
     dev_server_port: u16,
     host: String,
     dev_token: String,
+    db_password: String,
     app_dir: PathBuf,
     app_entrypoint: String,
     dotenv_vars: Arc<Mutex<HashMap<String, String>>>,
@@ -75,7 +77,7 @@ impl ProcessManager {
         db_port: u16,
     ) -> Result<Self, String> {
         let bun_path = Self::ensure_bun_path()?;
-        
+
         // Note: Preflight checks (metadata, uv sync, bun install) are done client-side in start.rs
         let metadata = read_project_metadata(app_dir)?;
 
@@ -84,6 +86,7 @@ impl ProcessManager {
         let app_entrypoint = metadata.app_entrypoint.clone();
 
         let dev_token = Self::generate_dev_token();
+        let db_password = Self::generate_dev_token(); // Random password for PGlite
         let manager = Self {
             log_queue: Arc::new(Mutex::new(Vec::new())),
             frontend_child: Arc::new(Mutex::new(None)),
@@ -95,29 +98,22 @@ impl ProcessManager {
             dev_server_port,
             host: host.to_string(),
             dev_token,
+            db_password,
             app_dir: app_dir.to_path_buf(),
             app_entrypoint,
             dotenv_vars,
         };
 
-        debug!(
-            "Spawning bun dev process"
-        );
+        debug!("Spawning bun dev process");
         manager.spawn_bun_dev(app_dir, bun_path.clone()).await?;
-        debug!(
-            "Spawning PGLite database process"
-        );
+        debug!("Spawning PGLite database process");
         manager.spawn_pglite(&bun_path).await?;
-        debug!(
-            "Spawning uvicorn process"
-        );
+        debug!("Spawning uvicorn process");
         manager
             .spawn_uvicorn(app_dir, metadata.app_entrypoint)
             .await?;
 
-        debug!(
-            "Starting file watcher for backend restart"
-        );
+        debug!("Starting file watcher for backend restart");
         manager.start_backend_file_watcher();
 
         debug!(
@@ -177,9 +173,30 @@ impl ProcessManager {
         let one_minute_ago = chrono::Utc::now().timestamp_millis() - 60_000;
         let (_, logs) = self.logs_since_timestamp(one_minute_ago).await;
 
-        let frontend_status = Self::status_for_child(&self.frontend_child, &logs, LogSource::Ui, "localhost", self.frontend_port).await;
-        let backend_status = Self::status_for_child(&self.backend_child, &logs, LogSource::App, &self.host, self.backend_port).await;
-        let db_status = Self::status_for_child(&self.db_child, &logs, LogSource::Db, &self.host, self.db_port).await;
+        let frontend_status = Self::status_for_child(
+            &self.frontend_child,
+            &logs,
+            LogSource::Ui,
+            "localhost",
+            self.frontend_port,
+        )
+        .await;
+        let backend_status = Self::status_for_child(
+            &self.backend_child,
+            &logs,
+            LogSource::App,
+            &self.host,
+            self.backend_port,
+        )
+        .await;
+        let db_status = Self::status_for_child(
+            &self.db_child,
+            &logs,
+            LogSource::Db,
+            &self.host,
+            self.db_port,
+        )
+        .await;
         (frontend_status, backend_status, db_status)
     }
 
@@ -197,70 +214,134 @@ impl ProcessManager {
     }
 
     async fn spawn_bun_dev(&self, app_dir: &Path, bun_path: PathBuf) -> Result<(), String> {
-        let child = self.spawn_process(
-            app_dir,
-            bun_path,
-            vec!["run".to_string(), "dev".to_string()],
-            LogSource::Ui,
-            false,
-        )
-        .await
-        ?;
+        let child = self
+            .spawn_process(
+                app_dir,
+                bun_path,
+                vec!["run".to_string(), "dev".to_string()],
+                LogSource::Ui,
+                false,
+            )
+            .await?;
         let mut guard = self.frontend_child.lock().await;
         *guard = Some(child);
         Ok(())
     }
 
-    async fn spawn_uvicorn(
-        &self,
-        app_dir: &Path,
-        app_entrypoint: String,
-    ) -> Result<(), String> {
-        let child = self.spawn_process(
-            app_dir,
-            PathBuf::from("uv"),
-            vec![
-                "run".to_string(),
-                "uvicorn".to_string(),
-                app_entrypoint,
-                "--host".to_string(),
-                self.host.clone(),
-                "--port".to_string(),
-                self.backend_port.to_string(),
-                "--reload".to_string(),
-            ],
-            LogSource::App,
-            true,
-        )
-        .await
-        ?;
+    async fn spawn_uvicorn(&self, app_dir: &Path, app_entrypoint: String) -> Result<(), String> {
+        let child = self
+            .spawn_process(
+                app_dir,
+                PathBuf::from("uv"),
+                vec![
+                    "run".to_string(),
+                    "uvicorn".to_string(),
+                    app_entrypoint,
+                    "--host".to_string(),
+                    self.host.clone(),
+                    "--port".to_string(),
+                    self.backend_port.to_string(),
+                    "--reload".to_string(),
+                ],
+                LogSource::App,
+                true,
+            )
+            .await?;
         let mut guard = self.backend_child.lock().await;
         *guard = Some(child);
         Ok(())
     }
 
     async fn spawn_pglite(&self, bun_path: &Path) -> Result<(), String> {
-        let child = self.spawn_process(
-            &self.app_dir,
-            bun_path.to_path_buf(),
-            vec![
-                "x".to_string(),
-                "@electric-sql/pglite-socket".to_string(),
-                "--db=memory://".to_string(),
-                format!("--host={}", self.host),
-                "--debug=0".to_string(),
-                format!("--port={}", self.db_port),
-            ],
-            LogSource::Db,
-            false,
-        )
-        .await?;
+        let child = self
+            .spawn_process(
+                &self.app_dir,
+                bun_path.to_path_buf(),
+                vec![
+                    "x".to_string(),
+                    "@electric-sql/pglite-socket".to_string(),
+                    "--db=memory://".to_string(),
+                    format!("--host={}", self.host),
+                    "--debug=0".to_string(),
+                    format!("--port={}", self.db_port),
+                ],
+                LogSource::Db,
+                false,
+            )
+            .await?;
 
         let mut guard = self.db_child.lock().await;
         *guard = Some(child);
 
+        // Wait for PGlite to be ready and change the default password
+        // Use CLIENT_HOST (127.0.0.1) for connections, not the bind host (0.0.0.0)
+        Self::wait_for_db_ready(CLIENT_HOST, self.db_port).await?;
+        Self::change_db_password(CLIENT_HOST, self.db_port, &self.db_password).await?;
+        debug!("PGlite password changed successfully");
+
         self.spawn_db_health_monitor();
         Ok(())
+    }
+
+    /// Wait for PGlite database to be ready to accept connections.
+    async fn wait_for_db_ready(host: &str, port: u16) -> Result<(), String> {
+        for _ in 0..30 {
+            if tokio::net::TcpStream::connect((host, port)).await.is_ok() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Err(format!("PGlite not ready on {}:{}", host, port))
+    }
+
+    /// Change the PGlite database password using tokio-postgres.
+    /// Important: PGlite only supports one connection at a time, so we must
+    /// ensure the connection is fully closed before returning.
+    async fn change_db_password(host: &str, port: u16, new_password: &str) -> Result<(), String> {
+        use tokio_postgres::NoTls;
+
+        let conn_str = format!(
+            "host={} port={} user=postgres password=postgres dbname=postgres",
+            host, port
+        );
+
+        let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
+            .await
+            .map_err(|e| format!("Failed to connect to PGlite: {}", e))?;
+
+        // Spawn connection task with a handle so we can wait for it
+        let conn_handle = tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                warn!("PGlite connection error: {}", e);
+            }
+        });
+
+        // Escape single quotes for SQL safety
+        let escaped = new_password.replace('\'', "''");
+        let query = format!("ALTER USER postgres WITH PASSWORD '{}'", escaped);
+
+        let result = client
+            .execute(&query, &[])
+            .await
+            .map_err(|e| format!("Failed to change password: {}", e));
+
+        // Drop the client to signal the connection to close
+        drop(client);
+
+        // Wait up to 5 seconds for the connection task to exit
+        match timeout(Duration::from_secs(5), conn_handle).await {
+            Ok(Ok(())) => {
+                // connection task exited cleanly
+            }
+            Ok(Err(e)) => {
+                warn!("Postgres connection task panicked: {}", e);
+            }
+            Err(_) => {
+                warn!("Timed out waiting for Postgres connection to shut down");
+            }
+        }
+
+        result.map(|_| ())
     }
 
     fn spawn_db_health_monitor(&self) {
@@ -310,6 +391,7 @@ impl ProcessManager {
         let db_port = self.db_port;
         let dev_server_port = self.dev_server_port;
         let dev_token = self.dev_token.clone();
+        let db_password = self.db_password.clone();
 
         tokio::spawn(async move {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(100);
@@ -372,8 +454,10 @@ impl ProcessManager {
                     while let Ok(additional_event) = rx.try_recv() {
                         received_more = true;
                         for path in &additional_event.paths {
-                            let additional_file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                            if ["pyproject.toml", "uv.lock", ".env"].contains(&additional_file_name) {
+                            let additional_file_name =
+                                path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            if ["pyproject.toml", "uv.lock", ".env"].contains(&additional_file_name)
+                            {
                                 file_name = additional_file_name.to_string();
                             }
                         }
@@ -413,6 +497,7 @@ impl ProcessManager {
                         db_port,
                         dev_server_port,
                         &dev_token,
+                        &db_password,
                         &dotenv_vars,
                         &backend_child,
                         &log_queue,
@@ -475,8 +560,13 @@ impl ProcessManager {
             }
             match timeout(Duration::from_secs(2), child.wait()).await {
                 Ok(Ok(status)) => debug!(process = name, ?status, "Child process exited."),
-                Ok(Err(err)) => warn!(error = %err, process = name, "Failed to wait for child process."),
-                Err(_) => warn!(process = name, "Timed out waiting for child process to exit."),
+                Ok(Err(err)) => {
+                    warn!(error = %err, process = name, "Failed to wait for child process.")
+                }
+                Err(_) => warn!(
+                    process = name,
+                    "Timed out waiting for child process to exit."
+                ),
             }
         } else {
             debug!(process = name, "No child process to stop.");
@@ -493,6 +583,7 @@ impl ProcessManager {
         db_port: u16,
         dev_server_port: u16,
         dev_token: &str,
+        db_password: &str,
         dotenv_vars: &Arc<Mutex<HashMap<String, String>>>,
         backend_child: &Arc<Mutex<Option<Child>>>,
         log_queue: &LogQueue,
@@ -517,6 +608,7 @@ impl ProcessManager {
         cmd.env("APX_FRONTEND_PORT", frontend_port.to_string());
         cmd.env("APX_BACKEND_PORT", backend_port.to_string());
         cmd.env("APX_DEV_DB_PORT", db_port.to_string());
+        cmd.env("APX_DEV_DB_PWD", db_password);
         cmd.env("APX_DEV_SERVER_PORT", dev_server_port.to_string());
         cmd.env("APX_DEV_SERVER_HOST", host);
         cmd.env("APX_DEV_TOKEN", dev_token);
@@ -595,6 +687,7 @@ impl ProcessManager {
         cmd.env("APX_FRONTEND_PORT", self.frontend_port.to_string());
         cmd.env("APX_BACKEND_PORT", self.backend_port.to_string());
         cmd.env("APX_DEV_DB_PORT", self.db_port.to_string());
+        cmd.env("APX_DEV_DB_PWD", self.db_password.clone());
         cmd.env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string());
         cmd.env("APX_DEV_SERVER_HOST", self.host.clone());
         cmd.env("APX_DEV_TOKEN", self.dev_token.clone());
@@ -637,7 +730,9 @@ impl ProcessManager {
                     // Process still running, wait for it
                     match child.wait().await {
                         Ok(status) => debug!(process = name, ?status, "Child process exited."),
-                        Err(err) => warn!(error = %err, process = name, "Failed to wait for child."),
+                        Err(err) => {
+                            warn!(error = %err, process = name, "Failed to wait for child.")
+                        }
                     }
                 }
                 Err(err) => warn!(error = %err, process = name, "Failed to check child status."),
@@ -653,7 +748,10 @@ impl ProcessManager {
             match child.try_wait() {
                 Ok(Some(_)) => {
                     // Already exited, nothing to do
-                    debug!(process = name, "Process already exited, skipping force kill.");
+                    debug!(
+                        process = name,
+                        "Process already exited, skipping force kill."
+                    );
                 }
                 Ok(None) => {
                     // Still running, force kill
@@ -678,13 +776,16 @@ impl ProcessManager {
         sys.refresh_all();
 
         let Some(root_process) = sys.process(root_pid) else {
-            debug!(process = label, pid, "Process not found, may have already exited.");
+            debug!(
+                process = label,
+                pid, "Process not found, may have already exited."
+            );
             return;
         };
 
         let root_start_time = root_process.start_time();
         let parents = Self::build_parent_map(&sys);
-        
+
         // Log the process tree we're about to signal
         debug!(
             process = label,
@@ -693,10 +794,10 @@ impl ProcessManager {
             "Sending {:?} to process tree", signal
         );
         Self::log_process_tree(&sys, &parents, root_pid, root_start_time, label, 0);
-        
+
         Self::send_signal_tree_recursive(&sys, &parents, root_pid, root_start_time, signal, label);
     }
-    
+
     /// Log the process tree for debugging.
     fn log_process_tree(
         sys: &System,
@@ -720,7 +821,7 @@ impl ProcessManager {
                 );
             }
         }
-        
+
         if let Some(children) = parents.get(&pid) {
             for child_pid in children {
                 Self::log_process_tree(sys, parents, *child_pid, root_start_time, label, depth + 1);
@@ -786,8 +887,13 @@ impl ProcessManager {
             }
             match timeout(Duration::from_secs(2), child.wait()).await {
                 Ok(Ok(status)) => debug!(process = name, ?status, "Child process exited."),
-                Ok(Err(err)) => warn!(error = %err, process = name, "Failed to wait for child process."),
-                Err(_) => warn!(process = name, "Timed out waiting for child process to exit."),
+                Ok(Err(err)) => {
+                    warn!(error = %err, process = name, "Failed to wait for child process.")
+                }
+                Err(_) => warn!(
+                    process = name,
+                    "Timed out waiting for child process to exit."
+                ),
             }
         } else {
             debug!(process = name, "No child process to stop.");
@@ -808,7 +914,7 @@ impl ProcessManager {
                 Ok(None) => {
                     // Process is running, check if port is accepting connections
                     let port_ready = tokio::net::TcpStream::connect((host, port)).await.is_ok();
-                    
+
                     if port_ready {
                         "healthy".to_string()
                     } else {
@@ -893,9 +999,7 @@ impl ProcessManager {
                 return;
             }
             let name = process.name();
-            let killed = process
-                .kill_with(Signal::Kill)
-                .unwrap_or(false);
+            let killed = process.kill_with(Signal::Kill).unwrap_or(false);
             if killed {
                 debug!(pid = ?pid, process_name = ?name, process = label, "Killed process.");
             } else {
