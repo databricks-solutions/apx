@@ -12,8 +12,7 @@ use walkdir::WalkDir;
 
 use crate::bun_binary_path;
 use crate::cli::run_cli_async;
-use crate::cli::components::add::run_inner as add_component;
-use crate::cli::components::add::ComponentsAddArgs;
+use crate::cli::components::add::{add_components, ComponentInput};
 use crate::common::{bun_install, read_project_metadata, write_metadata_file, spinner, format_elapsed_ms, run_with_spinner, run_with_spinner_async};
 use crate::dotenv::DotenvFile;
 use crate::interop::{list_profiles, templates_dir};
@@ -382,43 +381,34 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     }
 
     if !args.skip_frontend_dependencies {
-        run_with_spinner_async(
-            "🎨 Bootstrapping components...",
-            "✅ Components added",
-            || async {
-                add_component(ComponentsAddArgs {
-                    component: "button".to_string(),
-                    registry: None,
-                    force: true,
-                    dry_run: false,
-                    app_path: Some(app_path.clone()),
-                })
-                .await?;
-                
-                if matches!(layout, Layout::Sidebar) {
-                    let components = vec![
-                        "avatar",
-                        "sidebar",
-                        "separator",
-                        "skeleton",
-                        "badge",
-                        "card",
-                    ];
-                    for comp in components {
-                        add_component(ComponentsAddArgs {
-                            component: comp.to_string(),
-                            registry: None,
-                            force: true,
-                            dry_run: false,
-                            app_path: Some(app_path.clone()),
-                        })
-                        .await?;
-                    }
-                }
-                Ok(())
-            },
-        )
-        .await?;
+        // Build list of components to add
+        let mut components_to_add = vec![ComponentInput::new("button")];
+        
+        if matches!(layout, Layout::Sidebar) {
+            components_to_add.extend([
+                ComponentInput::new("avatar"),
+                ComponentInput::new("sidebar"),
+                ComponentInput::new("separator"),
+                ComponentInput::new("skeleton"),
+                ComponentInput::new("badge"),
+                ComponentInput::new("card"),
+            ]);
+        }
+
+        let components_start = Instant::now();
+        let spinner = spinner("🎨 Adding components...");
+        
+        let result = add_components(&app_path, &components_to_add, true).await?;
+        
+        spinner.finish_and_clear();
+        println!("✅ Components added ({})", format_elapsed_ms(components_start));
+        
+        // Print details at debug level or if there are warnings
+        if !result.warnings.is_empty() {
+            for warning in &result.warnings {
+                eprintln!("   ⚠️  {}", warning);
+            }
+        }
     }
 
     if !args.skip_build {
