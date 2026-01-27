@@ -15,6 +15,7 @@ use tracing::{debug, info, warn};
 use crate::api_generator::start_openapi_watcher;
 use crate::dev::common::{lock_path, remove_lock, Shutdown};
 use crate::dev::logging::BrowserLogPayload;
+use crate::dev::otel::build_otlp_log_payload_from_ms;
 use crate::dev::process::ProcessManager;
 use crate::dev::proxy;
 use crate::dotenv::DotenvFile;
@@ -294,8 +295,8 @@ async fn browser_logs(
         message.push_str(&stack);
     }
 
-    // Forward to otelcol via OTLP HTTP
-    let otlp_payload = build_otlp_log_payload(
+    // Forward to otelcol via OTLP HTTP using shared otel module
+    let otlp_payload = build_otlp_log_payload_from_ms(
         &message,
         &payload.level,
         payload.timestamp,
@@ -317,55 +318,6 @@ async fn browser_logs(
     }
 
     StatusCode::OK
-}
-
-/// Build an OTLP JSON log payload
-fn build_otlp_log_payload(
-    message: &str,
-    level: &str,
-    timestamp_ms: i64,
-    service_name: &str,
-    app_dir: &std::path::Path,
-) -> serde_json::Value {
-    // Convert severity level to OTLP severity number
-    let severity_number = match level.to_lowercase().as_str() {
-        "trace" => 1,
-        "debug" => 5,
-        "info" | "log" => 9,
-        "warn" | "warning" => 13,
-        "error" => 17,
-        "fatal" | "critical" => 21,
-        _ => 9, // default to INFO
-    };
-
-    // Convert milliseconds to nanoseconds for OTLP
-    let time_unix_nano = (timestamp_ms * 1_000_000).to_string();
-
-    serde_json::json!({
-        "resourceLogs": [{
-            "resource": {
-                "attributes": [
-                    {
-                        "key": "service.name",
-                        "value": { "stringValue": service_name }
-                    },
-                    {
-                        "key": "apx.app_path",
-                        "value": { "stringValue": app_dir.display().to_string() }
-                    }
-                ]
-            },
-            "scopeLogs": [{
-                "scope": {},
-                "logRecords": [{
-                    "timeUnixNano": time_unix_nano,
-                    "severityNumber": severity_number,
-                    "severityText": level.to_uppercase(),
-                    "body": { "stringValue": message }
-                }]
-            }]
-        }]
-    })
 }
 
 async fn stop(

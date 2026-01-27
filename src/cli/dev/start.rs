@@ -233,6 +233,11 @@ pub(crate) async fn spawn_server(
         cmd.arg("--skip-credentials-validation");
     }
     
+    // Canonicalize app_dir for consistent path matching in logs
+    let canonical_app_dir = app_dir
+        .canonicalize()
+        .unwrap_or_else(|_| app_dir.to_path_buf());
+
     let mut child = cmd
         .current_dir(app_dir)
         .stdin(Stdio::null())
@@ -240,6 +245,7 @@ pub(crate) async fn spawn_server(
         .stderr(Stdio::from(startup_file))
         .env("APX_COLLECT_LOGS", "1")
         .env("APX_OTEL_LOGS", "1")
+        .env("APX_APP_DIR", &canonical_app_dir)
         .spawn()
         .map_err(|err| format!("Failed to start dev server: {err}"))?;
 

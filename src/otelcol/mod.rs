@@ -36,8 +36,8 @@ const OTELCOL_CONFIG_TEMPLATE: &str = r#"receivers:
 
 processors:
   batch:
-    timeout: 1s
-    send_batch_size: 512
+    timeout: 100ms
+    send_batch_size: 128
 
 exporters:
   file/logs:

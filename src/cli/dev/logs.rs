@@ -266,6 +266,47 @@ async fn follow_logs(
     // Track if server was initially running
     let server_was_running = lock_path.exists();
 
+    // Helper closure to read new log content from file
+    let read_new_content = |file: &mut File, file_pos: &mut u64, recent_entries: &mut VecDeque<u64>, app_path: &str| {
+        if let Ok(metadata) = file.metadata() {
+            let new_len = metadata.len();
+            if new_len > *file_pos {
+                // Seek to last position and read new content
+                if file.seek(SeekFrom::Start(*file_pos)).is_ok() {
+                    let reader = BufReader::new(&*file);
+                    for line in reader.lines().map_while(Result::ok) {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+
+                        if let Ok(parsed) = parse_otlp_line(&line) {
+                            for entry in parsed {
+                                // Filter by app path
+                                if let Some(ref entry_app_path) = entry.app_path {
+                                    if !entry_app_path.contains(app_path) && !app_path.contains(entry_app_path) {
+                                        continue;
+                                    }
+                                }
+
+                                // Deduplicate
+                                if recent_entries.contains(&entry.timestamp_ns) {
+                                    continue;
+                                }
+                                recent_entries.push_back(entry.timestamp_ns);
+                                if recent_entries.len() > 100 {
+                                    recent_entries.pop_front();
+                                }
+
+                                println!("{}", entry.format(true));
+                            }
+                        }
+                    }
+                }
+                *file_pos = new_len;
+            }
+        }
+    };
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -276,48 +317,15 @@ async fn follow_logs(
                 if event.is_none() {
                     break;
                 }
-
-                // Read new content from file
-                if let Ok(metadata) = file.metadata() {
-                    let new_len = metadata.len();
-                    if new_len > file_pos {
-                        // Seek to last position and read new content
-                        if file.seek(SeekFrom::Start(file_pos)).is_ok() {
-                            let reader = BufReader::new(&file);
-                            for line in reader.lines().map_while(Result::ok) {
-                                if line.trim().is_empty() {
-                                    continue;
-                                }
-
-                                if let Ok(parsed) = parse_otlp_line(&line) {
-                                    for entry in parsed {
-                                        // Filter by app path
-                                        if let Some(ref entry_app_path) = entry.app_path {
-                                            if !entry_app_path.contains(app_path) && !app_path.contains(entry_app_path) {
-                                                continue;
-                                            }
-                                        }
-
-                                        // Deduplicate
-                                        if recent_entries.contains(&entry.timestamp_ns) {
-                                            continue;
-                                        }
-                                        recent_entries.push_back(entry.timestamp_ns);
-                                        if recent_entries.len() > 100 {
-                                            recent_entries.pop_front();
-                                        }
-
-                                        println!("{}", entry.format(true));
-                                    }
-                                }
-                            }
-                        }
-                        file_pos = new_len;
-                    }
-                }
+                // Read new content triggered by file watcher event
+                read_new_content(&mut file, &mut file_pos, &mut recent_entries, app_path);
             }
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                // Periodic check: if server was running but lockfile is now gone, server stopped
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                // Fallback polling: check for new content even if watcher event was missed
+                // This ensures logs appear even when file watcher events are delayed
+                read_new_content(&mut file, &mut file_pos, &mut recent_entries, app_path);
+
+                // Check if server was running but lockfile is now gone
                 if server_was_running && !lock_path.exists() {
                     debug!("Dev server stopped (lockfile removed), exiting logs follow.");
                     println!("\n📭 Dev server stopped.");
