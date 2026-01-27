@@ -26,16 +26,12 @@ use crate::dotenv::DotenvFile;
 
 #[derive(Debug, Clone, Copy)]
 enum LogSource {
-    App,
-    Ui,
     Db,
 }
 
 impl fmt::Display for LogSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LogSource::App => write!(f, "app"),
-            LogSource::Ui => write!(f, "ui"),
             LogSource::Db => write!(f, "db"),
         }
     }
@@ -199,44 +195,174 @@ impl ProcessManager {
     }
 
     async fn spawn_bun_dev(&self, app_dir: &Path, bun_path: PathBuf) -> Result<(), String> {
-        let child = self
-            .spawn_process(
-                app_dir,
-                bun_path,
-                vec!["run".to_string(), "dev".to_string()],
-                LogSource::Ui,
-                false,
-            )
-            .await?;
+        // ============================================================================
+        // IMPORTANT: Frontend logs are NOT piped through apx stdout/stderr.
+        // The frontend process sends logs directly to otelcol via OTEL SDK.
+        // This ensures proper service attribution (service.name = {app}_ui) and avoids
+        // log interleaving issues that occur when multiple processes share stdout.
+        // See entrypoint.ts for OTEL initialization.
+        // ============================================================================
+        let mut cmd = Command::new(&bun_path);
+        cmd.args(["run", "dev"])
+            .current_dir(app_dir)
+            .stdin(Stdio::null())
+            // Inherit stdout/stderr for local visibility, but don't capture/forward
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+
+        // Set APX environment variables
+        cmd.env("APX_FRONTEND_PORT", self.frontend_port.to_string());
+        cmd.env("APX_BACKEND_PORT", self.backend_port.to_string());
+        cmd.env("APX_DEV_DB_PORT", self.db_port.to_string());
+        cmd.env("APX_DEV_DB_PWD", &self.db_password);
+        cmd.env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string());
+        cmd.env("APX_DEV_SERVER_HOST", &self.host);
+        cmd.env("APX_DEV_TOKEN", &self.dev_token);
+        cmd.env("APX_APP_NAME", &self.app_slug);
+        cmd.env("APX_APP_PATH", self.app_dir.display().to_string());
+
+        // OpenTelemetry configuration - frontend sends logs directly to otelcol
+        cmd.env(
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            format!("http://127.0.0.1:{}", crate::otelcol::OTELCOL_PORT),
+        );
+        cmd.env("OTEL_SERVICE_NAME", format!("{}_ui", self.app_slug));
+
+        let child = cmd
+            .spawn()
+            .map_err(|err| format!("Failed to start frontend process: {err}"))?;
+
         let mut guard = self.frontend_child.lock().await;
         *guard = Some(child);
         Ok(())
     }
 
     async fn spawn_uvicorn(&self, app_dir: &Path, app_entrypoint: String) -> Result<(), String> {
-        // Use opentelemetry-instrument wrapper for auto-instrumentation
-        let child = self
-            .spawn_process(
-                app_dir,
-                PathBuf::from("uv"),
-                vec![
-                    "run".to_string(),
-                    "opentelemetry-instrument".to_string(),
-                    "uvicorn".to_string(),
-                    app_entrypoint,
-                    "--host".to_string(),
-                    self.host.clone(),
-                    "--port".to_string(),
-                    self.backend_port.to_string(),
-                    "--reload".to_string(),
-                ],
-                LogSource::App,
-                true,
-            )
-            .await?;
+        // ============================================================================
+        // IMPORTANT: Backend logs are sent directly to otelcol via OTEL auto-instrumentation.
+        // NOT piped through apx stdout/stderr.
+        //
+        // Key configuration:
+        // - OTEL_LOGS_EXPORTER=otlp: enables log export to OTLP endpoint
+        // - OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED=true: attaches OTEL handler
+        // - uvicorn --log-config: configures uvicorn loggers to propagate to root logger
+        //   where OTEL's handler captures them
+        // ============================================================================
+
+        // Create uvicorn logging config that enables propagation to root logger
+        let log_config = self.create_uvicorn_log_config(app_dir).await?;
+
+        let mut cmd = Command::new("uv");
+        cmd.args([
+            "run",
+            "opentelemetry-instrument",
+            "--logs_exporter",
+            "otlp",
+            "uvicorn",
+            &app_entrypoint,
+            "--host",
+            &self.host,
+            "--port",
+            &self.backend_port.to_string(),
+            "--reload",
+            "--log-config",
+            &log_config,
+        ])
+        .current_dir(app_dir)
+        .stdin(Stdio::null())
+        // Inherit stdout/stderr for local visibility, OTEL sends logs directly to otelcol
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+        // Set APX environment variables
+        cmd.env("APX_FRONTEND_PORT", self.frontend_port.to_string());
+        cmd.env("APX_BACKEND_PORT", self.backend_port.to_string());
+        cmd.env("APX_DEV_DB_PORT", self.db_port.to_string());
+        cmd.env("APX_DEV_DB_PWD", &self.db_password);
+        cmd.env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string());
+        cmd.env("APX_DEV_SERVER_HOST", &self.host);
+        cmd.env("APX_DEV_TOKEN", &self.dev_token);
+        // Force Python to flush stdout/stderr immediately (no buffering)
+        cmd.env("PYTHONUNBUFFERED", "1");
+
+        // OpenTelemetry auto-instrumentation configuration
+        cmd.env(
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            format!("http://127.0.0.1:{}", crate::otelcol::OTELCOL_PORT),
+        );
+        cmd.env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
+        cmd.env("OTEL_LOGS_EXPORTER", "otlp");
+        cmd.env("OTEL_SERVICE_NAME", format!("{}_app", self.app_slug));
+        cmd.env("OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED", "true");
+        cmd.env(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            format!("apx.app_path={}", self.app_dir.display()),
+        );
+
+        // Apply dotenv variables
+        let vars = self.dotenv_vars.lock().await;
+        for (key, value) in vars.iter() {
+            cmd.env(key, value);
+        }
+        drop(vars);
+
+        let child = cmd
+            .spawn()
+            .map_err(|err| format!("Failed to start backend process: {err}"))?;
+
         let mut guard = self.backend_child.lock().await;
         *guard = Some(child);
         Ok(())
+    }
+
+    /// Create a uvicorn logging config file that enables propagation to root logger.
+    /// This allows OTEL's handler on the root logger to capture uvicorn logs.
+    async fn create_uvicorn_log_config(&self, app_dir: &Path) -> Result<String, String> {
+        let config_dir = app_dir.join(".apx");
+        tokio::fs::create_dir_all(&config_dir)
+            .await
+            .map_err(|e| format!("Failed to create .apx directory: {}", e))?;
+
+        let config_path = config_dir.join("uvicorn_logging.yaml");
+        let config_content = r#"version: 1
+disable_existing_loggers: false
+handlers:
+  default:
+    class: logging.StreamHandler
+    stream: ext://sys.stderr
+    formatter: default
+  access:
+    class: logging.StreamHandler
+    stream: ext://sys.stdout
+    formatter: access
+formatters:
+  default:
+    format: "%(levelname)s:     %(message)s"
+  access:
+    format: "%(levelname)s:     %(client_addr)s - \"%(request_line)s\" %(status_code)s"
+loggers:
+  uvicorn:
+    handlers: [default]
+    level: INFO
+    propagate: true
+  uvicorn.error:
+    handlers: [default]
+    level: INFO
+    propagate: true
+  uvicorn.access:
+    handlers: [access]
+    level: INFO
+    propagate: true
+root:
+  level: INFO
+  handlers: [default]
+"#;
+
+        tokio::fs::write(&config_path, config_content)
+            .await
+            .map_err(|e| format!("Failed to write uvicorn logging config: {}", e))?;
+
+        Ok(config_path.display().to_string())
     }
 
     async fn spawn_pglite(&self, bun_path: &Path) -> Result<(), String> {
@@ -599,11 +725,22 @@ impl ProcessManager {
         dotenv_vars: &Arc<Mutex<HashMap<String, String>>>,
         backend_child: &Arc<Mutex<Option<Child>>>,
     ) -> Result<(), String> {
+        // ============================================================================
+        // IMPORTANT: Backend logs are sent directly to otelcol via OTEL auto-instrumentation.
+        // NOT piped through apx stdout/stderr.
+        // See spawn_uvicorn() for detailed explanation of the configuration.
+        // ============================================================================
+
+        // Reuse the existing log config file (created by spawn_uvicorn)
+        let log_config = app_dir.join(".apx").join("uvicorn_logging.yaml");
+        let log_config_str = log_config.display().to_string();
+
         let mut cmd = Command::new("uv");
-        // Use opentelemetry-instrument wrapper for auto-instrumentation
         cmd.args([
             "run",
             "opentelemetry-instrument",
+            "--logs_exporter",
+            "otlp",
             "uvicorn",
             app_entrypoint,
             "--host",
@@ -611,14 +748,16 @@ impl ProcessManager {
             "--port",
             &backend_port.to_string(),
             "--reload",
+            "--log-config",
+            &log_config_str,
         ])
         .current_dir(app_dir)
         .stdin(Stdio::null())
-        // Capture stdout/stderr to forward to otelcol
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        // Inherit stdout/stderr for local visibility, OTEL sends logs directly to otelcol
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
 
-        // Apply environment variables
+        // Set APX environment variables
         cmd.env("APX_FRONTEND_PORT", frontend_port.to_string());
         cmd.env("APX_BACKEND_PORT", backend_port.to_string());
         cmd.env("APX_DEV_DB_PORT", db_port.to_string());
@@ -626,6 +765,7 @@ impl ProcessManager {
         cmd.env("APX_DEV_SERVER_PORT", dev_server_port.to_string());
         cmd.env("APX_DEV_SERVER_HOST", host);
         cmd.env("APX_DEV_TOKEN", dev_token);
+        // Force Python to flush stdout/stderr immediately (no buffering)
         cmd.env("PYTHONUNBUFFERED", "1");
 
         // OpenTelemetry auto-instrumentation configuration
@@ -635,7 +775,7 @@ impl ProcessManager {
         );
         cmd.env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
         cmd.env("OTEL_LOGS_EXPORTER", "otlp");
-        cmd.env("OTEL_SERVICE_NAME", format!("{}_backend", app_slug));
+        cmd.env("OTEL_SERVICE_NAME", format!("{}_app", app_slug));
         cmd.env("OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED", "true");
         cmd.env(
             "OTEL_RESOURCE_ATTRIBUTES",
@@ -648,39 +788,9 @@ impl ProcessManager {
         }
         drop(vars);
 
-        let mut child = cmd
+        let child = cmd
             .spawn()
-            .map_err(|err| format!("Failed to start app process: {err}"))?;
-
-        // Spawn tasks to read stdout/stderr and forward to otelcol
-        let service_name = format!("{}_app", app_slug);
-        let app_path = app_dir.display().to_string();
-
-        if let Some(stdout) = child.stdout.take() {
-            let service_name = service_name.clone();
-            let app_path = app_path.clone();
-            tokio::spawn(async move {
-                let reader = BufReader::new(stdout);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    println!("{}", line);
-                    forward_log_to_otelcol(&line, "INFO", &service_name, &app_path).await;
-                }
-            });
-        }
-
-        if let Some(stderr) = child.stderr.take() {
-            let service_name = service_name.clone();
-            let app_path = app_path.clone();
-            tokio::spawn(async move {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    eprintln!("{}", line);
-                    forward_log_to_otelcol(&line, "ERROR", &service_name, &app_path).await;
-                }
-            });
-        }
+            .map_err(|err| format!("Failed to start backend process: {err}"))?;
 
         let mut guard = backend_child.lock().await;
         *guard = Some(child);

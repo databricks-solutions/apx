@@ -137,7 +137,7 @@ def setup_logger(
     if logger.handlers:
         logger.handlers.clear()
 
-    # Create console handler
+    # Create console handler for local terminal visibility
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(level)
 
@@ -148,8 +148,10 @@ def setup_logger(
     # Add handler to logger
     logger.addHandler(console_handler)
 
-    # Prevent propagation to avoid duplicate logs
-    logger.propagate = False
+    # Always propagate to root logger. When OTEL auto-instrumentation is enabled,
+    # the root logger has an OTEL handler that captures logs and sends to otelcol.
+    # When OTEL is not enabled, root has no handlers so propagation is a no-op.
+    logger.propagate = True
 
     return logger
 

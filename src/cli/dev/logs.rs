@@ -62,9 +62,10 @@ impl LogEntry {
         let timestamp = format_timestamp(timestamp_ms);
 
         // Determine source from service name
-        let source = if self.service_name.ends_with("_backend") {
+        // Service names are formatted as: {app_slug}_app, {app_slug}_ui, {app_slug}_db
+        let source = if self.service_name.ends_with("_app") {
             "app"
-        } else if self.service_name == "browser" {
+        } else if self.service_name.ends_with("_ui") {
             " ui"
         } else if self.service_name.ends_with("_db") {
             " db"

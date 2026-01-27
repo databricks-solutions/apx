@@ -3,6 +3,13 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import type { IncomingMessage, ServerResponse } from "http";
+import {
+  LoggerProvider,
+  BatchLogRecordProcessor,
+} from "@opentelemetry/sdk-logs";
+import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
+import { SeverityNumber } from "@opentelemetry/api-logs";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 
 const APX_DEV_TOKEN_HEADER = "x-apx-dev-token";
 
@@ -14,6 +21,92 @@ const publicDir = process.argv[5]; // Absolute path to public assets directory
 
 // Shared config from environment
 const appName = process.env.APX_APP_NAME!;
+
+// ============================================================================
+// OpenTelemetry Logging Setup
+// ============================================================================
+// Logs are sent directly to otelcol via OTLP HTTP, NOT piped through apx stdout.
+// This ensures proper service attribution and avoids log interleaving issues.
+// ============================================================================
+
+let otelLogger: ReturnType<LoggerProvider["getLogger"]> | null = null;
+
+function initOtelLogging() {
+  const otelEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  const serviceName = process.env.OTEL_SERVICE_NAME;
+  const appPath = process.env.APX_APP_PATH;
+
+  if (!otelEndpoint || !serviceName) {
+    // OTEL not configured (e.g., during build), skip initialization
+    return;
+  }
+
+  const resource = resourceFromAttributes({
+    "service.name": serviceName,
+    "apx.app_path": appPath || "",
+  });
+
+  const logExporter = new OTLPLogExporter({
+    url: `${otelEndpoint}/v1/logs`,
+  });
+
+  const loggerProvider = new LoggerProvider({
+    resource,
+    processors: [
+      new BatchLogRecordProcessor(logExporter, {
+        maxExportBatchSize: 50,
+        scheduledDelayMillis: 500,
+      }),
+    ],
+  });
+
+  otelLogger = loggerProvider.getLogger("apx-frontend");
+
+  // Flush logs on exit
+  const flushAndExit = async (code: number) => {
+    await loggerProvider.forceFlush();
+    await loggerProvider.shutdown();
+    process.exit(code);
+  };
+
+  process.on("beforeExit", () => flushAndExit(0));
+}
+
+function emitLog(
+  severity: "INFO" | "WARN" | "ERROR",
+  message: string,
+  attributes?: Record<string, string>,
+) {
+  const severityNumber =
+    severity === "ERROR"
+      ? SeverityNumber.ERROR
+      : severity === "WARN"
+        ? SeverityNumber.WARN
+        : SeverityNumber.INFO;
+
+  if (otelLogger) {
+    otelLogger.emit({
+      severityNumber,
+      severityText: severity,
+      body: message,
+      attributes,
+    });
+  }
+}
+
+function log(message: string) {
+  // Write to stdout for local visibility
+  process.stdout.write(message + "\n");
+  // Send to otelcol
+  emitLog("INFO", message);
+}
+
+function logError(message: string) {
+  // Write to stderr for local visibility
+  process.stderr.write(message + "\n");
+  // Send to otelcol
+  emitLog("ERROR", message);
+}
 
 function getBrowserLoggingScript(): string {
   return `
@@ -158,7 +251,7 @@ function apxPlugin(): Plugin {
               devServerHost === "0.0.0.0" ? requestHost : devServerHost;
 
             const redirectUrl = `http://${redirectHost}:${devServerPort}${url}`;
-            console.log(`[APX] Redirecting to: ${redirectUrl}`);
+            log(`Redirecting to: ${redirectUrl}`);
             res.statusCode = 302;
             res.setHeader("Location", redirectUrl);
             res.end();
@@ -203,16 +296,16 @@ function createBaseConfig(): InlineConfig {
 }
 
 async function runDev() {
+  // Initialize OTEL logging before anything else
+  initOtelLogging();
+
   const frontendPort = parseInt(process.env.APX_FRONTEND_PORT!);
   const devServerPort = parseInt(process.env.APX_DEV_SERVER_PORT!);
   const devServerHost = process.env.APX_DEV_SERVER_HOST!;
 
-  console.log("[APX] Starting frontend dev server...");
-  console.log(
-    "[APX] Config: port=%d, devServerPort=%d, devServerHost=%s",
-    frontendPort,
-    devServerPort,
-    devServerHost,
+  log("Starting frontend dev server...");
+  log(
+    `Config: port=${frontendPort}, devServerPort=${devServerPort}, devServerHost=${devServerHost}`,
   );
 
   const config: InlineConfig = {
@@ -229,24 +322,24 @@ async function runDev() {
     },
   };
 
-  console.log("[APX] Creating vite server...");
+  log("Creating vite server...");
   const server = await createServer(config);
 
-  console.log("[APX] Starting to listen...");
+  log("Starting to listen...");
   await server.listen();
 
   server.printUrls();
-  console.log("[APX:READY] Frontend server listening on port", frontendPort);
+  log(`[READY] Frontend server listening on port ${frontendPort}`);
 
   // Handle graceful shutdown
   const shutdown = async (signal: string) => {
-    console.log(`[APX] Received ${signal}, shutting down frontend server...`);
+    log(`Received ${signal}, shutting down frontend server...`);
     try {
       await server.close();
-      console.log("[APX] Frontend server closed gracefully");
+      log("Frontend server closed gracefully");
       process.exit(0);
     } catch (err) {
-      console.error("[APX] Error during shutdown:", err);
+      logError(`Error during shutdown: ${err}`);
       process.exit(1);
     }
   };
@@ -256,11 +349,11 @@ async function runDev() {
 
   // Log if the server has any errors after startup
   server.httpServer?.on("error", (err) => {
-    console.error("[APX] HTTP server error:", err);
+    logError(`HTTP server error: ${err}`);
   });
 
   server.httpServer?.on("close", () => {
-    console.log("[APX] HTTP server closed");
+    log("HTTP server closed");
   });
 }
 
@@ -272,15 +365,15 @@ async function runBuild() {
 // Main entry point
 if (mode === "dev") {
   runDev().catch((err) => {
-    console.error("[APX] Failed to start dev server:", err);
+    logError(`Failed to start dev server: ${err}`);
     process.exit(1);
   });
 } else if (mode === "build") {
   runBuild().catch((err) => {
-    console.error("[APX] Failed to build:", err);
+    logError(`Failed to build: ${err}`);
     process.exit(1);
   });
 } else {
-  console.error(`[APX] Invalid mode: ${mode}. Expected "dev" or "build".`);
+  logError(`Invalid mode: ${mode}. Expected "dev" or "build".`);
   process.exit(1);
 }
