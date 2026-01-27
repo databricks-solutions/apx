@@ -2,8 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .._metadata import api_prefix
-from .dependencies import get_config
+from .._metadata import api_prefix, dist_dir
 from .logger import logger
 
 
@@ -24,8 +23,7 @@ def add_not_found_handler(app: FastAPI):
 
             if (not is_api) and is_get_page_nav and (not looks_like_asset):
                 # Let the SPA router handle it
-                config = get_config()
-                return FileResponse(config.static_assets_path / "index.html")
+                return FileResponse(dist_dir / "index.html")
         # Default: return the original HTTP error (JSON 404 for API, etc.)
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
