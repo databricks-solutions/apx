@@ -33,6 +33,7 @@ mod dev;
 pub mod dotenv;
 mod interop;
 mod mcp;
+mod otelcol;
 mod registry;
 mod search;
 mod sources;
@@ -80,6 +81,8 @@ enum Commands {
     Build(cli::build::BuildArgs),
     /// 🍞 Run a command using bun
     Bun(cli::bun::BunArgs),
+    /// 📊 Run a command using otelcol (OpenTelemetry Collector)
+    Otelcol(cli::otelcol::OtelcolArgs),
     /// 🧩 Components commands
     #[command(subcommand)]
     Components(ComponentsCommands),
@@ -153,6 +156,7 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
             Some(Commands::Init(init_args)) => cli::init::run(init_args).await,
             Some(Commands::Build(build_args)) => cli::build::run(build_args).await,
             Some(Commands::Bun(bun_args)) => cli::bun::run(bun_args).await,
+            Some(Commands::Otelcol(otelcol_args)) => cli::otelcol::run(otelcol_args).await,
             Some(Commands::Components(components_cmd)) => match components_cmd {
                 ComponentsCommands::Add(args) => cli::components::add::run(args).await,
             },
@@ -205,26 +209,77 @@ pub(crate) fn init_tracing() {
         Err(_) => format!("{crate_root}=info"),
     };
 
+    // Check if OTLP logging is enabled (set by dev server subprocess)
+    let otel_enabled = std::env::var("APX_OTEL_LOGS").map_or(false, |v| v == "1");
+
+    if otel_enabled {
+        // Initialize with both fmt and OTLP layers
+        if let Err(e) = init_tracing_with_otel(&crate_root, &filter) {
+            eprintln!("Warning: Failed to initialize OTLP logging: {e}");
+            init_tracing_fmt_only(&filter);
+        }
+    } else {
+        init_tracing_fmt_only(&filter);
+    }
+}
+
+fn init_tracing_fmt_only(filter: &str) {
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_target(true)
         .with_line_number(true)
         .with_file(true)
-        .with_filter(EnvFilter::new(&filter));
-
-    let apx_layer = std::env::var("APX_COLLECT_LOGS").ok().map(|_| {
-        dev::logging::ApxLogLayer.with_filter(EnvFilter::new(format!("{crate_root}=debug")))
-    });
+        .with_filter(EnvFilter::new(filter));
 
     if tracing_subscriber::registry()
         .with(fmt_layer)
-        .with(apx_layer)
         .try_init()
         .is_err()
     {
-        // Tracing already initialized, this can happen if module is reimported
         eprintln!("Warning: tracing subscriber already initialized");
     }
+}
+
+fn init_tracing_with_otel(service_name: &str, filter: &str) -> Result<(), String> {
+    use opentelemetry::KeyValue;
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::logs::SdkLoggerProvider;
+    use opentelemetry_sdk::Resource;
+
+    let endpoint = format!("http://127.0.0.1:{}/v1/logs", otelcol::OTELCOL_PORT);
+
+    let exporter = opentelemetry_otlp::LogExporter::builder()
+        .with_http()
+        .with_endpoint(&endpoint)
+        .build()
+        .map_err(|e| format!("Failed to create OTLP exporter: {e}"))?;
+
+    let provider = SdkLoggerProvider::builder()
+        .with_resource(Resource::builder().with_attributes([
+            KeyValue::new("service.name", service_name.to_string()),
+        ]).build())
+        .with_batch_exporter(exporter)
+        .build();
+
+    let otel_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&provider);
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .with_line_number(true)
+        .with_file(true)
+        .with_filter(EnvFilter::new(filter));
+
+    if tracing_subscriber::registry()
+        .with(otel_layer)
+        .with(fmt_layer)
+        .try_init()
+        .is_err()
+    {
+        eprintln!("Warning: tracing subscriber already initialized");
+    }
+
+    Ok(())
 }
 
 fn is_plain_level(s: &str) -> bool {

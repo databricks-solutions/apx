@@ -1,33 +1,25 @@
+//! APX dev server with otelcol-based logging.
+
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use std::collections::HashMap;
-use std::convert::Infallible;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tokio::sync::mpsc;
 use tokio::time::Duration;
-use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 
 use crate::api_generator::start_openapi_watcher;
 use crate::dev::common::{lock_path, remove_lock, Shutdown};
-use crate::dev::logging::{
-    apx_log_queue, apx_log_queue_since, apx_log_queue_since_timestamp, clear_apx_log_queue,
-    encode_log_payload, BrowserLogPayload, LogPayload, LogPipe, LogStreamName, SyncLogQueue,
-    APX_SHUTDOWN_MESSAGE,
-};
+use crate::dev::logging::BrowserLogPayload;
 use crate::dev::process::ProcessManager;
 use crate::dev::proxy;
 use crate::dotenv::DotenvFile;
 use crate::interop::get_token;
+use crate::otelcol;
 
 /// Shared application state for the dev server.
 #[derive(Clone)]
@@ -35,7 +27,10 @@ struct AppState {
     /// Broadcast sender for shutdown signals - the single authority for shutdown coordination.
     shutdown_tx: broadcast::Sender<Shutdown>,
     process_manager: Arc<ProcessManager>,
-    apx_log_queue: SyncLogQueue,
+    /// HTTP client for forwarding browser logs to otelcol
+    http_client: reqwest::Client,
+    /// App directory path for resource attributes
+    app_dir: PathBuf,
 }
 
 #[derive(serde::Serialize)]
@@ -47,13 +42,8 @@ struct HealthResponse {
 }
 
 #[derive(serde::Deserialize)]
-struct LogsQuery {
-    since: Option<i64>,
-    follow: Option<bool>,
-}
-
-#[derive(serde::Deserialize)]
 struct StopQuery {
+    #[allow(dead_code)]
     persist_logs: Option<bool>,
 }
 
@@ -66,8 +56,10 @@ pub async fn run_server(
     frontend_port: u16,
     db_port: u16,
 ) -> Result<(), String> {
-    let apx_log_queue = apx_log_queue();
-    clear_apx_log_queue(&apx_log_queue);
+    // Ensure otelcol is running for log collection
+    if let Err(e) = otelcol::ensure_otelcol_running() {
+        warn!("Failed to start otelcol: {}. Logging may not work correctly.", e);
+    }
 
     // Extract port and host from the pre-bound listener
     let local_addr = listener
@@ -122,10 +114,17 @@ pub async fn run_server(
         app_dir.clone(),
     );
 
+    // Create HTTP client for OTLP forwarding
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
     let state = AppState {
         shutdown_tx: shutdown_tx.clone(),
         process_manager: Arc::clone(&process_manager),
-        apx_log_queue: Arc::clone(&apx_log_queue),
+        http_client,
+        app_dir: app_dir.clone(),
     };
 
     // API router - proxied to backend with token manager
@@ -137,7 +136,7 @@ pub async fn run_server(
     // APX internal router
     let apx_router = Router::new()
         .route("/health", get(health))
-        .route("/logs", get(logs).post(browser_logs))
+        .route("/logs", axum::routing::post(browser_logs))
         .route("/stop", get(stop))
         .with_state(state);
 
@@ -150,37 +149,18 @@ pub async fn run_server(
         .merge(api_utils_router)
         .merge(ui_router);
 
-    // Listener is already bound, use it directly
-
     // Clone what we need for the shutdown handler
     let mut shutdown_rx = shutdown_tx.subscribe();
     let lock = lock_path(&app_dir);
-    let shutdown_apx_log_queue = Arc::clone(&apx_log_queue);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             // Wait for Stop signal
             match shutdown_rx.recv().await {
-                Ok(Shutdown::Stop { persist_logs }) => {
+                Ok(Shutdown::Stop { .. }) => {
                     debug!("Stop signal received, shutting down server.");
                     // ProcessManager owns all process termination
                     process_manager.stop().await;
-
-                    // After processes stop, wait for log readers to drain final output
-                    if persist_logs {
-                        debug!("Waiting for log readers to drain...");
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-
-                        // Now persist logs - processes are stopped and output is drained
-                        if let Err(e) = persist_logs_to_file(
-                            &process_manager,
-                            &shutdown_apx_log_queue,
-                        )
-                        .await
-                        {
-                            warn!("Failed to persist logs: {}", e);
-                        }
-                    }
 
                     // Remove lock file after processes are stopped
                     let _ = remove_lock(&lock);
@@ -299,123 +279,13 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRespon
     )
 }
 
-async fn logs(
-    State(state): State<AppState>,
-    Query(query): Query<LogsQuery>,
-) -> axum::response::Response {
-    let since = query.since.unwrap_or(0);
-    let follow = query.follow.unwrap_or(false);
-    let (tx, rx) = mpsc::channel(200);
-    let mut shutdown_rx = state.shutdown_tx.subscribe();
-
-    tokio::spawn(async move {
-        // Send initial logs (merged and sorted by timestamp)
-        let (mut app_len, initial_logs) = state.process_manager.logs_since_timestamp(since).await;
-        let (mut apx_len, initial_apx_logs) =
-            apx_log_queue_since_timestamp(&state.apx_log_queue, since);
-
-        let mut merged = initial_logs;
-        merged.extend(initial_apx_logs);
-        merged.sort_by_key(|log| log.timestamp);
-
-        for entry in merged {
-            if send_log_payload(&tx, entry).await.is_err() {
-                return;
-            }
-        }
-
-        if !follow {
-            return;
-        }
-
-        // Follow mode: poll logs until shutdown signal
-        let poll_interval = Duration::from_millis(100);
-
-        loop {
-            tokio::select! {
-                biased;
-                // React to shutdown signal
-                result = shutdown_rx.recv() => {
-                    match result {
-                        Ok(Shutdown::Stop { .. }) => {
-                            // Flush any remaining logs before sending shutdown message (merged and sorted)
-                            let (_, final_logs) = state.process_manager.logs_since_index(app_len).await;
-                            let (_, final_apx_logs) = apx_log_queue_since(&state.apx_log_queue, apx_len);
-
-                            let mut merged = final_logs;
-                            merged.extend(final_apx_logs);
-                            merged.sort_by_key(|log| log.timestamp);
-
-                            for entry in merged {
-                                let _ = send_log_payload(&tx, entry).await;
-                            }
-
-                            // Send final shutdown message and close
-                            let _ = send_log_payload(
-                                &tx,
-                                LogPayload::new(
-                                    LogStreamName::Apx,
-                                    None,
-                                    APX_SHUTDOWN_MESSAGE.to_string(),
-                                ),
-                            )
-                            .await;
-                            return;
-                        }
-                        Err(_) => {
-                            // Channel closed
-                            return;
-                        }
-                    }
-                }
-                // Poll for new logs (merged and sorted)
-                _ = tokio::time::sleep(poll_interval) => {
-                    let (next_app_len, logs) = state.process_manager.logs_since_index(app_len).await;
-                    let (next_apx_len, apx_logs) = apx_log_queue_since(&state.apx_log_queue, apx_len);
-
-                    let mut merged = logs;
-                    merged.extend(apx_logs);
-                    merged.sort_by_key(|log| log.timestamp);
-
-                    for entry in merged {
-                        if send_log_payload(&tx, entry).await.is_err() {
-                            return;
-                        }
-                    }
-
-                    app_len = next_app_len;
-                    apx_len = next_apx_len;
-                }
-            }
-        }
-    });
-
-    if follow {
-        Sse::new(ReceiverStream::new(rx))
-            .keep_alive(
-                KeepAlive::new()
-                    .interval(Duration::from_secs(10))
-                    .text("keep-alive"),
-            )
-            .into_response()
-    } else {
-        Sse::new(ReceiverStream::new(rx)).into_response()
-    }
-}
-
 async fn browser_logs(
     State(state): State<AppState>,
     Json(payload): Json<BrowserLogPayload>,
 ) -> StatusCode {
-    let level = payload.level.as_str();
-    let pipe = if level == "error" {
-        LogPipe::Error
-    } else {
-        LogPipe::Out
-    };
     let mut message = format!(
         "[browser:{}:{}] {}",
-        level,
+        payload.level,
         payload.source,
         payload.message
     );
@@ -423,14 +293,79 @@ async fn browser_logs(
         message.push('\n');
         message.push_str(&stack);
     }
-    let log_payload = LogPayload {
-        stream: LogStreamName::Ui,
-        pipe: Some(pipe),
-        message,
-        timestamp: payload.timestamp,
-    };
-    state.process_manager.push_browser_log(log_payload).await;
+
+    // Forward to otelcol via OTLP HTTP
+    let otlp_payload = build_otlp_log_payload(
+        &message,
+        &payload.level,
+        payload.timestamp,
+        "browser",
+        &state.app_dir,
+    );
+
+    let endpoint = format!("http://127.0.0.1:{}/v1/logs", otelcol::OTELCOL_PORT);
+    let result = state
+        .http_client
+        .post(&endpoint)
+        .header("Content-Type", "application/json")
+        .json(&otlp_payload)
+        .send()
+        .await;
+
+    if let Err(e) = result {
+        debug!("Failed to forward browser log to otelcol: {}", e);
+    }
+
     StatusCode::OK
+}
+
+/// Build an OTLP JSON log payload
+fn build_otlp_log_payload(
+    message: &str,
+    level: &str,
+    timestamp_ms: i64,
+    service_name: &str,
+    app_dir: &std::path::Path,
+) -> serde_json::Value {
+    // Convert severity level to OTLP severity number
+    let severity_number = match level.to_lowercase().as_str() {
+        "trace" => 1,
+        "debug" => 5,
+        "info" | "log" => 9,
+        "warn" | "warning" => 13,
+        "error" => 17,
+        "fatal" | "critical" => 21,
+        _ => 9, // default to INFO
+    };
+
+    // Convert milliseconds to nanoseconds for OTLP
+    let time_unix_nano = (timestamp_ms * 1_000_000).to_string();
+
+    serde_json::json!({
+        "resourceLogs": [{
+            "resource": {
+                "attributes": [
+                    {
+                        "key": "service.name",
+                        "value": { "stringValue": service_name }
+                    },
+                    {
+                        "key": "apx.app_path",
+                        "value": { "stringValue": app_dir.display().to_string() }
+                    }
+                ]
+            },
+            "scopeLogs": [{
+                "scope": {},
+                "logRecords": [{
+                    "timeUnixNano": time_unix_nano,
+                    "severityNumber": severity_number,
+                    "severityText": level.to_uppercase(),
+                    "body": { "stringValue": message }
+                }]
+            }]
+        }]
+    })
 }
 
 async fn stop(
@@ -440,74 +375,7 @@ async fn stop(
     let persist_logs = query.persist_logs.unwrap_or(false);
     debug!(persist_logs, "Received dev server stop request.");
 
-    // Send the shutdown signal with persist_logs flag
-    // Log persistence happens AFTER processes stop in the graceful_shutdown handler
+    // Send the shutdown signal
     let _ = state.shutdown_tx.send(Shutdown::Stop { persist_logs });
     StatusCode::OK
 }
-
-/// Persist all subprocess logs to .apx/startup.log for debugging startup failures.
-/// This should be called AFTER processes have stopped to ensure all output is captured.
-async fn persist_logs_to_file(
-    process_manager: &ProcessManager,
-    apx_log_queue: &SyncLogQueue,
-) -> Result<(), String> {
-    debug!("Persisting subprocess logs to startup.log");
-
-    // Collect all logs from process_manager and apx_log_queue
-    let (_, app_logs) = process_manager.logs_since_index(0).await;
-    let (_, apx_logs) = apx_log_queue_since(apx_log_queue, 0);
-
-    debug!(
-        app_log_count = app_logs.len(),
-        apx_log_count = apx_logs.len(),
-        "Collected logs from queues"
-    );
-
-    // Merge and sort by timestamp
-    let mut all_logs = app_logs;
-    all_logs.extend(apx_logs);
-    all_logs.sort_by_key(|log| log.timestamp);
-
-    debug!(total_logs = all_logs.len(), "Merged and sorted logs");
-
-    // Append to startup.log
-    let log_path = process_manager.app_dir().join(".apx/startup.log");
-    debug!(path = %log_path.display(), "Opening startup.log for append");
-
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| format!("Failed to open startup.log: {}", e))?;
-
-    writeln!(file, "\n--- Subprocess Logs ---")
-        .map_err(|e| format!("Failed to write to startup.log: {}", e))?;
-
-    for log in &all_logs {
-        let stream = format!("{:?}", log.stream).to_lowercase();
-        let pipe = log
-            .pipe
-            .map(|p| format!("{:?}", p).to_lowercase())
-            .unwrap_or_default();
-        writeln!(file, "[{}:{}] {}", stream, pipe, log.message)
-            .map_err(|e| format!("Failed to write log entry: {}", e))?;
-    }
-
-    debug!(
-        logs_written = all_logs.len(),
-        path = %log_path.display(),
-        "Successfully persisted subprocess logs"
-    );
-
-    Ok(())
-}
-
-async fn send_log_payload(
-    tx: &mpsc::Sender<Result<Event, Infallible>>,
-    payload: LogPayload,
-) -> Result<(), ()> {
-    let data = encode_log_payload(&payload).map_err(|_| ())?;
-    tx.send(Ok(Event::default().data(data))).await.map_err(|_| ())
-}
-

@@ -6,13 +6,14 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::bun_binary_path;
-use crate::cli::dev::logs::stream_logs;
+use crate::cli::dev::logs::LogsArgs;
 use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
 use crate::common::{ensure_dir, spinner, format_elapsed_ms, run_preflight_checks};
-use crate::dev::client::{health, logs, stop_with_logs, wait_for_healthy, HealthCheckConfig};
+use crate::dev::client::{health, stop_with_logs, wait_for_healthy, HealthCheckConfig};
 use crate::dev::common::{lock_path, read_lock, remove_lock, write_lock, DevLock, BIND_HOST};
 use crate::dev::process::ProcessManager;
+use crate::otelcol;
 use crate::registry::Registry;
 use tracing::debug;
 
@@ -74,8 +75,18 @@ async fn run_attached(args: StartArgs) -> Result<(), String> {
         spawn_server(&app_dir, None, args.skip_credentials_validation).await?
     };
 
-    let response = logs(port, None, true).await?;
-    let _ = stream_logs(response, true).await;
+    // Use the file-based log following (reads from otelcol output)
+    let logs_args = LogsArgs {
+        app_path: Some(app_dir.clone()),
+        duration: "10m".to_string(),
+        follow: true,
+    };
+
+    // Run logs command (will return on Ctrl+C)
+    let _ = crate::cli::dev::logs::run(logs_args).await;
+
+    // Ignore port to avoid unused warning
+    let _ = port;
 
     stop_dev_server(&app_dir).await?;
     Ok(())
@@ -175,6 +186,11 @@ pub(crate) async fn spawn_server(
 
     println!("🚀 Starting dev server...");
     
+    // Start otelcol for log collection (before subprocess so it's ready to receive logs)
+    if let Err(e) = otelcol::ensure_otelcol_running() {
+        debug!("Failed to start otelcol: {e}. Logs may not be collected.");
+    }
+    
     // Load registry and cleanup stale entries (projects that no longer exist)
     let mut registry = Registry::load()?;
     let stale = registry.cleanup_stale_entries();
@@ -223,6 +239,7 @@ pub(crate) async fn spawn_server(
         .stdout(Stdio::null())
         .stderr(Stdio::from(startup_file))
         .env("APX_COLLECT_LOGS", "1")
+        .env("APX_OTEL_LOGS", "1")
         .spawn()
         .map_err(|err| format!("Failed to start dev server: {err}"))?;
 

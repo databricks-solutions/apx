@@ -1,3 +1,8 @@
+//! Process management for APX dev server.
+//!
+//! Manages frontend (Vite/Bun), backend (uvicorn), and database (PGlite) processes.
+//! Subprocess stdout/stderr are captured and forwarded to otelcol for centralized logging.
+
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -16,11 +21,8 @@ use tracing::{debug, info, warn};
 use crate::bun_binary_path;
 use crate::common::read_project_metadata;
 use crate::dev::common::CLIENT_HOST;
-use crate::dev::logging::{
-    LogPayload, LogPipe, LogQueue, LogStreamName, log_queue_since, log_queue_since_timestamp,
-    push_log,
-};
 use crate::dotenv::DotenvFile;
+use crate::otelcol;
 
 #[derive(Debug, Clone, Copy)]
 enum LogSource {
@@ -39,19 +41,8 @@ impl fmt::Display for LogSource {
     }
 }
 
-impl From<LogSource> for LogStreamName {
-    fn from(source: LogSource) -> Self {
-        match source {
-            LogSource::App => LogStreamName::App,
-            LogSource::Ui => LogStreamName::Ui,
-            LogSource::Db => LogStreamName::Db,
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct ProcessManager {
-    log_queue: LogQueue,
     frontend_child: Arc<Mutex<Option<Child>>>,
     backend_child: Arc<Mutex<Option<Child>>>,
     db_child: Arc<Mutex<Option<Child>>>,
@@ -63,6 +54,7 @@ pub struct ProcessManager {
     dev_token: String,
     db_password: String,
     app_dir: PathBuf,
+    app_slug: String,
     app_entrypoint: String,
     dotenv_vars: Arc<Mutex<HashMap<String, String>>>,
 }
@@ -83,12 +75,12 @@ impl ProcessManager {
 
         let dotenv = DotenvFile::read(&app_dir.join(".env"))?;
         let dotenv_vars = Arc::new(Mutex::new(dotenv.get_vars()));
+        let app_slug = metadata.app_slug.clone();
         let app_entrypoint = metadata.app_entrypoint.clone();
 
         let dev_token = Self::generate_dev_token();
         let db_password = Self::generate_dev_token(); // Random password for PGlite
         let manager = Self {
-            log_queue: Arc::new(Mutex::new(Vec::new())),
             frontend_child: Arc::new(Mutex::new(None)),
             backend_child: Arc::new(Mutex::new(None)),
             db_child: Arc::new(Mutex::new(None)),
@@ -100,6 +92,7 @@ impl ProcessManager {
             dev_token,
             db_password,
             app_dir: app_dir.to_path_buf(),
+            app_slug,
             app_entrypoint,
             dotenv_vars,
         };
@@ -126,6 +119,7 @@ impl ProcessManager {
         &self.dev_token
     }
 
+    #[allow(dead_code)]
     pub fn app_dir(&self) -> &Path {
         &self.app_dir
     }
@@ -170,29 +164,20 @@ impl ProcessManager {
     }
 
     pub async fn status(&self) -> (String, String, String) {
-        let one_minute_ago = chrono::Utc::now().timestamp_millis() - 60_000;
-        let (_, logs) = self.logs_since_timestamp(one_minute_ago).await;
-
         let frontend_status = Self::status_for_child(
             &self.frontend_child,
-            &logs,
-            LogSource::Ui,
             "localhost",
             self.frontend_port,
         )
         .await;
         let backend_status = Self::status_for_child(
             &self.backend_child,
-            &logs,
-            LogSource::App,
             &self.host,
             self.backend_port,
         )
         .await;
         let db_status = Self::status_for_child(
             &self.db_child,
-            &logs,
-            LogSource::Db,
             &self.host,
             self.db_port,
         )
@@ -229,12 +214,14 @@ impl ProcessManager {
     }
 
     async fn spawn_uvicorn(&self, app_dir: &Path, app_entrypoint: String) -> Result<(), String> {
+        // Use opentelemetry-instrument wrapper for auto-instrumentation
         let child = self
             .spawn_process(
                 app_dir,
                 PathBuf::from("uv"),
                 vec![
                     "run".to_string(),
+                    "opentelemetry-instrument".to_string(),
                     "uvicorn".to_string(),
                     app_entrypoint,
                     "--host".to_string(),
@@ -383,7 +370,7 @@ impl ProcessManager {
         let app_dir = self.app_dir.clone();
         let dotenv_vars = Arc::clone(&self.dotenv_vars);
         let backend_child = Arc::clone(&self.backend_child);
-        let log_queue = Arc::clone(&self.log_queue);
+        let app_slug = self.app_slug.clone();
         let app_entrypoint = self.app_entrypoint.clone();
         let host = self.host.clone();
         let backend_port = self.backend_port;
@@ -490,6 +477,7 @@ impl ProcessManager {
                     // Restart uvicorn
                     if let Err(e) = Self::spawn_uvicorn_static(
                         &app_dir,
+                        &app_slug,
                         &app_entrypoint,
                         &host,
                         backend_port,
@@ -500,7 +488,6 @@ impl ProcessManager {
                         &db_password,
                         &dotenv_vars,
                         &backend_child,
-                        &log_queue,
                     )
                     .await
                     {
@@ -523,6 +510,7 @@ impl ProcessManager {
         cmd.args(args)
             .current_dir(app_dir)
             .stdin(Stdio::null())
+            // Capture stdout/stderr to forward to otelcol
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         self.apply_env(&mut cmd, include_dotenv).await;
@@ -531,17 +519,39 @@ impl ProcessManager {
             .spawn()
             .map_err(|err| format!("Failed to start {source} process: {err}"))?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| format!("Failed to capture {source} stdout"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| format!("Failed to capture {source} stderr"))?;
+        // Spawn tasks to read stdout/stderr and forward to otelcol
+        let service_name = format!("{}_{}", self.app_slug, source);
+        let app_path = self.app_dir.display().to_string();
 
-        self.spawn_log_reader(stdout, source, LogPipe::Out);
-        self.spawn_log_reader(stderr, source, LogPipe::Error);
+        if let Some(stdout) = child.stdout.take() {
+            let service_name = service_name.clone();
+            let app_path = app_path.clone();
+            tokio::spawn(async move {
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    // Print to terminal for visibility
+                    println!("{}", line);
+                    // Forward to otelcol
+                    forward_log_to_otelcol(&line, "INFO", &service_name, &app_path).await;
+                }
+            });
+        }
+
+        if let Some(stderr) = child.stderr.take() {
+            let service_name = service_name.clone();
+            let app_path = app_path.clone();
+            tokio::spawn(async move {
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    // Print to terminal for visibility
+                    eprintln!("{}", line);
+                    // Forward to otelcol as error/warning
+                    forward_log_to_otelcol(&line, "ERROR", &service_name, &app_path).await;
+                }
+            });
+        }
 
         Ok(child)
     }
@@ -574,8 +584,10 @@ impl ProcessManager {
     }
 
     /// Static version of spawn_uvicorn for use in async tasks without self
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_uvicorn_static(
         app_dir: &Path,
+        app_slug: &str,
         app_entrypoint: &str,
         host: &str,
         backend_port: u16,
@@ -586,11 +598,12 @@ impl ProcessManager {
         db_password: &str,
         dotenv_vars: &Arc<Mutex<HashMap<String, String>>>,
         backend_child: &Arc<Mutex<Option<Child>>>,
-        log_queue: &LogQueue,
     ) -> Result<(), String> {
         let mut cmd = Command::new("uv");
+        // Use opentelemetry-instrument wrapper for auto-instrumentation
         cmd.args([
             "run",
+            "opentelemetry-instrument",
             "uvicorn",
             app_entrypoint,
             "--host",
@@ -601,6 +614,7 @@ impl ProcessManager {
         ])
         .current_dir(app_dir)
         .stdin(Stdio::null())
+        // Capture stdout/stderr to forward to otelcol
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -612,6 +626,21 @@ impl ProcessManager {
         cmd.env("APX_DEV_SERVER_PORT", dev_server_port.to_string());
         cmd.env("APX_DEV_SERVER_HOST", host);
         cmd.env("APX_DEV_TOKEN", dev_token);
+        cmd.env("PYTHONUNBUFFERED", "1");
+
+        // OpenTelemetry auto-instrumentation configuration
+        cmd.env(
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            format!("http://127.0.0.1:{}", crate::otelcol::OTELCOL_PORT),
+        );
+        cmd.env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
+        cmd.env("OTEL_LOGS_EXPORTER", "otlp");
+        cmd.env("OTEL_SERVICE_NAME", format!("{}_backend", app_slug));
+        cmd.env("OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED", "true");
+        cmd.env(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            format!("apx.app_path={}", app_dir.display()),
+        );
 
         let vars = dotenv_vars.lock().await;
         for (key, value) in vars.iter() {
@@ -623,64 +652,40 @@ impl ProcessManager {
             .spawn()
             .map_err(|err| format!("Failed to start app process: {err}"))?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "Failed to capture app stdout".to_string())?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "Failed to capture app stderr".to_string())?;
+        // Spawn tasks to read stdout/stderr and forward to otelcol
+        let service_name = format!("{}_app", app_slug);
+        let app_path = app_dir.display().to_string();
 
-        // Spawn log readers
-        let log_queue_stdout = Arc::clone(log_queue);
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let entry = LogPayload::new(LogStreamName::App, Some(LogPipe::Out), line);
-                push_log(&log_queue_stdout, entry).await;
-            }
-        });
+        if let Some(stdout) = child.stdout.take() {
+            let service_name = service_name.clone();
+            let app_path = app_path.clone();
+            tokio::spawn(async move {
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    println!("{}", line);
+                    forward_log_to_otelcol(&line, "INFO", &service_name, &app_path).await;
+                }
+            });
+        }
 
-        let log_queue_stderr = Arc::clone(log_queue);
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let entry = LogPayload::new(LogStreamName::App, Some(LogPipe::Error), line);
-                push_log(&log_queue_stderr, entry).await;
-            }
-        });
+        if let Some(stderr) = child.stderr.take() {
+            let service_name = service_name.clone();
+            let app_path = app_path.clone();
+            tokio::spawn(async move {
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    eprintln!("{}", line);
+                    forward_log_to_otelcol(&line, "ERROR", &service_name, &app_path).await;
+                }
+            });
+        }
 
         let mut guard = backend_child.lock().await;
         *guard = Some(child);
 
         Ok(())
-    }
-
-    fn spawn_log_reader<R>(&self, reader: R, source: LogSource, pipe: LogPipe)
-    where
-        R: tokio::io::AsyncRead + Unpin + Send + 'static,
-    {
-        let log_queue = Arc::clone(&self.log_queue);
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(reader).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let entry = LogPayload::new(LogStreamName::from(source), Some(pipe), line);
-                push_log(&log_queue, entry).await;
-            }
-        });
-    }
-
-    pub async fn logs_since_index(&self, start_index: usize) -> (usize, Vec<LogPayload>) {
-        log_queue_since(&self.log_queue, start_index).await
-    }
-
-    pub async fn logs_since_timestamp(&self, since: i64) -> (usize, Vec<LogPayload>) {
-        log_queue_since_timestamp(&self.log_queue, since).await
-    }
-
-    pub async fn push_browser_log(&self, payload: LogPayload) {
-        push_log(&self.log_queue, payload).await;
     }
 
     async fn apply_env(&self, cmd: &mut Command, include_dotenv: bool) {
@@ -694,6 +699,24 @@ impl ProcessManager {
         // Force Python to flush stdout/stderr immediately (no buffering)
         // This ensures error output is captured before process termination
         cmd.env("PYTHONUNBUFFERED", "1");
+
+        // OpenTelemetry auto-instrumentation configuration
+        cmd.env(
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            format!("http://127.0.0.1:{}", crate::otelcol::OTELCOL_PORT),
+        );
+        cmd.env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
+        cmd.env("OTEL_LOGS_EXPORTER", "otlp");
+        cmd.env(
+            "OTEL_SERVICE_NAME",
+            format!("{}_backend", self.app_slug),
+        );
+        cmd.env("OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED", "true");
+        cmd.env(
+            "OTEL_RESOURCE_ATTRIBUTES",
+            format!("apx.app_path={}", self.app_dir.display()),
+        );
+
         if include_dotenv {
             let vars = self.dotenv_vars.lock().await;
             for (key, value) in vars.iter() {
@@ -905,8 +928,6 @@ impl ProcessManager {
 
     async fn status_for_child(
         child: &Arc<Mutex<Option<Child>>>,
-        _logs: &[LogPayload],
-        _source: LogSource,
         host: &str,
         port: u16,
     ) -> String {
@@ -1010,4 +1031,99 @@ impl ProcessManager {
             }
         }
     }
+}
+
+/// Forward a log line to otelcol via OTLP HTTP.
+/// This is fire-and-forget; errors are silently ignored to avoid log loops.
+async fn forward_log_to_otelcol(message: &str, level: &str, service_name: &str, app_path: &str) {
+    // Skip noisy internal logs
+    if should_skip_log(message) {
+        return;
+    }
+
+    // Convert severity level to OTLP severity number
+    let severity_number = match level.to_uppercase().as_str() {
+        "TRACE" => 1,
+        "DEBUG" => 5,
+        "INFO" | "LOG" => 9,
+        "WARN" | "WARNING" => 13,
+        "ERROR" => 17,
+        "FATAL" | "CRITICAL" => 21,
+        _ => 9,
+    };
+
+    let timestamp_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+
+    let payload = serde_json::json!({
+        "resourceLogs": [{
+            "resource": {
+                "attributes": [
+                    {
+                        "key": "service.name",
+                        "value": { "stringValue": service_name }
+                    },
+                    {
+                        "key": "apx.app_path",
+                        "value": { "stringValue": app_path }
+                    }
+                ]
+            },
+            "scopeLogs": [{
+                "scope": {},
+                "logRecords": [{
+                    "timeUnixNano": timestamp_ns.to_string(),
+                    "severityNumber": severity_number,
+                    "severityText": level.to_uppercase(),
+                    "body": { "stringValue": message }
+                }]
+            }]
+        }]
+    });
+
+    let endpoint = format!("http://127.0.0.1:{}/v1/logs", otelcol::OTELCOL_PORT);
+
+    // Use a simple HTTP client - fire and forget
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(1))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let _ = client
+        .post(&endpoint)
+        .header("Content-Type", "application/json")
+        .json(&payload)
+        .send()
+        .await;
+}
+
+/// Check if a log message should be skipped (internal/noisy logs)
+fn should_skip_log(message: &str) -> bool {
+    // HTTP connection pooling logs (hyper/reqwest)
+    if message.starts_with("starting new connection:")
+        || message.starts_with("connecting to ")
+        || message.starts_with("connected to ")
+        || message.starts_with("reuse idle connection")
+        || message.starts_with("pooling idle connection")
+    {
+        return true;
+    }
+
+    // Tokio-postgres internal debug logs (may contain passwords)
+    if message.starts_with("preparing query ")
+        || message.starts_with("DEBUG: parse ")
+        || message.starts_with("DEBUG: bind ")
+        || message.starts_with("executing statement ")
+    {
+        return true;
+    }
+
+    // Skip messages containing sensitive data patterns
+    if message.contains("WITH PASSWORD") || message.contains("PASSWORD '") {
+        return true;
+    }
+
+    false
 }

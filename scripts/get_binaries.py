@@ -20,9 +20,7 @@ import typer
 DEFAULT_BUN_VERSION = "1.3.6"
 DEFAULT_OTELCOL_VERSION = "0.144.0"
 BUN_RELEASES_BASE_URL = "https://github.com/oven-sh/bun/releases/download"
-OTELCOL_RELEASES_BASE_URL = (
-    "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download"
-)
+OTELCOL_RELEASES_BASE_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
@@ -66,7 +64,8 @@ class OtelcolAsset:
 
     def filename(self, version: str) -> str:
         """Return the archive filename for a given version."""
-        return f"otelcol_{version}_{self.platform}_{self.otelcol_arch}.tar.gz"
+        # Use otelcol-contrib which includes file exporter
+        return f"otelcol-contrib_{version}_{self.platform}_{self.otelcol_arch}.tar.gz"
 
     @property
     def output_filename(self) -> str:
@@ -168,10 +167,10 @@ def pick_bun_member(zf: zipfile.ZipFile, *, prefer_exe: bool) -> zipfile.ZipInfo
 
 
 def extract_otelcol_from_tar(data: bytes, platform: str) -> bytes:
-    """Extract otelcol binary from tar.gz archive."""
+    """Extract otelcol-contrib binary from tar.gz archive."""
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-        # otelcol binary is at root of archive
-        name = "otelcol.exe" if platform == "windows" else "otelcol"
+        # otelcol-contrib binary is at root of archive
+        name = "otelcol-contrib.exe" if platform == "windows" else "otelcol-contrib"
         member = tf.getmember(name)
         f = tf.extractfile(member)
         if f is None:
@@ -218,17 +217,13 @@ def download_bun(
         # Verify SHA256 before extracting
         expected_sha = shasums.get(asset.filename)
         if expected_sha is None:
-            typer.echo(
-                f"error: no checksum found for {asset.filename}", err=True
-            )
+            typer.echo(f"error: no checksum found for {asset.filename}", err=True)
             raise typer.Exit(code=1)
         verify_sha256(resp.content, expected_sha, asset.filename)
 
         try:
             with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-                member = pick_bun_member(
-                    zf, prefer_exe=(asset.platform == "windows")
-                )
+                member = pick_bun_member(zf, prefer_exe=(asset.platform == "windows"))
                 bun_bytes = zf.read(member)
         except (zipfile.BadZipFile, ValueError, KeyError) as exc:
             raise typer.Exit(code=1) from exc
@@ -243,8 +238,8 @@ def download_otelcol(
     output_dir: Path,
     force: bool,
 ) -> None:
-    """Download OpenTelemetry Collector binaries for all platforms."""
-    typer.echo(f"\n=== Downloading otelcol v{version} ===")
+    """Download OpenTelemetry Collector Contrib binaries for all platforms."""
+    typer.echo(f"\n=== Downloading otelcol-contrib v{version} ===")
     otelcol_dir = output_dir / "otelcol"
 
     for asset in OTELCOL_ASSETS:
@@ -266,7 +261,7 @@ def download_otelcol(
         try:
             otelcol_bytes = extract_otelcol_from_tar(resp.content, asset.platform)
         except (tarfile.TarError, ValueError, KeyError) as exc:
-            typer.echo(f"error: failed to extract otelcol: {exc}", err=True)
+            typer.echo(f"error: failed to extract otelcol-contrib: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
         write_executable(out_path, otelcol_bytes)

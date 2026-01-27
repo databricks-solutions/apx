@@ -1,3 +1,5 @@
+//! HTTP client for communicating with APX dev server.
+
 use reqwest::StatusCode;
 use serde::Deserialize;
 use std::time::Duration;
@@ -194,39 +196,4 @@ async fn stop_with_options(port: u16, persist_logs: bool) -> Result<(), String> 
             response.status()
         ))
     }
-}
-
-pub async fn logs(
-    port: u16,
-    since: Option<i64>,
-    follow: bool,
-) -> Result<reqwest::Response, String> {
-    let client = build_client()?;
-    let url = build_logs_url(port, since, follow);
-    debug!(%url, "Opening async dev server logs stream.");
-    client
-        .get(url)
-        .header("Accept-Encoding", "identity")
-        .send()
-        .await
-        .map_err(|err| {
-            warn!(error = %err, "Async logs request failed.");
-            format!("Logs request failed: {err}")
-        })
-}
-
-fn build_logs_url(port: u16, since: Option<i64>, follow: bool) -> String {
-    let mut url = build_url(CLIENT_HOST, port, "/_apx/logs");
-    let mut params: Vec<String> = Vec::new();
-    if let Some(since) = since {
-        params.push(format!("since={since}"));
-    }
-    if follow {
-        params.push("follow=true".to_string());
-    }
-    if !params.is_empty() {
-        url.push('?');
-        url.push_str(&params.join("&"));
-    }
-    url
 }
