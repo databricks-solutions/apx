@@ -1,82 +1,85 @@
 name: CI
 
 on:
-    pull_request:
-        branches:
-            - "**"
-            - "!main"
-    push:
-        branches:
-            - "**"
-            - "!main"
+  pull_request:
+    branches:
+      - "**"
+      - "!main"
+  push:
+    branches:
+      - "**"
+      - "!main"
 
 env:
-    CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: always
 
 jobs:
-    test:
-        runs-on: ubuntu-latest
+  test:
+    runs-on: ubuntu-latest
 
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
-              with:
-                  fetch-depth: 0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-            - name: Install protoc
-              run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-            - name: Set up Rust
-              uses: dtolnay/rust-toolchain@stable
-              with:
-                  toolchain: "1.88.0"
-                  components: rustfmt, clippy
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88.0"
+          components: rustfmt, clippy
 
-            - name: Cache Rust dependencies
-              uses: Swatinem/rust-cache@v2
-              with:
-                  shared-key: "ci"
-                  cache-all-crates: "true"
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
+          cache-all-crates: "true"
 
-            - name: Install uv
-              uses: astral-sh/setup-uv@v7
-              with:
-                  enable-cache: true
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
 
-            - name: Set up Python
-              uses: actions/setup-python@v5
-              with:
-                  python-version-file: ".python-version"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
 
-            - name: Install Bun
-              uses: oven-sh/setup-bun@v2
-              with:
-                  bun-version: 1.3.6
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.6
 
-            - name: Cache Bun dependencies
-              uses: actions/cache@v4
-              with:
-                  path: |
-                      ~/.bun/install/cache
-                  key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lockb') }}
-                  restore-keys: |
-                      ${{ runner.os }}-bun-
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lockb') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
 
-            - name: Install just
-              uses: extractions/setup-just@v2
+      - name: Download binaries
+        run: uv run --no-sync python scripts/get_binaries.py
 
-            - name: Install dependencies
-              run: |
-                  uv sync --all-groups
-                  bun install
+      - name: Install just
+        uses: extractions/setup-just@v2
 
-            - name: Configure git for tests
-              run: |
-                  git config --global user.email "ci@github.com"
-                  git config --global user.name "GitHub CI"
+      - name: Install dependencies
+        run: |
+          uv sync --all-groups
+          bun install
 
-            # - name: Run checks
-            #   run: just check
+      - name: Configure git for tests
+        run: |
+          git config --global user.email "ci@github.com"
+          git config --global user.name "GitHub CI"
 
-            # - name: Run tests
-            #   run: just test
+      # - name: Run checks
+      #   run: just check
+
+      # - name: Run tests
+      #   run: just test
