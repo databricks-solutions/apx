@@ -4,12 +4,6 @@ import json
 from pathlib import Path
 
 import httpx
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-)
 
 from conftest import run_cli_async, _init_project, run_cli_background
 
@@ -232,7 +226,7 @@ async def test_db_parallel_connections():
     """
     import random
     import time
-    from dataclasses import dataclass, field
+    from dataclasses import dataclass
     from typing import Optional
     from sqlalchemy import create_engine, text, Engine, event
     from sqlmodel import SQLModel, Field, Session, select
@@ -451,12 +445,12 @@ async def test_db_parallel_connections():
         print("SQLALCHEMY POOLING WITH PGLITE - READ/WRITE TEST SUMMARY")
         print("=" * 60)
 
-        print(f"\nPool Configuration:")
+        print("\nPool Configuration:")
         print(f"  pool_size: {pool_size}")
         print(f"  max_overflow: {max_overflow}")
         print(f"  pool_timeout: {pool_timeout}s")
 
-        print(f"\nPool Statistics:")
+        print("\nPool Statistics:")
         print(f"  New connections created: {stats.connects}")
         print(f"  Connection checkouts: {stats.checkouts}")
         print(f"  Connection checkins: {stats.checkins}")
@@ -484,7 +478,7 @@ async def test_db_parallel_connections():
                     f"pool_wait={r.wait_for_conn_ms:.0f}ms"
                 )
         if failed_writers:
-            print(f"  Failed writers:")
+            print("  Failed writers:")
             for r in failed_writers:
                 print(f"    Writer {r.task_id}: {r.error}")
 
@@ -498,14 +492,14 @@ async def test_db_parallel_connections():
                     f"{r.duration_ms:.0f}ms, pool_wait={r.wait_for_conn_ms:.0f}ms"
                 )
         if failed_readers:
-            print(f"  Failed readers:")
+            print("  Failed readers:")
             for r in failed_readers:
                 print(f"    Reader {r.task_id}: {r.error}")
 
         # Overall summary
         total_success = len(successful_writers) + len(successful_readers)
         total_tasks = num_writers + num_readers
-        print(f"\nOverall:")
+        print("\nOverall:")
         print(f"  Total tasks: {total_tasks}")
         print(f"  Successful: {total_success}")
         print(f"  Failed: {total_tasks - total_success}")

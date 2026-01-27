@@ -2,7 +2,6 @@
 
 import json
 import os
-import shutil
 from pathlib import Path
 import pytest
 from conftest import run_cli_async, init_project_async

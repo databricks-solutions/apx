@@ -1,4 +1,3 @@
-from typing import Callable, Awaitable
 import asyncio
 import json
 from pathlib import Path
