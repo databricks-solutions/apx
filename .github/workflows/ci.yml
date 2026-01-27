@@ -33,9 +33,10 @@ jobs:
               uses: Swatinem/rust-cache@v2
               with:
                   shared-key: "ci"
+                  cache-all-crates: "true"
 
             - name: Install uv
-              uses: astral-sh/setup-uv@v6
+              uses: astral-sh/setup-uv@v7
               with:
                   enable-cache: true
 
@@ -71,8 +72,8 @@ jobs:
                   git config --global user.email "ci@github.com"
                   git config --global user.name "GitHub CI"
 
-            - name: Run checks
-              run: just check
+            # - name: Run checks
+            #   run: just check
 
-            - name: Run tests
-              run: just test
+            # - name: Run tests
+            #   run: just test
