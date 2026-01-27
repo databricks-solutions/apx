@@ -62,6 +62,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-bun-
 
+      - name: Install dev only deps
+        run: uv pip install httpx typer
+
       - name: Download binaries
         run: uv run --no-sync python scripts/get_binaries.py
 
