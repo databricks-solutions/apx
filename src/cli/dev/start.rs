@@ -11,12 +11,10 @@ use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
 use crate::common::{ensure_dir, spinner, format_elapsed_ms, run_preflight_checks};
 use crate::dev::client::{health, logs, stop_with_logs, wait_for_healthy, HealthCheckConfig};
-use tracing::debug;
-use crate::dev::common::{
-    lock_path, read_lock, remove_lock, reserve_port_in_range, write_lock, DevLock, BIND_HOST,
-    DEV_PORT_END, DEV_PORT_START,
-};
+use crate::dev::common::{lock_path, read_lock, remove_lock, write_lock, DevLock, BIND_HOST};
 use crate::dev::process::ProcessManager;
+use crate::registry::Registry;
+use tracing::debug;
 
 /// Prepare the app directory for dev server startup.
 /// Ensures the .apx directory exists.
@@ -176,7 +174,20 @@ pub(crate) async fn spawn_server(
     let lock_path = lock_path(app_dir);
 
     println!("🚀 Starting dev server...");
-    let port = resolve_port(preferred_port).await?;
+    
+    // Load registry and cleanup stale entries (projects that no longer exist)
+    let mut registry = Registry::load()?;
+    let stale = registry.cleanup_stale_entries();
+    if !stale.is_empty() {
+        debug!("Cleaned up {} stale registry entries", stale.len());
+    }
+    
+    // Get or allocate port from registry
+    let port = registry.get_or_allocate_port(app_dir, preferred_port)?;
+    registry.save()?;
+    
+    // Ensure the port is available (wait if needed)
+    wait_for_port_available(port).await?;
     let command = format!(
         "uv run apx dev __internal__run_server --app-dir {} --host {} --port {}{}",
         app_dir.display(),
@@ -263,30 +274,26 @@ pub(crate) async fn spawn_server(
     Ok(port)
 }
 
-/// Maximum time to wait for a preferred port to become available (in ms).
+/// Maximum time to wait for a port to become available (in ms).
 const PORT_WAIT_TIMEOUT_MS: u64 = 2000;
 /// Interval between port availability checks (in ms).
 const PORT_WAIT_INTERVAL_MS: u64 = 100;
 
-async fn resolve_port(preferred_port: Option<u16>) -> Result<u16, String> {
-    if let Some(port) = preferred_port {
-        // Try the preferred port with retries (in case it's still being released)
-        let max_attempts = PORT_WAIT_TIMEOUT_MS / PORT_WAIT_INTERVAL_MS;
-        for attempt in 0..max_attempts {
-            if TcpListener::bind((BIND_HOST, port)).is_ok() {
-                return Ok(port);
-            }
-            if attempt == 0 {
-                println!("⏳ Waiting for port {port} to become available...");
-            }
-            tokio::time::sleep(Duration::from_millis(PORT_WAIT_INTERVAL_MS)).await;
+/// Wait for a port to become available, with timeout.
+/// Returns Ok if port is available, Err if timeout exceeded.
+async fn wait_for_port_available(port: u16) -> Result<(), String> {
+    let max_attempts = PORT_WAIT_TIMEOUT_MS / PORT_WAIT_INTERVAL_MS;
+    for attempt in 0..max_attempts {
+        if TcpListener::bind((BIND_HOST, port)).is_ok() {
+            return Ok(());
         }
-        println!("⚠️  Port {port} still in use, finding alternative...");
+        if attempt == 0 {
+            println!("⏳ Waiting for port {port} to become available...");
+        }
+        tokio::time::sleep(Duration::from_millis(PORT_WAIT_INTERVAL_MS)).await;
     }
-    // Use randomized port selection to reduce collision probability
-    // when multiple dev servers start simultaneously
-    let reserved = reserve_port_in_range(BIND_HOST, DEV_PORT_START, DEV_PORT_END)?;
-    // Return just the port number - the subprocess will bind to it
-    // The reserved listener is dropped here, but the subprocess starts immediately after
-    Ok(reserved.port)
+    Err(format!(
+        "Port {port} is still in use after {}ms. Another process may be using it.",
+        PORT_WAIT_TIMEOUT_MS
+    ))
 }

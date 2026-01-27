@@ -33,9 +33,9 @@ mod dev;
 pub mod dotenv;
 mod interop;
 mod mcp;
-mod sources;
-
+mod registry;
 mod search;
+mod sources;
 
 pub use api_generator::generate_openapi;
 pub(crate) use interop::bun_binary_path;

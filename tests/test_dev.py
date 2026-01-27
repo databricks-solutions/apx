@@ -19,7 +19,12 @@ async def test_dev_server_start_stop_with_logs(isolated_project: Path) -> None:
     try:
         print(f"Starting dev server in {isolated_project}")
         start_result = await run_cli_async(["dev", "start"], cwd=isolated_project)
-        assert start_result.returncode == 0
+        if start_result.returncode != 0:
+            for line in start_result.stderr.split("\n"):
+                print(f"stderr: {line}")
+            for line in start_result.stdout.split("\n"):
+                print(f"stdout: {line}")
+            raise RuntimeError(f"Failed to start dev server: {start_result.stderr}")
 
         # check the server logs
         print(f"Checking server logs in {isolated_project}")
@@ -121,7 +126,6 @@ async def version():
         assert api_ts_path.exists(), f"api.ts file not found at {api_ts_path}"
         api_ts_content = api_ts_path.read_text()
         assert "currentUser" not in api_ts_content
-
     finally:
         print("Stopping dev server as a cleanup step")
         stop_result = await run_cli_async(["dev", "stop"], cwd=isolated_project)

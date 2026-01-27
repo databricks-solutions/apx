@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
 use crate::common::ensure_dir;
@@ -22,7 +21,6 @@ pub const FRONTEND_PORT_END: u16 = 5999;
 pub const BACKEND_PORT_START: u16 = 8000;
 pub const BACKEND_PORT_END: u16 = 8999;
 pub const DEV_PORT_START: u16 = 9000;
-pub const DEV_PORT_END: u16 = 9999;
 pub const DB_PORT_START: u16 = 4000;
 pub const DB_PORT_END: u16 = 4999;
 /// Host used for binding the server (all interfaces)
@@ -82,48 +80,12 @@ pub fn remove_lock(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// A reserved port that holds a TcpListener to prevent race conditions.
-/// The port is kept bound until the ReservedPort is dropped or `into_listener()` is called.
-pub struct ReservedPort {
-    pub port: u16,
-    #[allow(dead_code)] // Kept bound to hold the port; may be extracted via into_listener()
-    listener: TcpListener,
-}
-
-impl ReservedPort {
-    /// Consume the ReservedPort and return the underlying TcpListener.
-    /// Use this when you're ready to pass the listener to the actual server.
-    #[allow(dead_code)] // Available for future use cases
-    pub fn into_listener(self) -> TcpListener {
-        self.listener
-    }
-}
-
-/// Reserve a port in the given range by binding a TcpListener and keeping it open.
-/// Returns a ReservedPort that holds the listener until dropped or `into_listener()` is called.
-/// Uses randomized starting offset to reduce collision probability when multiple processes
-/// are looking for ports simultaneously.
-pub fn reserve_port_in_range(host: &str, start: u16, end: u16) -> Result<ReservedPort, String> {
-    use rand::Rng;
-    let range_size = (end - start + 1) as usize;
-    let offset = rand::thread_rng().gen_range(0..range_size);
-
-    // Try from random offset, then wrap around
-    for i in 0..range_size {
-        let port = start + ((offset + i) % range_size) as u16;
-        if let Ok(listener) = TcpListener::bind((host, port)) {
-            return Ok(ReservedPort { port, listener });
-        }
-    }
-    Err(format!("No available ports in range {start}-{end}"))
-}
-
 /// Find an available port in the given range, starting from a random offset.
 /// This reduces collision probability when multiple processes are looking for ports
-/// simultaneously. Unlike `reserve_port_in_range`, this releases the port after finding it,
-/// so it's suitable for subprocess ports where we can't hold the binding.
+/// simultaneously.
 pub fn find_random_port_in_range(host: &str, start: u16, end: u16) -> Result<u16, String> {
     use rand::Rng;
+    use std::net::TcpListener;
     let range_size = (end - start + 1) as usize;
     let offset = rand::thread_rng().gen_range(0..range_size);
 
