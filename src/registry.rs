@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use toml_edit::{DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::dev::common::DEV_PORT_START;
 
@@ -59,7 +60,11 @@ impl Registry {
         Ok(Self { path, data })
     }
 
-    /// Save the registry to disk
+    /// Save the registry to disk with clean formatting:
+    /// ```toml
+    /// [servers]
+    /// "/path/to/project" = { port = 9000 }
+    /// ```
     pub fn save(&self) -> Result<(), String> {
         // Ensure parent directory exists
         if let Some(parent) = self.path.parent() {
@@ -67,10 +72,20 @@ impl Registry {
                 .map_err(|err| format!("Failed to create registry directory: {err}"))?;
         }
 
-        let contents =
-            toml::to_string_pretty(&self.data).map_err(|err| format!("Failed to serialize registry: {err}"))?;
+        // Build document with inline tables for cleaner formatting
+        let mut doc = DocumentMut::new();
+        let mut servers_table = Table::new();
 
-        fs::write(&self.path, contents).map_err(|err| format!("Failed to write registry file: {err}"))
+        for (path, entry) in &self.data.servers {
+            let mut inline = InlineTable::new();
+            inline.insert("port", Value::from(i64::from(entry.port)));
+            servers_table.insert(path, Item::Value(Value::InlineTable(inline)));
+        }
+
+        doc.insert("servers", Item::Table(servers_table));
+
+        fs::write(&self.path, doc.to_string())
+            .map_err(|err| format!("Failed to write registry file: {err}"))
     }
 
     /// Remove entries where the project directory no longer exists
