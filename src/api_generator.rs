@@ -2,7 +2,6 @@ use notify::{RecursiveMode, Watcher};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::process::Command;
 use std::time::SystemTime;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::broadcast;
@@ -11,12 +10,10 @@ use tokio::time::{Duration, Sleep};
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-use crate::bun_binary_path;
 use crate::common::{read_project_metadata, APX_DIR_NAME, OPENAPI_SCHEMA_FILENAME};
 use crate::dev::common::Shutdown;
 use crate::interop::generate_openapi_spec;
-
-const ORVAL_CONFIG_FILENAME: &str = "orval.config.ts";
+use crate::openapi;
 
 pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String> {
     let metadata = read_project_metadata(project_root)?;
@@ -28,11 +25,17 @@ pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String
 
     let apx_dir = project_root.join(APX_DIR_NAME);
     let schema_path = apx_dir.join(OPENAPI_SCHEMA_FILENAME);
-    let config_path = apx_dir.join(ORVAL_CONFIG_FILENAME);
+    let api_ts_path = project_root
+        .join("src")
+        .join(&app_slug)
+        .join("ui")
+        .join("lib")
+        .join("api.ts");
+
     debug!(
         apx_dir = %apx_dir.display(),
         schema_path = %schema_path.display(),
-        config_path = %config_path.display(),
+        api_ts_path = %api_ts_path.display(),
         spec_len = spec_json.len(),
         "Resolved OpenAPI output paths."
     );
@@ -62,83 +65,31 @@ pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String
         debug!("OpenAPI schema unchanged; skipping schema write.");
     }
 
-    if !config_path.exists() {
-        debug!("Orval config missing; writing new config.");
-        let config_content = format!(
-            r#"import {{ defineConfig }} from "orval";
-
-export default defineConfig({{
-  api: {{
-    input: "./openapi.json",
-    output: {{
-      target: "../src/{app_slug}/ui/lib/api.ts",
-      client: "react-query",
-      httpClient: "axios",
-      prettier: true,
-      override: {{
-        query: {{
-          useQuery: true,
-          useSuspenseQuery: true,
-        }},
-      }},
-    }},
-  }},
-}});
-"#,
-            app_slug = app_slug
-        );
-        fs::write(&config_path, config_content)
-            .map_err(|err| format!("Failed to write orval config: {err}"))?;
-    }
-
     if !schema_changed && !force {
-        debug!("OpenAPI schema unchanged and force=false; skipping orval.");
+        debug!("OpenAPI schema unchanged and force=false; skipping generation.");
         return Ok(false);
     }
 
-    let bun_path = bun_binary_path()?;
-    let config_path_str = config_path.to_string_lossy();
-    debug!(
-        bun_path = %bun_path.display(),
-        config_path = %config_path_str,
-        cwd = %project_root.display(),
-        "Running orval for API generation: {} x --bun orval -c {}",
-        bun_path.display(),
-        config_path_str
-    );
-    let output = Command::new(&bun_path)
-        .arg("x")
-        .arg("--bun")
-        .arg("orval")
-        .arg("-c")
-        .arg(config_path_str.as_ref())
-        .current_dir(project_root)
-        .output()
-        .map_err(|err| format!("Failed to run orval: {err}"))?;
+    // Generate TypeScript code from OpenAPI spec
+    debug!("Generating TypeScript API client from OpenAPI spec.");
+    let ts_code = openapi::generate(&spec_json)?;
 
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        warn!(
-            status = %output.status,
-            stdout = %stdout,
-            stderr = %stderr,
-            "Orval failed."
-        );
-        return Err(format!(
-            "Orval failed with status {status}. Stdout: {stdout} Stderr: {stderr}",
-            status = output.status
-        ));
+    // Ensure the output directory exists
+    if let Some(parent) = api_ts_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed to create api.ts directory: {err}"))?;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Write the generated TypeScript code
+    fs::write(&api_ts_path, &ts_code)
+        .map_err(|err| format!("Failed to write api.ts: {err}"))?;
+
     debug!(
-        status = %output.status,
-        stdout = %stdout,
-        stderr = %stderr,
-        "Orval completed successfully."
+        api_ts_path = %api_ts_path.display(),
+        ts_code_len = ts_code.len(),
+        "TypeScript API client generated successfully."
     );
+
     Ok(true)
 }
 

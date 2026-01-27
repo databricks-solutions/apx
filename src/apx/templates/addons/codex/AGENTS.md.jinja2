@@ -17,7 +17,7 @@
 - **Component organization:** Prefer grouping components by functionality rather than by file type (e.g. `src/{{app_name}}/ui/components/chat/`)
 
 ## Project Structure
-Full-stack app: `src/{{app_name}}/ui/` (React + Vite) and `src/{{app_name}}/backend/` (FastAPI). Backend serves frontend at `/` and API at `/api`. API client auto-generated via `orval`.
+Full-stack app: `src/{{app_name}}/ui/` (React + Vite) and `src/{{app_name}}/backend/` (FastAPI). Backend serves frontend at `/` and API at `/api`. API client auto-generated from OpenAPI schema.
 
 ## Models & API
 - **3-model pattern:** `Entity` (DB), `EntityIn` (input), `EntityOut` (output)

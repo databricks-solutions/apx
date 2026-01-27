@@ -56,7 +56,7 @@ databricks bundle deploy -p <your-profile>
 - 🐍 Python + FastAPI in the backend
 - ⚛️ React + shadcn/ui in the frontend
 
-🔌 To connect the frontend and the backend, `apx` uses `orval` to generate the client code from the OpenAPI schema.
+🔌 To connect the frontend and the backend, `apx` auto-generates TypeScript API client code from the OpenAPI schema.
 
 ## 🚀 Init
 
@@ -340,7 +340,7 @@ Prepares the app for deployment by building both frontend assets and Python whee
 uv run apx openapi [APP_PATH] [OPTIONS]
 ```
 
-Manually generates OpenAPI schema and orval client.
+Manually generates OpenAPI schema and TypeScript API client.
 
 **Arguments:**
 
@@ -397,7 +397,6 @@ This will update your vite configuration with the required apx plugin that handl
 | Pydantic                  | Data validation and settings management using Python type hints                                                                        | MIT          | [GitHub](https://github.com/pydantic/pydantic)              |
 | SQLModel                  | SQLAlchemy-like ORM for Python                                                                                                         | MIT          | [GitHub](https://github.com/fastapi/sqlmodel)               |
 | Databricks SDK for Python | Official Databricks SDK for Python                                                                                                     | Apache-2.0   | [GitHub](https://github.com/databricks/databricks-sdk-py)   |
-| orval                     | OpenAPI client generator                                                                                                               | MIT          | [GitHub](https://github.com/orval-labs/orval)               |
 | shadcn/ui                 | UI library for React                                                                                                                   | MIT          | [GitHub](https://github.com/shadcn/ui)                      |
 | React                     | Library for building user interfaces                                                                                                   | MIT          | [GitHub](https://github.com/facebook/react)                 |
 | TypeScript                | Programming language for web development                                                                                               | Apache-2.0   | [GitHub](https://github.com/microsoft/TypeScript)           |

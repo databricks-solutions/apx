@@ -8,13 +8,16 @@ from fastapi import FastAPI
 from apx._core import generate_openapi
 
 
-def test_generate_openapi_skips_orval_when_schema_unchanged(tmp_path: Path) -> None:
+def test_generate_openapi_skips_generation_when_schema_unchanged(tmp_path: Path) -> None:
+    """Test that generation is skipped when the OpenAPI schema hasn't changed."""
     app_slug = "test_app"
     app_entrypoint = "test_app.backend.app:app"
     project_root = tmp_path
     src_dir = project_root / "src"
     backend_dir = src_dir / app_slug / "backend"
+    ui_lib_dir = src_dir / app_slug / "ui" / "lib"
     backend_dir.mkdir(parents=True)
+    ui_lib_dir.mkdir(parents=True)
     (src_dir / app_slug / "__init__.py").write_text("")
     (backend_dir / "__init__.py").write_text("")
     (backend_dir / "app.py").write_text(
@@ -63,7 +66,6 @@ def test_generate_openapi_skips_orval_when_schema_unchanged(tmp_path: Path) -> N
 
     assert did_regenerate is False
     assert (apx_dir / "openapi.json").read_text() == expected_json
-    assert (apx_dir / "orval.config.ts").exists()
 
 
 async def test_generate_openapi_with_rich_operations(isolated_project: Path) -> None:
@@ -207,13 +209,20 @@ def delete_item(item_id: int):
     else:
         print("OpenAPI schema file not found!")
 
-    # Print the generated api.ts file
+    # Verify and print the generated api.ts file
     api_ts_path = src_dir / "test_app" / "ui" / "lib" / "api.ts"
-    if api_ts_path.exists():
-        print("\n" + "=" * 80)
-        print("Generated api.ts:")
-        print("=" * 80)
-        print(api_ts_path.read_text())
-        print("=" * 80)
-    else:
-        print(f"\napi.ts file not found at: {api_ts_path}")
+    assert api_ts_path.exists(), f"api.ts file not found at: {api_ts_path}"
+
+    api_ts_content = api_ts_path.read_text()
+    print("\n" + "=" * 80)
+    print("Generated api.ts:")
+    print("=" * 80)
+    print(api_ts_content)
+    print("=" * 80)
+
+    # Verify api.ts contains expected content
+    assert "import {" in api_ts_content, "api.ts should contain imports"
+    assert "useQuery" in api_ts_content, "api.ts should contain useQuery"
+    assert "useMutation" in api_ts_content, "api.ts should contain useMutation"
+    assert "export const listItems" in api_ts_content, "api.ts should contain listItems function"
+    assert "export function useListItems" in api_ts_content, "api.ts should contain useListItems hook"
