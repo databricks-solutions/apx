@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -25,10 +26,6 @@ class BunAsset:
     platform: str
     arch: str
     filename: str
-
-    @property
-    def url(self) -> str:
-        raise RuntimeError("Use build_url(version, asset) instead.")
 
     @property
     def output_filename(self) -> str:
@@ -58,6 +55,54 @@ def normalize_version(version: str) -> str:
 
 def build_url(version: str, asset: BunAsset) -> str:
     return f"{RELEASES_BASE_URL}/bun-v{version}/{asset.filename}"
+
+
+def build_shasums_url(version: str) -> str:
+    return f"{RELEASES_BASE_URL}/bun-v{version}/SHASUMS256.txt"
+
+
+def fetch_shasums(client: httpx.Client, version: str) -> dict[str, str]:
+    """Fetch and parse SHASUMS256.txt, returning {filename: sha256} mapping."""
+    url = build_shasums_url(version)
+    typer.echo(f"fetch checksums: {url}")
+    try:
+        resp = client.get(url)
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        typer.echo(f"error: failed to fetch checksums: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    shasums: dict[str, str] = {}
+    for line in resp.text.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Format: "sha256  filename" (two spaces between)
+        parts = line.split()
+        if len(parts) >= 2:
+            sha256_hash = parts[0]
+            filename = parts[-1]
+            shasums[filename] = sha256_hash
+    return shasums
+
+
+def compute_sha256(data: bytes) -> str:
+    """Compute SHA256 hex digest of data."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def verify_sha256(data: bytes, expected: str, filename: str) -> None:
+    """Verify SHA256 of data matches expected, exit on mismatch."""
+    actual = compute_sha256(data)
+    if actual != expected:
+        typer.echo(
+            f"error: SHA256 mismatch for {filename}\n"
+            f"  expected: {expected}\n"
+            f"  actual:   {actual}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    typer.echo(f"verified: {filename}")
 
 
 def pick_bun_member(zf: zipfile.ZipFile, *, prefer_exe: bool) -> zipfile.ZipInfo:
@@ -101,6 +146,9 @@ def main(
 
     timeout = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=10.0)
     with httpx.Client(follow_redirects=True, timeout=timeout) as client:
+        # Fetch checksums once for all assets
+        shasums = fetch_shasums(client, v)
+
         for asset in ASSETS:
             out_path = output_dir / asset.output_filename
             if out_path.exists() and not force:
@@ -114,6 +162,15 @@ def main(
                 resp.raise_for_status()
             except httpx.HTTPError as exc:
                 raise typer.Exit(code=1) from exc
+
+            # Verify SHA256 before extracting
+            expected_sha = shasums.get(asset.filename)
+            if expected_sha is None:
+                typer.echo(
+                    f"error: no checksum found for {asset.filename}", err=True
+                )
+                raise typer.Exit(code=1)
+            verify_sha256(resp.content, expected_sha, asset.filename)
 
             try:
                 with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
