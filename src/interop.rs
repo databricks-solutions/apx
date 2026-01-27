@@ -2,7 +2,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::path::{Path, PathBuf};
-use tracing::debug;
+use tracing::{debug, trace};
 
 #[cfg(target_os = "windows")]
 const BUN_FILENAME: &str = "bun.exe";
@@ -193,7 +193,7 @@ pub(crate) fn generate_openapi_spec(
         let path_any = sys.getattr("path")?;
         let path = path_any.cast::<PyList>()?;
         
-        debug!("sys.path before modifications: {:?}", path.extract::<Vec<String>>());
+        trace!("sys.path before modifications: {:?}", path.extract::<Vec<String>>());
         
         if src_root.exists() && !path.contains(src_root_str.as_str())? {
             path.insert(0, src_root_str.as_str())?;
@@ -212,7 +212,7 @@ pub(crate) fn generate_openapi_spec(
             debug!("project_root already in sys.path");
         }
         
-        debug!("sys.path after modifications: {:?}", path.extract::<Vec<String>>());
+        trace!("sys.path after modifications: {:?}", path.extract::<Vec<String>>());
 
         let (module_path, attr_name) = app_entrypoint
             .split_once(':')
