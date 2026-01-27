@@ -63,7 +63,7 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install dev only deps
-        run: uv pip install httpx typer
+        run: uv sync --script scripts/get_binaries.py
 
       - name: Download binaries
         run: uv run --no-sync python scripts/get_binaries.py
