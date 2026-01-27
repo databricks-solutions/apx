@@ -60,7 +60,7 @@ async def test_dev_server_start_stop_with_logs(isolated_project: Path) -> None:
             for line in stdout.split("\n"):
                 print(f" - {line}")
 
-            assert "shutdown complete" in stdout
+            assert "Dev server stopped" in stdout
 
     finally:
         print("Stopping dev server as a cleanup step")

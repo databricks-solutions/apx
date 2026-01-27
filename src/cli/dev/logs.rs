@@ -135,7 +135,7 @@ async fn run_async(args: LogsArgs) -> Result<(), String> {
 
     if args.follow {
         println!("📜 Streaming logs... (Ctrl+C to stop)\n");
-        follow_logs(&logs_path, &app_path_canonical, since_ns).await
+        follow_logs(&logs_path, &app_path_canonical, since_ns, &lock_path).await
     } else {
         read_logs(&logs_path, &app_path_canonical, since_ns)
     }
@@ -225,7 +225,12 @@ fn read_log_entries(
 }
 
 /// Follow logs file for new entries
-async fn follow_logs(logs_path: &Path, app_path: &str, since_ns: u64) -> Result<(), String> {
+async fn follow_logs(
+    logs_path: &Path,
+    app_path: &str,
+    since_ns: u64,
+    lock_path: &Path,
+) -> Result<(), String> {
     // First, read existing logs
     read_logs(logs_path, app_path, since_ns)?;
 
@@ -243,21 +248,23 @@ async fn follow_logs(logs_path: &Path, app_path: &str, since_ns: u64) -> Result<
     .map_err(|e| format!("Failed to create file watcher: {}", e))?;
 
     // Watch the logs directory
-    let logs_dir = logs_path
-        .parent()
-        .ok_or("Invalid logs path")?;
+    let logs_dir = logs_path.parent().ok_or("Invalid logs path")?;
     watcher
         .watch(logs_dir, RecursiveMode::NonRecursive)
         .map_err(|e| format!("Failed to watch logs directory: {}", e))?;
 
     // Track file position for incremental reading
-    let mut file = File::open(logs_path).map_err(|e| format!("Failed to open logs file: {}", e))?;
+    let mut file =
+        File::open(logs_path).map_err(|e| format!("Failed to open logs file: {}", e))?;
     let mut file_pos = file
         .seek(SeekFrom::End(0))
         .map_err(|e| format!("Failed to seek logs file: {}", e))?;
 
     // Buffer for recently seen entries to avoid duplicates
     let mut recent_entries: VecDeque<u64> = VecDeque::with_capacity(100);
+
+    // Track if server was initially running
+    let server_was_running = lock_path.exists();
 
     loop {
         tokio::select! {
@@ -310,7 +317,12 @@ async fn follow_logs(logs_path: &Path, app_path: &str, since_ns: u64) -> Result<
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                // Periodic check for file changes (in case notify misses some)
+                // Periodic check: if server was running but lockfile is now gone, server stopped
+                if server_was_running && !lock_path.exists() {
+                    debug!("Dev server stopped (lockfile removed), exiting logs follow.");
+                    println!("\n📭 Dev server stopped.");
+                    break;
+                }
             }
         }
     }
