@@ -7,18 +7,12 @@ use crate::generate_openapi;
 pub struct GenerateOpenapiArgs {
     #[arg(long = "app-dir", value_name = "APP_PATH")]
     pub app_dir: PathBuf,
-    #[arg(long = "force", default_value = "false")]
-    pub force: bool,
 }
 
 pub fn run(args: GenerateOpenapiArgs) -> i32 {
-    match generate_openapi(&args.app_dir, args.force) {
-        Ok(true) => {
+    match generate_openapi(&args.app_dir) {
+        Ok(()) => {
             println!("regenerated");
-            0
-        }
-        Ok(false) => {
-            println!("unchanged");
             0
         }
         Err(err) => {

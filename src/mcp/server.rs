@@ -4,7 +4,8 @@ use crate::databricks_sdk_doc::SDKSource;
 use crate::search::docs_index::SDKDocsIndex;
 use crate::cli::components::{SharedCacheState, sync_registry_indexes, needs_registry_refresh};
 use crate::search::ComponentIndex;
-use crate::common::{APX_DIR_NAME, OPENAPI_SCHEMA_FILENAME};
+use crate::common::read_project_metadata;
+use crate::interop::generate_openapi_spec;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -398,17 +399,12 @@ struct RouteInfo {
 }
 
 async fn routes_resource(ctx: Arc<AppContext>) -> Result<String, String> {
-    let openapi_path = ctx.app_dir.join(APX_DIR_NAME).join(OPENAPI_SCHEMA_FILENAME);
-    
-    if !openapi_path.exists() {
-        return Err(format!(
-            "OpenAPI schema not found at {}. Run 'apx __generate_openapi' first.",
-            openapi_path.display()
-        ));
-    }
-    
-    let openapi_content = std::fs::read_to_string(&openapi_path)
-        .map_err(|e| format!("Failed to read OpenAPI schema: {}", e))?;
+    let metadata = read_project_metadata(&ctx.app_dir)?;
+    let (openapi_content, _) = generate_openapi_spec(
+        &ctx.app_dir,
+        &metadata.app_entrypoint,
+        &metadata.app_slug,
+    )?;
     
     let openapi: Value = serde_json::from_str(&openapi_content)
         .map_err(|e| format!("Failed to parse OpenAPI schema: {}", e))?;
@@ -484,10 +480,7 @@ fn default_logs_duration() -> String {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-pub struct RefreshOpenapiArgs {
-    #[serde(default)]
-    pub force: bool,
-}
+pub struct RefreshOpenapiArgs {}
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct DatabricksAppsLogsArgs {
@@ -622,12 +615,11 @@ async fn logs_tool(ctx: Arc<AppContext>, args: LogsArgs) -> ToolResult {
     }
 }
 
-async fn refresh_openapi_tool(ctx: Arc<AppContext>, args: RefreshOpenapiArgs) -> ToolResult {
+async fn refresh_openapi_tool(ctx: Arc<AppContext>, _args: RefreshOpenapiArgs) -> ToolResult {
     use crate::generate_openapi;
 
-    match generate_openapi(&ctx.app_dir, args.force) {
-        Ok(true) => ToolResult::success("OpenAPI regenerated".to_string()),
-        Ok(false) => ToolResult::success("OpenAPI is up to date".to_string()),
+    match generate_openapi(&ctx.app_dir) {
+        Ok(()) => ToolResult::success("OpenAPI regenerated".to_string()),
         Err(e) => ToolResult::error(e),
     }
 }
@@ -1094,18 +1086,18 @@ async fn docs_tool(ctx: Arc<AppContext>, args: DocsArgs) -> ToolResult {
 }
 
 async fn get_route_info_tool(ctx: Arc<AppContext>, args: GetRouteInfoArgs) -> ToolResult {
-    let openapi_path = ctx.app_dir.join(APX_DIR_NAME).join(OPENAPI_SCHEMA_FILENAME);
+    let metadata = match read_project_metadata(&ctx.app_dir) {
+        Ok(m) => m,
+        Err(e) => return ToolResult::error(e),
+    };
     
-    if !openapi_path.exists() {
-        return ToolResult::error(format!(
-            "OpenAPI schema not found at {}. Run 'apx __generate_openapi' first.",
-            openapi_path.display()
-        ));
-    }
-    
-    let openapi_content = match std::fs::read_to_string(&openapi_path) {
-        Ok(content) => content,
-        Err(e) => return ToolResult::error(format!("Failed to read OpenAPI schema: {}", e)),
+    let openapi_content = match generate_openapi_spec(
+        &ctx.app_dir,
+        &metadata.app_entrypoint,
+        &metadata.app_slug,
+    ) {
+        Ok((content, _)) => content,
+        Err(e) => return ToolResult::error(format!("Failed to generate OpenAPI spec: {}", e)),
     };
     
     let openapi: Value = match serde_json::from_str(&openapi_content) {

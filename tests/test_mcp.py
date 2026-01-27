@@ -412,11 +412,10 @@ async def _setup_openapi_project(project_path: Path) -> None:
     (src_dir / "test_app" / "_version.py").write_text('version = "0.0.0"\n')
 
     result = await run_cli_async(
-        ["__generate_openapi", "--app-dir", str(project_path), "--force"],
+        ["__generate_openapi", "--app-dir", str(project_path)],
         cwd=project_path,
     )
     assert result.returncode == 0, "OpenAPI generation should succeed"
-    assert (project_path / ".apx" / "openapi.json").exists()
 
 
 def _assert_query_example(example: str, operation_name: str) -> None:

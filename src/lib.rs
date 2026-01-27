@@ -339,7 +339,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 #[pyfunction(name = "generate_openapi")]
-fn generate_openapi_py(project_root: PathBuf, force: bool) -> PyResult<bool> {
-    api_generator::generate_openapi(&project_root, force)
+fn generate_openapi_py(project_root: PathBuf) -> PyResult<()> {
+    api_generator::generate_openapi(&project_root)
         .map_err(|err| PyRuntimeError::new_err(err))
 }

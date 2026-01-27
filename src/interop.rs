@@ -2,7 +2,10 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tracing::{debug, trace};
+
+use crate::dev::common::{lock_path, read_lock, CLIENT_HOST};
 
 #[cfg(target_os = "windows")]
 const BUN_FILENAME: &str = "bun.exe";
@@ -177,11 +180,49 @@ pub(crate) fn generate_openapi_spec(
     app_entrypoint: &str,
     app_slug: &str,
 ) -> Result<(String, String), String> {
+    // Try to fetch from running server first (200ms timeout)
+    if let Some(spec_json) = try_fetch_openapi_from_server(project_root) {
+        debug!("Got OpenAPI spec from running server");
+        return Ok((spec_json, app_slug.to_string()));
+    }
+
+    // Fall back to Python module method
+    generate_openapi_spec_from_module(project_root, app_entrypoint, app_slug)
+}
+
+/// Try to fetch OpenAPI spec from a running dev server.
+/// Returns None if server is not running or doesn't respond within 200ms.
+fn try_fetch_openapi_from_server(project_root: &Path) -> Option<String> {
+    let lock_file = lock_path(project_root);
+    let lock = read_lock(&lock_file).ok()?;
+    
+    let url = format!("http://{}:{}/openapi.json", CLIENT_HOST, lock.port);
+    debug!("Trying to fetch OpenAPI from server at {}", url);
+    
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(200))
+        .build()
+        .ok()?;
+    
+    let response = client.get(&url).send().ok()?;
+    
+    if !response.status().is_success() {
+        return None;
+    }
+    
+    response.text().ok()
+}
+
+fn generate_openapi_spec_from_module(
+    project_root: &Path,
+    app_entrypoint: &str,
+    app_slug: &str,
+) -> Result<(String, String), String> {
     let project_root_str = project_root.to_string_lossy().to_string();
     let src_root = project_root.join("src");
     let src_root_str = src_root.to_string_lossy().to_string();
 
-    debug!("generate_openapi_spec called:");
+    debug!("generate_openapi_spec_from_module called:");
     debug!("  project_root: {}", project_root_str);
     debug!("  src_root: {}", src_root_str);
     debug!("  app_entrypoint: {}", app_entrypoint);

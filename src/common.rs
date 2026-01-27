@@ -8,10 +8,6 @@ use tokio::process::Command;
 const DEFAULT_API_PREFIX: &str = "/api";
 const PYPROJECT_FILENAME: &str = "pyproject.toml";
 
-/// OpenAPI schema directory and filename constants
-pub const APX_DIR_NAME: &str = ".apx";
-pub const OPENAPI_SCHEMA_FILENAME: &str = "openapi.json";
-
 #[derive(Debug, Clone)]
 pub struct ProjectMetadata {
     pub app_name: String,

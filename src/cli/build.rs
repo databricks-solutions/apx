@@ -56,7 +56,7 @@ async fn run_inner(args: BuildArgs) -> Result<(), String> {
     fs::write(build_dir.join(".gitignore"), "*\n")
         .map_err(|err| format!("Failed to write build .gitignore: {err}"))?;
 
-    generate_openapi(&app_path, false)?;
+    generate_openapi(&app_path)?;
 
     if args.skip_ui_build {
         println!("Skipping UI build");

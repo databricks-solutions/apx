@@ -10,12 +10,12 @@ use tokio::time::{Duration, Sleep};
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-use crate::common::{read_project_metadata, APX_DIR_NAME, OPENAPI_SCHEMA_FILENAME};
+use crate::common::read_project_metadata;
 use crate::dev::common::Shutdown;
 use crate::interop::generate_openapi_spec;
 use crate::openapi;
 
-pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String> {
+pub fn generate_openapi(project_root: &Path) -> Result<(), String> {
     let metadata = read_project_metadata(project_root)?;
     let app_slug = metadata.app_slug;
     let app_entrypoint = metadata.app_entrypoint;
@@ -23,8 +23,6 @@ pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String
     let (spec_json, app_slug) =
         generate_openapi_spec(project_root, &app_entrypoint, &app_slug)?;
 
-    let apx_dir = project_root.join(APX_DIR_NAME);
-    let schema_path = apx_dir.join(OPENAPI_SCHEMA_FILENAME);
     let api_ts_path = project_root
         .join("src")
         .join(&app_slug)
@@ -33,42 +31,10 @@ pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String
         .join("api.ts");
 
     debug!(
-        apx_dir = %apx_dir.display(),
-        schema_path = %schema_path.display(),
         api_ts_path = %api_ts_path.display(),
         spec_len = spec_json.len(),
-        "Resolved OpenAPI output paths."
+        "Resolved OpenAPI output path."
     );
-
-    fs::create_dir_all(&apx_dir)
-        .map_err(|err| format!("Failed to create .apx directory: {err}"))?;
-
-    let mut schema_changed = true;
-    if schema_path.exists() {
-        let existing = fs::read_to_string(&schema_path)
-            .map_err(|err| format!("Failed to read existing schema: {err}"))?;
-        debug!(
-            existing_len = existing.len(),
-            spec_len = spec_json.len(),
-            "Loaded existing OpenAPI schema for comparison."
-        );
-        if existing == spec_json {
-            schema_changed = false;
-        }
-    }
-
-    if schema_changed {
-        debug!("OpenAPI schema changed, writing new schema file.");
-        fs::write(&schema_path, &spec_json)
-            .map_err(|err| format!("Failed to write OpenAPI schema: {err}"))?;
-    } else {
-        debug!("OpenAPI schema unchanged; skipping schema write.");
-    }
-
-    if !schema_changed && !force {
-        debug!("OpenAPI schema unchanged and force=false; skipping generation.");
-        return Ok(false);
-    }
 
     // Generate TypeScript code from OpenAPI spec
     debug!("Generating TypeScript API client from OpenAPI spec.");
@@ -90,7 +56,7 @@ pub fn generate_openapi(project_root: &Path, force: bool) -> Result<bool, String
         "TypeScript API client generated successfully."
     );
 
-    Ok(true)
+    Ok(())
 }
 
 const OPENAPI_WATCH_DEBOUNCE_MS: u64 = 100;
@@ -113,21 +79,16 @@ pub fn start_openapi_watcher(
         .map_err(|err| format!("Failed to watch app dir: {err}"))?;
 
     let initial_mtime = latest_python_mtime(&app_dir);
-    
-    // Check if OpenAPI schema exists - if not, trigger initial generation
-    let schema_path = app_dir.join(APX_DIR_NAME).join(OPENAPI_SCHEMA_FILENAME);
-    let needs_initial_generation = !schema_path.exists();
 
     tokio::spawn(async move {
         let _watcher = watcher;
-        let mut pending = needs_initial_generation;
-        let mut is_initial_generation = needs_initial_generation;
-        let mut debounce: Option<Pin<Box<Sleep>>> = if needs_initial_generation {
-            info!("OpenAPI schema not found, will generate on startup");
+        // Always run initial generation on startup
+        let mut pending = true;
+        let mut is_initial_generation = true;
+        let mut debounce: Option<Pin<Box<Sleep>>> = {
+            info!("Will generate OpenAPI on startup");
             // Start with a short debounce to allow server to fully initialize
             Some(Box::pin(tokio::time::sleep(Duration::from_millis(500))))
-        } else {
-            None
         };
         let mut last_mtime = initial_mtime;
         let mut poll_interval = tokio::time::interval(Duration::from_millis(200));

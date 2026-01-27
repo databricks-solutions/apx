@@ -8,8 +8,8 @@ from fastapi import FastAPI
 from apx._core import generate_openapi
 
 
-def test_generate_openapi_skips_generation_when_schema_unchanged(tmp_path: Path) -> None:
-    """Test that generation is skipped when the OpenAPI schema hasn't changed."""
+def test_generate_openapi_generates_api_ts(tmp_path: Path) -> None:
+    """Test that generation creates api.ts file."""
     app_slug = "test_app"
     app_entrypoint = "test_app.backend.app:app"
     project_root = tmp_path
@@ -54,18 +54,14 @@ def test_generate_openapi_skips_generation_when_schema_unchanged(tmp_path: Path)
         module = import_module("test_app.backend.app")
         app = getattr(module, "app")  # pyright: ignore[reportAny]
         assert isinstance(app, FastAPI)
-        expected_json = json.dumps(app.openapi(), indent=2)
     finally:
         sys.path.remove(str(project_root))
 
-    apx_dir = project_root / ".apx"
-    apx_dir.mkdir()
-    (apx_dir / "openapi.json").write_text(expected_json)
+    generate_openapi(project_root)
 
-    did_regenerate = generate_openapi(project_root, False)
-
-    assert did_regenerate is False
-    assert (apx_dir / "openapi.json").read_text() == expected_json
+    api_ts_path = ui_lib_dir / "api.ts"
+    assert api_ts_path.exists()
+    assert len(api_ts_path.read_text()) > 0
 
 
 async def test_generate_openapi_with_rich_operations(isolated_project: Path) -> None:
@@ -168,46 +164,12 @@ def delete_item(item_id: int):
             "__generate_openapi",
             "--app-dir",
             str(project_root),
-            "--force",
         ],
         cwd=project_root,
     )
     exit_code = result.returncode
 
     print(f"\n__generate_openapi exit code: {exit_code}")
-
-    # Read and print the generated OpenAPI schema
-    openapi_json_path = apx_dir / "openapi.json"
-    if openapi_json_path.exists():
-        openapi_schema = json.loads(openapi_json_path.read_text())
-        print("\n" + "=" * 80)
-        print("Generated OpenAPI Schema:")
-        print("=" * 80)
-        print(json.dumps(openapi_schema, indent=2))
-        print("=" * 80)
-        print(f"\nNumber of paths: {len(openapi_schema.get('paths', {}))}")
-        print(f"Paths: {list(openapi_schema.get('paths', {}).keys())}")
-
-        # Print operations by method
-        paths = openapi_schema.get("paths", {})
-        operations: dict[str, list[str]] = {
-            "get": [],
-            "post": [],
-            "put": [],
-            "patch": [],
-            "delete": [],
-        }
-        for path, methods in paths.items():
-            for method in ["get", "post", "put", "patch", "delete"]:
-                if method in methods:
-                    operations[method].append(path)
-
-        print("\nOperations by method:")
-        for method, paths_list in operations.items():
-            if paths_list:
-                print(f"  {method.upper()}: {paths_list}")
-    else:
-        print("OpenAPI schema file not found!")
 
     # Verify and print the generated api.ts file
     api_ts_path = src_dir / "test_app" / "ui" / "lib" / "api.ts"

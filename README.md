@@ -349,7 +349,6 @@ Manually generates OpenAPI schema and TypeScript API client.
 **Options:**
 
 - `--watch, -w`: Watch for changes and regenerate automatically
-- `--force, -f`: Force regeneration even if schema hasn't changed
 
 Note: you don't need to run this command manually, the watcher will run automatically when you start the development server.
 
