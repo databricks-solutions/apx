@@ -198,7 +198,7 @@ def _init_project(
     project_path: Path,
     *,
     name: str = "test-app",
-    template: str = "essential",
+    template: str = "minimal",
     layout: str = "basic",
     assistant: str = "cursor",
     profile: str = "DEFAULT",

@@ -22,6 +22,7 @@ const APX_INDEX_URL: &str = "https://databricks-solutions.github.io/apx/simple";
 #[derive(ValueEnum, Clone, Debug)]
 #[value(rename_all = "lower")]
 pub enum Template {
+    Minimal,
     Essential,
     Stateful,
 }
@@ -137,11 +138,11 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     let app_slug = app_name.replace("-", "_");
 
     if args.template.is_none() {
-        let choices = vec![Template::Essential, Template::Stateful];
-        let default_idx = 0;
+        let choices = vec![Template::Minimal, Template::Essential, Template::Stateful];
+        let default_idx = 1; // Default to essential
         let selection = Select::new()
             .with_prompt("Which template would you like to use?")
-            .items(&["essential", "stateful"])
+            .items(&["minimal", "essential", "stateful"])
             .default(default_idx)
             .interact()
             .map_err(|err| format!("Failed to select template: {err}"))?;
@@ -209,7 +210,10 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
         }
     }
 
-    if args.layout.is_none() {
+    let template = args.template.take().unwrap_or(Template::Essential);
+
+    // Skip layout selection for minimal template (always uses basic layout)
+    if !matches!(template, Template::Minimal) && args.layout.is_none() {
         let choices = vec![Layout::Sidebar, Layout::Basic];
         let selection = Select::new()
             .with_prompt("Which layout would you like to use?")
@@ -220,8 +224,12 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
         args.layout = Some(choices[selection].clone());
     }
 
-    let template = args.template.take().unwrap_or(Template::Essential);
-    let layout = args.layout.take().unwrap_or(Layout::Sidebar);
+    // Minimal template always uses basic layout
+    let layout = if matches!(template, Template::Minimal) {
+        Layout::Basic
+    } else {
+        args.layout.take().unwrap_or(Layout::Sidebar)
+    };
 
     println!(
         "\nInitializing app {} in {}\n",
@@ -253,6 +261,23 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
             if matches!(template, Template::Stateful) {
                 let stateful_addon = templates_dir.join("addons").join("stateful");
                 process_template_directory(&stateful_addon, &app_path, &app_name, &app_slug)?;
+            }
+
+            // Apply minimal UI overlay and cleanup unused files
+            if matches!(template, Template::Minimal) {
+                let minimal_ui_addon = templates_dir.join("addons").join("minimal-ui");
+                process_template_directory(&minimal_ui_addon, &app_path, &app_name, &app_slug)?;
+
+                // Delete unused files for minimal template
+                let ui_path = app_path.join("src").join(&app_slug).join("ui");
+                // Remove components/ui/ (shadcn)
+                let _ = fs::remove_dir_all(ui_path.join("components/ui"));
+                // Remove components/backgrounds/
+                let _ = fs::remove_dir_all(ui_path.join("components/backgrounds"));
+                // Remove unused apx components
+                let _ = fs::remove_file(ui_path.join("components/apx/mode-toggle.tsx"));
+                let _ = fs::remove_file(ui_path.join("components/apx/navbar.tsx"));
+                let _ = fs::remove_file(ui_path.join("components/apx/theme-provider.tsx"));
             }
 
             if let Some(profile) = args.profile.as_deref() {
@@ -380,7 +405,8 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
         );
     }
 
-    if !args.skip_frontend_dependencies {
+    // Skip adding shadcn components for minimal template
+    if !args.skip_frontend_dependencies && !matches!(template, Template::Minimal) {
         // Build list of components to add
         let mut components_to_add = vec![ComponentInput::new("button")];
         
