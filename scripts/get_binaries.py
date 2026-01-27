@@ -1,3 +1,8 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [httpx, typer, zipfile]
+# ///
+
 from __future__ import annotations
 
 import io
