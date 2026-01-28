@@ -150,6 +150,8 @@ impl Storage {
     }
 
     /// Query logs for a specific app path since a given timestamp.
+    /// Uses COALESCE to fall back to observed_timestamp_ns when timestamp_ns is 0,
+    /// which happens with OpenTelemetry tracing bridge logs.
     pub fn query_logs(
         &self,
         app_path: Option<&str>,
@@ -157,6 +159,9 @@ impl Storage {
         limit: Option<usize>,
     ) -> Result<Vec<LogRecord>, String> {
         let conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
+
+        // Use effective_ts to handle logs where timestamp_ns is 0 (e.g., APX internal logs)
+        const EFFECTIVE_TS: &str = "COALESCE(NULLIF(timestamp_ns, 0), observed_timestamp_ns)";
 
         let sql = match (app_path, limit) {
             (Some(_), Some(lim)) => format!(
@@ -166,43 +171,45 @@ impl Storage {
                        trace_id, span_id
                 FROM logs
                 WHERE (app_path LIKE ?1 OR ?1 LIKE '%' || app_path || '%')
-                  AND timestamp_ns >= ?2
-                ORDER BY timestamp_ns ASC
+                  AND {EFFECTIVE_TS} >= ?2
+                ORDER BY {EFFECTIVE_TS} ASC
                 LIMIT {}
                 "#,
                 lim
             ),
-            (Some(_), None) => r#"
+            (Some(_), None) => format!(
+                r#"
                 SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
                        body, service_name, app_path, resource_attributes, log_attributes,
                        trace_id, span_id
                 FROM logs
                 WHERE (app_path LIKE ?1 OR ?1 LIKE '%' || app_path || '%')
-                  AND timestamp_ns >= ?2
-                ORDER BY timestamp_ns ASC
+                  AND {EFFECTIVE_TS} >= ?2
+                ORDER BY {EFFECTIVE_TS} ASC
                 "#
-            .to_string(),
+            ),
             (None, Some(lim)) => format!(
                 r#"
                 SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
                        body, service_name, app_path, resource_attributes, log_attributes,
                        trace_id, span_id
                 FROM logs
-                WHERE timestamp_ns >= ?1
-                ORDER BY timestamp_ns ASC
+                WHERE {EFFECTIVE_TS} >= ?1
+                ORDER BY {EFFECTIVE_TS} ASC
                 LIMIT {}
                 "#,
                 lim
             ),
-            (None, None) => r#"
+            (None, None) => format!(
+                r#"
                 SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
                        body, service_name, app_path, resource_attributes, log_attributes,
                        trace_id, span_id
                 FROM logs
-                WHERE timestamp_ns >= ?1
-                ORDER BY timestamp_ns ASC
+                WHERE {EFFECTIVE_TS} >= ?1
+                ORDER BY {EFFECTIVE_TS} ASC
                 "#
-            .to_string(),
+            ),
         };
 
         let mut stmt = conn.prepare(&sql).map_err(|e| format!("Prepare error: {}", e))?;
@@ -234,6 +241,7 @@ impl Storage {
     }
 
     /// Query logs newer than a given ID (for follow mode).
+    /// Uses COALESCE for ordering to handle logs where timestamp_ns is 0.
     pub fn query_logs_after_id(
         &self,
         app_path: Option<&str>,
@@ -241,33 +249,40 @@ impl Storage {
     ) -> Result<Vec<LogRecord>, String> {
         let conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
 
+        // Use effective_ts to handle logs where timestamp_ns is 0 (e.g., APX internal logs)
+        const EFFECTIVE_TS: &str = "COALESCE(NULLIF(timestamp_ns, 0), observed_timestamp_ns)";
+
         let (sql, needs_app_path) = if let Some(_) = app_path {
             (
-                r#"
+                format!(
+                    r#"
                 SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
                        body, service_name, app_path, resource_attributes, log_attributes,
                        trace_id, span_id
                 FROM logs
                 WHERE id > ?1 AND (app_path LIKE ?2 OR ?2 LIKE '%' || app_path || '%')
-                ORDER BY timestamp_ns ASC
-                "#,
+                ORDER BY {EFFECTIVE_TS} ASC
+                "#
+                ),
                 true,
             )
         } else {
             (
-                r#"
+                format!(
+                    r#"
                 SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
                        body, service_name, app_path, resource_attributes, log_attributes,
                        trace_id, span_id
                 FROM logs
                 WHERE id > ?1
-                ORDER BY timestamp_ns ASC
-                "#,
+                ORDER BY {EFFECTIVE_TS} ASC
+                "#
+                ),
                 false,
             )
         };
 
-        let mut stmt = conn.prepare(sql).map_err(|e| format!("Prepare error: {}", e))?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| format!("Prepare error: {}", e))?;
 
         let rows = if needs_app_path {
             let pattern = format!("%{}%", app_path.unwrap());

@@ -352,15 +352,17 @@ impl ProcessManager {
             .map_err(|e| format!("Failed to create .apx directory: {}", e))?;
 
         let config_path = config_dir.join("uvicorn_logging.json");
+        // APX adds: timestamp | source | channel | <this output>
+        // So we only need: location | message
         let config_content = r#"{
   "version": 1,
   "disable_existing_loggers": false,
   "formatters": {
     "default": {
-      "format": "%(levelname)s:     %(message)s"
+      "format": "%(module)s.%(funcName)s | %(message)s"
     },
     "access": {
-      "format": "%(levelname)s:     %(client_addr)s - \"%(request_line)s\" %(status_code)s"
+      "format": "%(client_addr)s - \"%(request_line)s\" %(status_code)s"
     }
   },
   "handlers": {
