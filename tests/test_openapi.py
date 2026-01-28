@@ -76,9 +76,9 @@ async def test_generate_openapi_with_rich_operations(isolated_project: Path) -> 
     # Create a backend router with rich REST operations
     router_code = """from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from .config import conf
+from .._metadata import api_prefix
 
-api = APIRouter(prefix=conf.api_prefix)
+api = APIRouter(prefix=api_prefix)
 
 class Item(BaseModel):
     id: int
@@ -168,8 +168,13 @@ def delete_item(item_id: int):
         cwd=project_root,
     )
     exit_code = result.returncode
-
-    print(f"\n__generate_openapi exit code: {exit_code}")
+    if exit_code != 0:
+        print(f"\n__generate_openapi exit code: {exit_code}")
+        for line in result.stdout.splitlines():
+            print(f"stdout: {line}")
+        for line in result.stderr.splitlines():
+            print(f"stderr: {line}")
+        raise Exception("OpenAPI generation failed")
 
     # Verify and print the generated api.ts file
     api_ts_path = src_dir / "test_app" / "ui" / "lib" / "api.ts"

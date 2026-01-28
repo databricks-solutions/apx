@@ -50,17 +50,36 @@ pub async fn run_build(app_dir: &Path, print_status: bool) -> Result<(), String>
         .args(&args)
         .current_dir(app_dir)
         .env("APX_APP_NAME", &app_name)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .output()
         .await
         .map_err(|err| format!("Failed to run frontend build: {err}"))?;
 
+    // Print stdout if there's any output
+    if !output.stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+
     if !output.status.success() {
-        return Err(format!(
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        
+        let mut error_msg = format!(
             "Frontend build failed with status {}",
             output.status.code().unwrap_or(1)
-        ));
+        );
+        
+        if !stderr.is_empty() {
+            error_msg.push_str(&format!("\n\nError output:\n{}", stderr.trim()));
+        }
+        
+        if !stdout.is_empty() && stderr.is_empty() {
+            // If there's no stderr but there is stdout, it might contain error info
+            error_msg.push_str(&format!("\n\nBuild output:\n{}", stdout.trim()));
+        }
+        
+        return Err(error_msg);
     }
 
     if print_status {

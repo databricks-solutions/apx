@@ -108,10 +108,19 @@ pub fn write_metadata_file(project_root: &Path, metadata: &ProjectMetadata) -> R
     ]
     .join("\n");
 
-    fs::write(&target_path, contents)
-        .map_err(|err| format!("Failed to write metadata file: {err}"))?;
+    // Only write if file doesn't exist or contents have changed
+    let needs_write = match fs::read_to_string(&target_path) {
+        Ok(existing) => existing != contents,
+        Err(_) => true, // File doesn't exist or can't be read
+    };
 
-    tracing::debug!("Metadata file written successfully");
+    if needs_write {
+        fs::write(&target_path, contents)
+            .map_err(|err| format!("Failed to write metadata file: {err}"))?;
+        tracing::debug!("Metadata file written successfully");
+    } else {
+        tracing::debug!("Metadata file unchanged, skipping write");
+    }
 
     // Create __dist__ directory and .gitignore
     let dist_dir = metadata.dist_dir(project_root);
@@ -119,8 +128,10 @@ pub fn write_metadata_file(project_root: &Path, metadata: &ProjectMetadata) -> R
     ensure_dir(&dist_dir)?;
 
     let gitignore_path = dist_dir.join(".gitignore");
-    fs::write(&gitignore_path, "*\n")
-        .map_err(|err| format!("Failed to write __dist__ .gitignore: {err}"))?;
+    if !gitignore_path.exists() {
+        fs::write(&gitignore_path, "*\n")
+            .map_err(|err| format!("Failed to write __dist__ .gitignore: {err}"))?;
+    }
 
     tracing::debug!("Dist directory and .gitignore created successfully");
 

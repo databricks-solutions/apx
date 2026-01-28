@@ -10,15 +10,18 @@ use tokio::time::{Duration, Sleep};
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-use crate::common::read_project_metadata;
+use crate::common::{read_project_metadata, write_metadata_file};
 use crate::dev::common::Shutdown;
 use crate::interop::generate_openapi_spec;
 use crate::openapi;
 
 pub fn generate_openapi(project_root: &Path) -> Result<(), String> {
     let metadata = read_project_metadata(project_root)?;
-    let app_slug = metadata.app_slug;
-    let app_entrypoint = metadata.app_entrypoint;
+    let app_slug = metadata.app_slug.clone();
+    let app_entrypoint = metadata.app_entrypoint.clone();
+
+    // Ensure _metadata.py exists before importing the Python module
+    write_metadata_file(project_root, &metadata)?;
 
     let (spec_json, app_slug) =
         generate_openapi_spec(project_root, &app_entrypoint, &app_slug)?;
