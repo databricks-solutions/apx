@@ -1,0 +1,123 @@
+---
+title: Getting Started
+description: Build Databricks Apps with apx
+---
+
+Welcome to the apx documentation. apx is a reliable, feature-full, human and LLM friendly development toolkit for building Databricks Apps.
+
+## Quick Start
+
+Initialize a new project with a single command:
+
+```bash
+uvx --index https://databricks-solutions.github.io/apx/simple apx init
+```
+
+This launches an interactive prompt that guides you through:
+
+- Naming your app
+- Selecting a Databricks profile
+- Setting up AI assistant rules
+- Choosing a template
+
+## Prerequisites
+
+Before getting started, ensure you have:
+
+- **uv** - Fast Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
+- **Databricks CLI** - For deployment ([install](https://docs.databricks.com/dev-tools/cli/install.html))
+
+Note: Bun is bundled with apx and does not need to be installed separately.
+
+## Documentation
+
+<Cards>
+  <Card title="CLI Reference" href="/docs/cli">
+    Complete reference for all apx commands including init, build, and dev
+  </Card>
+  <Card title="MCP Reference" href="/docs/mcp">
+    Model Context Protocol server for AI-assisted development
+  </Card>
+  <Card title="Features" href="/docs/features">
+    Dev server, components CLI, local database, and more
+  </Card>
+</Cards>
+
+## Project Structure
+
+After initialization, your project will have this structure:
+
+```
+my-app/
+├── package.json          # Frontend dependencies
+├── pyproject.toml        # Backend dependencies
+├── src/
+│   └── my_app/
+│       ├── __dist__/     # Built frontend assets
+│       ├── backend/
+│       │   ├── app.py    # FastAPI application
+│       │   ├── models.py # Pydantic models
+│       │   └── router.py # API routes
+│       └── ui/
+│           ├── components/
+│           ├── routes/
+│           └── main.tsx
+└── databricks.yml        # Deployment configuration
+```
+
+## Development Workflow
+
+1. **Start the dev server**
+
+   ```bash
+   uv run apx dev start
+   ```
+
+2. **Add UI components**
+
+   ```bash
+   uv run apx components add button card
+   ```
+
+3. **Check your code**
+
+   ```bash
+   uv run apx dev check
+   ```
+
+4. **Build for deployment**
+
+   ```bash
+   uv run apx build
+   ```
+
+5. **Deploy to Databricks**
+   ```bash
+   databricks bundle deploy -p <your-profile>
+   ```
+
+## Stack
+
+apx is built on modern, production-ready technologies:
+
+| Layer    | Technology                |
+| -------- | ------------------------- |
+| Backend  | Python, FastAPI, Pydantic |
+| Frontend | React, TypeScript, Vite   |
+| UI       | shadcn/ui, Tailwind CSS   |
+| Runtime  | Bun (bundled), uv         |
+| Database | SQLModel (optional)       |
+
+## Next Steps
+
+<Cards>
+  <Card title="CLI Reference" href="/docs/cli">
+    Learn all available commands
+  </Card>
+  <Card title="MCP Server" href="/docs/mcp">
+    Set up AI assistant integration
+  </Card>
+  <Card title="Features" href="/docs/features">
+    Explore dev server, components, and database
+  </Card>
+</Cards>

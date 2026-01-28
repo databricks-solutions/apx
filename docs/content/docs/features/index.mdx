@@ -1,0 +1,289 @@
+---
+title: Features
+description: Core features of the apx development toolkit
+---
+
+apx provides a comprehensive set of features designed to streamline Databricks App development for both humans and AI assistants.
+
+## Development Server
+
+The apx dev server provides a seamless full-stack development experience with hot reloading, automatic API client generation, and detached mode operation.
+
+### Key Features
+
+<Cards>
+  <Card title="Hot Reload">
+    Automatic refresh on code changes for both frontend and backend
+  </Card>
+  <Card title="Detached Mode">
+    Run servers in background, continue working in terminal
+  </Card>
+  <Card title="Unified Logs">Stream logs from all services in one place</Card>
+  <Card title="OpenAPI Sync">
+    Auto-generate TypeScript client from Python models
+  </Card>
+</Cards>
+
+### Quick Start
+
+```bash
+# Start all servers in detached mode
+uv run apx dev start
+
+# Check status
+uv run apx dev status
+
+# View logs
+uv run apx dev logs -f
+
+# Stop when done
+uv run apx dev stop
+```
+
+### Architecture
+
+When you run `dev start`, apx launches:
+
+1. **Backend Server** - FastAPI application with hot reload via uvicorn
+2. **Frontend Server** - Vite dev server with HMR (Hot Module Replacement)
+3. **OpenAPI Watcher** - Monitors Python models and regenerates TypeScript client
+
+All three services run in detached mode, allowing you to continue working in your terminal. Logs are collected and can be streamed with `dev logs -f`.
+
+### OpenAPI Integration
+
+apx automatically generates a TypeScript API client from your FastAPI backend:
+
+```python
+# backend/models.py
+from pydantic import BaseModel
+
+class Order(BaseModel):
+    id: str
+    customer_name: str
+    total: float
+```
+
+This automatically generates:
+
+```typescript
+// Generated TypeScript client
+interface Order {
+  id: string;
+  customer_name: string;
+  total: number;
+}
+```
+
+The watcher monitors your Python files and regenerates the client whenever you modify Pydantic models or FastAPI routes.
+
+---
+
+## Built-in Components CLI
+
+apx includes an integrated component system powered by shadcn/ui, with additional curated repositories for animations, AI components, and icons.
+
+### Adding Components
+
+```bash
+uv run apx components add button
+uv run apx components add card
+uv run apx components add dialog
+```
+
+### Available Repositories
+
+apx comes preconfigured with high-quality component repositories:
+
+| Repository                            | Description                   | License    |
+| ------------------------------------- | ----------------------------- | ---------- |
+| [shadcn/ui](https://ui.shadcn.com/)   | Core UI components            | MIT        |
+| [animate-ui](https://animate-ui.com/) | Animation components          | MIT        |
+| [ai-sdk](https://ai-sdk.dev/)         | AI components (chat, prompts) | Apache-2.0 |
+| [svgl](https://svgl.app/)             | SVG icons collection          | MIT        |
+
+### Example: Building a Dashboard
+
+```bash
+# Add required components
+uv run apx components add card
+uv run apx components add table
+uv run apx components add chart
+uv run apx components add tabs
+```
+
+Then use them in your React code:
+
+```tsx
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
+
+export function Dashboard() {
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      <Card>
+        <CardHeader>
+          <CardTitle>Orders</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Table>{/* ... */}</Table>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+```
+
+### Customization
+
+Components are installed directly into your project at `src/<app>/ui/components/`, giving you full control to customize styles and behavior.
+
+The component configuration is stored in `components.json`:
+
+```json
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "new-york",
+  "rsc": false,
+  "tsx": true,
+  "tailwind": {
+    "config": "tailwind.config.js",
+    "css": "src/<app>/ui/main.css"
+  },
+  "aliases": {
+    "components": "@/components",
+    "utils": "@/lib/utils"
+  },
+  "repositories": [
+    "https://animate-ui.com/r",
+    "https://ai-sdk.dev/r",
+    "https://svgl.app/docs/shadcn-ui"
+  ]
+}
+```
+
+---
+
+## Local Development Database
+
+The **stateful** template includes integrated database support via SQLModel, providing a local SQLite database for development that maps to Lakebase in production.
+
+### Initializing with Database Support
+
+```bash
+uvx --index https://databricks-solutions.github.io/apx/simple apx init --template stateful
+```
+
+Or apply to an existing project:
+
+```bash
+uv run apx dev apply stateful
+```
+
+### Defining Models
+
+SQLModel combines Pydantic and SQLAlchemy for type-safe database models:
+
+```python
+from sqlmodel import SQLModel, Field
+from typing import Optional
+from datetime import datetime
+
+class Order(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    customer_name: str
+    total: float
+    status: str = "pending"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+```
+
+### Database Operations
+
+```python
+from sqlmodel import Session, select
+from backend.runtime import get_engine
+
+def get_orders():
+    with Session(get_engine()) as session:
+        return session.exec(select(Order)).all()
+
+def create_order(order: Order):
+    with Session(get_engine()) as session:
+        session.add(order)
+        session.commit()
+        session.refresh(order)
+        return order
+```
+
+### Development vs Production
+
+| Environment | Database | Configuration                     |
+| ----------- | -------- | --------------------------------- |
+| Development | SQLite   | Local file in project directory   |
+| Production  | Lakebase | Configured via Databricks profile |
+
+The same SQLModel code works in both environments - apx handles the connection configuration automatically.
+
+### Migrations
+
+For schema changes, apx supports Alembic migrations:
+
+```bash
+# Generate migration
+alembic revision --autogenerate -m "add status column"
+
+# Apply migration
+alembic upgrade head
+```
+
+---
+
+## Project Templates
+
+apx offers two project templates to get you started:
+
+### Essential Template
+
+The basic template includes:
+
+- FastAPI backend with example routes
+- React frontend with Vite
+- TypeScript API client generation
+- shadcn/ui component integration
+- Tailwind CSS styling
+
+```bash
+uvx --index https://databricks-solutions.github.io/apx/simple apx init --template essential
+```
+
+### Stateful Template
+
+Everything in Essential, plus:
+
+- SQLModel database integration
+- Lakebase configuration for production
+- Example CRUD operations
+- Alembic migrations setup
+
+```bash
+uvx --index https://databricks-solutions.github.io/apx/simple apx init --template stateful
+```
+
+---
+
+## AI Assistant Rules
+
+apx can generate configuration files for popular AI coding assistants:
+
+```bash
+# During init
+uvx --index https://databricks-solutions.github.io/apx/simple apx init --assistant cursor
+
+# Or apply later
+uv run apx dev apply cursor
+uv run apx dev apply vscode
+uv run apx dev apply claude
+uv run apx dev apply codex
+```
+
+These rules help AI assistants understand your project structure and conventions, enabling more effective code generation and assistance.

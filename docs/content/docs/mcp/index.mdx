@@ -1,0 +1,306 @@
+---
+title: MCP Reference
+description: Model Context Protocol server for AI-assisted development
+---
+
+apx includes a built-in MCP (Model Context Protocol) server that enables AI assistants like Cursor, Claude, VSCode, and Codex to interact with your development environment.
+
+## Overview
+
+The MCP server provides tools for:
+
+- **Development Server Management** - Start, stop, restart, and monitor dev servers
+- **Code Quality** - Check project code for errors
+- **Component Management** - Search and add UI components
+- **SDK Documentation** - Search Databricks SDK documentation
+- **API Routes** - Get route information and code examples
+- **Deployment Logs** - Fetch logs from deployed Databricks Apps
+
+## Starting the MCP Server
+
+```bash
+uv run apx mcp
+```
+
+The MCP server runs over stdio and integrates with AI assistants that support the Model Context Protocol.
+
+## Configuration
+
+Choose your AI assistant to see the configuration:
+
+<Tabs items={["Cursor", "VSCode", "Claude", "Codex"]}>
+  <Tab value="Cursor">
+    Create `.cursor/mcp.json` in your project root:
+
+    ```json
+    {
+      "mcpServers": {
+        "shadcn": {
+          "command": "bun",
+          "args": ["x", "--bun", "shadcn@latest", "mcp"]
+        },
+        "apx": {
+          "command": "uv",
+          "args": ["run", "apx", "mcp"]
+        }
+      }
+    }
+    ```
+
+    Or apply the Cursor template:
+
+    ```bash
+    uv run apx dev apply cursor
+    ```
+
+  </Tab>
+  <Tab value="VSCode">
+    Create `.vscode/mcp.json` in your project root:
+
+    ```json
+    {
+      "mcpServers": {
+        "shadcn": {
+          "command": "bun",
+          "args": ["x", "--bun", "shadcn@latest", "mcp"]
+        },
+        "apx": {
+          "command": "uv",
+          "args": ["run", "apx", "mcp"]
+        },
+        "playwright": {
+          "command": "bun",
+          "args": ["x", "--bun", "@playwright/mcp@latest"]
+        }
+      }
+    }
+    ```
+
+    Or apply the VSCode template:
+
+    ```bash
+    uv run apx dev apply vscode
+    ```
+
+  </Tab>
+  <Tab value="Claude">
+    Create `.mcp.json` in your project root:
+
+    ```json
+    {
+      "mcpServers": {
+        "shadcn": {
+          "command": "bun",
+          "args": ["x", "--bun", "shadcn@latest", "mcp"]
+        },
+        "apx": {
+          "command": "uv",
+          "args": ["run", "apx", "mcp"]
+        },
+        "playwright": {
+          "command": "bun",
+          "args": ["x", "--bun", "@playwright/mcp@latest"]
+        }
+      }
+    }
+    ```
+
+    Or apply the Claude template:
+
+    ```bash
+    uv run apx dev apply claude
+    ```
+
+    This also creates a `CLAUDE.md` file with project instructions.
+
+  </Tab>
+  <Tab value="Codex">
+    Apply the Codex template to create `AGENTS.md`:
+
+    ```bash
+    uv run apx dev apply codex
+    ```
+
+    This creates an `AGENTS.md` file with project instructions for OpenAI Codex.
+
+  </Tab>
+</Tabs>
+
+---
+
+## Available Tools
+
+### Development Server Tools
+
+| Tool              | Description                                                        |
+| ----------------- | ------------------------------------------------------------------ |
+| `start`           | Start development server and return the URL                        |
+| `stop`            | Stop the development server                                        |
+| `restart`         | Restart the development server (preserves port if possible)        |
+| `logs`            | Fetch recent dev server logs                                       |
+| `check`           | Check project code for errors (runs tsc and ty checks in parallel) |
+| `refresh_openapi` | Regenerate OpenAPI schema and API client                           |
+
+### Component Tools
+
+| Tool                         | Description                                             |
+| ---------------------------- | ------------------------------------------------------- |
+| `search_registry_components` | Search shadcn registry components using semantic search |
+| `add_component`              | Add a component to the project                          |
+
+### Documentation Tools
+
+| Tool             | Description                                                              |
+| ---------------- | ------------------------------------------------------------------------ |
+| `docs`           | Search Databricks SDK documentation for code examples and API references |
+| `get_route_info` | Get code example for using a specific API route                          |
+
+### Deployment Tools
+
+| Tool                   | Description                                    |
+| ---------------------- | ---------------------------------------------- |
+| `databricks_apps_logs` | Fetch Databricks Apps logs from a deployed app |
+
+---
+
+## Tool Details
+
+### start
+
+Start the development server in detached mode.
+
+**Returns:** Server URL (e.g., `http://localhost:8000`)
+
+### stop
+
+Stop all running development servers.
+
+**Returns:** Confirmation message
+
+### restart
+
+Restart development servers, attempting to reuse the same port.
+
+**Returns:** New server URL
+
+### logs
+
+Fetch recent dev server logs.
+
+**Parameters:**
+
+- `duration` (optional): Time period for logs (default: `60s`)
+
+**Returns:** Log output from backend, frontend, and OpenAPI watcher
+
+### check
+
+Check project code for errors using TypeScript compiler and Python type checker in parallel.
+
+**Returns:** Check results or error messages
+
+### refresh_openapi
+
+Regenerate the OpenAPI schema and TypeScript API client from your Python models.
+
+**Returns:** Confirmation message
+
+### search_registry_components
+
+Search for UI components using semantic search across configured registries.
+
+**Parameters:**
+
+- `query`: Search query (e.g., "button", "data table", "chart")
+- `limit` (optional): Maximum results (default: `10`)
+
+**Returns:** List of matching components with registry and relevance score
+
+### add_component
+
+Add a UI component to your project.
+
+**Parameters:**
+
+- `component_id`: Component identifier
+  - Simple: `button` (from default registry)
+  - With registry: `@animate-ui/accordion`
+- `force` (optional): Overwrite existing files (default: `false`)
+
+**Returns:** Confirmation message
+
+### docs
+
+Search Databricks SDK documentation for relevant code examples.
+
+**Parameters:**
+
+- `source`: Documentation source (`databricks-sdk-python`)
+- `query`: Search query (e.g., "create cluster", "list jobs")
+- `num_results` (optional): Maximum results (default: `5`)
+
+**Returns:** Matching documentation with code examples and source files
+
+### get_route_info
+
+Get TypeScript code example for using a specific API route.
+
+**Parameters:**
+
+- `operation_id`: Operation ID from OpenAPI schema (e.g., `listItems`, `createItem`)
+
+**Returns:** React hook usage example with types
+
+### databricks_apps_logs
+
+Fetch logs from a deployed Databricks App.
+
+**Parameters:**
+
+- `app_name` (optional): App name (auto-detected from `databricks.yml` if not provided)
+- `tail_lines` (optional): Number of lines to fetch (default: `200`)
+- `search` (optional): Filter logs by search term
+- `source` (optional): Filter by log source
+- `profile` (optional): Databricks CLI profile
+- `target` (optional): Deployment target
+- `timeout_seconds` (optional): Command timeout (default: `60`)
+
+**Returns:** Log output with metadata
+
+---
+
+## Resources
+
+The MCP server also exposes resources that provide project information:
+
+| Resource       | Description                                         |
+| -------------- | --------------------------------------------------- |
+| `apx://info`   | Information about the apx toolkit and project stack |
+| `apx://routes` | List of API routes from OpenAPI schema              |
+
+---
+
+## AI Assistant Integration
+
+### Workflow Example
+
+```text
+Use apx mcp server to start development server, then create a nice
+application for order management. Use shadcn mcp to add new components,
+make sure style is consistent and data is properly fetched from the backend.
+```
+
+The AI assistant will:
+
+1. Call `start` to launch the development servers
+2. Use `search_registry_components` to find relevant UI components
+3. Call `add_component` to install components
+4. Use `get_route_info` to understand API usage
+5. Use `check` to verify code quality
+
+### Best Practices
+
+1. **Let the AI manage servers** - AI assistants can start/stop servers as needed
+2. **Use component search** - Find the right components with semantic search
+3. **Leverage SDK docs** - Search for Databricks APIs when building integrations
+4. **Check code regularly** - Use the `check` tool to catch errors early

@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Package Links</title>
+</head>
+<body>
+    <h1>Links</h1>
+    {% for wheel in wheels %}
+    <a href="{{ wheel.url }}">{{ wheel.name }}</a><br>
+    {% endfor %}
+</body>
+</html>

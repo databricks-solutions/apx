@@ -1,0 +1,358 @@
+---
+title: CLI Reference
+description: Complete reference for apx command-line interface
+---
+
+The apx CLI provides commands to initialize, develop, build, and manage your Databricks Apps projects.
+
+## Installation
+
+apx is distributed from a custom PyPI registry. Install and run using `uvx`:
+
+```bash
+uvx --index https://databricks-solutions.github.io/apx/simple apx <command>
+```
+
+Or after adding to your project:
+
+```bash
+uv run apx <command>
+```
+
+## Commands Overview
+
+| Command      | Description                      |
+| ------------ | -------------------------------- |
+| `init`       | Initialize a new project         |
+| `build`      | Build the project for deployment |
+| `dev`        | Development server management    |
+| `components` | UI components commands           |
+| `frontend`   | Frontend-specific commands       |
+| `mcp`        | Start the MCP server             |
+| `bun`        | Run a command using bun          |
+| `flux`       | Flux OTEL collector commands     |
+
+---
+
+## init
+
+Initialize a new apx project with interactive prompts for configuration.
+
+```bash
+uvx --index https://databricks-solutions.github.io/apx/simple apx init [OPTIONS] [APP_PATH]
+```
+
+### Arguments
+
+- `APP_PATH`: The path to create the app (optional, defaults to current directory)
+
+### Options
+
+| Option                         | Description                                              |
+| ------------------------------ | -------------------------------------------------------- |
+| `-n, --name <APP_NAME>`        | The name of the project                                  |
+| `-t, --template <TEMPLATE>`    | Template to use: `minimal`, `essential`, `stateful`      |
+| `-p, --profile <PROFILE>`      | Databricks profile to use                                |
+| `-a, --assistant <ASSISTANT>`  | AI assistant type: `cursor`, `vscode`, `codex`, `claude` |
+| `-l, --layout <LAYOUT>`        | Layout to use: `basic`, `sidebar`                        |
+| `--skip-frontend-dependencies` | Skip installing bun packages                             |
+| `--skip-backend-dependencies`  | Skip running uv sync                                     |
+| `--skip-build`                 | Skip building after initialization                       |
+
+### Templates
+
+<Tabs items={["Minimal", "Essential", "Stateful"]}>
+  <Tab value="Minimal">
+    Minimal template with basic UI structure and no additional features.
+
+    ```bash
+    uvx --index https://databricks-solutions.github.io/apx/simple apx init --template minimal
+    ```
+
+  </Tab>
+  <Tab value="Essential">
+    Standard template with UI and API, including shadcn/ui components and OpenAPI client generation.
+
+    ```bash
+    uvx --index https://databricks-solutions.github.io/apx/simple apx init --template essential
+    ```
+
+  </Tab>
+  <Tab value="Stateful">
+    Everything in Essential, plus SQLModel database integration and Lakebase configuration.
+
+    ```bash
+    uvx --index https://databricks-solutions.github.io/apx/simple apx init --template stateful
+    ```
+
+  </Tab>
+</Tabs>
+
+### Example
+
+```bash
+uvx --index https://databricks-solutions.github.io/apx/simple apx init \
+  --name my-app \
+  --template essential \
+  --profile my-profile \
+  --assistant cursor \
+  my-app
+```
+
+---
+
+## build
+
+Prepare the app for deployment by building both frontend assets and Python wheel.
+
+```bash
+uv run apx build [OPTIONS] [APP_PATH]
+```
+
+### Arguments
+
+- `APP_PATH`: The path to the app (optional, defaults to current directory)
+
+### Options
+
+| Option                      | Description                              |
+| --------------------------- | ---------------------------------------- |
+| `--build-path <BUILD_PATH>` | Build directory path (default: `.build`) |
+| `--skip-ui-build`           | Skip the UI build step                   |
+
+---
+
+## dev
+
+The `dev` command group manages development servers.
+
+### dev start
+
+Start development servers in detached mode.
+
+```bash
+uv run apx dev start [OPTIONS] [APP_PATH]
+```
+
+#### Options
+
+| Option                          | Description                            |
+| ------------------------------- | -------------------------------------- |
+| `-a, --attached`                | Follow logs and stop server on Ctrl+C  |
+| `--skip-credentials-validation` | Skip credentials validation on startup |
+
+### dev status
+
+Check the status of running development servers.
+
+```bash
+uv run apx dev status [APP_PATH]
+```
+
+### dev logs
+
+Display logs from development servers.
+
+```bash
+uv run apx dev logs [OPTIONS] [APP_PATH]
+```
+
+#### Options
+
+| Option                      | Description                            |
+| --------------------------- | -------------------------------------- |
+| `-d, --duration <DURATION>` | Duration to look back (default: `10m`) |
+| `-f, --follow`              | Follow logs until Ctrl+C               |
+
+### dev restart
+
+Restart all running development servers.
+
+```bash
+uv run apx dev restart [APP_PATH]
+```
+
+### dev stop
+
+Stop all running development servers.
+
+```bash
+uv run apx dev stop [APP_PATH]
+```
+
+### dev check
+
+Check the project code for errors using TypeScript compiler and Python type checker.
+
+```bash
+uv run apx dev check [APP_PATH]
+```
+
+### dev apply
+
+Apply an addon to an existing project.
+
+```bash
+uv run apx dev apply <ADDON>
+```
+
+#### Available Addons
+
+<Tabs items={["Assistant Rules", "Templates", "Layouts"]}>
+  <Tab value="Assistant Rules">
+    Configure AI assistant integration:
+
+    - `cursor` - Cursor IDE rules and MCP config
+    - `vscode` - VSCode instructions and MCP config
+    - `claude` - Claude project file and MCP config
+    - `codex` - OpenAI Codex AGENTS.md file
+
+    ```bash
+    uv run apx dev apply cursor
+    uv run apx dev apply vscode
+    uv run apx dev apply claude
+    uv run apx dev apply codex
+    ```
+
+  </Tab>
+  <Tab value="Templates">
+    Apply project templates:
+
+    - `essential` - Standard template with UI and API
+    - `stateful` - Template with database integration
+
+    ```bash
+    uv run apx dev apply essential
+    uv run apx dev apply stateful
+    ```
+
+  </Tab>
+  <Tab value="Layouts">
+    Apply UI layouts:
+
+    - `sidebar` - Sidebar navigation layout
+    - `minimal-ui` - Minimal UI structure
+
+    ```bash
+    uv run apx dev apply sidebar
+    uv run apx dev apply minimal-ui
+    ```
+
+  </Tab>
+</Tabs>
+
+---
+
+## components
+
+Manage UI components using shadcn/ui.
+
+### components add
+
+Add a UI component to your project.
+
+```bash
+uv run apx components add [OPTIONS] <COMPONENT> [APP_PATH]
+```
+
+#### Arguments
+
+- `COMPONENT`: Component name (e.g., `button`, `dialog`, `table`)
+
+#### Options
+
+| Option                  | Description                         |
+| ----------------------- | ----------------------------------- |
+| `--registry <REGISTRY>` | Registry name from components.json  |
+| `--force`               | Overwrite existing files            |
+| `--dry-run`             | Print actions without writing files |
+
+#### Examples
+
+```bash
+# Add from default registry
+uv run apx components add button
+
+# Add from specific registry
+uv run apx components add accordion --registry animate-ui
+
+# Force overwrite
+uv run apx components add card --force
+```
+
+#### Preconfigured Registries
+
+Projects include these component repositories:
+
+| Repository                            | Description                   |
+| ------------------------------------- | ----------------------------- |
+| [shadcn/ui](https://ui.shadcn.com/)   | Core UI components            |
+| [animate-ui](https://animate-ui.com/) | Animation components          |
+| [ai-sdk](https://ai-sdk.dev/)         | AI components (chat, prompts) |
+| [svgl](https://svgl.app/)             | SVG icons collection          |
+
+---
+
+## mcp
+
+Start the MCP (Model Context Protocol) server.
+
+```bash
+uv run apx mcp
+```
+
+See the [MCP Reference](/docs/mcp) for available tools and configuration.
+
+---
+
+## frontend
+
+Frontend-specific commands.
+
+### frontend dev
+
+Run the frontend development server standalone.
+
+```bash
+uv run apx frontend dev
+```
+
+### frontend build
+
+Build the frontend for production.
+
+```bash
+uv run apx frontend build
+```
+
+---
+
+## bun
+
+Run commands using the bundled bun runtime.
+
+```bash
+uv run apx bun <ARGS>
+```
+
+---
+
+## flux
+
+Flux OTEL collector commands for observability.
+
+### flux start
+
+Start the Flux OTEL collector daemon.
+
+```bash
+uv run apx flux start
+```
+
+### flux stop
+
+Stop the Flux OTEL collector daemon.
+
+```bash
+uv run apx flux stop
+```
