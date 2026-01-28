@@ -38,7 +38,7 @@ jobs:
           python-version: "3.11"
 
       - name: Build wheels
-        run: uv build --wheel
+        run: uvx maturin build --release --out dist
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -91,7 +91,7 @@ jobs:
           enable-cache: true
 
       - name: Generate registry
-        run: uv run scripts/generate_registry.py
+        run: uv run --script scripts/generate_registry.py
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

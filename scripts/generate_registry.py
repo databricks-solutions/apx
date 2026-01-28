@@ -1,3 +1,8 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["httpx", "jinja2"]
+# ///
+
 from collections import defaultdict
 from pathlib import Path
 import re
