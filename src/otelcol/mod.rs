@@ -10,7 +10,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::interop::otelcol_binary_path;
 
@@ -246,10 +246,6 @@ pub fn ensure_otelcol_running() -> Result<(), String> {
 
     // Check if something else is using the port
     if is_otelcol_listening(OTELCOL_PORT) {
-        warn!(
-            "Port {} is already in use by another process",
-            OTELCOL_PORT
-        );
         // Try to use it anyway - might be a previous otelcol without lock
         return Ok(());
     }
