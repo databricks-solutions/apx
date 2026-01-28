@@ -26,15 +26,31 @@ use crate::dotenv::DotenvFile;
 
 #[derive(Debug, Clone, Copy)]
 enum LogSource {
+    App,
     Db,
+}
+
+impl LogSource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            LogSource::App => "app",
+            LogSource::Db => "db",
+        }
+    }
 }
 
 impl fmt::Display for LogSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LogSource::Db => write!(f, "db"),
-        }
+        write!(f, "{}", self.as_str())
     }
+}
+
+/// Format a log line with timestamp and source prefix.
+/// Output: `2026-01-28 14:09:02.413 |  app | <message>`
+fn format_log_line(source: LogSource, message: &str) -> String {
+    let now = chrono::Utc::now();
+    let timestamp = now.format("%Y-%m-%d %H:%M:%S%.3f");
+    format!("{} | {:>4} | {}", timestamp, source, message)
 }
 
 #[derive(Debug)]
@@ -243,41 +259,35 @@ impl ProcessManager {
 
     async fn spawn_uvicorn(&self, app_dir: &Path, app_entrypoint: String) -> Result<(), String> {
         // ============================================================================
-        // IMPORTANT: Backend logs are sent directly to flux via OTEL auto-instrumentation.
-        // NOT piped through apx stdout/stderr.
-        //
-        // Key configuration:
-        // - OTEL_LOGS_EXPORTER=otlp: enables log export to OTLP endpoint
-        // - OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED=true: attaches OTEL handler
-        // - uvicorn --log-config: configures uvicorn loggers to propagate to root logger
-        //   where OTEL's handler captures them
+        // Backend logs are captured via stdout/stderr and forwarded to flux.
+        // No OTEL Python dependencies required - apx handles log collection.
+        // Log lines are prefixed with timestamp and source for visibility:
+        //   2026-01-28 14:09:02.413 |  app | INFO: Uvicorn running...
         // ============================================================================
 
-        // Create uvicorn logging config that enables propagation to root logger
+        // Create uvicorn logging config for consistent log format
         let log_config = self.create_uvicorn_log_config(app_dir).await?;
 
-        // Use direct Python invocation instead of `uv run` to avoid extra process
-        // and uv cache locking. Dependencies are synced by preflight checks.
+        // Run uvicorn directly (no OTEL auto-instrumentation wrapper)
         let apx_cmd = ApxCommand::new()?;
         let mut cmd = Command::new(&apx_cmd.python);
-        cmd.args(["-m", "opentelemetry.instrumentation.auto_instrumentation"])
-            .args(["--logs_exporter", "otlp"])
-            .args([
-                "uvicorn",
-                &app_entrypoint,
-                "--host",
-                &self.host,
-                "--port",
-                &self.backend_port.to_string(),
-                "--reload",
-                "--log-config",
-                &log_config,
-            ])
-            .current_dir(app_dir)
-            .stdin(Stdio::null())
-            // Inherit stdout/stderr for local visibility, OTEL sends logs directly to flux
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+        cmd.args([
+            "-m",
+            "uvicorn",
+            &app_entrypoint,
+            "--host",
+            &self.host,
+            "--port",
+            &self.backend_port.to_string(),
+            "--reload",
+            "--log-config",
+            &log_config,
+        ])
+        .current_dir(app_dir)
+        .stdin(Stdio::null())
+        // Capture stdout/stderr for prefixed logging and flux forwarding
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
         // Set APX environment variables
         cmd.env("APX_FRONTEND_PORT", self.frontend_port.to_string());
@@ -290,20 +300,6 @@ impl ProcessManager {
         // Force Python to flush stdout/stderr immediately (no buffering)
         cmd.env("PYTHONUNBUFFERED", "1");
 
-        // OpenTelemetry auto-instrumentation configuration
-        cmd.env(
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-            format!("http://127.0.0.1:{}", crate::flux::FLUX_PORT),
-        );
-        cmd.env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
-        cmd.env("OTEL_LOGS_EXPORTER", "otlp");
-        cmd.env("OTEL_SERVICE_NAME", format!("{}_app", self.app_slug));
-        cmd.env("OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED", "true");
-        cmd.env(
-            "OTEL_RESOURCE_ATTRIBUTES",
-            format!("apx.app_path={}", self.app_dir.display()),
-        );
-
         // Apply dotenv variables
         let vars = self.dotenv_vars.lock().await;
         for (key, value) in vars.iter() {
@@ -311,57 +307,95 @@ impl ProcessManager {
         }
         drop(vars);
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|err| format!("Failed to start backend process: {err}"))?;
+
+        // Spawn tasks to read stdout/stderr, prefix with source, and forward to flux
+        let service_name = format!("{}_app", self.app_slug);
+        let app_path = self.app_dir.display().to_string();
+
+        if let Some(stdout) = child.stdout.take() {
+            let service_name = service_name.clone();
+            let app_path = app_path.clone();
+            tokio::spawn(async move {
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    println!("{}", format_log_line(LogSource::App, &line));
+                    forward_log_to_flux(&line, "INFO", &service_name, &app_path).await;
+                }
+            });
+        }
+
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    eprintln!("{}", format_log_line(LogSource::App, &line));
+                    forward_log_to_flux(&line, "ERROR", &service_name, &app_path).await;
+                }
+            });
+        }
 
         let mut guard = self.backend_child.lock().await;
         *guard = Some(child);
         Ok(())
     }
 
-    /// Create a uvicorn logging config file that enables propagation to root logger.
-    /// This allows OTEL's handler on the root logger to capture uvicorn logs.
+    /// Create a uvicorn logging config file (JSON format, no pyyaml dependency).
     async fn create_uvicorn_log_config(&self, app_dir: &Path) -> Result<String, String> {
         let config_dir = app_dir.join(".apx");
         tokio::fs::create_dir_all(&config_dir)
             .await
             .map_err(|e| format!("Failed to create .apx directory: {}", e))?;
 
-        let config_path = config_dir.join("uvicorn_logging.yaml");
-        let config_content = r#"version: 1
-disable_existing_loggers: false
-handlers:
-  default:
-    class: logging.StreamHandler
-    stream: ext://sys.stderr
-    formatter: default
-  access:
-    class: logging.StreamHandler
-    stream: ext://sys.stdout
-    formatter: access
-formatters:
-  default:
-    format: "%(levelname)s:     %(message)s"
-  access:
-    format: "%(levelname)s:     %(client_addr)s - \"%(request_line)s\" %(status_code)s"
-loggers:
-  uvicorn:
-    handlers: [default]
-    level: INFO
-    propagate: true
-  uvicorn.error:
-    handlers: [default]
-    level: INFO
-    propagate: true
-  uvicorn.access:
-    handlers: [access]
-    level: INFO
-    propagate: true
-root:
-  level: INFO
-  handlers: [default]
-"#;
+        let config_path = config_dir.join("uvicorn_logging.json");
+        let config_content = r#"{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "formatters": {
+    "default": {
+      "format": "%(levelname)s:     %(message)s"
+    },
+    "access": {
+      "format": "%(levelname)s:     %(client_addr)s - \"%(request_line)s\" %(status_code)s"
+    }
+  },
+  "handlers": {
+    "default": {
+      "class": "logging.StreamHandler",
+      "stream": "ext://sys.stderr",
+      "formatter": "default"
+    },
+    "access": {
+      "class": "logging.StreamHandler",
+      "stream": "ext://sys.stdout",
+      "formatter": "access"
+    }
+  },
+  "loggers": {
+    "uvicorn": {
+      "handlers": ["default"],
+      "level": "INFO",
+      "propagate": false
+    },
+    "uvicorn.error": {
+      "level": "INFO",
+      "propagate": true
+    },
+    "uvicorn.access": {
+      "handlers": ["access"],
+      "level": "INFO",
+      "propagate": false
+    }
+  },
+  "root": {
+    "level": "INFO",
+    "handlers": ["default"]
+  }
+}"#;
 
         tokio::fs::write(&config_path, config_content)
             .await
@@ -658,9 +692,9 @@ root:
 
         let mut child = cmd
             .spawn()
-            .map_err(|err| format!("Failed to start {source} process: {err}"))?;
+            .map_err(|err| format!("Failed to start {} process: {err}", source))?;
 
-        // Spawn tasks to read stdout/stderr and forward to flux
+        // Spawn tasks to read stdout/stderr, prefix with source, and forward to flux
         let service_name = format!("{}_{}", self.app_slug, source);
         let app_path = self.app_dir.display().to_string();
 
@@ -671,24 +705,18 @@ root:
                 let reader = BufReader::new(stdout);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    // Print to terminal for visibility
-                    println!("{}", line);
-                    // Forward to flux
+                    println!("{}", format_log_line(source, &line));
                     forward_log_to_flux(&line, "INFO", &service_name, &app_path).await;
                 }
             });
         }
 
         if let Some(stderr) = child.stderr.take() {
-            let service_name = service_name.clone();
-            let app_path = app_path.clone();
             tokio::spawn(async move {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    // Print to terminal for visibility
-                    eprintln!("{}", line);
-                    // Forward to flux as error/warning
+                    eprintln!("{}", format_log_line(source, &line));
                     forward_log_to_flux(&line, "ERROR", &service_name, &app_path).await;
                 }
             });
@@ -741,37 +769,35 @@ root:
         backend_child: &Arc<Mutex<Option<Child>>>,
     ) -> Result<(), String> {
         // ============================================================================
-        // IMPORTANT: Backend logs are sent directly to flux via OTEL auto-instrumentation.
-        // NOT piped through apx stdout/stderr.
-        // See spawn_uvicorn() for detailed explanation of the configuration.
+        // Backend logs are captured via stdout/stderr and forwarded to flux.
+        // No OTEL Python dependencies required - apx handles log collection.
+        // See spawn_uvicorn() for detailed explanation.
         // ============================================================================
 
         // Reuse the existing log config file (created by spawn_uvicorn)
-        let log_config = app_dir.join(".apx").join("uvicorn_logging.yaml");
+        let log_config = app_dir.join(".apx").join("uvicorn_logging.json");
         let log_config_str = log_config.display().to_string();
 
-        // Use direct Python invocation instead of `uv run` to avoid extra process
-        // and uv cache locking. uv sync is called by file watcher when deps change.
+        // Run uvicorn directly (no OTEL auto-instrumentation wrapper)
         let apx_cmd = ApxCommand::new()?;
         let mut cmd = Command::new(&apx_cmd.python);
-        cmd.args(["-m", "opentelemetry.instrumentation.auto_instrumentation"])
-            .args(["--logs_exporter", "otlp"])
-            .args([
-                "uvicorn",
-                app_entrypoint,
-                "--host",
-                host,
-                "--port",
-                &backend_port.to_string(),
-                "--reload",
-                "--log-config",
-                &log_config_str,
-            ])
-            .current_dir(app_dir)
-            .stdin(Stdio::null())
-            // Inherit stdout/stderr for local visibility, OTEL sends logs directly to flux
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+        cmd.args([
+            "-m",
+            "uvicorn",
+            app_entrypoint,
+            "--host",
+            host,
+            "--port",
+            &backend_port.to_string(),
+            "--reload",
+            "--log-config",
+            &log_config_str,
+        ])
+        .current_dir(app_dir)
+        .stdin(Stdio::null())
+        // Capture stdout/stderr for prefixed logging and flux forwarding
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
         // Set APX environment variables
         cmd.env("APX_FRONTEND_PORT", frontend_port.to_string());
@@ -784,29 +810,43 @@ root:
         // Force Python to flush stdout/stderr immediately (no buffering)
         cmd.env("PYTHONUNBUFFERED", "1");
 
-        // OpenTelemetry auto-instrumentation configuration
-        cmd.env(
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-            format!("http://127.0.0.1:{}", crate::flux::FLUX_PORT),
-        );
-        cmd.env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
-        cmd.env("OTEL_LOGS_EXPORTER", "otlp");
-        cmd.env("OTEL_SERVICE_NAME", format!("{}_app", app_slug));
-        cmd.env("OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED", "true");
-        cmd.env(
-            "OTEL_RESOURCE_ATTRIBUTES",
-            format!("apx.app_path={}", app_dir.display()),
-        );
-
         let vars = dotenv_vars.lock().await;
         for (key, value) in vars.iter() {
             cmd.env(key, value);
         }
         drop(vars);
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|err| format!("Failed to start backend process: {err}"))?;
+
+        // Spawn tasks to read stdout/stderr, prefix with source, and forward to flux
+        let service_name = format!("{}_app", app_slug);
+        let app_path = app_dir.display().to_string();
+
+        if let Some(stdout) = child.stdout.take() {
+            let service_name = service_name.clone();
+            let app_path = app_path.clone();
+            tokio::spawn(async move {
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    println!("{}", format_log_line(LogSource::App, &line));
+                    forward_log_to_flux(&line, "INFO", &service_name, &app_path).await;
+                }
+            });
+        }
+
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    eprintln!("{}", format_log_line(LogSource::App, &line));
+                    forward_log_to_flux(&line, "ERROR", &service_name, &app_path).await;
+                }
+            });
+        }
 
         let mut guard = backend_child.lock().await;
         *guard = Some(child);
@@ -822,26 +862,6 @@ root:
         cmd.env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string());
         cmd.env("APX_DEV_SERVER_HOST", self.host.clone());
         cmd.env("APX_DEV_TOKEN", self.dev_token.clone());
-        // Force Python to flush stdout/stderr immediately (no buffering)
-        // This ensures error output is captured before process termination
-        cmd.env("PYTHONUNBUFFERED", "1");
-
-        // OpenTelemetry auto-instrumentation configuration
-        cmd.env(
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-            format!("http://127.0.0.1:{}", crate::flux::FLUX_PORT),
-        );
-        cmd.env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
-        cmd.env("OTEL_LOGS_EXPORTER", "otlp");
-        cmd.env(
-            "OTEL_SERVICE_NAME",
-            format!("{}_backend", self.app_slug),
-        );
-        cmd.env("OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED", "true");
-        cmd.env(
-            "OTEL_RESOURCE_ATTRIBUTES",
-            format!("apx.app_path={}", self.app_dir.display()),
-        );
 
         if include_dotenv {
             let vars = self.dotenv_vars.lock().await;

@@ -4,6 +4,7 @@
 
 use chrono::{Local, TimeZone, Utc};
 use clap::Args;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::debug;
@@ -11,6 +12,9 @@ use tracing::debug;
 use crate::cli::run_cli_async;
 use crate::dev::common::{lock_path, read_lock};
 use crate::flux::{db_path, LogRecord, Storage};
+
+/// Time window for aggregating similar messages (in milliseconds)
+const AGGREGATION_WINDOW_MS: i64 = 2000;
 
 pub const DEFAULT_LOG_DURATION: &str = "10m";
 
@@ -103,11 +107,32 @@ pub async fn fetch_logs(app_dir: &std::path::Path, duration: &str) -> Result<Str
     let since_ns = since_timestamp_nanos(duration);
 
     let records = storage.query_logs(Some(&app_path_canonical), since_ns, None)?;
-    let output: Vec<String> = records
-        .iter()
-        .filter(|r| !should_skip_log(r))
-        .map(|r| format_log_record(r, false))
-        .collect();
+    let filtered: Vec<_> = records.iter().filter(|r| !should_skip_log(r)).collect();
+    
+    // Use aggregator for repetitive messages
+    let mut aggregator = LogAggregator::new();
+    let mut output = Vec::new();
+    
+    for record in &filtered {
+        let timestamp_ns = if record.timestamp_ns == 0 {
+            record.observed_timestamp_ns
+        } else {
+            record.timestamp_ns
+        };
+        let timestamp_ms = (timestamp_ns / 1_000_000) as i64;
+        
+        // Flush expired aggregations
+        output.extend(aggregator.flush_expired(timestamp_ms, false));
+        
+        // Try to aggregate, if not aggregatable add directly
+        if !aggregator.add(record) {
+            output.push(format_log_record(record, false));
+        }
+    }
+    
+    // Flush remaining aggregations
+    output.extend(aggregator.flush_all(false));
+    
     Ok(output.join("\n"))
 }
 
@@ -122,8 +147,31 @@ fn read_logs(storage: &Storage, app_path: &str, since_ns: i64) -> Result<(), Str
         return Ok(());
     }
 
-    for record in filtered {
-        println!("{}", format_log_record(record, true));
+    // Use aggregator for repetitive messages
+    let mut aggregator = LogAggregator::new();
+    
+    for record in &filtered {
+        let timestamp_ns = if record.timestamp_ns == 0 {
+            record.observed_timestamp_ns
+        } else {
+            record.timestamp_ns
+        };
+        let timestamp_ms = (timestamp_ns / 1_000_000) as i64;
+        
+        // Flush expired aggregations before processing this record
+        for line in aggregator.flush_expired(timestamp_ms, true) {
+            println!("{}", line);
+        }
+        
+        // Try to aggregate, if not aggregatable print directly
+        if !aggregator.add(record) {
+            println!("{}", format_log_record(record, true));
+        }
+    }
+    
+    // Flush any remaining aggregations
+    for line in aggregator.flush_all(true) {
+        println!("{}", line);
     }
 
     Ok(())
@@ -144,20 +192,37 @@ async fn follow_logs(
 
     // Track if server was initially running
     let server_was_running = lock_path.exists();
+    
+    // Aggregator for follow mode
+    let mut aggregator = LogAggregator::new();
 
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 debug!("Received Ctrl+C, stopping logs stream.");
+                // Flush remaining aggregations
+                for line in aggregator.flush_all(true) {
+                    println!("{}", line);
+                }
                 break;
             }
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                let current_time_ms = Utc::now().timestamp_millis();
+                
+                // Flush expired aggregations
+                for line in aggregator.flush_expired(current_time_ms, true) {
+                    println!("{}", line);
+                }
+                
                 // Poll for new logs
                 let new_records = storage.query_logs_after_id(Some(app_path), last_id)?;
 
                 for record in &new_records {
                     if !should_skip_log(record) {
-                        println!("{}", format_log_record(record, true));
+                        // Try to aggregate, if not aggregatable print directly
+                        if !aggregator.add(record) {
+                            println!("{}", format_log_record(record, true));
+                        }
                     }
                 }
 
@@ -171,6 +236,10 @@ async fn follow_logs(
                 // Check if server was running but lockfile is now gone
                 if server_was_running && !lock_path.exists() {
                     debug!("Dev server stopped (lockfile removed), exiting logs follow.");
+                    // Flush remaining aggregations
+                    for line in aggregator.flush_all(true) {
+                        println!("{}", line);
+                    }
                     println!("\n📭 Dev server stopped.");
                     break;
                 }
@@ -334,4 +403,109 @@ fn since_timestamp_nanos(duration: Duration) -> i64 {
     let now_ns = now_ms * 1_000_000;
     let duration_ns = duration.as_nanos() as u64;
     now_ns.saturating_sub(duration_ns) as i64
+}
+
+/// Get aggregation key for a message if it should be aggregated.
+/// Returns (key, display_template) where display_template is used for the summary.
+fn get_aggregation_key(record: &LogRecord) -> Option<(String, &'static str)> {
+    let message = record.body.as_deref().unwrap_or("");
+    let service = record.service_name.as_deref().unwrap_or("");
+    
+    // Aggregate db "Client connected" messages
+    if service.ends_with("_db") && message.starts_with("Client connected from") {
+        return Some((format!("{}_client_connected", service), "db connections in last 2s"));
+    }
+    
+    // Aggregate db "Client disconnected" messages  
+    if service.ends_with("_db") && message.starts_with("Client disconnected") {
+        return Some((format!("{}_client_disconnected", service), "db disconnections in last 2s"));
+    }
+    
+    None
+}
+
+/// Tracks aggregated messages within time windows
+struct LogAggregator {
+    /// Map of aggregation key -> (count, first_timestamp_ms, last_timestamp_ms, display_template)
+    buckets: HashMap<String, (usize, i64, i64, &'static str)>,
+}
+
+impl LogAggregator {
+    fn new() -> Self {
+        Self {
+            buckets: HashMap::new(),
+        }
+    }
+    
+    /// Add a record to aggregation. Returns true if aggregated, false if should be displayed directly.
+    fn add(&mut self, record: &LogRecord) -> bool {
+        let Some((key, template)) = get_aggregation_key(record) else {
+            return false;
+        };
+        
+        let timestamp_ns = if record.timestamp_ns == 0 {
+            record.observed_timestamp_ns
+        } else {
+            record.timestamp_ns
+        };
+        let timestamp_ms = (timestamp_ns / 1_000_000) as i64;
+        
+        let entry = self.buckets.entry(key).or_insert((0, timestamp_ms, timestamp_ms, template));
+        entry.0 += 1; // count
+        entry.2 = timestamp_ms; // last_timestamp
+        
+        true
+    }
+    
+    /// Flush buckets that have expired (last message older than window)
+    fn flush_expired(&mut self, current_time_ms: i64, colorize: bool) -> Vec<String> {
+        let mut output = Vec::new();
+        let mut to_remove = Vec::new();
+        
+        for (key, (count, first_ts, last_ts, template)) in &self.buckets {
+            if current_time_ms - last_ts > AGGREGATION_WINDOW_MS {
+                if *count > 1 {
+                    let formatted = format_aggregated(*count, *first_ts, template, colorize);
+                    output.push(formatted);
+                }
+                to_remove.push(key.clone());
+            }
+        }
+        
+        for key in to_remove {
+            self.buckets.remove(&key);
+        }
+        
+        output
+    }
+    
+    /// Flush all remaining buckets
+    fn flush_all(&mut self, colorize: bool) -> Vec<String> {
+        let mut output = Vec::new();
+        
+        for (_key, (count, first_ts, _last_ts, template)) in &self.buckets {
+            if *count > 1 {
+                let formatted = format_aggregated(*count, *first_ts, template, colorize);
+                output.push(formatted);
+            }
+        }
+        
+        self.buckets.clear();
+        output
+    }
+}
+
+/// Format an aggregated message summary
+fn format_aggregated(count: usize, timestamp_ms: i64, template: &str, colorize: bool) -> String {
+    let timestamp = format_timestamp(timestamp_ms);
+    let source = if template.starts_with("db") { " db" } else { "app" };
+    let message = format!("[{}] {}", count, template);
+    
+    if colorize {
+        let color_code = "\x1b[32m"; // green for db
+        let reset = "\x1b[0m";
+        format!("{color_code}{timestamp} | {source} | out | {message}{reset}")
+    } else {
+        format!("{timestamp} | {source} | out | {message}")
+    }
 }
