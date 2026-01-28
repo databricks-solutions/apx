@@ -158,6 +158,20 @@ pub enum TsExpr {
         then_expr: Box<TsExpr>,
         else_expr: Box<TsExpr>,
     },
+    /// Index/bracket access: obj[key]
+    Index {
+        object: Box<TsExpr>,
+        index: Box<TsExpr>,
+    },
+    /// Array literal: [a, b, c]
+    Array(Vec<TsExpr>),
+    /// Type cast: expr as Type
+    Cast {
+        expr: Box<TsExpr>,
+        ty: TsType,
+    },
+    /// Raw code that doesn't fit the AST
+    Raw(String),
 }
 
 /// Binary operators
@@ -246,6 +260,8 @@ pub enum TsStmt {
     },
     /// Throw statement
     Throw(TsExpr),
+    /// Raw code block (for complex patterns that don't fit the AST)
+    Raw(String),
 }
 
 /// Variable declaration kind

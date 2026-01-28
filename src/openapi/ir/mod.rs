@@ -1,27 +1,32 @@
 //! Intermediate Representation for OpenAPI to TypeScript code generation.
 //!
-//! This module defines a two-layer IR:
+//! This module defines a three-layer architecture:
 //! 1. API-level IR: Normalized operations, parameters, hooks (OpenAPI-agnostic)
-//! 2. TypeScript IR: Types and expressions for code generation
+//! 2. TypeScript AST IR: Types, expressions, statements, functions
+//! 3. Emission: AST to TypeScript code strings via the `Emit` trait
 //!
 //! The separation allows:
 //! - All OpenAPI corner cases resolved in normalization
-//! - Emitters become mechanical printers with no branching logic
+//! - Code generation builds structured AST (testable)
+//! - Emission is purely mechanical string building
 //!
 //! ## Module Structure
 //!
-//! - `types`: TypeScript IR (TsType, TsExpr, etc.)
-//! - `api`: API-level IR (OperationIR, ParamsIR, etc.)
-//! - `normalize`: OpenAPI spec to API IR conversion
-//! - `printer`: API IR to TypeScript code
+//! - `types`: TypeScript AST IR (TsType, TsExpr, TsStmt, TsFunction, TsModule)
+//! - `api`: API-level IR (OperationIR, ParamsIR, FetchIR, HookIR)
+//! - `normalize`: OpenAPI spec -> API IR conversion
+//! - `codegen`: API IR -> TypeScript AST
+//! - `emit`: TypeScript AST -> code strings (via Emit trait)
 //! - `utils`: Common utilities shared across modules
 
 mod api;
+mod codegen;
+mod emit;
 mod normalize;
-mod printer;
 mod types;
 pub mod utils;
 
 // Re-export the main entry points
+pub use codegen::codegen_module;
+pub use emit::Emit;
 pub use normalize::normalize_spec;
-pub use printer::print_module;

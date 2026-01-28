@@ -191,5 +191,9 @@ def delete_item(item_id: int):
     assert "import {" in api_ts_content, "api.ts should contain imports"
     assert "useQuery" in api_ts_content, "api.ts should contain useQuery"
     assert "useMutation" in api_ts_content, "api.ts should contain useMutation"
-    assert "export const listItems" in api_ts_content, "api.ts should contain listItems function"
-    assert "export function useListItems" in api_ts_content, "api.ts should contain useListItems hook"
+    assert "export const listItems" in api_ts_content, (
+        "api.ts should contain listItems function"
+    )
+    assert "export function useListItems" in api_ts_content, (
+        "api.ts should contain useListItems hook"
+    )
