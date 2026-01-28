@@ -1,12 +1,12 @@
-//! OTEL utilities for sending logs to otelcol.
+//! OTEL utilities for sending logs to flux.
 //!
 //! This module provides shared functionality for building and sending OTLP log payloads
-//! to the otelcol collector. Used by both subprocess log forwarding and browser log forwarding.
+//! to the flux collector. Used by both subprocess log forwarding and browser log forwarding.
 
 use std::path::Path;
 use std::time::Duration;
 
-use crate::otelcol::OTELCOL_PORT;
+use crate::flux::FLUX_PORT;
 
 /// Convert severity level string to OTLP severity number.
 fn severity_to_number(level: &str) -> u8 {
@@ -71,9 +71,9 @@ pub fn build_otlp_log_payload_from_ms(
     build_otlp_log_payload(message, level, timestamp_ns, service_name, &app_dir.display().to_string())
 }
 
-/// Forward a log line to otelcol via OTLP HTTP.
+/// Forward a log line to flux via OTLP HTTP.
 /// This is fire-and-forget; errors are silently ignored to avoid log loops.
-pub async fn forward_log_to_otelcol(message: &str, level: &str, service_name: &str, app_path: &str) {
+pub async fn forward_log_to_flux(message: &str, level: &str, service_name: &str, app_path: &str) {
     // Skip noisy internal logs
     if should_skip_log(message) {
         return;
@@ -81,7 +81,7 @@ pub async fn forward_log_to_otelcol(message: &str, level: &str, service_name: &s
 
     let timestamp_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
     let payload = build_otlp_log_payload(message, level, timestamp_ns, service_name, app_path);
-    let endpoint = format!("http://127.0.0.1:{}/v1/logs", OTELCOL_PORT);
+    let endpoint = format!("http://127.0.0.1:{}/v1/logs", FLUX_PORT);
 
     // Use a simple HTTP client - fire and forget
     let client = match reqwest::Client::builder()

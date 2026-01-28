@@ -31,10 +31,10 @@ mod common;
 mod databricks_sdk_doc;
 mod dev;
 pub mod dotenv;
+mod flux;
 mod interop;
 mod mcp;
 mod openapi;
-mod otelcol;
 mod registry;
 mod search;
 mod sources;
@@ -82,8 +82,6 @@ enum Commands {
     Build(cli::build::BuildArgs),
     /// 🍞 Run a command using bun
     Bun(cli::bun::BunArgs),
-    /// 📊 Run a command using otelcol (OpenTelemetry Collector)
-    Otelcol(cli::otelcol::OtelcolArgs),
     /// 🧩 Components commands
     #[command(subcommand)]
     Components(ComponentsCommands),
@@ -95,6 +93,9 @@ enum Commands {
     /// 🚀 Development server commands
     #[command(subcommand)]
     Dev(DevCommands),
+    /// 📊 Flux OTEL collector commands
+    #[command(subcommand)]
+    Flux(FluxCommands),
     /// Internal: generate OpenAPI schema and client
     #[command(name = "__generate_openapi", hide = true)]
     GenerateOpenapi(cli::__generate_openapi::GenerateOpenapiArgs),
@@ -135,6 +136,17 @@ enum DevCommands {
     InternalRunServer(cli::dev::__internal_run_server::InternalRunServerArgs),
 }
 
+#[derive(Subcommand)]
+enum FluxCommands {
+    /// Start the flux OTEL collector daemon
+    Start(cli::flux::start::StartArgs),
+    /// Stop the flux OTEL collector daemon
+    Stop(cli::flux::stop::StopArgs),
+    /// Internal: run flux server
+    #[command(name = "__run", hide = true)]
+    Run(cli::flux::__run::RunArgs),
+}
+
 #[pyfunction]
 fn run_cli(args: Vec<String>) -> i32 {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -157,7 +169,6 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
             Some(Commands::Init(init_args)) => cli::init::run(init_args).await,
             Some(Commands::Build(build_args)) => cli::build::run(build_args).await,
             Some(Commands::Bun(bun_args)) => cli::bun::run(bun_args).await,
-            Some(Commands::Otelcol(otelcol_args)) => cli::otelcol::run(otelcol_args).await,
             Some(Commands::Components(components_cmd)) => match components_cmd {
                 ComponentsCommands::Add(args) => cli::components::add::run(args).await,
             },
@@ -180,6 +191,11 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
                 DevCommands::InternalRunServer(args) => {
                     cli::dev::__internal_run_server::run(args).await
                 }
+            },
+            Some(Commands::Flux(flux_cmd)) => match flux_cmd {
+                FluxCommands::Start(args) => cli::flux::start::run(args).await,
+                FluxCommands::Stop(args) => cli::flux::stop::run(args).await,
+                FluxCommands::Run(args) => cli::flux::__run::run(args).await,
             },
             Some(Commands::GenerateOpenapi(args)) => cli::__generate_openapi::run(args),
             None => {
@@ -250,7 +266,7 @@ fn init_tracing_with_otel(service_name: &str, filter: &str, app_dir: Option<&str
     use opentelemetry_sdk::logs::SdkLoggerProvider;
     use opentelemetry_sdk::Resource;
 
-    let endpoint = format!("http://127.0.0.1:{}/v1/logs", otelcol::OTELCOL_PORT);
+    let endpoint = format!("http://127.0.0.1:{}/v1/logs", flux::FLUX_PORT);
 
     let exporter = opentelemetry_otlp::LogExporter::builder()
         .with_http()

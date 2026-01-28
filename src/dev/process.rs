@@ -1,7 +1,7 @@
 //! Process management for APX dev server.
 //!
 //! Manages frontend (Vite/Bun), backend (uvicorn), and database (PGlite) processes.
-//! Subprocess stdout/stderr are captured and forwarded to otelcol for centralized logging.
+//! Subprocess stdout/stderr are captured and forwarded to flux for centralized logging.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 use crate::bun_binary_path;
 use crate::common::read_project_metadata;
 use crate::dev::common::CLIENT_HOST;
-use crate::dev::otel::forward_log_to_otelcol;
+use crate::dev::otel::forward_log_to_flux;
 use crate::dotenv::DotenvFile;
 
 #[derive(Debug, Clone, Copy)]
@@ -197,7 +197,7 @@ impl ProcessManager {
     async fn spawn_bun_dev(&self, app_dir: &Path, bun_path: PathBuf) -> Result<(), String> {
         // ============================================================================
         // IMPORTANT: Frontend logs are NOT piped through apx stdout/stderr.
-        // The frontend process sends logs directly to otelcol via OTEL SDK.
+        // The frontend process sends logs directly to flux via OTEL SDK.
         // This ensures proper service attribution (service.name = {app}_ui) and avoids
         // log interleaving issues that occur when multiple processes share stdout.
         // See entrypoint.ts for OTEL initialization.
@@ -221,10 +221,10 @@ impl ProcessManager {
         cmd.env("APX_APP_NAME", &self.app_slug);
         cmd.env("APX_APP_PATH", self.app_dir.display().to_string());
 
-        // OpenTelemetry configuration - frontend sends logs directly to otelcol
+        // OpenTelemetry configuration - frontend sends logs directly to flux
         cmd.env(
             "OTEL_EXPORTER_OTLP_ENDPOINT",
-            format!("http://127.0.0.1:{}", crate::otelcol::OTELCOL_PORT),
+            format!("http://127.0.0.1:{}", crate::flux::FLUX_PORT),
         );
         cmd.env("OTEL_SERVICE_NAME", format!("{}_ui", self.app_slug));
 
@@ -239,7 +239,7 @@ impl ProcessManager {
 
     async fn spawn_uvicorn(&self, app_dir: &Path, app_entrypoint: String) -> Result<(), String> {
         // ============================================================================
-        // IMPORTANT: Backend logs are sent directly to otelcol via OTEL auto-instrumentation.
+        // IMPORTANT: Backend logs are sent directly to flux via OTEL auto-instrumentation.
         // NOT piped through apx stdout/stderr.
         //
         // Key configuration:
@@ -270,7 +270,7 @@ impl ProcessManager {
         ])
         .current_dir(app_dir)
         .stdin(Stdio::null())
-        // Inherit stdout/stderr for local visibility, OTEL sends logs directly to otelcol
+        // Inherit stdout/stderr for local visibility, OTEL sends logs directly to flux
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
@@ -288,7 +288,7 @@ impl ProcessManager {
         // OpenTelemetry auto-instrumentation configuration
         cmd.env(
             "OTEL_EXPORTER_OTLP_ENDPOINT",
-            format!("http://127.0.0.1:{}", crate::otelcol::OTELCOL_PORT),
+            format!("http://127.0.0.1:{}", crate::flux::FLUX_PORT),
         );
         cmd.env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
         cmd.env("OTEL_LOGS_EXPORTER", "otlp");
@@ -636,7 +636,7 @@ root:
         cmd.args(args)
             .current_dir(app_dir)
             .stdin(Stdio::null())
-            // Capture stdout/stderr to forward to otelcol
+            // Capture stdout/stderr to forward to flux
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         self.apply_env(&mut cmd, include_dotenv).await;
@@ -645,7 +645,7 @@ root:
             .spawn()
             .map_err(|err| format!("Failed to start {source} process: {err}"))?;
 
-        // Spawn tasks to read stdout/stderr and forward to otelcol
+        // Spawn tasks to read stdout/stderr and forward to flux
         let service_name = format!("{}_{}", self.app_slug, source);
         let app_path = self.app_dir.display().to_string();
 
@@ -658,8 +658,8 @@ root:
                 while let Ok(Some(line)) = lines.next_line().await {
                     // Print to terminal for visibility
                     println!("{}", line);
-                    // Forward to otelcol
-                    forward_log_to_otelcol(&line, "INFO", &service_name, &app_path).await;
+                    // Forward to flux
+                    forward_log_to_flux(&line, "INFO", &service_name, &app_path).await;
                 }
             });
         }
@@ -673,8 +673,8 @@ root:
                 while let Ok(Some(line)) = lines.next_line().await {
                     // Print to terminal for visibility
                     eprintln!("{}", line);
-                    // Forward to otelcol as error/warning
-                    forward_log_to_otelcol(&line, "ERROR", &service_name, &app_path).await;
+                    // Forward to flux as error/warning
+                    forward_log_to_flux(&line, "ERROR", &service_name, &app_path).await;
                 }
             });
         }
@@ -726,7 +726,7 @@ root:
         backend_child: &Arc<Mutex<Option<Child>>>,
     ) -> Result<(), String> {
         // ============================================================================
-        // IMPORTANT: Backend logs are sent directly to otelcol via OTEL auto-instrumentation.
+        // IMPORTANT: Backend logs are sent directly to flux via OTEL auto-instrumentation.
         // NOT piped through apx stdout/stderr.
         // See spawn_uvicorn() for detailed explanation of the configuration.
         // ============================================================================
@@ -753,7 +753,7 @@ root:
         ])
         .current_dir(app_dir)
         .stdin(Stdio::null())
-        // Inherit stdout/stderr for local visibility, OTEL sends logs directly to otelcol
+        // Inherit stdout/stderr for local visibility, OTEL sends logs directly to flux
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
@@ -771,7 +771,7 @@ root:
         // OpenTelemetry auto-instrumentation configuration
         cmd.env(
             "OTEL_EXPORTER_OTLP_ENDPOINT",
-            format!("http://127.0.0.1:{}", crate::otelcol::OTELCOL_PORT),
+            format!("http://127.0.0.1:{}", crate::flux::FLUX_PORT),
         );
         cmd.env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
         cmd.env("OTEL_LOGS_EXPORTER", "otlp");
@@ -813,7 +813,7 @@ root:
         // OpenTelemetry auto-instrumentation configuration
         cmd.env(
             "OTEL_EXPORTER_OTLP_ENDPOINT",
-            format!("http://127.0.0.1:{}", crate::otelcol::OTELCOL_PORT),
+            format!("http://127.0.0.1:{}", crate::flux::FLUX_PORT),
         );
         cmd.env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
         cmd.env("OTEL_LOGS_EXPORTER", "otlp");

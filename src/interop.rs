@@ -12,11 +12,6 @@ const BUN_FILENAME: &str = "bun.exe";
 #[cfg(not(target_os = "windows"))]
 const BUN_FILENAME: &str = "bun";
 
-#[cfg(target_os = "windows")]
-const OTELCOL_FILENAME: &str = "otelcol.exe";
-#[cfg(not(target_os = "windows"))]
-const OTELCOL_FILENAME: &str = "otelcol";
-
 pub(crate) fn get_bun_binary_path(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let bun_path = resolve_bun_binary_path(py)?;
     let pathlib = py.import("pathlib")?;
@@ -41,33 +36,6 @@ fn resolve_bun_binary_path(py: Python<'_>) -> PyResult<PathBuf> {
     let fspath = bun_path.getattr("__fspath__")?.call0()?;
     let bun_path_str: String = fspath.extract()?;
     Ok(PathBuf::from(bun_path_str))
-}
-
-#[allow(dead_code)]
-pub(crate) fn get_otelcol_binary_path(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let otelcol_path = resolve_otelcol_binary_path(py)?;
-    let pathlib = py.import("pathlib")?;
-    let path_cls = pathlib.getattr("Path")?;
-    let path_obj = path_cls.call1((otelcol_path.to_string_lossy().as_ref(),))?;
-    Ok(path_obj.unbind())
-}
-
-pub(crate) fn otelcol_binary_path() -> Result<PathBuf, String> {
-    Python::attach(|py| {
-        resolve_otelcol_binary_path(py)
-            .map_err(|err| format!("Failed to resolve otelcol binary path: {err}"))
-    })
-}
-
-fn resolve_otelcol_binary_path(py: Python<'_>) -> PyResult<PathBuf> {
-    let importlib = py.import("importlib.resources")?;
-    let files = importlib.getattr("files")?;
-    let apx_resources = files.call1(("apx",))?;
-    let binaries_dir = apx_resources.getattr("joinpath")?.call1(("binaries",))?;
-    let otelcol_path = binaries_dir.getattr("joinpath")?.call1((OTELCOL_FILENAME,))?;
-    let fspath = otelcol_path.getattr("__fspath__")?.call0()?;
-    let otelcol_path_str: String = fspath.extract()?;
-    Ok(PathBuf::from(otelcol_path_str))
 }
 
 /// Get the path to the frontend entrypoint.ts asset

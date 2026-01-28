@@ -9,7 +9,6 @@ import hashlib
 import io
 import os
 import re
-import tarfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,9 +17,7 @@ import httpx
 import typer
 
 DEFAULT_BUN_VERSION = "1.3.6"
-DEFAULT_OTELCOL_VERSION = "0.144.0"
 BUN_RELEASES_BASE_URL = "https://github.com/oven-sh/bun/releases/download"
-OTELCOL_RELEASES_BASE_URL = "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
@@ -45,42 +42,6 @@ BUN_ASSETS: tuple[BunAsset, ...] = (
 )
 
 
-# Mapping from our internal arch names to otelcol arch names
-OTELCOL_ARCH_MAP: dict[str, str] = {
-    "x64": "amd64",
-    "aarch64": "arm64",
-}
-
-
-@dataclass(frozen=True, slots=True)
-class OtelcolAsset:
-    platform: str
-    arch: str  # Internal arch name (x64, aarch64)
-
-    @property
-    def otelcol_arch(self) -> str:
-        """Return the arch name used by otelcol releases."""
-        return OTELCOL_ARCH_MAP[self.arch]
-
-    def filename(self, version: str) -> str:
-        """Return the archive filename for a given version."""
-        # Use otelcol-contrib which includes file exporter
-        return f"otelcol-contrib_{version}_{self.platform}_{self.otelcol_arch}.tar.gz"
-
-    @property
-    def output_filename(self) -> str:
-        suffix = ".exe" if self.platform == "windows" else ""
-        return f"otelcol-{self.platform}-{self.arch}{suffix}"
-
-
-OTELCOL_ASSETS: tuple[OtelcolAsset, ...] = (
-    OtelcolAsset(platform="windows", arch="x64"),
-    OtelcolAsset(platform="linux", arch="x64"),
-    OtelcolAsset(platform="linux", arch="aarch64"),
-    OtelcolAsset(platform="darwin", arch="x64"),
-    OtelcolAsset(platform="darwin", arch="aarch64"),
-)
-
 app = typer.Typer(add_completion=False)
 
 
@@ -99,10 +60,6 @@ def build_bun_url(version: str, asset: BunAsset) -> str:
 
 def build_bun_shasums_url(version: str) -> str:
     return f"{BUN_RELEASES_BASE_URL}/bun-v{version}/SHASUMS256.txt"
-
-
-def build_otelcol_url(version: str, asset: OtelcolAsset) -> str:
-    return f"{OTELCOL_RELEASES_BASE_URL}/v{version}/{asset.filename(version)}"
 
 
 def fetch_bun_shasums(client: httpx.Client, version: str) -> dict[str, str]:
@@ -166,18 +123,6 @@ def pick_bun_member(zf: zipfile.ZipFile, *, prefer_exe: bool) -> zipfile.ZipInfo
     return min(candidates, key=lambda i: len(i.filename))
 
 
-def extract_otelcol_from_tar(data: bytes, platform: str) -> bytes:
-    """Extract otelcol-contrib binary from tar.gz archive."""
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-        # otelcol-contrib binary is at root of archive
-        name = "otelcol-contrib.exe" if platform == "windows" else "otelcol-contrib"
-        member = tf.getmember(name)
-        f = tf.extractfile(member)
-        if f is None:
-            raise ValueError(f"Could not extract {name} from archive")
-        return f.read()
-
-
 def write_executable(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
@@ -232,64 +177,24 @@ def download_bun(
         typer.echo(f"saved: {out_path}")
 
 
-def download_otelcol(
-    client: httpx.Client,
-    version: str,
-    output_dir: Path,
-    force: bool,
-) -> None:
-    """Download OpenTelemetry Collector Contrib binaries for all platforms."""
-    typer.echo(f"\n=== Downloading otelcol-contrib v{version} ===")
-    otelcol_dir = output_dir / "otelcol"
-
-    for asset in OTELCOL_ASSETS:
-        out_path = otelcol_dir / asset.output_filename
-        if out_path.exists() and not force:
-            typer.echo(f"skip: {out_path}")
-            continue
-
-        url = build_otelcol_url(version, asset)
-        typer.echo(f"download: {url}")
-        try:
-            resp = client.get(url)
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            typer.echo(f"error: failed to download {url}: {exc}", err=True)
-            raise typer.Exit(code=1) from exc
-
-        # Skip SHA verification for otelcol (as requested)
-        try:
-            otelcol_bytes = extract_otelcol_from_tar(resp.content, asset.platform)
-        except (tarfile.TarError, ValueError, KeyError) as exc:
-            typer.echo(f"error: failed to extract otelcol-contrib: {exc}", err=True)
-            raise typer.Exit(code=1) from exc
-
-        write_executable(out_path, otelcol_bytes)
-        typer.echo(f"saved: {out_path}")
-
-
 @app.command()
 def main(
     bun_version: str = typer.Option(DEFAULT_BUN_VERSION, "--bun-version"),
-    otelcol_version: str = typer.Option(DEFAULT_OTELCOL_VERSION, "--otelcol-version"),
     output_dir: Path = typer.Option(Path(".bins"), "--output-dir", "-o"),
     force: bool = typer.Option(False, "--force", "-f"),
 ) -> None:
     """
-    Download Bun and OpenTelemetry Collector binaries for common platforms.
+    Download Bun binaries for common platforms.
 
     Binaries are saved to:
       - .bins/bun/
-      - .bins/otelcol/
     """
     bun_v = normalize_version(bun_version)
-    otelcol_v = normalize_version(otelcol_version)
     output_dir = output_dir.expanduser().resolve()
 
     timeout = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=10.0)
     with httpx.Client(follow_redirects=True, timeout=timeout) as client:
         download_bun(client, bun_v, output_dir, force)
-        download_otelcol(client, otelcol_v, output_dir, force)
 
 
 if __name__ == "__main__":

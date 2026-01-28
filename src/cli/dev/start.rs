@@ -13,7 +13,7 @@ use crate::common::{ensure_dir, spinner, format_elapsed_ms, run_preflight_checks
 use crate::dev::client::{health, stop_with_logs, wait_for_healthy, HealthCheckConfig};
 use crate::dev::common::{lock_path, read_lock, remove_lock, write_lock, DevLock, BIND_HOST};
 use crate::dev::process::ProcessManager;
-use crate::otelcol;
+use crate::flux;
 use crate::registry::Registry;
 use tracing::debug;
 
@@ -75,7 +75,7 @@ async fn run_attached(args: StartArgs) -> Result<(), String> {
         spawn_server(&app_dir, None, args.skip_credentials_validation).await?
     };
 
-    // Use the file-based log following (reads from otelcol output)
+    // Use the SQLite-based log following (reads from flux storage)
     let logs_args = LogsArgs {
         app_path: Some(app_dir.clone()),
         duration: "10m".to_string(),
@@ -186,9 +186,9 @@ pub(crate) async fn spawn_server(
 
     println!("🚀 Starting dev server...");
     
-    // Start otelcol for log collection (before subprocess so it's ready to receive logs)
-    if let Err(e) = otelcol::ensure_otelcol_running() {
-        debug!("Failed to start otelcol: {e}. Logs may not be collected.");
+    // Start flux for log collection (before subprocess so it's ready to receive logs)
+    if let Err(e) = flux::ensure_running() {
+        debug!("Failed to start flux: {e}. Logs may not be collected.");
     }
     
     // Load registry and cleanup stale entries (projects that no longer exist)

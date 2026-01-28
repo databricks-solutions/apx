@@ -1,4 +1,4 @@
-//! Logging types for browser log forwarding to otelcol.
+//! Logging types for browser log forwarding to flux.
 
 use serde::Deserialize;
 

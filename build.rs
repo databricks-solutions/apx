@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::os::unix::fs::PermissionsExt;
 
 const BUN_BIN_DIR: &str = ".bins/bun";
-const OTELCOL_BIN_DIR: &str = ".bins/otelcol";
 const OUTPUT_DIR: &str = "src/apx/binaries";
 
 fn main() {
@@ -38,23 +37,9 @@ fn main() {
     fs::copy(&bun_source, &bun_dest).expect("Failed to copy Bun binary");
     set_executable_permissions(&bun_dest);
 
-    // Copy otelcol binary
-    let otelcol_src_name = otelcol_binary_name(&target_os, &target_arch)
-        .unwrap_or_else(|| panic!("Unsupported target for otelcol: {target_os}-{target_arch}"));
-    let otelcol_source = manifest_dir.join(OTELCOL_BIN_DIR).join(otelcol_src_name);
-    if !otelcol_source.exists() {
-        panic!("Missing otelcol binary at {}", otelcol_source.display());
-    }
-    let otelcol_dest_name = if target_os == "windows" { "otelcol.exe" } else { "otelcol" };
-    let otelcol_dest = output_dir.join(otelcol_dest_name);
-    fs::copy(&otelcol_source, &otelcol_dest).expect("Failed to copy otelcol binary");
-    set_executable_permissions(&otelcol_dest);
-
     // Watch for changes
     println!("cargo:rerun-if-changed={}", bun_source.display());
-    println!("cargo:rerun-if-changed={}", otelcol_source.display());
     println!("cargo:rerun-if-changed={}/", BUN_BIN_DIR);
-    println!("cargo:rerun-if-changed={}/", OTELCOL_BIN_DIR);
 
     // Watch for changes in the plugin.ts asset file
     let plugin_ts = manifest_dir.join("src/apx/assets/plugin.ts");
@@ -82,17 +67,6 @@ fn bun_binary_name(target_os: &str, target_arch: &str) -> Option<&'static str> {
         ("linux", "aarch64") => Some("bun-linux-aarch64"),
         ("linux", "x86_64") => Some("bun-linux-x64"),
         ("windows", "x86_64") => Some("bun-windows-x64.exe"),
-        _ => None,
-    }
-}
-
-fn otelcol_binary_name(target_os: &str, target_arch: &str) -> Option<&'static str> {
-    match (target_os, target_arch) {
-        ("macos", "aarch64") => Some("otelcol-darwin-aarch64"),
-        ("macos", "x86_64") => Some("otelcol-darwin-x64"),
-        ("linux", "aarch64") => Some("otelcol-linux-aarch64"),
-        ("linux", "x86_64") => Some("otelcol-linux-x64"),
-        ("windows", "x86_64") => Some("otelcol-windows-x64.exe"),
         _ => None,
     }
 }

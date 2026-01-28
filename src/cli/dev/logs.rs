@@ -1,27 +1,18 @@
-//! Log viewer for APX dev server using otelcol file output.
+//! Log viewer for APX dev server using flux SQLite storage.
 //!
-//! Reads logs from ~/.apx/logs/logs.json which is written by otelcol.
+//! Reads logs from ~/.apx/logs/db which is maintained by flux.
 
-use chrono::{TimeZone, Utc};
+use chrono::{Local, TimeZone, Utc};
 use clap::Args;
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::VecDeque;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 use tracing::debug;
 
 use crate::cli::run_cli_async;
 use crate::dev::common::{lock_path, read_lock};
+use crate::flux::{db_path, LogRecord, Storage};
 
 pub const DEFAULT_LOG_DURATION: &str = "10m";
-
-/// Directory where otelcol writes logs
-const OTELCOL_LOGS_DIR: &str = ".apx/logs";
-
-/// Log file name
-const LOGS_FILENAME: &str = "logs.json";
 
 #[derive(Args, Debug, Clone)]
 pub struct LogsArgs {
@@ -42,60 +33,8 @@ pub struct LogsArgs {
     pub follow: bool,
 }
 
-/// A parsed log entry from OTLP JSON format
-#[derive(Debug, Clone)]
-struct LogEntry {
-    timestamp_ns: u64,
-    severity: String,
-    message: String,
-    service_name: String,
-    app_path: Option<String>,
-}
-
 /// Minimum severity level for apx internal logs (DEBUG = 5, skipping TRACE = 1-4)
-const APX_MIN_SEVERITY: u8 = 5;
-
-impl LogEntry {
-    /// Format for terminal display
-    fn format(&self, colorize: bool) -> String {
-        let timestamp_ms = (self.timestamp_ns / 1_000_000) as i64;
-        let timestamp = format_timestamp(timestamp_ms);
-
-        // Determine source from service name
-        // Service names are formatted as: {app_slug}_app, {app_slug}_ui, {app_slug}_db
-        let source = if self.service_name.ends_with("_app") {
-            "app"
-        } else if self.service_name.ends_with("_ui") {
-            " ui"
-        } else if self.service_name.ends_with("_db") {
-            " db"
-        } else {
-            "apx"
-        };
-
-        // Severity to channel
-        let channel = match self.severity.to_uppercase().as_str() {
-            "ERROR" | "FATAL" | "CRITICAL" => "err",
-            _ => "out",
-        };
-
-        if colorize {
-            let color_code = match source {
-                "app" => "\x1b[36m", // cyan
-                " ui" => "\x1b[35m", // magenta
-                " db" => "\x1b[32m", // green
-                _ => "\x1b[33m",     // yellow
-            };
-            let reset = "\x1b[0m";
-            format!(
-                "{color_code}{timestamp} | {source} | {channel} | {}{reset}",
-                self.message
-            )
-        } else {
-            format!("{timestamp} | {source} | {channel} | {}", self.message)
-        }
-    }
-}
+const APX_MIN_SEVERITY: i32 = 5;
 
 pub async fn run(args: LogsArgs) -> i32 {
     run_cli_async(|| run_async(args)).await
@@ -123,190 +62,88 @@ async fn run_async(args: LogsArgs) -> Result<(), String> {
         debug!(port = lock.port, "Dev server running at port.");
     }
 
-    // Find logs file
-    let logs_path = get_logs_path()?;
-    if !logs_path.exists() {
-        println!("⚠️  No logs found at {}\n", logs_path.display());
+    // Check if database exists
+    let db_path = db_path()?;
+    if !db_path.exists() {
+        println!("⚠️  No logs database found at {}\n", db_path.display());
         println!("Logs will appear here once the dev server is started and produces output.");
         return Ok(());
     }
+
+    // Open storage
+    let storage = Storage::open().map_err(|e| format!("Failed to open logs database: {}", e))?;
 
     let duration = parse_duration(&args.duration)?;
     let since_ns = since_timestamp_nanos(duration);
 
     if args.follow {
         println!("📜 Streaming logs... (Ctrl+C to stop)\n");
-        follow_logs(&logs_path, &app_path_canonical, since_ns, &lock_path).await
+        follow_logs(&storage, &app_path_canonical, since_ns, &lock_path).await
     } else {
-        read_logs(&logs_path, &app_path_canonical, since_ns)
+        read_logs(&storage, &app_path_canonical, since_ns)
     }
 }
 
 /// Fetch dev server logs for the given duration without following.
-pub async fn fetch_logs(app_dir: &Path, duration: &str) -> Result<String, String> {
+pub async fn fetch_logs(app_dir: &std::path::Path, duration: &str) -> Result<String, String> {
     let app_path_canonical = app_dir
         .canonicalize()
         .unwrap_or_else(|_| app_dir.to_path_buf())
         .display()
         .to_string();
 
-    let logs_path = get_logs_path()?;
-    if !logs_path.exists() {
-        return Ok("No logs file found.".to_string());
+    let db_path = db_path()?;
+    if !db_path.exists() {
+        return Ok("No logs database found.".to_string());
     }
+
+    let storage = Storage::open().map_err(|e| format!("Failed to open logs database: {}", e))?;
 
     let duration = parse_duration(duration)?;
     let since_ns = since_timestamp_nanos(duration);
 
-    let entries = read_log_entries(&logs_path, &app_path_canonical, since_ns)?;
-    let output: Vec<String> = entries.iter().map(|e| e.format(false)).collect();
+    let records = storage.query_logs(Some(&app_path_canonical), since_ns, None)?;
+    let output: Vec<String> = records
+        .iter()
+        .filter(|r| !should_skip_log(r))
+        .map(|r| format_log_record(r, false))
+        .collect();
     Ok(output.join("\n"))
 }
 
-/// Get the path to the logs file
-fn get_logs_path() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("Could not determine home directory")?;
-    Ok(home.join(OTELCOL_LOGS_DIR).join(LOGS_FILENAME))
-}
+/// Read logs from database, filtered by app path and timestamp
+fn read_logs(storage: &Storage, app_path: &str, since_ns: i64) -> Result<(), String> {
+    let records = storage.query_logs(Some(app_path), since_ns, None)?;
 
-/// Read logs from file, filtered by app path and timestamp
-fn read_logs(logs_path: &Path, app_path: &str, since_ns: u64) -> Result<(), String> {
-    let entries = read_log_entries(logs_path, app_path, since_ns)?;
+    let filtered: Vec<_> = records.iter().filter(|r| !should_skip_log(r)).collect();
 
-    if entries.is_empty() {
+    if filtered.is_empty() {
         println!("No logs found for the specified time range.");
         return Ok(());
     }
 
-    for entry in entries {
-        println!("{}", entry.format(true));
+    for record in filtered {
+        println!("{}", format_log_record(record, true));
     }
 
     Ok(())
 }
 
-/// Read and parse log entries from file
-fn read_log_entries(
-    logs_path: &Path,
-    app_path: &str,
-    since_ns: u64,
-) -> Result<Vec<LogEntry>, String> {
-    let file =
-        File::open(logs_path).map_err(|e| format!("Failed to open logs file: {}", e))?;
-    let reader = BufReader::new(file);
-
-    let mut entries = Vec::new();
-
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("Failed to read log line: {}", e))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        if let Ok(parsed) = parse_otlp_line(&line) {
-            for entry in parsed {
-                // Filter by app path if specified
-                if let Some(ref entry_app_path) = entry.app_path {
-                    if !entry_app_path.contains(app_path) && !app_path.contains(entry_app_path) {
-                        continue;
-                    }
-                }
-
-                // Filter by timestamp
-                if entry.timestamp_ns >= since_ns {
-                    entries.push(entry);
-                }
-            }
-        }
-    }
-
-    // Sort by timestamp
-    entries.sort_by_key(|e| e.timestamp_ns);
-    Ok(entries)
-}
-
-/// Follow logs file for new entries
+/// Follow logs for new entries
 async fn follow_logs(
-    logs_path: &Path,
+    storage: &Storage,
     app_path: &str,
-    since_ns: u64,
-    lock_path: &Path,
+    since_ns: i64,
+    lock_path: &std::path::Path,
 ) -> Result<(), String> {
     // First, read existing logs
-    read_logs(logs_path, app_path, since_ns)?;
+    read_logs(storage, app_path, since_ns)?;
 
-    // Set up file watcher
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(100);
-
-    let mut watcher = RecommendedWatcher::new(
-        move |res: Result<Event, notify::Error>| {
-            if let Ok(event) = res {
-                let _ = tx.blocking_send(event);
-            }
-        },
-        notify::Config::default(),
-    )
-    .map_err(|e| format!("Failed to create file watcher: {}", e))?;
-
-    // Watch the logs directory
-    let logs_dir = logs_path.parent().ok_or("Invalid logs path")?;
-    watcher
-        .watch(logs_dir, RecursiveMode::NonRecursive)
-        .map_err(|e| format!("Failed to watch logs directory: {}", e))?;
-
-    // Track file position for incremental reading
-    let mut file =
-        File::open(logs_path).map_err(|e| format!("Failed to open logs file: {}", e))?;
-    let mut file_pos = file
-        .seek(SeekFrom::End(0))
-        .map_err(|e| format!("Failed to seek logs file: {}", e))?;
-
-    // Buffer for recently seen entries to avoid duplicates
-    let mut recent_entries: VecDeque<u64> = VecDeque::with_capacity(100);
+    // Track last seen ID for incremental queries
+    let mut last_id = storage.get_latest_id()?;
 
     // Track if server was initially running
     let server_was_running = lock_path.exists();
-
-    // Helper closure to read new log content from file
-    let read_new_content = |file: &mut File, file_pos: &mut u64, recent_entries: &mut VecDeque<u64>, app_path: &str| {
-        if let Ok(metadata) = file.metadata() {
-            let new_len = metadata.len();
-            if new_len > *file_pos {
-                // Seek to last position and read new content
-                if file.seek(SeekFrom::Start(*file_pos)).is_ok() {
-                    let reader = BufReader::new(&*file);
-                    for line in reader.lines().map_while(Result::ok) {
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-
-                        if let Ok(parsed) = parse_otlp_line(&line) {
-                            for entry in parsed {
-                                // Filter by app path
-                                if let Some(ref entry_app_path) = entry.app_path {
-                                    if !entry_app_path.contains(app_path) && !app_path.contains(entry_app_path) {
-                                        continue;
-                                    }
-                                }
-
-                                // Deduplicate
-                                if recent_entries.contains(&entry.timestamp_ns) {
-                                    continue;
-                                }
-                                recent_entries.push_back(entry.timestamp_ns);
-                                if recent_entries.len() > 100 {
-                                    recent_entries.pop_front();
-                                }
-
-                                println!("{}", entry.format(true));
-                            }
-                        }
-                    }
-                }
-                *file_pos = new_len;
-            }
-        }
-    };
 
     loop {
         tokio::select! {
@@ -314,17 +151,22 @@ async fn follow_logs(
                 debug!("Received Ctrl+C, stopping logs stream.");
                 break;
             }
-            event = rx.recv() => {
-                if event.is_none() {
-                    break;
-                }
-                // Read new content triggered by file watcher event
-                read_new_content(&mut file, &mut file_pos, &mut recent_entries, app_path);
-            }
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                // Fallback polling: check for new content even if watcher event was missed
-                // This ensures logs appear even when file watcher events are delayed
-                read_new_content(&mut file, &mut file_pos, &mut recent_entries, app_path);
+                // Poll for new logs
+                let new_records = storage.query_logs_after_id(Some(app_path), last_id)?;
+
+                for record in &new_records {
+                    if !should_skip_log(record) {
+                        println!("{}", format_log_record(record, true));
+                    }
+                }
+
+                // Update last_id
+                if let Ok(new_id) = storage.get_latest_id() {
+                    if new_id > last_id {
+                        last_id = new_id;
+                    }
+                }
 
                 // Check if server was running but lockfile is now gone
                 if server_was_running && !lock_path.exists() {
@@ -339,120 +181,65 @@ async fn follow_logs(
     Ok(())
 }
 
-/// Parse a single line of OTLP JSON format
-fn parse_otlp_line(line: &str) -> Result<Vec<LogEntry>, String> {
-    let json: serde_json::Value =
-        serde_json::from_str(line).map_err(|e| format!("Invalid JSON: {}", e))?;
+/// Format a log record for terminal display
+fn format_log_record(record: &LogRecord, colorize: bool) -> String {
+    // Per OTEL spec: use observed_timestamp_ns when timestamp_ns is 0/absent
+    let effective_timestamp_ns = if record.timestamp_ns == 0 {
+        record.observed_timestamp_ns
+    } else {
+        record.timestamp_ns
+    };
+    let timestamp_ms = (effective_timestamp_ns / 1_000_000) as i64;
+    let timestamp = format_timestamp(timestamp_ms);
 
-    let mut entries = Vec::new();
+    // Determine source from service name
+    let service_name = record.service_name.as_deref().unwrap_or("unknown");
+    let source = if service_name.ends_with("_app") {
+        "app"
+    } else if service_name.ends_with("_ui") {
+        " ui"
+    } else if service_name.ends_with("_db") {
+        " db"
+    } else {
+        "apx"
+    };
 
-    let empty_vec: Vec<serde_json::Value> = vec![];
-    let resource_logs = json
-        .get("resourceLogs")
-        .and_then(|v| v.as_array())
-        .unwrap_or(&empty_vec);
+    // Severity to channel
+    let severity = record.severity_text.as_deref().unwrap_or("INFO");
+    let channel = match severity.to_uppercase().as_str() {
+        "ERROR" | "FATAL" | "CRITICAL" => "err",
+        _ => "out",
+    };
 
-    for resource_log in resource_logs {
-        // Extract resource attributes
-        let mut service_name = String::from("unknown");
-        let mut app_path = None;
+    let message = record.body.as_deref().unwrap_or("");
 
-        if let Some(resource) = resource_log.get("resource") {
-            if let Some(attrs) = resource.get("attributes").and_then(|v| v.as_array()) {
-                for attr in attrs {
-                    let key = attr.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                    let value = attr
-                        .get("value")
-                        .and_then(|v| v.get("stringValue"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    match key {
-                        "service.name" => service_name = value.to_string(),
-                        "apx.app_path" => app_path = Some(value.to_string()),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        // Extract log records
-        let empty_scope_logs: Vec<serde_json::Value> = vec![];
-        let scope_logs = resource_log
-            .get("scopeLogs")
-            .and_then(|v| v.as_array())
-            .unwrap_or(&empty_scope_logs);
-
-        for scope_log in scope_logs {
-            let empty_log_records: Vec<serde_json::Value> = vec![];
-            let log_records = scope_log
-                .get("logRecords")
-                .and_then(|v| v.as_array())
-                .unwrap_or(&empty_log_records);
-
-            for record in log_records {
-                // Try timeUnixNano first, fall back to observedTimeUnixNano
-                let timestamp_ns = record
-                    .get("timeUnixNano")
-                    .or_else(|| record.get("observedTimeUnixNano"))
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-
-                let severity = record
-                    .get("severityText")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("INFO")
-                    .to_string();
-
-                let severity_number = record
-                    .get("severityNumber")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(9) as u8; // Default to INFO
-
-                // Try body.stringValue first, fall back to eventName
-                let body_str = record
-                    .get("body")
-                    .and_then(|v| v.get("stringValue"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                
-                let message = if body_str.is_empty() {
-                    record
-                        .get("eventName")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string()
-                } else {
-                    body_str.to_string()
-                };
-
-                // Skip internal/noisy logs
-                if should_skip_log(&message) {
-                    continue;
-                }
-
-                // For apx service, only show INFO and higher
-                if service_name == "_core" && severity_number < APX_MIN_SEVERITY {
-                    continue;
-                }
-
-                entries.push(LogEntry {
-                    timestamp_ns,
-                    severity,
-                    message,
-                    service_name: service_name.clone(),
-                    app_path: app_path.clone(),
-                });
-            }
-        }
+    if colorize {
+        let color_code = match source {
+            "app" => "\x1b[36m", // cyan
+            " ui" => "\x1b[35m", // magenta
+            " db" => "\x1b[32m", // green
+            _ => "\x1b[33m",    // yellow
+        };
+        let reset = "\x1b[0m";
+        format!(
+            "{color_code}{timestamp} | {source} | {channel} | {message}{reset}"
+        )
+    } else {
+        format!("{timestamp} | {source} | {channel} | {message}")
     }
-
-    Ok(entries)
 }
 
-/// Check if a log message should be skipped (internal/noisy logs)
-fn should_skip_log(message: &str) -> bool {
+/// Check if a log record should be skipped (internal/noisy logs).
+fn should_skip_log(record: &LogRecord) -> bool {
+    let message = record.body.as_deref().unwrap_or("");
+    let service_name = record.service_name.as_deref().unwrap_or("");
+    let severity_number = record.severity_number.unwrap_or(9);
+
+    // For apx service, only show INFO and higher
+    if service_name == "_core" && severity_number < APX_MIN_SEVERITY {
+        return true;
+    }
+
     // OpenTelemetry SDK internal logs
     if message.starts_with("BatchLogProcessor.")
         || message.starts_with("ReqwestBlockingClient.")
@@ -495,11 +282,15 @@ fn should_skip_log(message: &str) -> bool {
     false
 }
 
-/// Format a timestamp in milliseconds to `YYYY-MM-DD HH:MM:SS.mmm` format.
+/// Format a timestamp in milliseconds to `YYYY-MM-DD HH:MM:SS.mmm` format in local timezone.
 fn format_timestamp(timestamp_ms: i64) -> String {
     let datetime = Utc.timestamp_millis_opt(timestamp_ms).single();
     match datetime {
-        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+        Some(dt) => {
+            // Convert to local timezone for display
+            let local_dt = dt.with_timezone(&Local);
+            local_dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
+        }
         None => "????-??-?? ??:??:??.???".to_string(),
     }
 }
@@ -538,9 +329,9 @@ fn parse_duration(input: &str) -> Result<Duration, String> {
     Ok(Duration::from_secs(seconds))
 }
 
-fn since_timestamp_nanos(duration: Duration) -> u64 {
+fn since_timestamp_nanos(duration: Duration) -> i64 {
     let now_ms = Utc::now().timestamp_millis() as u64;
     let now_ns = now_ms * 1_000_000;
     let duration_ns = duration.as_nanos() as u64;
-    now_ns.saturating_sub(duration_ns)
+    now_ns.saturating_sub(duration_ns) as i64
 }

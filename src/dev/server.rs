@@ -1,4 +1,4 @@
-//! APX dev server with otelcol-based logging.
+//! APX dev server with flux-based logging.
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -20,7 +20,7 @@ use crate::dev::process::ProcessManager;
 use crate::dev::proxy;
 use crate::dotenv::DotenvFile;
 use crate::interop::get_token;
-use crate::otelcol;
+use crate::flux;
 
 /// Shared application state for the dev server.
 #[derive(Clone)]
@@ -28,7 +28,7 @@ struct AppState {
     /// Broadcast sender for shutdown signals - the single authority for shutdown coordination.
     shutdown_tx: broadcast::Sender<Shutdown>,
     process_manager: Arc<ProcessManager>,
-    /// HTTP client for forwarding browser logs to otelcol
+    /// HTTP client for forwarding browser logs to flux
     http_client: reqwest::Client,
     /// App directory path for resource attributes
     app_dir: PathBuf,
@@ -57,9 +57,9 @@ pub async fn run_server(
     frontend_port: u16,
     db_port: u16,
 ) -> Result<(), String> {
-    // Ensure otelcol is running for log collection
-    if let Err(e) = otelcol::ensure_otelcol_running() {
-        warn!("Failed to start otelcol: {}. Logging may not work correctly.", e);
+    // Ensure flux is running for log collection
+    if let Err(e) = flux::ensure_running() {
+        warn!("Failed to start flux: {}. Logging may not work correctly.", e);
     }
 
     // Extract port and host from the pre-bound listener
@@ -295,7 +295,7 @@ async fn browser_logs(
         message.push_str(&stack);
     }
 
-    // Forward to otelcol via OTLP HTTP using shared otel module
+    // Forward to flux via OTLP HTTP using shared otel module
     let otlp_payload = build_otlp_log_payload_from_ms(
         &message,
         &payload.level,
@@ -304,7 +304,7 @@ async fn browser_logs(
         &state.app_dir,
     );
 
-    let endpoint = format!("http://127.0.0.1:{}/v1/logs", otelcol::OTELCOL_PORT);
+    let endpoint = format!("http://127.0.0.1:{}/v1/logs", flux::FLUX_PORT);
     let result = state
         .http_client
         .post(&endpoint)
@@ -314,7 +314,7 @@ async fn browser_logs(
         .await;
 
     if let Err(e) = result {
-        debug!("Failed to forward browser log to otelcol: {}", e);
+        debug!("Failed to forward browser log to flux: {}", e);
     }
 
     StatusCode::OK

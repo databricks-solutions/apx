@@ -149,7 +149,7 @@ def setup_logger(
     logger.addHandler(console_handler)
 
     # Always propagate to root logger. When OTEL auto-instrumentation is enabled,
-    # the root logger has an OTEL handler that captures logs and sends to otelcol.
+    # the root logger has an OTEL handler that captures logs and sends to flux.
     # When OTEL is not enabled, root has no handlers so propagation is a no-op.
     logger.propagate = True
 

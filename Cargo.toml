@@ -69,6 +69,9 @@ toml_edit = "0.24.0"
 rayon = "1.11.0"
 sha2 = "0.10"
 hex = "0.4"
+rusqlite = { version = "0.38.0", features = ["bundled"] }
+opentelemetry-proto = "0.31.0"
+prost = "0.14.3"
 
 [dev-dependencies]
 tempfile = "3.15"

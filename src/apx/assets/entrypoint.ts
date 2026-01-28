@@ -25,7 +25,7 @@ const appName = process.env.APX_APP_NAME!;
 // ============================================================================
 // OpenTelemetry Logging Setup
 // ============================================================================
-// Logs are sent directly to otelcol via OTLP HTTP, NOT piped through apx stdout.
+// Logs are sent directly to flux via OTLP HTTP, NOT piped through apx stdout.
 // This ensures proper service attribution and avoids log interleaving issues.
 // ============================================================================
 
@@ -97,14 +97,14 @@ function emitLog(
 function log(message: string) {
   // Write to stdout for local visibility
   process.stdout.write(message + "\n");
-  // Send to otelcol
+  // Send to flux
   emitLog("INFO", message);
 }
 
 function logError(message: string) {
   // Write to stderr for local visibility
   process.stderr.write(message + "\n");
-  // Send to otelcol
+  // Send to flux
   emitLog("ERROR", message);
 }
 
