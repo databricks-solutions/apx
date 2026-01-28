@@ -99,9 +99,9 @@ pub struct Schema {
     /// Item schema for array types.
     pub items: Option<Box<Schema>>,
 
-    /// Enum values for string enums.
+    /// Enum values (can be strings, integers, floats, booleans, or null).
     #[serde(rename = "enum")]
-    pub enum_values: Option<Vec<String>>,
+    pub enum_values: Option<Vec<EnumValue>>,
 
     /// Union type (any of these schemas).
     #[serde(rename = "anyOf")]
@@ -111,11 +111,78 @@ pub struct Schema {
     #[serde(rename = "oneOf")]
     pub one_of: Option<Vec<Schema>>,
 
+    /// Intersection type (all of these schemas combined).
+    #[serde(rename = "allOf")]
+    pub all_of: Option<Vec<Schema>>,
+
     /// Additional properties for object types (for Record/dict types).
     pub additional_properties: Option<AdditionalProperties>,
 
+    /// Discriminator for polymorphic oneOf schemas.
+    pub discriminator: Option<Discriminator>,
+
     /// Format hint (e.g., date-time, uuid).
     pub format: Option<String>,
+
+    // --- Validation keywords (parsed but not directly emitted as types) ---
+
+    /// Constant value - schema matches only this exact value.
+    #[serde(rename = "const")]
+    pub const_value: Option<serde_json::Value>,
+
+    /// Default value for the schema.
+    pub default: Option<serde_json::Value>,
+
+    /// OpenAPI 3.0 nullable flag (3.1 uses type arrays instead).
+    pub nullable: Option<bool>,
+
+    /// Regex pattern for string validation.
+    pub pattern: Option<String>,
+
+    /// Minimum value for numbers.
+    pub minimum: Option<f64>,
+
+    /// Maximum value for numbers.
+    pub maximum: Option<f64>,
+
+    /// Exclusive minimum value for numbers.
+    pub exclusive_minimum: Option<f64>,
+
+    /// Exclusive maximum value for numbers.
+    pub exclusive_maximum: Option<f64>,
+
+    /// Minimum length for strings.
+    pub min_length: Option<u64>,
+
+    /// Maximum length for strings.
+    pub max_length: Option<u64>,
+
+    /// Minimum items for arrays.
+    pub min_items: Option<u64>,
+
+    /// Maximum items for arrays.
+    pub max_items: Option<u64>,
+}
+
+/// Enum value can be string, integer, float, boolean, or null.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum EnumValue {
+    String(String),
+    Integer(i64),
+    Float(f64),
+    Bool(bool),
+    Null,
+}
+
+/// Discriminator for polymorphic schemas (oneOf/anyOf).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Discriminator {
+    /// The property name that contains the discriminator value.
+    pub property_name: String,
+    /// Optional mapping from discriminator values to schema refs.
+    pub mapping: Option<HashMap<String, String>>,
 }
 
 /// Schema type can be a single type or an array of types (for nullable).
@@ -142,8 +209,13 @@ impl OpenApiSpec {
 }
 
 impl Schema {
-    /// Check if this schema is nullable (contains null in anyOf or type array).
+    /// Check if this schema is nullable (contains null in anyOf, type array, or nullable flag).
     pub fn is_nullable(&self) -> bool {
+        // Check OpenAPI 3.0 nullable flag
+        if self.nullable == Some(true) {
+            return true;
+        }
+
         // Check anyOf for null type
         if let Some(any_of) = &self.any_of {
             for schema in any_of {
