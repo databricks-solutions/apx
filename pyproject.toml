@@ -67,7 +67,7 @@ apx = "apx.__main__:main"
 module-name = "apx._core"
 python-packages = ["apx"]
 python-source = "src"
-include = ["src/apx/binaries/*", "src/apx/assets/*"]
+include = ["**/apx/binaries/*", "**/apx/assets/*"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
