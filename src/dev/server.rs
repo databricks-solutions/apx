@@ -1,6 +1,6 @@
 //! APX dev server with flux-based logging.
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::Json;
@@ -42,11 +42,6 @@ struct HealthResponse {
     db_status: String,
 }
 
-#[derive(serde::Deserialize)]
-struct StopQuery {
-    #[allow(dead_code)]
-    persist_logs: Option<bool>,
-}
 
 /// Run the dev server with a pre-bound listener.
 /// The listener is passed in to avoid TOCTOU race conditions with port allocation.
@@ -158,7 +153,7 @@ pub async fn run_server(
         .with_graceful_shutdown(async move {
             // Wait for Stop signal
             match shutdown_rx.recv().await {
-                Ok(Shutdown::Stop { .. }) => {
+                Ok(Shutdown::Stop) => {
                     debug!("Stop signal received, shutting down server.");
                     // ProcessManager owns all process termination
                     process_manager.stop().await;
@@ -193,7 +188,7 @@ fn start_env_watcher(
                 biased;
                 result = shutdown_rx.recv() => {
                     match result {
-                        Ok(Shutdown::Stop { .. }) | Err(_) => {
+                        Ok(Shutdown::Stop) | Err(_) => {
                             debug!(".env watcher stopping.");
                             break;
                         }
@@ -237,7 +232,7 @@ fn start_filesystem_watcher(
                 biased;
                 result = shutdown_rx.recv() => {
                     match result {
-                        Ok(Shutdown::Stop { .. }) | Err(_) => {
+                        Ok(Shutdown::Stop) | Err(_) => {
                             debug!("Filesystem watcher stopping.");
                             break;
                         }
@@ -250,7 +245,7 @@ fn start_filesystem_watcher(
                             "Project folder '{}' was removed, stopping dev server.",
                             app_dir.display()
                         );
-                        let _ = shutdown_tx.send(Shutdown::Stop { persist_logs: false });
+                        let _ = shutdown_tx.send(Shutdown::Stop);
                         break;
                     }
                 }
@@ -320,14 +315,10 @@ async fn browser_logs(
     StatusCode::OK
 }
 
-async fn stop(
-    State(state): State<AppState>,
-    Query(query): Query<StopQuery>,
-) -> StatusCode {
-    let persist_logs = query.persist_logs.unwrap_or(false);
-    debug!(persist_logs, "Received dev server stop request.");
+async fn stop(State(state): State<AppState>) -> StatusCode {
+    debug!("Received dev server stop request.");
 
     // Send the shutdown signal
-    let _ = state.shutdown_tx.send(Shutdown::Stop { persist_logs });
+    let _ = state.shutdown_tx.send(Shutdown::Stop);
     StatusCode::OK
 }

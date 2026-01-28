@@ -1,5 +1,4 @@
 use clap::Args;
-use std::fs::{self, File};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -10,7 +9,7 @@ use crate::cli::dev::logs::LogsArgs;
 use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
 use crate::common::{ensure_dir, spinner, format_elapsed_ms, run_preflight_checks};
-use crate::dev::client::{health, stop_with_logs, wait_for_healthy, HealthCheckConfig};
+use crate::dev::client::{health, stop, wait_for_healthy, HealthCheckConfig};
 use crate::dev::common::{lock_path, read_lock, remove_lock, write_lock, DevLock, BIND_HOST};
 use crate::dev::process::ProcessManager;
 use crate::flux;
@@ -124,21 +123,6 @@ pub async fn start_dev_server(app_dir: &Path) -> Result<u16, String> {
     spawn_server(app_dir, None, false).await
 }
 
-/// Path to the startup log file within the .apx directory.
-fn startup_log_path(app_dir: &Path) -> PathBuf {
-    app_dir.join(".apx/startup.log")
-}
-
-/// Read and format startup log contents for error display.
-fn read_startup_log(path: &Path) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.to_string())
-}
-
 /// Run preflight checks and display progress.
 async fn run_preflight(app_dir: &Path) -> Result<(), String> {
     println!("🛫 Preflight check started...");
@@ -212,11 +196,6 @@ pub(crate) async fn spawn_server(
         if skip_credentials_validation { " --skip-credentials-validation" } else { "" }
     );
 
-    // Create startup log file to capture early stderr
-    let startup_log = startup_log_path(app_dir);
-    let startup_file = File::create(&startup_log)
-        .map_err(|err| format!("Failed to create startup log: {err}"))?;
-
     let mut cmd = Command::new("uv");
     cmd.arg("run")
         .arg("apx")
@@ -242,7 +221,7 @@ pub(crate) async fn spawn_server(
         .current_dir(app_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::from(startup_file))
+        .stderr(Stdio::null())
         .env("APX_COLLECT_LOGS", "1")
         .env("APX_OTEL_LOGS", "1")
         .env("APX_APP_DIR", &canonical_app_dir)
@@ -255,14 +234,9 @@ pub(crate) async fn spawn_server(
     if let Err(e) = wait_for_healthy(port, &config).await {
         health_spinner.finish_and_clear();
 
-        // Try graceful shutdown with log persistence (5 second timeout)
-        // This dumps subprocess logs to startup.log before stopping
-        debug!("Health checks failed, attempting graceful shutdown with log persistence.");
-        let shutdown_result = tokio::time::timeout(
-            Duration::from_secs(5),
-            stop_with_logs(port, true),
-        )
-        .await;
+        // Try graceful shutdown (5 second timeout)
+        debug!("Health checks failed, attempting graceful shutdown.");
+        let shutdown_result = tokio::time::timeout(Duration::from_secs(5), stop(port)).await;
 
         match shutdown_result {
             Ok(Ok(())) => debug!("Graceful shutdown completed."),
@@ -278,17 +252,17 @@ pub(crate) async fn spawn_server(
         // Clean up lock file if it exists
         let _ = remove_lock(&lock_path);
 
-        // Read and display startup log on failure (now includes subprocess logs)
-        if let Some(log_content) = read_startup_log(&startup_log) {
-            eprintln!("\n📋 Startup log:\n{}\n", log_content);
+        // Fetch and display recent logs from Flux on failure
+        if let Ok(logs) = crate::cli::dev::logs::fetch_logs(app_dir, "30s").await {
+            let logs = logs.trim();
+            if !logs.is_empty() {
+                eprintln!("\n📋 Recent logs:\n{}\n", logs);
+            }
         }
 
         return Err(e);
     }
     health_spinner.finish_and_clear();
-
-    // Remove startup log on success
-    let _ = fs::remove_file(&startup_log);
 
     let lock = DevLock::new(child.id(), port, command, app_dir);
     write_lock(&lock_path, &lock)?;
