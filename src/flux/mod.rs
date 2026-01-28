@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -139,7 +139,7 @@ pub fn is_running() -> bool {
 // Daemon management
 // ============================================================================
 
-/// Spawn flux as a detached daemon process using `apx flux __run`.
+/// Spawn flux as a detached daemon process using the current apx executable.
 fn spawn_daemon() -> Result<u32, String> {
     let log_file = log_path()?;
 
@@ -159,10 +159,15 @@ fn spawn_daemon() -> Result<u32, String> {
         .try_clone()
         .map_err(|e| format!("Failed to clone log file handle: {}", e))?;
 
-    debug!("Spawning flux daemon: uv run apx flux __run");
+    // Get the apx command to avoid spawning via `uv run`
+    // which would create an extra process and lock the uv cache
+    let apx_cmd = crate::common::ApxCommand::new()?;
 
-    let child = Command::new("uv")
-        .args(["run", "apx", "flux", "__run"])
+    debug!("Spawning flux daemon: {} flux __run", apx_cmd.display());
+
+    let mut cmd = apx_cmd.command();
+    let child = cmd
+        .args(["flux", "__run"])
         .stdin(Stdio::null())
         .stdout(log)
         .stderr(log_stderr)

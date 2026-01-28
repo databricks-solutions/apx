@@ -1,14 +1,14 @@
 use clap::Args;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::bun_binary_path;
 use crate::cli::dev::logs::LogsArgs;
 use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
-use crate::common::{ensure_dir, spinner, format_elapsed_ms, run_preflight_checks};
+use crate::common::{ApxCommand, ensure_dir, spinner, format_elapsed_ms, run_preflight_checks};
 use crate::dev::client::{health, stop, wait_for_healthy, HealthCheckConfig};
 use crate::dev::common::{lock_path, read_lock, remove_lock, write_lock, DevLock, BIND_HOST};
 use crate::dev::process::ProcessManager;
@@ -188,18 +188,22 @@ pub(crate) async fn spawn_server(
     
     // Ensure the port is available (wait if needed)
     wait_for_port_available(port).await?;
+    
+    // Get the apx command to avoid spawning via `uv run`
+    // which would create an extra process and lock the uv cache
+    let apx_cmd = ApxCommand::new()?;
+    
     let command = format!(
-        "uv run apx dev __internal__run_server --app-dir {} --host {} --port {}{}",
+        "{} dev __internal__run_server --app-dir {} --host {} --port {}{}",
+        apx_cmd.display(),
         app_dir.display(),
         BIND_HOST,
         port,
         if skip_credentials_validation { " --skip-credentials-validation" } else { "" }
     );
 
-    let mut cmd = Command::new("uv");
-    cmd.arg("run")
-        .arg("apx")
-        .arg("dev")
+    let mut cmd = apx_cmd.tokio_command();
+    cmd.arg("dev")
         .arg("__internal__run_server")
         .arg("--app-dir")
         .arg(app_dir)
@@ -245,8 +249,9 @@ pub(crate) async fn spawn_server(
         }
 
         // Kill any remaining processes (in case graceful shutdown failed or timed out)
-        let pid = child.id();
-        let _ = ProcessManager::kill_process_tree_async(pid, "dev-server".to_string()).await;
+        if let Some(pid) = child.id() {
+            let _ = ProcessManager::kill_process_tree_async(pid, "dev-server".to_string()).await;
+        }
         let _ = child.kill(); // Fallback in case tree kill missed the root
 
         // Clean up lock file if it exists
@@ -264,7 +269,8 @@ pub(crate) async fn spawn_server(
     }
     health_spinner.finish_and_clear();
 
-    let lock = DevLock::new(child.id(), port, command, app_dir);
+    let pid = child.id().ok_or("Failed to get child process ID")?;
+    let lock = DevLock::new(pid, port, command, app_dir);
     write_lock(&lock_path, &lock)?;
 
     println!("✅ Dev server started at http://localhost:{port} in {}\n", format_elapsed_ms(start_time));

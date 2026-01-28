@@ -19,7 +19,7 @@ use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
 use crate::bun_binary_path;
-use crate::common::read_project_metadata;
+use crate::common::{read_project_metadata, ApxCommand};
 use crate::dev::common::CLIENT_HOST;
 use crate::dev::otel::forward_log_to_flux;
 use crate::dotenv::DotenvFile;
@@ -93,8 +93,8 @@ impl ProcessManager {
             dotenv_vars,
         };
 
-        debug!("Spawning bun dev process");
-        manager.spawn_bun_dev(app_dir, bun_path.clone()).await?;
+        debug!("Spawning frontend dev process");
+        manager.spawn_bun_dev(app_dir).await?;
         debug!("Spawning PGLite database process");
         manager.spawn_pglite(&bun_path).await?;
         debug!("Spawning uvicorn process");
@@ -194,7 +194,7 @@ impl ProcessManager {
             .await
     }
 
-    async fn spawn_bun_dev(&self, app_dir: &Path, bun_path: PathBuf) -> Result<(), String> {
+    async fn spawn_bun_dev(&self, app_dir: &Path) -> Result<(), String> {
         // ============================================================================
         // IMPORTANT: Frontend logs are NOT piped through apx stdout/stderr.
         // The frontend process sends logs directly to flux via OTEL SDK.
@@ -202,8 +202,12 @@ impl ProcessManager {
         // log interleaving issues that occur when multiple processes share stdout.
         // See entrypoint.ts for OTEL initialization.
         // ============================================================================
-        let mut cmd = Command::new(&bun_path);
-        cmd.args(["run", "dev"])
+
+        // Use ApxCommand to directly invoke `apx frontend dev` instead of going through
+        // `bun run dev` -> `uv run apx frontend dev`. This eliminates 2 wrapper processes.
+        let apx_cmd = ApxCommand::new()?;
+        let mut cmd = Command::new(&apx_cmd.python);
+        cmd.args(["-m", "apx", "frontend", "dev"])
             .current_dir(app_dir)
             .stdin(Stdio::null())
             // Inherit stdout/stderr for local visibility, but don't capture/forward
@@ -252,27 +256,28 @@ impl ProcessManager {
         // Create uvicorn logging config that enables propagation to root logger
         let log_config = self.create_uvicorn_log_config(app_dir).await?;
 
-        let mut cmd = Command::new("uv");
-        cmd.args([
-            "run",
-            "opentelemetry-instrument",
-            "--logs_exporter",
-            "otlp",
-            "uvicorn",
-            &app_entrypoint,
-            "--host",
-            &self.host,
-            "--port",
-            &self.backend_port.to_string(),
-            "--reload",
-            "--log-config",
-            &log_config,
-        ])
-        .current_dir(app_dir)
-        .stdin(Stdio::null())
-        // Inherit stdout/stderr for local visibility, OTEL sends logs directly to flux
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+        // Use direct Python invocation instead of `uv run` to avoid extra process
+        // and uv cache locking. Dependencies are synced by preflight checks.
+        let apx_cmd = ApxCommand::new()?;
+        let mut cmd = Command::new(&apx_cmd.python);
+        cmd.args(["-m", "opentelemetry.instrumentation.auto_instrumentation"])
+            .args(["--logs_exporter", "otlp"])
+            .args([
+                "uvicorn",
+                &app_entrypoint,
+                "--host",
+                &self.host,
+                "--port",
+                &self.backend_port.to_string(),
+                "--reload",
+                "--log-config",
+                &log_config,
+            ])
+            .current_dir(app_dir)
+            .stdin(Stdio::null())
+            // Inherit stdout/stderr for local visibility, OTEL sends logs directly to flux
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
 
         // Set APX environment variables
         cmd.env("APX_FRONTEND_PORT", self.frontend_port.to_string());
@@ -584,6 +589,16 @@ root:
                     // No more events, proceed with restart
                     info!("{} changed, restarting uvicorn", file_name);
 
+                    // Run uv sync if Python dependencies changed
+                    let needs_sync = file_name == "pyproject.toml" || file_name == "uv.lock";
+                    if needs_sync {
+                        info!("Running uv sync due to {} change", file_name);
+                        if let Err(e) = crate::common::uv_sync(&app_dir).await {
+                            warn!("uv sync failed: {}", e);
+                            // Continue anyway - uvicorn may still work with existing deps
+                        }
+                    }
+
                     // Reload .env if it exists
                     let new_vars = if let Ok(dotenv) = DotenvFile::read(&app_dir.join(".env")) {
                         dotenv.get_vars()
@@ -735,27 +750,28 @@ root:
         let log_config = app_dir.join(".apx").join("uvicorn_logging.yaml");
         let log_config_str = log_config.display().to_string();
 
-        let mut cmd = Command::new("uv");
-        cmd.args([
-            "run",
-            "opentelemetry-instrument",
-            "--logs_exporter",
-            "otlp",
-            "uvicorn",
-            app_entrypoint,
-            "--host",
-            host,
-            "--port",
-            &backend_port.to_string(),
-            "--reload",
-            "--log-config",
-            &log_config_str,
-        ])
-        .current_dir(app_dir)
-        .stdin(Stdio::null())
-        // Inherit stdout/stderr for local visibility, OTEL sends logs directly to flux
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+        // Use direct Python invocation instead of `uv run` to avoid extra process
+        // and uv cache locking. uv sync is called by file watcher when deps change.
+        let apx_cmd = ApxCommand::new()?;
+        let mut cmd = Command::new(&apx_cmd.python);
+        cmd.args(["-m", "opentelemetry.instrumentation.auto_instrumentation"])
+            .args(["--logs_exporter", "otlp"])
+            .args([
+                "uvicorn",
+                app_entrypoint,
+                "--host",
+                host,
+                "--port",
+                &backend_port.to_string(),
+                "--reload",
+                "--log-config",
+                &log_config_str,
+            ])
+            .current_dir(app_dir)
+            .stdin(Stdio::null())
+            // Inherit stdout/stderr for local visibility, OTEL sends logs directly to flux
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
 
         // Set APX environment variables
         cmd.env("APX_FRONTEND_PORT", frontend_port.to_string());

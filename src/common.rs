@@ -5,6 +5,46 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
+/// Command to spawn an apx subprocess without going through `uv run`.
+///
+/// Since `apx` is a Python entry point (not a standalone binary),
+/// `std::env::current_exe()` returns the Python interpreter. We use
+/// `python -m apx` to invoke apx as a module, avoiding the extra `uv`
+/// wrapper process and uv cache locking.
+#[derive(Debug, Clone)]
+pub struct ApxCommand {
+    /// Path to the Python interpreter
+    pub python: PathBuf,
+}
+
+impl ApxCommand {
+    /// Get the command to spawn apx subprocesses.
+    pub fn new() -> Result<Self, String> {
+        let python = std::env::current_exe()
+            .map_err(|e| format!("Failed to get current executable path: {}", e))?;
+        Ok(Self { python })
+    }
+
+    /// Create a new std::process::Command for spawning apx.
+    pub fn command(&self) -> std::process::Command {
+        let mut cmd = std::process::Command::new(&self.python);
+        cmd.args(["-m", "apx"]);
+        cmd
+    }
+
+    /// Create a new tokio::process::Command for spawning apx.
+    pub fn tokio_command(&self) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new(&self.python);
+        cmd.args(["-m", "apx"]);
+        cmd
+    }
+
+    /// Format the command for display/logging.
+    pub fn display(&self) -> String {
+        format!("{} -m apx", self.python.display())
+    }
+}
+
 const DEFAULT_API_PREFIX: &str = "/api";
 const PYPROJECT_FILENAME: &str = "pyproject.toml";
 
