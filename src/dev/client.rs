@@ -10,8 +10,8 @@ use crate::dev::common::CLIENT_HOST;
 const DEFAULT_TIMEOUT_SECS: u64 = 2;
 const STOP_TIMEOUT_SECS: u64 = 10;
 
-/// Default number of health check retries
-const HEALTH_RETRY_COUNT: u32 = 50;
+/// Default timeout for health checks (in seconds)
+const HEALTH_TIMEOUT_SECS: u64 = 60;
 /// Delay between health check retries (in ms)
 const HEALTH_RETRY_DELAY_MS: u64 = 200;
 /// Initial delay before starting health checks (give server time to start)
@@ -20,60 +20,61 @@ const HEALTH_INITIAL_DELAY_MS: u64 = 1000;
 /// Configuration for health check waiting behavior
 #[derive(Debug, Clone)]
 pub struct HealthCheckConfig {
-    pub retry_count: u32,
+    /// Total timeout for health checks (in seconds)
+    pub timeout_secs: u64,
+    /// Delay between health check retries (in ms)
     pub retry_delay_ms: u64,
+    /// Initial delay before starting health checks (in ms)
     pub initial_delay_ms: u64,
-    pub print_waiting: bool,
 }
 
 impl Default for HealthCheckConfig {
     fn default() -> Self {
         Self {
-            retry_count: HEALTH_RETRY_COUNT,
+            timeout_secs: HEALTH_TIMEOUT_SECS,
             retry_delay_ms: HEALTH_RETRY_DELAY_MS,
             initial_delay_ms: HEALTH_INITIAL_DELAY_MS,
-            print_waiting: true,
         }
     }
 }
 
 /// Wait for the dev server to become healthy.
-/// Returns Ok(()) if healthy, Err with message if not healthy after retries.
+/// Returns Ok(()) if healthy, Err with message if timeout exceeded.
+#[allow(dead_code)]
 pub async fn wait_for_healthy(port: u16, config: &HealthCheckConfig) -> Result<(), String> {
+    use std::time::Instant;
+
     // Give server time to start Python/tokio before polling
     tokio::time::sleep(Duration::from_millis(config.initial_delay_ms)).await;
 
-    for attempt in 0..config.retry_count {
+    let deadline = Instant::now() + Duration::from_secs(config.timeout_secs);
+    let mut first_attempt = true;
+
+    while Instant::now() < deadline {
         match status(port).await {
             Ok(status_response) if status_response.status == "ok" => return Ok(()),
             Ok(status_response) => {
-                // Log which services aren't ready yet (only on first attempt and if debugging)
-                if attempt == 0 {
+                // Log which services aren't ready yet (only on first attempt)
+                if first_attempt {
                     debug!(
                         "Services not ready - frontend: {}, backend: {}, db: {}",
-                        status_response.frontend_status, 
+                        status_response.frontend_status,
                         status_response.backend_status,
                         status_response.db_status
                     );
-                    if config.print_waiting {
-                        println!("Waiting for dev server to become healthy...");
-                    }
+                    first_attempt = false;
                 }
                 tokio::time::sleep(Duration::from_millis(config.retry_delay_ms)).await;
             }
             Err(_) => {
-                // Only print status on first attempt
-                if attempt == 0 && config.print_waiting {
-                    println!("Waiting for dev server to become healthy...");
-                }
                 tokio::time::sleep(Duration::from_millis(config.retry_delay_ms)).await;
             }
         }
     }
 
     Err(format!(
-        "Dev server failed to become healthy after {} retries",
-        config.retry_count
+        "Dev server failed to become healthy after {}s timeout",
+        config.timeout_secs
     ))
 }
 

@@ -3,6 +3,7 @@ pub mod logs;
 pub mod mcp;
 pub mod restart;
 pub mod start;
+pub mod startup_logs;
 pub mod status;
 pub mod stop;
 pub mod check;

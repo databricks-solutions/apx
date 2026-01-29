@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 
 use crate::bun_binary_path;
 use crate::cli::dev::logs::LogsArgs;
+use crate::cli::dev::startup_logs::StartupLogDisplay;
 use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
 use crate::common::{ApxCommand, ensure_dir, spinner, format_elapsed_ms, handle_spawn_error, run_preflight_checks};
-use crate::dev::client::{health, stop, wait_for_healthy, HealthCheckConfig};
+use crate::dev::client::{health, status, stop, HealthCheckConfig};
 use crate::dev::common::{lock_path, read_lock, remove_lock, write_lock, DevLock, BIND_HOST};
 use crate::dev::process::ProcessManager;
 use crate::flux;
@@ -41,6 +42,13 @@ pub struct StartArgs {
         help = "Skip credentials validation on startup (server will start but API proxy may not work)"
     )]
     pub skip_credentials_validation: bool,
+    #[arg(
+        long = "timeout",
+        default_value = "60",
+        value_name = "SECONDS",
+        help = "Maximum time in seconds to wait for dev server to become healthy"
+    )]
+    pub timeout: u64,
 }
 
 pub async fn run(args: StartArgs) -> i32 {
@@ -61,7 +69,7 @@ async fn run_detached(args: StartArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    let _ = spawn_server(&app_dir, None, args.skip_credentials_validation).await?;
+    let _ = spawn_server(&app_dir, None, args.skip_credentials_validation, args.timeout).await?;
     Ok(())
 }
 
@@ -71,7 +79,7 @@ async fn run_attached(args: StartArgs) -> Result<(), String> {
         println!("✅ Dev server already running at http://localhost:{port}, attaching logs...\n");
         port
     } else {
-        spawn_server(&app_dir, None, args.skip_credentials_validation).await?
+        spawn_server(&app_dir, None, args.skip_credentials_validation, args.timeout).await?
     };
 
     // Use the SQLite-based log following (reads from flux storage)
@@ -120,7 +128,7 @@ pub async fn start_dev_server(app_dir: &Path) -> Result<u16, String> {
     if let Some(port) = resolve_existing_server(app_dir).await? {
         return Ok(port);
     }
-    spawn_server(app_dir, None, false).await
+    spawn_server(app_dir, None, false, 60).await
 }
 
 /// Run preflight checks and display progress.
@@ -159,6 +167,7 @@ pub(crate) async fn spawn_server(
     app_dir: &Path,
     preferred_port: Option<u16>,
     skip_credentials_validation: bool,
+    timeout_secs: u64,
 ) -> Result<u16, String> {
     let start_time = Instant::now();
     prepare_app_dir(app_dir)?;
@@ -231,12 +240,16 @@ pub(crate) async fn spawn_server(
         .spawn()
         .map_err(|err| handle_spawn_error("apx", err))?;
 
-    let health_spinner = spinner("⏳ Waiting for dev server to become healthy...");
-    let mut config = HealthCheckConfig::default();
-    config.print_waiting = false; // Don't print, we have a spinner instead
-    if let Err(e) = wait_for_healthy(port, &config).await {
-        health_spinner.finish_and_clear();
+    // Wait for server to become healthy with inline log display
+    println!("⏳ Waiting for dev server to become healthy...\n");
+    let config = HealthCheckConfig {
+        timeout_secs,
+        ..HealthCheckConfig::default()
+    };
 
+    let health_result = wait_for_healthy_with_logs(port, &config, app_dir).await;
+
+    if let Err(e) = health_result {
         // Try graceful shutdown (5 second timeout)
         debug!("Health checks failed, attempting graceful shutdown.");
         let shutdown_result = tokio::time::timeout(Duration::from_secs(5), stop(port)).await;
@@ -266,7 +279,6 @@ pub(crate) async fn spawn_server(
 
         return Err(e);
     }
-    health_spinner.finish_and_clear();
 
     let pid = child.id().ok_or("Failed to get child process ID")?;
     let lock = DevLock::new(pid, port, command, app_dir);
@@ -297,5 +309,55 @@ async fn wait_for_port_available(port: u16) -> Result<(), String> {
     Err(format!(
         "Port {port} is still in use after {}ms. Another process may be using it.",
         PORT_WAIT_TIMEOUT_MS
+    ))
+}
+
+/// Wait for dev server to become healthy while displaying streaming logs.
+/// Shows an inline scrolling log window that clears when done.
+async fn wait_for_healthy_with_logs(
+    port: u16,
+    config: &HealthCheckConfig,
+    app_dir: &Path,
+) -> Result<(), String> {
+    // Give server time to start Python/tokio before polling
+    tokio::time::sleep(Duration::from_millis(config.initial_delay_ms)).await;
+
+    let deadline = Instant::now() + Duration::from_secs(config.timeout_secs);
+    let mut log_display = StartupLogDisplay::new(app_dir);
+    let mut first_attempt = true;
+
+    while Instant::now() < deadline {
+        // Poll for new logs and update display
+        log_display.poll();
+
+        // Check health status
+        match status(port).await {
+            Ok(status_response) if status_response.status == "ok" => {
+                log_display.finish_and_clear();
+                return Ok(());
+            }
+            Ok(status_response) => {
+                if first_attempt {
+                    debug!(
+                        "Services not ready - frontend: {}, backend: {}, db: {}",
+                        status_response.frontend_status,
+                        status_response.backend_status,
+                        status_response.db_status
+                    );
+                    first_attempt = false;
+                }
+            }
+            Err(_) => {
+                // Server not responding yet, keep waiting
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(config.retry_delay_ms)).await;
+    }
+
+    log_display.finish_and_clear();
+    Err(format!(
+        "Dev server failed to become healthy after {}s timeout",
+        config.timeout_secs
     ))
 }

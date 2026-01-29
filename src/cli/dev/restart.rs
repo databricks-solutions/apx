@@ -44,7 +44,7 @@ pub async fn restart_dev_server(app_dir: &Path) -> Result<u16, String> {
         None
     };
 
-    let port = spawn_server(app_dir, preferred_port, false).await?;
+    let port = spawn_server(app_dir, preferred_port, false, 60).await?;
     println!(
         "✅ Dev server restarted at http://localhost:{port}\n",
         port = port

@@ -18,6 +18,8 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
+use reqwest;
+
 use crate::bun_binary_path;
 use crate::common::{handle_spawn_error, read_project_metadata, ApxCommand, UvCommand};
 use crate::dev::common::CLIENT_HOST;
@@ -1080,10 +1082,8 @@ impl ProcessManager {
             None => "stopped".to_string(),
             Some(process) => match process.try_wait() {
                 Ok(None) => {
-                    // Process is running, check if port is accepting connections
-                    let port_ready = tokio::net::TcpStream::connect((host, port)).await.is_ok();
-
-                    if port_ready {
+                    // Process is running, check if it responds to HTTP requests
+                    if Self::http_health_probe(host, port).await {
                         "healthy".to_string()
                     } else {
                         "starting".to_string()
@@ -1092,6 +1092,24 @@ impl ProcessManager {
                 Ok(Some(_)) => "stopped".to_string(),
                 Err(_) => "error".to_string(),
             },
+        }
+    }
+
+    /// Check if a service is healthy by making an HTTP GET request to its root path.
+    /// Returns true if the service responds with any non-5xx status code.
+    async fn http_health_probe(host: &str, port: u16) -> bool {
+        let url = format!("http://{}:{}/", host, port);
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        match client.get(&url).send().await {
+            Ok(resp) => !resp.status().is_server_error(), // 5xx = unhealthy, else healthy
+            Err(_) => false,
         }
     }
 
