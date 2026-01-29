@@ -12,7 +12,9 @@ use crate::common::{
     ApxCommand, ensure_dir, format_elapsed_ms, handle_spawn_error, run_preflight_checks, spinner,
 };
 use crate::dev::client::{HealthCheckConfig, health, status, stop};
-use crate::dev::common::{BIND_HOST, DevLock, lock_path, read_lock, remove_lock, write_lock};
+use crate::dev::common::{
+    BIND_HOST, DevLock, is_process_running, lock_path, read_lock, remove_lock, write_lock,
+};
 use crate::dev::process::ProcessManager;
 use crate::flux;
 use crate::registry::Registry;
@@ -125,15 +127,23 @@ async fn resolve_existing_server(app_dir: &Path) -> Result<Option<u16>, String> 
     }
 
     let lock = read_lock(&lock_path)?;
-    let is_healthy = health(lock.port).await?;
-    if is_healthy {
-        Ok(Some(lock.port))
-    } else {
-        println!(
-            "⚠️  Dev server unreachable at http://localhost:{}",
-            lock.port
-        );
-        Ok(None)
+
+    // First check: is the process still running?
+    if !is_process_running(lock.pid) {
+        println!("🧹 Cleaning up stale lock file...");
+        remove_lock(&lock_path)?;
+        return Ok(None);
+    }
+
+    // Second check: is the server responding?
+    match health(lock.port).await {
+        Ok(true) => Ok(Some(lock.port)),
+        Ok(false) | Err(_) => {
+            // Server process exists but not responding - could be zombie or different process reusing PID
+            println!("🧹 Cleaning up stale lock file...");
+            remove_lock(&lock_path)?;
+            Ok(None)
+        }
     }
 }
 

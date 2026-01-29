@@ -79,6 +79,15 @@ pub fn remove_lock(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Check if a process with the given PID is still running.
+/// Uses sysinfo crate for cross-platform compatibility (Linux, macOS, Windows).
+pub fn is_process_running(pid: u32) -> bool {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
+    sys.process(Pid::from_u32(pid)).is_some()
+}
+
 /// Find an available port in the given range, starting from a random offset.
 /// This reduces collision probability when multiple processes are looking for ports
 /// simultaneously.
