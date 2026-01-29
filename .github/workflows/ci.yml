@@ -13,6 +13,8 @@ env:
   # Enable sccache for faster builds
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
+  # Disable incremental compilation (incompatible with sccache)
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   test:
@@ -39,9 +41,10 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          # Shared key for cache sharing between CI and release
-          shared-key: "rust-cache"
+          shared-key: "ci-linux"
           cache-all-crates: "true"
+          # Only save cache on main branch to prevent fragmentation
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -67,8 +70,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-bun-
 
-      - name: Install dev only deps
-        run: uv sync --script scripts/get_binaries.py
+      - name: Prepare virtual environment
+        run: |
+          uv venv
 
       - name: Download binaries
         run: uv run --script scripts/get_binaries.py
@@ -78,8 +82,9 @@ jobs:
 
       - name: Build project in development mode
         run: |
-          cargo check
-          uvx maturin develop
+          uv venv
+          uv pip install maturin 
+          maturin develop --uv
 
       - name: Configure git for tests
         run: |

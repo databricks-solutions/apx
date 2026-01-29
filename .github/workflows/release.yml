@@ -15,6 +15,8 @@ env:
   # Enable sccache for faster builds
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
+  # Disable incremental compilation (incompatible with sccache)
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   build-wheels:
@@ -50,10 +52,11 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          # Use same shared-key as CI for cache sharing
-          shared-key: "rust-cache"
-          # Cache all crates for better hit rate
+          # Target-specific key to prevent cache collisions between platforms
+          shared-key: "release-${{ matrix.os }}"
           cache-all-crates: "true"
+          # Always save cache on release builds
+          save-if: true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -86,7 +89,7 @@ jobs:
         run: uv run --script scripts/get_binaries.py
 
       - name: Build wheels
-        run: uvx maturin build --release --out dist
+        run: uvx maturin build --release --locked --out dist
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4

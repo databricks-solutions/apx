@@ -1,0 +1,23 @@
+name: Clear Caches
+
+on:
+  schedule:
+    - cron: "0 4 * * MON" # Every Monday at 4 AM UTC
+  workflow_dispatch: # Manual trigger
+
+jobs:
+  clear-caches:
+    name: Clear all caches
+    runs-on: linux-ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clear all caches
+        run: |
+          echo "Clearing all GitHub Actions caches..."
+          gh cache delete --all || echo "No caches to delete or deletion failed"
+          echo "Cache cleanup complete."
+        env:
+          GH_TOKEN: ${{ github.token }}
