@@ -10,5 +10,5 @@ use crate::flux;
 pub struct RunArgs {}
 
 pub async fn run(_args: RunArgs) -> i32 {
-    run_cli_async(|| flux::run_server()).await
+    run_cli_async(flux::run_server).await
 }

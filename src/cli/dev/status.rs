@@ -26,7 +26,7 @@ async fn run_inner(args: StatusArgs) -> Result<(), String> {
 
     let lock_path = lock_path(&app_dir);
     debug!(path = %lock_path.display(), "Checking for dev server lockfile.");
-    
+
     if !lock_path.exists() {
         debug!("No dev server lockfile found.");
         println!("Dev Server: not running");
@@ -34,7 +34,11 @@ async fn run_inner(args: StatusArgs) -> Result<(), String> {
     }
 
     let lock = read_lock(&lock_path)?;
-    debug!(port = lock.port, pid = lock.pid, "Loaded dev server lockfile.");
+    debug!(
+        port = lock.port,
+        pid = lock.pid,
+        "Loaded dev server lockfile."
+    );
 
     // Query the health endpoint
     match get_status(lock.port).await {
@@ -47,7 +51,7 @@ async fn run_inner(args: StatusArgs) -> Result<(), String> {
         Err(err) => {
             debug!(error = %err, "Failed to get status from dev server.");
             println!("Dev Server: running (but unreachable)");
-            println!("Error: {}", err);
+            println!("Error: {err}");
             Err(err)
         }
     }

@@ -42,9 +42,9 @@ impl TsType {
             TsType::Array(_) => true,
             TsType::Union(types) => {
                 // Check if any non-null type in the union is an array
-                types.iter().any(|t| {
-                    !matches!(t, TsType::Primitive(TsPrimitive::Null)) && t.is_array()
-                })
+                types
+                    .iter()
+                    .any(|t| !matches!(t, TsType::Primitive(TsPrimitive::Null)) && t.is_array())
             }
             _ => false,
         }
@@ -124,10 +124,7 @@ pub enum TsExpr {
     /// Object literal: { a: 1, b: 2 }
     Object(Vec<(String, TsExpr)>),
     /// Member access: foo.bar
-    Member {
-        object: Box<TsExpr>,
-        prop: String,
-    },
+    Member { object: Box<TsExpr>, prop: String },
     /// Template literal: `${foo}/bar`
     Template(Vec<TemplatePart>),
     /// Await expression: await fetch()
@@ -141,10 +138,7 @@ pub enum TsExpr {
         right: Box<TsExpr>,
     },
     /// Optional chaining member access: foo?.bar
-    OptionalMember {
-        object: Box<TsExpr>,
-        prop: String,
-    },
+    OptionalMember { object: Box<TsExpr>, prop: String },
     /// new URL(...)
     New {
         callee: Box<TsExpr>,
@@ -166,10 +160,7 @@ pub enum TsExpr {
     /// Array literal: [a, b, c]
     Array(Vec<TsExpr>),
     /// Type cast: expr as Type
-    Cast {
-        expr: Box<TsExpr>,
-        ty: TsType,
-    },
+    Cast { expr: Box<TsExpr>, ty: TsType },
     /// Raw code that doesn't fit the AST
     Raw(String),
 }

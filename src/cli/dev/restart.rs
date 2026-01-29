@@ -23,7 +23,7 @@ async fn run_inner(args: RestartArgs) -> Result<(), String> {
     let app_dir = args
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    
+
     restart_dev_server(&app_dir).await?;
     Ok(())
 }
@@ -45,9 +45,6 @@ pub async fn restart_dev_server(app_dir: &Path) -> Result<u16, String> {
     };
 
     let port = spawn_server(app_dir, preferred_port, false, 60).await?;
-    println!(
-        "✅ Dev server restarted at http://localhost:{port}\n",
-        port = port
-    );
+    println!("✅ Dev server restarted at http://localhost:{port}\n");
     Ok(port)
 }

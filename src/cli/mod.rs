@@ -1,11 +1,11 @@
-pub mod build;
-pub mod dev;
-pub mod flux;
-pub mod init;
 pub mod __generate_openapi;
+pub mod build;
 pub mod bun;
 pub mod components;
+pub mod dev;
+pub mod flux;
 pub mod frontend;
+pub mod init;
 
 pub async fn run_cli_async<F, Fut>(f: F) -> i32
 where

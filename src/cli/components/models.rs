@@ -16,7 +16,7 @@ impl UiConfig {
     /// Construct UiConfig from ProjectMetadata
     pub fn from_metadata(metadata: &ProjectMetadata, app_dir: &Path) -> Self {
         let root = app_dir.join(&metadata.ui_root);
-        
+
         // Convert string registries to RegistryConfig
         let registries: HashMap<String, RegistryConfig> = metadata
             .ui_registries

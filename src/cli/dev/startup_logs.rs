@@ -59,7 +59,7 @@ impl StartupLogStreamer {
         }
 
         // Update last_log_id
-        if let Some(new_id) = storage.get_latest_id().ok() {
+        if let Ok(new_id) = storage.get_latest_id() {
             if new_id > self.last_log_id {
                 self.last_log_id = new_id;
             }
@@ -76,7 +76,7 @@ fn format_log_record(record: &LogRecord) -> String {
     } else {
         record.timestamp_ns
     };
-    let timestamp_ms = (effective_timestamp_ns / 1_000_000) as i64;
+    let timestamp_ms = effective_timestamp_ns / 1_000_000;
     let timestamp = format_timestamp(timestamp_ms);
 
     // Determine source from service name

@@ -7,7 +7,7 @@
 //! 3. Codegen: ApiIR -> TsModule (TypeScript AST)
 //! 4. Emit: TsModule -> String (via Emit trait)
 
-use crate::openapi::ir::{codegen_module, normalize_spec, Emit};
+use crate::openapi::ir::{Emit, codegen_module, normalize_spec};
 use crate::openapi::spec::OpenApiSpec;
 
 /// Generate TypeScript code from an OpenAPI JSON string.

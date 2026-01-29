@@ -3,12 +3,12 @@
 //! This module handles downloading, caching, and parsing SDK documentation
 //! from GitHub. The actual indexing and search is handled by `search::docs_index`.
 
+use crate::common::Timer;
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use crate::common::Timer;
 
 const GITHUB_REPO: &str = "databricks/databricks-sdk-py";
 
@@ -31,35 +31,46 @@ pub struct ParsedDocFile {
 }
 
 /// Get cache path for SDK documentation
-fn get_cache_path(version: &str) -> PathBuf {
-    dirs::home_dir()
-        .expect("Could not determine home directory")
+fn get_cache_path(version: &str) -> Result<PathBuf, String> {
+    Ok(dirs::home_dir()
+        .ok_or("Could not determine home directory")?
         .join(".apx")
         .join("cache")
         .join("databricks-sdk")
-        .join(version)
+        .join(version))
 }
 
 /// Check if docs are cached for this version
 fn is_cached(version: &str) -> bool {
-    let cache_path = get_cache_path(version);
+    let Ok(cache_path) = get_cache_path(version) else {
+        return false;
+    };
     let docs_path = cache_path.join("docs");
     let exists = docs_path.exists();
-    let has_files = docs_path.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false);
-    tracing::debug!("is_cached: version={}, cache_path={:?}, docs_path={:?}, exists={}, has_files={}", 
-        version, cache_path, docs_path, exists, has_files);
+    let has_files = docs_path
+        .read_dir()
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    tracing::debug!(
+        "is_cached: version={}, cache_path={:?}, docs_path={:?}, exists={}, has_files={}",
+        version,
+        cache_path,
+        docs_path,
+        exists,
+        has_files
+    );
     exists && has_files
 }
 
 /// Get GitHub zipball URL for a specific version
 fn get_github_zipball_url(version: &str) -> String {
-    format!("https://github.com/{}/archive/refs/tags/v{}.zip", GITHUB_REPO, version)
+    format!("https://github.com/{GITHUB_REPO}/archive/refs/tags/v{version}.zip")
 }
 
 /// Download and extract SDK repository
 pub async fn download_and_extract_sdk(version: &str) -> Result<PathBuf, String> {
-    let download_timer = Timer::start(format!("download_sdk_v{}", version));
-    let cache_path = get_cache_path(version);
+    let download_timer = Timer::start(format!("download_sdk_v{version}"));
+    let cache_path = get_cache_path(version)?;
     let docs_path = cache_path.join("docs");
 
     if is_cached(version) {
@@ -74,32 +85,39 @@ pub async fn download_and_extract_sdk(version: &str) -> Result<PathBuf, String> 
     let http_timer = Timer::start("http_download");
     let response = reqwest::get(&url)
         .await
-        .map_err(|e| format!("Failed to download SDK: {}", e))?;
+        .map_err(|e| format!("Failed to download SDK: {e}"))?;
 
     if !response.status().is_success() {
-        return Err(format!("Failed to download SDK: HTTP {}", response.status()));
+        return Err(format!(
+            "Failed to download SDK: HTTP {}",
+            response.status()
+        ));
     }
 
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| format!("Failed to read response: {}", e))?;
+        .map_err(|e| format!("Failed to read response: {e}"))?;
     http_timer.lap(&format!("Downloaded {} MB", bytes.len() / 1_048_576));
 
     // Extract ZIP
     let extract_timer = Timer::start("zip_extraction");
     fs::create_dir_all(&cache_path)
-        .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+        .map_err(|e| format!("Failed to create cache directory: {e}"))?;
 
     let cursor = Cursor::new(bytes.to_vec());
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| format!("Failed to read ZIP archive: {}", e))?;
-    tracing::debug!("download_and_extract_sdk: ZIP archive has {} files", archive.len());
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to read ZIP archive: {e}"))?;
+    tracing::debug!(
+        "download_and_extract_sdk: ZIP archive has {} files",
+        archive.len()
+    );
 
     // Find root folder name
-    let root_folder = if archive.len() > 0 {
-        let first_file = archive.by_index(0)
-            .map_err(|e| format!("Failed to read first file: {}", e))?;
+    let root_folder = if !archive.is_empty() {
+        let first_file = archive
+            .by_index(0)
+            .map_err(|e| format!("Failed to read first file: {e}"))?;
         let name = first_file.name();
         name.split('/').next().unwrap_or("").to_string()
     } else {
@@ -108,33 +126,36 @@ pub async fn download_and_extract_sdk(version: &str) -> Result<PathBuf, String> 
 
     // Extract docs/ folder
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i)
-            .map_err(|e| format!("Failed to read file at index {}: {}", i, e))?;
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to read file at index {i}: {e}"))?;
 
         let file_path = file.name().to_string();
 
         // Only extract docs/ folder
-        if !file_path.starts_with(&format!("{}/docs/", root_folder)) {
+        if !file_path.starts_with(&format!("{root_folder}/docs/")) {
             continue;
         }
 
-        let relative_path = file_path.strip_prefix(&format!("{}/", root_folder)).unwrap();
+        let relative_path = file_path
+            .strip_prefix(&format!("{root_folder}/"))
+            .ok_or_else(|| format!("Failed to strip prefix from path: {file_path}"))?;
         let target_path = cache_path.join(relative_path);
 
         if file.is_dir() {
             fs::create_dir_all(&target_path)
-                .map_err(|e| format!("Failed to create directory: {}", e))?;
+                .map_err(|e| format!("Failed to create directory: {e}"))?;
         } else {
             if let Some(parent) = target_path.parent() {
                 fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create parent directory: {}", e))?;
+                    .map_err(|e| format!("Failed to create parent directory: {e}"))?;
             }
 
             let mut outfile = fs::File::create(&target_path)
-                .map_err(|e| format!("Failed to create file: {}", e))?;
+                .map_err(|e| format!("Failed to create file: {e}"))?;
 
             std::io::copy(&mut file, &mut outfile)
-                .map_err(|e| format!("Failed to write file: {}", e))?;
+                .map_err(|e| format!("Failed to write file: {e}"))?;
         }
     }
 
@@ -147,15 +168,13 @@ pub async fn download_and_extract_sdk(version: &str) -> Result<PathBuf, String> 
 fn extract_method_name(signature: &str) -> Option<&str> {
     let name_part = signature.split('(').next()?;
     // If it has a dot (e.g., "Class.method"), get the last part
-    Some(name_part.split('.').last().unwrap_or(name_part))
+    Some(name_part.split('.').next_back().unwrap_or(name_part))
 }
 
 /// Extract service name from class name (e.g., "ClustersAPI" -> "clusters")
 fn extract_service_from_class(class_name: &str) -> Option<String> {
-    let name = class_name
-        .trim_end_matches("API")
-        .trim_end_matches("Ext");
-    
+    let name = class_name.trim_end_matches("API").trim_end_matches("Ext");
+
     if name.is_empty() {
         None
     } else {
@@ -180,18 +199,18 @@ fn parse_rst_directive(directive_content: &str) -> Option<ParsedDirective> {
     let double_colon_pos = directive_content.find("::")?;
     let directive_type = &directive_content[..double_colon_pos];
     let directive_value = directive_content[double_colon_pos + 2..].trim();
-    
+
     if directive_value.is_empty() && directive_type != "code-block" {
         return None;
     }
-    
+
     let mut result = ParsedDirective {
         text_fragments: Vec::new(),
         entity: None,
         operation: None,
         service: None,
     };
-    
+
     match directive_type {
         t if t.starts_with("py:class") => {
             result.text_fragments.push(directive_value.to_string());
@@ -209,20 +228,26 @@ fn parse_rst_directive(directive_content: &str) -> Option<ParsedDirective> {
             }
         }
         t if t.starts_with("py:attribute") => {
-            result.text_fragments.push(format!("attribute {}", directive_value));
+            result
+                .text_fragments
+                .push(format!("attribute {directive_value}"));
         }
         "autoclass" => {
-            result.text_fragments.push(format!("class {}", directive_value));
+            result
+                .text_fragments
+                .push(format!("class {directive_value}"));
         }
         t if t.starts_with("py:currentmodule") || t == "currentmodule" => {
-            result.text_fragments.push(format!("module {}", directive_value));
+            result
+                .text_fragments
+                .push(format!("module {directive_value}"));
         }
         "code-block" => {
             result.text_fragments.push("code example".to_string());
         }
         _ => return None,
     }
-    
+
     Some(result)
 }
 
@@ -231,7 +256,7 @@ fn parse_rst_directive(directive_content: &str) -> Option<ParsedDirective> {
 fn parse_rst_content(rst_content: &str) -> (String, String, String, String, Vec<String>) {
     let mut output = Vec::new();
     let mut in_code_block = false;
-    
+
     // Metadata collected from directives
     let mut entity = String::new();
     let mut operation = String::new();
@@ -257,7 +282,10 @@ fn parse_rst_content(rst_content: &str) -> (String, String, String, String, Vec<
         }
 
         // Skip RST heading underlines (===, ---, ~~~, etc.)
-        if trimmed.chars().all(|c| matches!(c, '=' | '-' | '~' | '^' | '*')) {
+        if trimmed
+            .chars()
+            .all(|c| matches!(c, '=' | '-' | '~' | '^' | '*'))
+        {
             continue;
         }
 
@@ -268,7 +296,7 @@ fn parse_rst_content(rst_content: &str) -> (String, String, String, String, Vec<
                 output.push("code example".to_string());
             } else if let Some(parsed) = parse_rst_directive(directive_content) {
                 output.extend(parsed.text_fragments);
-                
+
                 // Collect metadata (keep first entity/service, collect all operations)
                 if entity.is_empty() {
                     if let Some(e) = parsed.entity {
@@ -291,27 +319,29 @@ fn parse_rst_content(rst_content: &str) -> (String, String, String, String, Vec<
         }
 
         // Process field directives (:param:, :returns:, :value:, etc.)
-        if trimmed.starts_with(':') {
-            if let Some(colon_end) = trimmed[1..].find(':') {
-                let field_name = &trimmed[1..=colon_end];
+        if let Some(stripped) = trimmed.strip_prefix(':') {
+            if let Some(colon_end) = stripped.find(':') {
+                let field_name = &stripped[..colon_end];
                 let field_value = trimmed.get(colon_end + 2..).map(|s| s.trim()).unwrap_or("");
-                
+
                 let text = match field_name {
                     f if f.starts_with("param ") => {
                         let param_name = f.split_whitespace().nth(1).unwrap_or("");
                         if field_value.is_empty() {
-                            format!("param {}", param_name)
+                            format!("param {param_name}")
                         } else {
-                            format!("param {} {}", param_name, field_value)
+                            format!("param {param_name} {field_value}")
                         }
                     }
                     f if f.starts_with("type ") => {
                         let type_name = f.split_whitespace().nth(1).unwrap_or("");
-                        if field_value.is_empty() { continue; }
-                        format!("type {} {}", type_name, field_value)
+                        if field_value.is_empty() {
+                            continue;
+                        }
+                        format!("type {type_name} {field_value}")
                     }
-                    "returns" if !field_value.is_empty() => format!("returns {}", field_value),
-                    "value" if !field_value.is_empty() => format!("value {}", field_value),
+                    "returns" if !field_value.is_empty() => format!("returns {field_value}"),
+                    "value" if !field_value.is_empty() => format!("value {field_value}"),
                     "members" | "undoc-members" => continue, // Skip directive options
                     _ => continue,
                 };
@@ -334,16 +364,19 @@ fn parse_rst_content(rst_content: &str) -> (String, String, String, String, Vec<
 }
 
 /// Extract metadata from file path and RST content
-fn extract_metadata(file_path: &str, rst_content: &str) -> (String, String, String, String, String) {
+fn extract_metadata(
+    file_path: &str,
+    rst_content: &str,
+) -> (String, String, String, String, String) {
     let (text, entity, operation, mut service, mut symbols) = parse_rst_content(rst_content);
-    
+
     // Fallback: extract service from file path if not found in content
     if service.is_empty() {
         if let Some(stem) = Path::new(file_path).file_stem() {
             service = stem.to_string_lossy().to_lowercase();
         }
     }
-    
+
     // Add service to symbols for matching
     if !service.is_empty() && !symbols.contains(&service) {
         symbols.push(service.clone());
@@ -391,21 +424,21 @@ fn md_to_text(md_content: &str) -> String {
 
 /// Load RST files from a directory (recursive), skipping index.rst
 fn load_rst_from_dir(
-    dir_path: &Path, 
+    dir_path: &Path,
     docs_path: &Path,
     files: &mut Vec<ParsedDocFile>,
 ) -> Result<(), String> {
     if !dir_path.exists() {
         return Ok(());
     }
-    
+
     // Collect all valid RST file paths first
     let rst_paths: Vec<PathBuf> = walkdir::WalkDir::new(dir_path)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter_map(|entry| {
             let path = entry.path();
-            
+
             // Only .rst files, skip index.rst
             if path.extension().and_then(|s| s.to_str()) != Some("rst") {
                 return None;
@@ -413,27 +446,30 @@ fn load_rst_from_dir(
             if path.file_stem().and_then(|s| s.to_str()) == Some("index") {
                 return None;
             }
-            
+
             Some(path.to_path_buf())
         })
         .collect();
-    
+
     // Process files in parallel
-    let parsed_files: Vec<ParsedDocFile> = rst_paths.par_iter()
+    let parsed_files: Vec<ParsedDocFile> = rst_paths
+        .par_iter()
         .filter_map(|path| {
             let content = fs::read_to_string(path).ok()?;
-            
-            let relative_path = path.strip_prefix(docs_path)
+
+            let relative_path = path
+                .strip_prefix(docs_path)
                 .unwrap_or(path)
                 .to_string_lossy()
                 .to_string();
-            
-            let (text, service, entity, operation, symbols) = extract_metadata(&relative_path, &content);
-            
+
+            let (text, service, entity, operation, symbols) =
+                extract_metadata(&relative_path, &content);
+
             if text.is_empty() {
                 return None;
             }
-            
+
             Some(ParsedDocFile {
                 relative_path,
                 text,
@@ -444,9 +480,9 @@ fn load_rst_from_dir(
             })
         })
         .collect();
-    
+
     files.extend(parsed_files);
-    
+
     Ok(())
 }
 
@@ -461,55 +497,62 @@ pub fn load_doc_files(docs_path: &Path) -> Result<Vec<ParsedDocFile>, String> {
     let workspace_count = files.len();
     load_rst_from_dir(&docs_path.join("dbdataclasses"), docs_path, &mut files)?;
     let dbdataclasses_count = files.len() - workspace_count;
-    rst_timer.lap(&format!("Loaded {} RST files (workspace: {}, dbdataclasses: {})", 
-        workspace_count + dbdataclasses_count, workspace_count, dbdataclasses_count));
+    rst_timer.lap(&format!(
+        "Loaded {} RST files (workspace: {}, dbdataclasses: {})",
+        workspace_count + dbdataclasses_count,
+        workspace_count,
+        dbdataclasses_count
+    ));
 
     // Load markdown files from docs root - collect paths first
     let md_paths: Vec<PathBuf> = fs::read_dir(docs_path)
-        .map_err(|e| format!("Failed to read docs directory: {}", e))?
+        .map_err(|e| format!("Failed to read docs directory: {e}"))?
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
-            
+
             if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("md") {
                 return None;
             }
-            
+
             Some(path)
         })
         .collect();
-    
+
     // Process markdown files in parallel
-    let md_files: Vec<ParsedDocFile> = md_paths.par_iter()
+    let md_files: Vec<ParsedDocFile> = md_paths
+        .par_iter()
         .filter_map(|path| {
             let content = fs::read_to_string(path).ok()?;
             let text = md_to_text(&content);
-            
+
             if text.is_empty() {
                 return None;
             }
-            
-            let relative_path = path.strip_prefix(docs_path)
+
+            let relative_path = path
+                .strip_prefix(docs_path)
                 .unwrap_or(path)
                 .to_string_lossy()
                 .to_string();
-            
-            let file_stem = path.file_stem()
+
+            let file_stem = path
+                .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            
+
             Some(ParsedDocFile {
                 relative_path,
                 text,
                 service: file_stem.clone(),
                 entity: String::new(),
                 operation: String::new(),
-                symbols: format!("{} guide documentation", file_stem),
+                symbols: format!("{file_stem} guide documentation"),
             })
         })
         .collect();
-    
+
     files.extend(md_files);
 
     if files.is_empty() {

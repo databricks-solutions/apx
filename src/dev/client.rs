@@ -2,9 +2,9 @@
 
 use reqwest::StatusCode;
 use serde::Deserialize;
+use serde_json;
 use std::time::Duration;
 use tracing::{debug, warn};
-use serde_json;
 
 use crate::dev::common::CLIENT_HOST;
 
@@ -136,30 +136,27 @@ pub async fn status(port: u16) -> Result<StatusResponse, String> {
             debug!(error = %err, %url, "Status request failed to connect.");
             format!("Status request failed: {err}")
         })?;
-    
+
     let http_status = response.status();
     debug!(%url, status = %http_status, "Received HTTP response for status request.");
-    
+
     if http_status != StatusCode::OK {
-        return Err(format!(
-            "Status request failed with status {}",
-            http_status
-        ));
+        return Err(format!("Status request failed with status {http_status}"));
     }
-    
+
     // Get response body as text first for debugging
     let body_text = response.text().await.map_err(|err| {
         warn!(error = %err, %url, "Failed to read status response body.");
         format!("Failed to read status response body: {err}")
     })?;
-    
+
     debug!(%url, body = %body_text, "Status response body received.");
-    
+
     let status_response: StatusResponse = serde_json::from_str(&body_text).map_err(|err| {
         warn!(error = %err, %url, body = %body_text, "Failed to parse status response JSON.");
         format!("Failed to parse status response: {err}")
     })?;
-    
+
     debug!(
         %url,
         status = %status_response.status,

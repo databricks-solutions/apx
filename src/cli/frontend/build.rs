@@ -36,11 +36,11 @@ async fn run_inner(args: BuildArgs) -> Result<(), String> {
 /// If `print_status` is true, prints start/finish messages
 pub async fn run_build(app_dir: &Path, print_status: bool) -> Result<(), String> {
     let start_time = Instant::now();
-    
+
     if print_status {
         println!("📦 Starting frontend build...");
     }
-    
+
     let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "build")?;
     let bun_path = bun_binary_path()?;
 
@@ -64,26 +64,29 @@ pub async fn run_build(app_dir: &Path, print_status: bool) -> Result<(), String>
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        
+
         let mut error_msg = format!(
             "Frontend build failed with status {}",
             output.status.code().unwrap_or(1)
         );
-        
+
         if !stderr.is_empty() {
             error_msg.push_str(&format!("\n\nError output:\n{}", stderr.trim()));
         }
-        
+
         if !stdout.is_empty() && stderr.is_empty() {
             // If there's no stderr but there is stdout, it might contain error info
             error_msg.push_str(&format!("\n\nBuild output:\n{}", stdout.trim()));
         }
-        
+
         return Err(error_msg);
     }
 
     if print_status {
-        println!("✅ Frontend build finished in {}\n", format_elapsed_ms(start_time));
+        println!(
+            "✅ Frontend build finished in {}\n",
+            format_elapsed_ms(start_time)
+        );
     }
 
     Ok(())

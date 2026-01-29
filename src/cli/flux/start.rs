@@ -11,7 +11,7 @@ use crate::flux;
 pub struct StartArgs {}
 
 pub async fn run(_args: StartArgs) -> i32 {
-    run_cli_async(|| run_inner()).await
+    run_cli_async(run_inner).await
 }
 
 async fn run_inner() -> Result<(), String> {

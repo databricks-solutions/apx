@@ -38,7 +38,7 @@ impl Emit for TsLiteral {
         match self {
             TsLiteral::String(s) => {
                 let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-                format!("\"{}\"", escaped)
+                format!("\"{escaped}\"")
             }
             TsLiteral::Number(n) => n.to_string(),
             TsLiteral::Int(i) => i.to_string(),
@@ -60,18 +60,22 @@ impl Emit for TsType {
                 let inner_str = inner.emit();
                 // Wrap complex types in parentheses
                 if matches!(**inner, TsType::Union(_) | TsType::Intersection(_)) {
-                    format!("({})[]", inner_str)
+                    format!("({inner_str})[]")
                 } else {
-                    format!("{}[]", inner_str)
+                    format!("{inner_str}[]")
                 }
             }
-            TsType::Union(types) => types.iter().map(|t| t.emit()).collect::<Vec<_>>().join(" | "),
+            TsType::Union(types) => types
+                .iter()
+                .map(|t| t.emit())
+                .collect::<Vec<_>>()
+                .join(" | "),
             TsType::Intersection(types) => types
                 .iter()
                 .map(|t| {
                     let s = t.emit();
                     if matches!(t, TsType::Union(_)) {
-                        format!("({})", s)
+                        format!("({s})")
                     } else {
                         s
                     }
@@ -171,7 +175,11 @@ impl Emit for TsExpr {
                 format!("{}({})", callee.emit(), args_str)
             }
             TsExpr::Arrow { params, body } => {
-                let params_str = params.iter().map(|p| p.emit()).collect::<Vec<_>>().join(", ");
+                let params_str = params
+                    .iter()
+                    .map(|p| p.emit())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("({}) => {}", params_str, body.emit())
             }
             TsExpr::Object(props) => {
@@ -199,7 +207,7 @@ impl Emit for TsExpr {
                         TemplatePart::Dynamic(e) => format!("${{{}}}", e.emit()),
                     })
                     .collect();
-                format!("`{}`", content)
+                format!("`{content}`")
             }
             TsExpr::Await(expr) => {
                 format!("await {}", expr.emit())
@@ -225,14 +233,23 @@ impl Emit for TsExpr {
                 then_expr,
                 else_expr,
             } => {
-                format!("{} ? {} : {}", cond.emit(), then_expr.emit(), else_expr.emit())
+                format!(
+                    "{} ? {} : {}",
+                    cond.emit(),
+                    then_expr.emit(),
+                    else_expr.emit()
+                )
             }
             TsExpr::Index { object, index } => {
                 format!("{}[{}]", object.emit(), index.emit())
             }
             TsExpr::Array(items) => {
-                let items_str = items.iter().map(|i| i.emit()).collect::<Vec<_>>().join(", ");
-                format!("[{}]", items_str)
+                let items_str = items
+                    .iter()
+                    .map(|i| i.emit())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{items_str}]")
             }
             TsExpr::Cast { expr, ty } => {
                 format!("{} as {}", expr.emit(), ty.emit())
@@ -276,16 +293,31 @@ impl TsStmt {
     pub fn emit_indented(&self, indent: usize) -> String {
         let prefix = "  ".repeat(indent);
         match self {
-            TsStmt::VarDecl { kind, name, ty, init } => {
-                let ty_str = ty.as_ref().map(|t| format!(": {}", t.emit())).unwrap_or_default();
-                format!("{}{} {}{} = {};\n", prefix, kind.emit(), name, ty_str, init.emit())
+            TsStmt::VarDecl {
+                kind,
+                name,
+                ty,
+                init,
+            } => {
+                let ty_str = ty
+                    .as_ref()
+                    .map(|t| format!(": {}", t.emit()))
+                    .unwrap_or_default();
+                format!(
+                    "{}{} {}{} = {};\n",
+                    prefix,
+                    kind.emit(),
+                    name,
+                    ty_str,
+                    init.emit()
+                )
             }
             TsStmt::Expr(expr) => {
                 format!("{}{};\n", prefix, expr.emit())
             }
             TsStmt::Return(expr) => match expr {
                 Some(e) => format!("{}return {};\n", prefix, e.emit()),
-                None => format!("{}return;\n", prefix),
+                None => format!("{prefix}return;\n"),
             },
             TsStmt::If {
                 cond,
@@ -297,12 +329,12 @@ impl TsStmt {
                     output.push_str(&stmt.emit_indented(indent + 1));
                 }
                 if let Some(else_stmts) = else_body {
-                    output.push_str(&format!("{}}} else {{\n", prefix));
+                    output.push_str(&format!("{prefix}}} else {{\n"));
                     for stmt in else_stmts {
                         output.push_str(&stmt.emit_indented(indent + 1));
                     }
                 }
-                output.push_str(&format!("{}}}\n", prefix));
+                output.push_str(&format!("{prefix}}}\n"));
                 output
             }
             TsStmt::Throw(expr) => {
@@ -315,7 +347,7 @@ impl TsStmt {
                         if line.is_empty() {
                             "\n".to_string()
                         } else {
-                            format!("{}{}\n", prefix, line)
+                            format!("{prefix}{line}\n")
                         }
                     })
                     .collect()
@@ -360,7 +392,12 @@ impl Emit for TsFunction {
         };
 
         // Parameters
-        let params_str = self.params.iter().map(|p| p.emit()).collect::<Vec<_>>().join(", ");
+        let params_str = self
+            .params
+            .iter()
+            .map(|p| p.emit())
+            .collect::<Vec<_>>()
+            .join(", ");
 
         // Return type
         let return_type_str = self
@@ -423,9 +460,17 @@ impl Emit for ImportItem {
 
 impl Emit for TsImport {
     fn emit(&self) -> String {
-        let items_str = self.items.iter().map(|i| i.emit()).collect::<Vec<_>>().join(", ");
+        let items_str = self
+            .items
+            .iter()
+            .map(|i| i.emit())
+            .collect::<Vec<_>>()
+            .join(", ");
         let type_keyword = if self.type_only { "type " } else { "" };
-        format!("import {}{{ {} }} from \"{}\";\n", type_keyword, items_str, self.from)
+        format!(
+            "import {}{{ {} }} from \"{}\";\n",
+            type_keyword, items_str, self.from
+        )
     }
 }
 
@@ -467,6 +512,7 @@ impl Emit for TsModule {
 // =============================================================================
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -483,8 +529,11 @@ mod tests {
     #[test]
     fn test_emit_literal() {
         assert_eq!(TsLiteral::String("hello".into()).emit(), "\"hello\"");
-        assert_eq!(TsLiteral::String("say \"hi\"".into()).emit(), "\"say \\\"hi\\\"\"");
-        assert_eq!(TsLiteral::Number(3.14).emit(), "3.14");
+        assert_eq!(
+            TsLiteral::String("say \"hi\"".into()).emit(),
+            "\"say \\\"hi\\\"\""
+        );
+        assert_eq!(TsLiteral::Number(2.5).emit(), "2.5");
         assert_eq!(TsLiteral::Int(42).emit(), "42");
         assert_eq!(TsLiteral::Bool(true).emit(), "true");
         assert_eq!(TsLiteral::Null.emit(), "null");
@@ -571,19 +620,31 @@ mod tests {
     fn test_emit_import() {
         let import = TsImport {
             items: vec![
-                ImportItem { name: "useQuery".into(), alias: None },
-                ImportItem { name: "useMutation".into(), alias: None },
+                ImportItem {
+                    name: "useQuery".into(),
+                    alias: None,
+                },
+                ImportItem {
+                    name: "useMutation".into(),
+                    alias: None,
+                },
             ],
             from: "@tanstack/react-query".into(),
             type_only: false,
         };
-        assert_eq!(import.emit(), "import { useQuery, useMutation } from \"@tanstack/react-query\";\n");
+        assert_eq!(
+            import.emit(),
+            "import { useQuery, useMutation } from \"@tanstack/react-query\";\n"
+        );
     }
 
     #[test]
     fn test_emit_type_import() {
         let import = TsImport {
-            items: vec![ImportItem { name: "UseQueryOptions".into(), alias: None }],
+            items: vec![ImportItem {
+                name: "UseQueryOptions".into(),
+                alias: None,
+            }],
             from: "@tanstack/react-query".into(),
             type_only: true,
         };

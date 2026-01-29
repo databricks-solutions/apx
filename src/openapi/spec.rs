@@ -125,7 +125,6 @@ pub struct Schema {
     pub format: Option<String>,
 
     // --- Validation keywords (parsed but not directly emitted as types) ---
-
     /// Constant value - schema matches only this exact value.
     #[serde(rename = "const")]
     pub const_value: Option<serde_json::Value>,

@@ -12,6 +12,7 @@ mod spec;
 pub use emitter::generate;
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -119,32 +120,77 @@ mod tests {
         let ts_code = result.unwrap();
 
         // Print generated code for debugging
-        println!("=== GENERATED CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== GENERATED CODE ===\n{ts_code}\n=== END ===");
 
         // Verify imports
         assert!(ts_code.contains("import {"), "Missing imports");
         assert!(ts_code.contains("useQuery"), "Missing useQuery import");
-        assert!(ts_code.contains("useSuspenseQuery"), "Missing useSuspenseQuery import");
-        assert!(ts_code.contains("useMutation"), "Missing useMutation import");
+        assert!(
+            ts_code.contains("useSuspenseQuery"),
+            "Missing useSuspenseQuery import"
+        );
+        assert!(
+            ts_code.contains("useMutation"),
+            "Missing useMutation import"
+        );
 
         // Verify types are generated
-        assert!(ts_code.contains("export interface Item {"), "Missing Item interface");
-        assert!(ts_code.contains("export interface CreateItemInput {"), "Missing CreateItemInput interface");
-        assert!(ts_code.contains("export interface PaginatedItems {"), "Missing PaginatedItems interface");
-        assert!(ts_code.contains("export interface ErrorResponse {"), "Missing ErrorResponse interface");
+        assert!(
+            ts_code.contains("export interface Item {"),
+            "Missing Item interface"
+        );
+        assert!(
+            ts_code.contains("export interface CreateItemInput {"),
+            "Missing CreateItemInput interface"
+        );
+        assert!(
+            ts_code.contains("export interface PaginatedItems {"),
+            "Missing PaginatedItems interface"
+        );
+        assert!(
+            ts_code.contains("export interface ErrorResponse {"),
+            "Missing ErrorResponse interface"
+        );
 
         // Verify fetch functions
-        assert!(ts_code.contains("export const listItems = async"), "Missing listItems function");
-        assert!(ts_code.contains("export const createItem = async"), "Missing createItem function");
-        assert!(ts_code.contains("export const getItem = async"), "Missing getItem function");
-        assert!(ts_code.contains("export const deleteItem = async"), "Missing deleteItem function");
+        assert!(
+            ts_code.contains("export const listItems = async"),
+            "Missing listItems function"
+        );
+        assert!(
+            ts_code.contains("export const createItem = async"),
+            "Missing createItem function"
+        );
+        assert!(
+            ts_code.contains("export const getItem = async"),
+            "Missing getItem function"
+        );
+        assert!(
+            ts_code.contains("export const deleteItem = async"),
+            "Missing deleteItem function"
+        );
 
         // Verify hooks
-        assert!(ts_code.contains("export function useListItems"), "Missing useListItems hook");
-        assert!(ts_code.contains("export function useListItemsSuspense"), "Missing useListItemsSuspense hook");
-        assert!(ts_code.contains("export function useCreateItem"), "Missing useCreateItem hook");
-        assert!(ts_code.contains("export function useGetItem"), "Missing useGetItem hook");
-        assert!(ts_code.contains("export function useDeleteItem"), "Missing useDeleteItem hook");
+        assert!(
+            ts_code.contains("export function useListItems"),
+            "Missing useListItems hook"
+        );
+        assert!(
+            ts_code.contains("export function useListItemsSuspense"),
+            "Missing useListItemsSuspense hook"
+        );
+        assert!(
+            ts_code.contains("export function useCreateItem"),
+            "Missing useCreateItem hook"
+        );
+        assert!(
+            ts_code.contains("export function useGetItem"),
+            "Missing useGetItem hook"
+        );
+        assert!(
+            ts_code.contains("export function useDeleteItem"),
+            "Missing useDeleteItem hook"
+        );
 
         println!("Generated TypeScript code length: {} bytes", ts_code.len());
     }
@@ -182,7 +228,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== SPECIAL CHARS CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== SPECIAL CHARS CODE ===\n{ts_code}\n=== END ===");
 
         // Verify URN enum values are properly quoted
         assert!(
@@ -204,11 +250,13 @@ mod tests {
             "Property with dots should be quoted"
         );
         assert!(
-            ts_code.contains(r#""prop:with:colons"?"#) || ts_code.contains(r#""prop:with:colons":"#),
+            ts_code.contains(r#""prop:with:colons"?"#)
+                || ts_code.contains(r#""prop:with:colons":"#),
             "Property with colons should be quoted"
         );
         assert!(
-            ts_code.contains(r#""123startsWithNumber"?"#) || ts_code.contains(r#""123startsWithNumber":"#),
+            ts_code.contains(r#""123startsWithNumber"?"#)
+                || ts_code.contains(r#""123startsWithNumber":"#),
             "Property starting with number should be quoted"
         );
     }
@@ -256,10 +304,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!(
-            "=== GET-ONLY SPEC CODE ===\n{}\n=== END ===",
-            ts_code
-        );
+        println!("=== GET-ONLY SPEC CODE ===\n{ts_code}\n=== END ===");
 
         // Should have useQuery and useSuspenseQuery
         assert!(ts_code.contains("useQuery"), "Missing useQuery import");
@@ -326,13 +371,13 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!(
-            "=== MUTATION-ONLY SPEC CODE ===\n{}\n=== END ===",
-            ts_code
-        );
+        println!("=== MUTATION-ONLY SPEC CODE ===\n{ts_code}\n=== END ===");
 
         // Should have useMutation and UseMutationOptions
-        assert!(ts_code.contains("useMutation"), "Missing useMutation import");
+        assert!(
+            ts_code.contains("useMutation"),
+            "Missing useMutation import"
+        );
         assert!(
             ts_code.contains("UseMutationOptions"),
             "Missing UseMutationOptions import"
@@ -408,7 +453,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== ALLOF CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== ALLOF CODE ===\n{ts_code}\n=== END ===");
 
         // Verify BaseEntity is a regular interface
         assert!(
@@ -480,7 +525,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== DISCRIMINATOR CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== DISCRIMINATOR CODE ===\n{ts_code}\n=== END ===");
 
         // Verify Dog and Cat are regular interfaces
         assert!(
@@ -532,7 +577,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== INTEGER ENUM CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== INTEGER ENUM CODE ===\n{ts_code}\n=== END ===");
 
         // Verify HttpStatusCode enum with integer values
         assert!(
@@ -576,7 +621,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== MIXED ENUM CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== MIXED ENUM CODE ===\n{ts_code}\n=== END ===");
 
         // Verify MixedValue enum has various types
         assert!(
@@ -632,10 +677,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!(
-            "=== PROPS + ADDITIONAL CODE ===\n{}\n=== END ===",
-            ts_code
-        );
+        println!("=== PROPS + ADDITIONAL CODE ===\n{ts_code}\n=== END ===");
 
         // Verify ConfigWithDefaults has intersection type
         assert!(
@@ -705,7 +747,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== RECURSIVE SCHEMA CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== RECURSIVE SCHEMA CODE ===\n{ts_code}\n=== END ===");
 
         // Verify TreeNode interface exists
         assert!(
@@ -758,7 +800,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== CONST KEYWORD CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== CONST KEYWORD CODE ===\n{ts_code}\n=== END ===");
 
         // Verify const generates literal types
         assert!(
@@ -803,7 +845,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== NULLABLE 3.0 CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== NULLABLE 3.0 CODE ===\n{ts_code}\n=== END ===");
 
         // Note: The current implementation parses nullable but doesn't explicitly
         // emit | null for OpenAPI 3.0 style. This test documents current behavior.
@@ -849,7 +891,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== COMPLEX ANYOF CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== COMPLEX ANYOF CODE ===\n{ts_code}\n=== END ===");
 
         // Verify StringOrObject is a union
         assert!(
@@ -909,7 +951,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== 204+200 CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== 204+200 CODE ===\n{ts_code}\n=== END ===");
 
         // Should have runtime check for 204
         assert!(
@@ -961,7 +1003,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== 2XX WILDCARD CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== 2XX WILDCARD CODE ===\n{ts_code}\n=== END ===");
 
         // Should handle 2XX response
         assert!(
@@ -998,7 +1040,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== TEXT PLAIN CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== TEXT PLAIN CODE ===\n{ts_code}\n=== END ===");
 
         // Should use res.text() instead of res.json()
         assert!(
@@ -1044,7 +1086,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== BLOB CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== BLOB CODE ===\n{ts_code}\n=== END ===");
 
         // Should use res.blob() for binary content
         assert!(
@@ -1100,7 +1142,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== FORMDATA CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== FORMDATA CODE ===\n{ts_code}\n=== END ===");
 
         // Should NOT set Content-Type (browser sets it with boundary for FormData)
         assert!(
@@ -1153,7 +1195,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== URLENCODED CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== URLENCODED CODE ===\n{ts_code}\n=== END ===");
 
         // Should use URLSearchParams
         assert!(
@@ -1195,7 +1237,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== HEADER PARAMS CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== HEADER PARAMS CODE ===\n{ts_code}\n=== END ===");
 
         // Should include header params in interface (with valid TS names)
         assert!(
@@ -1236,14 +1278,12 @@ mod tests {
         // Should return an error for duplicate param names
         assert!(
             result.is_err(),
-            "Should fail with duplicate param names, got: {:?}",
-            result
+            "Should fail with duplicate param names, got: {result:?}"
         );
         let err = result.unwrap_err();
         assert!(
             err.contains("duplicate") || err.contains("Duplicate"),
-            "Error should mention duplicate: {}",
-            err
+            "Error should mention duplicate: {err}"
         );
     }
 
@@ -1278,14 +1318,12 @@ mod tests {
         // Should return an error for duplicate operationIds
         assert!(
             result.is_err(),
-            "Should fail with duplicate operationId, got: {:?}",
-            result
+            "Should fail with duplicate operationId, got: {result:?}"
         );
         let err = result.unwrap_err();
         assert!(
             err.contains("getItems") || err.contains("duplicate") || err.contains("collision"),
-            "Error should mention the duplicate operationId: {}",
-            err
+            "Error should mention the duplicate operationId: {err}"
         );
     }
 
@@ -1316,7 +1354,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== COOKIE PARAMS CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== COOKIE PARAMS CODE ===\n{ts_code}\n=== END ===");
 
         // Should NOT include cookie param in interface
         assert!(
@@ -1373,7 +1411,7 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== OPERATION ID SANITIZATION ===\n{}\n=== END ===", ts_code);
+        println!("=== OPERATION ID SANITIZATION ===\n{ts_code}\n=== END ===");
 
         // "list-items" should become "listItems" (camelCase)
         assert!(
@@ -1445,12 +1483,12 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== BRACKET NOTATION CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== BRACKET NOTATION CODE ===\n{ts_code}\n=== END ===");
 
         // Path param "item-id" should use bracket notation in URL template
         assert!(
             ts_code.contains(r#"params["item-id"]"#),
-            "Path param item-id should use bracket notation: {}", ts_code
+            "Path param item-id should use bracket notation: {ts_code}"
         );
         assert!(
             !ts_code.contains("params.item-id"),
@@ -1460,7 +1498,7 @@ mod tests {
         // Query param "sort-by" should also use bracket notation
         assert!(
             ts_code.contains(r#"params["sort-by"]"#) || ts_code.contains(r#"params?.["sort-by"]"#),
-            "Query param sort-by should use bracket notation: {}", ts_code
+            "Query param sort-by should use bracket notation: {ts_code}"
         );
     }
 
@@ -1488,13 +1526,13 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== PATH MISMATCH CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== PATH MISMATCH CODE ===\n{ts_code}\n=== END ===");
 
         // The generated code should use the param name from the spec (itemId),
         // NOT the path template placeholder (item_id)
         assert!(
             ts_code.contains("params.itemId") || ts_code.contains(r#"params["itemId"]"#),
-            "Should use param name 'itemId' not path placeholder 'item_id': {}", ts_code
+            "Should use param name 'itemId' not path placeholder 'item_id': {ts_code}"
         );
         assert!(
             !ts_code.contains("params.item_id"),
@@ -1527,12 +1565,12 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== ARRAY PARAMS CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== ARRAY PARAMS CODE ===\n{ts_code}\n=== END ===");
 
         // Should use forEach/for loop with append() for arrays, not String()
         assert!(
             ts_code.contains(".forEach") || ts_code.contains("for (") || ts_code.contains("for("),
-            "Array params should use forEach or for loop with append: {}", ts_code
+            "Array params should use forEach or for loop with append: {ts_code}"
         );
         assert!(
             !ts_code.contains("String(params") || ts_code.contains(".forEach"),
@@ -1564,12 +1602,12 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== NULL PARAMS CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== NULL PARAMS CODE ===\n{ts_code}\n=== END ===");
 
         // Should use != null (not !== undefined) to exclude both null and undefined
         assert!(
             ts_code.contains("!= null"),
-            "Should use != null to exclude null and undefined: {}", ts_code
+            "Should use != null to exclude null and undefined: {ts_code}"
         );
         assert!(
             !ts_code.contains("!== undefined") || ts_code.contains("!= null"),
@@ -1601,12 +1639,12 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== RELATIVE URL CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== RELATIVE URL CODE ===\n{ts_code}\n=== END ===");
 
         // Should NOT use window.location.origin - relative URLs work fine
         assert!(
             !ts_code.contains("window.location.origin"),
-            "Should NOT use window.location.origin: {}", ts_code
+            "Should NOT use window.location.origin: {ts_code}"
         );
     }
 
@@ -1631,24 +1669,25 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== API ERROR CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== API ERROR CODE ===\n{ts_code}\n=== END ===");
 
         // Should have ApiError class
         assert!(
             ts_code.contains("class ApiError") || ts_code.contains("ApiError"),
-            "Should emit ApiError class: {}", ts_code
+            "Should emit ApiError class: {ts_code}"
         );
 
         // ApiError should have status property
         assert!(
-            ts_code.contains("status") && (ts_code.contains("class ApiError") || ts_code.contains("throw new ApiError")),
-            "ApiError should include status: {}", ts_code
+            ts_code.contains("status")
+                && (ts_code.contains("class ApiError") || ts_code.contains("throw new ApiError")),
+            "ApiError should include status: {ts_code}"
         );
 
         // Should use ApiError instead of generic Error
         assert!(
             ts_code.contains("throw new ApiError") || !ts_code.contains("throw new Error"),
-            "Should throw ApiError instead of generic Error: {}", ts_code
+            "Should throw ApiError instead of generic Error: {ts_code}"
         );
     }
 
@@ -1678,13 +1717,14 @@ mod tests {
         assert!(result.is_ok(), "Generation failed: {:?}", result.err());
 
         let ts_code = result.unwrap();
-        println!("=== HOOK ERROR TYPE CODE ===\n{}\n=== END ===", ts_code);
+        println!("=== HOOK ERROR TYPE CODE ===\n{ts_code}\n=== END ===");
 
         // Hook options should reference ApiError, not just Error
         // Check for UseQueryOptions<..., ApiError, ...> or UseMutationOptions<..., ApiError, ...>
         assert!(
-            ts_code.contains("ApiError") && (ts_code.contains("UseQueryOptions") || ts_code.contains("UseMutationOptions")),
-            "Hooks should use ApiError type in options: {}", ts_code
+            ts_code.contains("ApiError")
+                && (ts_code.contains("UseQueryOptions") || ts_code.contains("UseMutationOptions")),
+            "Hooks should use ApiError type in options: {ts_code}"
         );
     }
 }

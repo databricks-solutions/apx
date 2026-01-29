@@ -77,7 +77,12 @@ impl DotenvFile {
 
         let mut updated = false;
         for line in &mut self.lines {
-            if let DotenvLine::Variable { key: existing, value: existing_value, raw } = line {
+            if let DotenvLine::Variable {
+                key: existing,
+                value: existing_value,
+                raw,
+            } = line
+            {
                 if existing == key {
                     *existing_value = value.to_string();
                     *raw = format!("{key}={value}");
@@ -155,8 +160,7 @@ fn parse_line(line: &str) -> Result<DotenvLine, String> {
 
     let before = export_stripped[..eq_index].chars().last();
     let after = export_stripped[eq_index + 1..].chars().next();
-    if before.map_or(false, |ch| ch.is_whitespace()) || after.map_or(false, |ch| ch.is_whitespace())
-    {
+    if before.is_some_and(|ch| ch.is_whitespace()) || after.is_some_and(|ch| ch.is_whitespace()) {
         return Err("Whitespace around '=' is not allowed".to_string());
     }
 
@@ -167,7 +171,10 @@ fn parse_line(line: &str) -> Result<DotenvLine, String> {
 
     let mut value = export_stripped[eq_index + 1..].to_string();
     if value.starts_with('"') || value.starts_with('\'') {
-        let quote = value.chars().next().unwrap();
+        let quote = match value.chars().next() {
+            Some(q) => q,
+            None => return Err("Invalid empty quoted value".to_string()),
+        };
         if !value.ends_with(quote) || value.len() == 1 {
             return Err("Invalid quoted value".to_string());
         }

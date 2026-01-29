@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use biome_css_parser::{parse_css, CssParserOptions};
+use biome_css_parser::{CssParserOptions, parse_css};
 use biome_css_syntax::*;
 use biome_rowan::AstNode;
 
@@ -27,12 +27,10 @@ impl std::error::Error for CssUpdateError {}
 type Result<T> = std::result::Result<T, CssUpdateError>;
 
 /// High-level mutations requested by registry items.
+#[allow(clippy::enum_variant_names)]
 pub enum CssMutation {
     /// Add a raw at-rule block (e.g. `@layer base`, `@keyframes foo`)
-    AddCssBlock {
-        at_rule: String,
-        body: String,
-    },
+    AddCssBlock { at_rule: String, body: String },
 
     /// Add CSS variables to a selector (`:root`, `.dark`)
     AddCssVars {
@@ -41,9 +39,7 @@ pub enum CssMutation {
     },
 
     /// Add mappings inside `@theme inline`
-    AddThemeMappings {
-        vars: Vec<(String, String)>,
-    },
+    AddThemeMappings { vars: Vec<(String, String)> },
 }
 
 /// Append-only CSS updater.
@@ -150,7 +146,7 @@ impl CssUpdater {
     // ------------------------------------------------------------
 
     fn append_css_block(&mut self, at_rule: &str, body: &str) {
-        self.source.push_str("\n");
+        self.source.push('\n');
         self.source.push_str(at_rule);
         self.source.push_str(" {\n");
         self.source.push_str(body);
@@ -182,7 +178,7 @@ impl CssUpdater {
             return false;
         }
 
-        self.source.push_str("\n");
+        self.source.push('\n');
         self.source.push_str(selector);
         self.source.push_str(" {\n");
         self.source.push_str(&lines);

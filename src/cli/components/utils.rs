@@ -14,7 +14,10 @@ use tracing::trace;
 pub fn strip_jsonc_comments(input: &str) -> String {
     use tracing::debug;
 
-    debug!(input_length = input.len(), "Starting JSONC comment stripping");
+    debug!(
+        input_length = input.len(),
+        "Starting JSONC comment stripping"
+    );
 
     let mut out = String::with_capacity(input.len());
 
@@ -42,11 +45,7 @@ pub fn strip_jsonc_comments(input: &str) -> String {
 
         if in_line_comment {
             if c == '\n' {
-                trace!(
-                    line = line_num,
-                    col = col_num,
-                    "Ending line comment"
-                );
+                trace!(line = line_num, col = col_num, "Ending line comment");
                 in_line_comment = false;
                 out.push('\n');
             }
@@ -56,11 +55,7 @@ pub fn strip_jsonc_comments(input: &str) -> String {
         if in_block_comment {
             if c == '*' && matches!(chars.peek(), Some('/')) {
                 chars.next(); // consume '/'
-                trace!(
-                    line = line_num,
-                    col = col_num,
-                    "Ending block comment"
-                );
+                trace!(line = line_num, col = col_num, "Ending block comment");
                 in_block_comment = false;
             } else if c == '\n' {
                 // preserve newlines
@@ -82,48 +77,38 @@ pub fn strip_jsonc_comments(input: &str) -> String {
                 out.push(c);
             }
 
-            '/' if !in_string => {
-                match chars.peek() {
-                    Some('/') => {
-                        chars.next();
-                        line_comments += 1;
-                        comments_found += 1;
-                        trace!(
-                            line = line_num,
-                            col = col_num,
-                            "Found line comment (//)"
-                        );
-                        in_line_comment = true;
-                    }
-                    Some('*') => {
-                        chars.next();
-                        block_comments += 1;
-                        comments_found += 1;
-                        trace!(
-                            line = line_num,
-                            col = col_num,
-                            "Found block comment start (/*)"
-                        );
-                        in_block_comment = true;
-                    }
-                    _ => {
-                        trace!(
-                            line = line_num,
-                            col = col_num,
-                            next_char = ?chars.peek(),
-                            "Forward slash not part of comment, preserving"
-                        );
-                        out.push(c);
-                    }
+            '/' if !in_string => match chars.peek() {
+                Some('/') => {
+                    chars.next();
+                    line_comments += 1;
+                    comments_found += 1;
+                    trace!(line = line_num, col = col_num, "Found line comment (//)");
+                    in_line_comment = true;
                 }
-            }
+                Some('*') => {
+                    chars.next();
+                    block_comments += 1;
+                    comments_found += 1;
+                    trace!(
+                        line = line_num,
+                        col = col_num,
+                        "Found block comment start (/*)"
+                    );
+                    in_block_comment = true;
+                }
+                _ => {
+                    trace!(
+                        line = line_num,
+                        col = col_num,
+                        next_char = ?chars.peek(),
+                        "Forward slash not part of comment, preserving"
+                    );
+                    out.push(c);
+                }
+            },
 
             '\\' if in_string => {
-                trace!(
-                    line = line_num,
-                    col = col_num,
-                    "Escape character in string"
-                );
+                trace!(line = line_num, col = col_num, "Escape character in string");
                 out.push(c);
             }
 

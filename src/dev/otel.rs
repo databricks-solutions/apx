@@ -68,7 +68,13 @@ pub fn build_otlp_log_payload_from_ms(
     app_dir: &Path,
 ) -> serde_json::Value {
     let timestamp_ns = timestamp_ms * 1_000_000;
-    build_otlp_log_payload(message, level, timestamp_ns, service_name, &app_dir.display().to_string())
+    build_otlp_log_payload(
+        message,
+        level,
+        timestamp_ns,
+        service_name,
+        &app_dir.display().to_string(),
+    )
 }
 
 /// Forward a log line to flux via OTLP HTTP.
@@ -81,7 +87,7 @@ pub async fn forward_log_to_flux(message: &str, level: &str, service_name: &str,
 
     let timestamp_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
     let payload = build_otlp_log_payload(message, level, timestamp_ns, service_name, app_path);
-    let endpoint = format!("http://127.0.0.1:{}/v1/logs", FLUX_PORT);
+    let endpoint = format!("http://127.0.0.1:{FLUX_PORT}/v1/logs");
 
     // Use a simple HTTP client - fire and forget
     let client = match reqwest::Client::builder()

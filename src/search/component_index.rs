@@ -1,15 +1,15 @@
 //! Component registry indexing and search using LanceDB with Full-Text Search.
 
-use lancedb::query::{ExecutableQuery, QueryBase};
-use lancedb::index::scalar::FullTextSearchQuery;
-use std::path::PathBuf;
-use arrow::array::{StringArray, ArrayRef};
+use arrow::array::{ArrayRef, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::{RecordBatch, RecordBatchIterator};
 use futures_util::StreamExt;
+use lancedb::index::scalar::FullTextSearchQuery;
+use lancedb::query::{ExecutableQuery, QueryBase};
+use std::path::PathBuf;
 
-use crate::cli::components::get_all_registry_indexes;
 use super::common;
+use crate::cli::components::get_all_registry_indexes;
 
 const SCHEMA_VERSION: u32 = 1; // v1: Pure FTS (no embeddings)
 
@@ -49,18 +49,15 @@ fn records_to_batch(records: Vec<ComponentRecord>) -> Result<RecordBatch, String
         Field::new("text", DataType::Utf8, false),
     ]);
 
-    let id_array = StringArray::from(
-        records.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
-    );
-    let name_array = StringArray::from(
-        records.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
-    );
+    let id_array = StringArray::from(records.iter().map(|r| r.id.as_str()).collect::<Vec<_>>());
+    let name_array = StringArray::from(records.iter().map(|r| r.name.as_str()).collect::<Vec<_>>());
     let registry_array = StringArray::from(
-        records.iter().map(|r| r.registry.as_str()).collect::<Vec<_>>()
+        records
+            .iter()
+            .map(|r| r.registry.as_str())
+            .collect::<Vec<_>>(),
     );
-    let text_array = StringArray::from(
-        records.iter().map(|r| r.text.as_str()).collect::<Vec<_>>()
-    );
+    let text_array = StringArray::from(records.iter().map(|r| r.text.as_str()).collect::<Vec<_>>());
 
     RecordBatch::try_new(
         std::sync::Arc::new(schema),
@@ -82,14 +79,14 @@ impl ComponentIndex {
 
     /// Get the default index path (~/.apx/db/)
     pub fn default_path() -> Result<PathBuf, String> {
-        let home = dirs::home_dir()
-            .ok_or_else(|| "Could not determine home directory".to_string())?;
+        let home =
+            dirs::home_dir().ok_or_else(|| "Could not determine home directory".to_string())?;
         Ok(home.join(".apx").join("db"))
     }
 
     /// Get table name with schema version
     pub fn table_name(base_name: &str) -> String {
-        format!("{}_fts_v{}", base_name, SCHEMA_VERSION)
+        format!("{base_name}_fts_v{SCHEMA_VERSION}")
     }
 
     /// Check if the index table exists (internal)
@@ -110,8 +107,8 @@ impl ComponentIndex {
             .table_names()
             .execute()
             .await
-            .map_err(|e| format!("Failed to list tables: {}", e))?;
-        
+            .map_err(|e| format!("Failed to list tables: {e}"))?;
+
         if !table_names.contains(&table_name.to_string()) {
             tracing::debug!("validate_index: Table '{}' does not exist", table_name);
             return Ok(false);
@@ -122,7 +119,7 @@ impl ComponentIndex {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!("Failed to open table {}: {}", table_name, e);
-                return Err(format!("Index corrupted: {}", e));
+                return Err(format!("Index corrupted: {e}"));
             }
         };
 
@@ -132,7 +129,7 @@ impl ComponentIndex {
             .limit(1)
             .execute()
             .await
-            .map_err(|e| format!("Index validation failed: {}", e))?;
+            .map_err(|e| format!("Index validation failed: {e}"))?;
 
         // Try to read at least one batch to verify data accessibility
         match stream.next().await {
@@ -140,7 +137,7 @@ impl ComponentIndex {
                 tracing::debug!("validate_index: Table '{}' is valid", table_name);
                 Ok(true)
             }
-            Some(Err(e)) => Err(format!("Index data corrupted: {}", e)),
+            Some(Err(e)) => Err(format!("Index data corrupted: {e}")),
             None => {
                 tracing::debug!("validate_index: Table '{}' is valid (empty)", table_name);
                 Ok(true) // Empty table is valid
@@ -155,7 +152,7 @@ impl ComponentIndex {
 
         // Load all registry indexes
         let all_indexes = get_all_registry_indexes()
-            .map_err(|e| format!("Failed to load registry indexes: {}", e))?;
+            .map_err(|e| format!("Failed to load registry indexes: {e}"))?;
 
         if all_indexes.is_empty() {
             tracing::warn!("No registry indexes found. Index will be empty.");
@@ -172,17 +169,26 @@ impl ComponentIndex {
                 let (id, registry) = if is_default {
                     (item.name.clone(), String::new())
                 } else {
-                    (format!("@{}/{}", registry_name, item.name), registry_name.clone())
+                    (
+                        format!("@{}/{}", registry_name, item.name),
+                        registry_name.clone(),
+                    )
                 };
 
                 // Enrich text for better FTS
                 let text = match &item.description {
-                    Some(desc) if !desc.is_empty() => 
-                        format!("{} {} ui component shadcn", item.name, desc),
+                    Some(desc) if !desc.is_empty() => {
+                        format!("{} {} ui component shadcn", item.name, desc)
+                    }
                     _ => format!("{} ui component shadcn", item.name),
                 };
 
-                records.push(ComponentRecord { id, name: item.name, registry, text });
+                records.push(ComponentRecord {
+                    id,
+                    name: item.name,
+                    registry,
+                    text,
+                });
             }
         }
 
@@ -198,8 +204,8 @@ impl ComponentIndex {
             .table_names()
             .execute()
             .await
-            .map_err(|e| format!("Failed to list tables: {}", e))?;
-        
+            .map_err(|e| format!("Failed to list tables: {e}"))?;
+
         if table_names.contains(&table_name.to_string()) {
             tracing::debug!("Dropping existing table: {}", table_name);
             conn.drop_table(table_name, &[])
@@ -211,17 +217,19 @@ impl ComponentIndex {
         let schema = batch.schema();
         let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
 
-        let table = conn.create_table(table_name, Box::new(batches))
+        let table = conn
+            .create_table(table_name, Box::new(batches))
             .execute()
             .await
             .map_err(|e| format!("Failed to create table: {e}"))?;
 
         // Create FTS index on text column
         tracing::info!("Creating FTS index on text column");
-        table.create_index(
-            &["text"],
-            lancedb::index::Index::FTS(lancedb::index::scalar::FtsIndexBuilder::default())
-        )
+        table
+            .create_index(
+                &["text"],
+                lancedb::index::Index::FTS(lancedb::index::scalar::FtsIndexBuilder::default()),
+            )
             .execute()
             .await
             .map_err(|e| format!("Failed to create FTS index: {e}"))?;
@@ -247,17 +255,18 @@ impl ComponentIndex {
             .table_names()
             .execute()
             .await
-            .map_err(|e| format!("Failed to list tables: {}", e))?;
-        
+            .map_err(|e| format!("Failed to list tables: {e}"))?;
+
         if !table_names.contains(&table_name.to_string()) {
             return Err("Index not built. Please ensure components are indexed.".to_string());
         }
 
         // Open table
-        let table = conn.open_table(table_name)
+        let table = conn
+            .open_table(table_name)
             .execute()
             .await
-            .map_err(|e| format!("Failed to open table: {}", e))?;
+            .map_err(|e| format!("Failed to open table: {e}"))?;
 
         // Extract query terms for name matching (lowercase, split on whitespace)
         let query_lower = query.to_lowercase();
@@ -273,13 +282,13 @@ impl ComponentIndex {
             .limit(fts_limit)
             .execute()
             .await
-            .map_err(|e| format!("Failed to execute FTS search: {}", e))?;
+            .map_err(|e| format!("Failed to execute FTS search: {e}"))?;
 
         let mut results = Vec::new();
         let mut rank = 0;
 
         while let Some(batch_result) = fts_results.next().await {
-            let batch = batch_result.map_err(|e| format!("Failed to read FTS batch: {}", e))?;
+            let batch = batch_result.map_err(|e| format!("Failed to read FTS batch: {e}"))?;
 
             let id_array = batch
                 .column_by_name("id")
@@ -318,7 +327,10 @@ impl ComponentIndex {
                 let name_match_boost = if query_terms.iter().any(|term| *term == name_lower) {
                     // Exact name match (e.g., query contains "button" and name is "button")
                     2.0
-                } else if query_terms.iter().any(|term| name_lower.contains(term) || term.contains(&name_lower)) {
+                } else if query_terms
+                    .iter()
+                    .any(|term| name_lower.contains(term) || term.contains(&name_lower))
+                {
                     // Partial name match
                     0.3
                 } else {
@@ -338,15 +350,16 @@ impl ComponentIndex {
         }
 
         // Re-sort by score after applying boosts
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Truncate to requested limit
         results.truncate(limit);
 
-        tracing::info!(
-            "FTS search for '{}': {} results", 
-            query, results.len()
-        );
+        tracing::info!("FTS search for '{}': {} results", query, results.len());
 
         Ok(results)
     }

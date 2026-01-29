@@ -21,6 +21,9 @@ jobs:
           toolchain: "1.88.0"
           components: rustfmt, clippy
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
       # Cache Cargo dependencies aggressively
       - name: Cache Cargo registry
         uses: actions/cache@v5
@@ -50,10 +53,6 @@ jobs:
           path: .protoc
           key: protoc-${{ runner.os }}-${{ runner.arch }}-${{ env.PROTOC_VERSION }}
 
-      - name: Install uv
-        if: steps.cache-protoc.outputs.cache-hit != 'true'
-        uses: astral-sh/setup-uv@v7
-
       - name: Download Protoc
         if: steps.cache-protoc.outputs.cache-hit != 'true'
         run: uv run --script scripts/download_protoc.py --version ${{ env.PROTOC_VERSION }} --output-dir .protoc
@@ -62,6 +61,18 @@ jobs:
         run: |
           echo "${{ github.workspace }}/.protoc/bin" >> $GITHUB_PATH
           echo "PROTOC=${{ github.workspace }}/.protoc/bin/protoc" >> $GITHUB_ENV
+
+      # Download Binaries (Bun)
+      - name: Cache Bun binaries
+        id: cache-bun-binaries
+        uses: actions/cache@v5
+        with:
+          path: .bins/bun
+          key: bun-binaries-${{ hashFiles('scripts/get_binaries.py') }}
+
+      - name: Download binaries
+        if: steps.cache-bun-binaries.outputs.cache-hit != 'true'
+        run: uv run --script scripts/get_binaries.py
 
       # Run checks
       - name: Cargo check

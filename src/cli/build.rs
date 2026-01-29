@@ -69,7 +69,7 @@ async fn run_inner(args: BuildArgs) -> Result<(), String> {
 
     let wheel_file = find_wheel_file(&build_dir)?;
     let requirements_path = build_dir.join("requirements.txt");
-    fs::write(&requirements_path, format!("{}\n", wheel_file))
+    fs::write(&requirements_path, format!("{wheel_file}\n"))
         .map_err(|err| format!("Failed to write requirements.txt: {err}"))?;
 
     println!("Build completed");
@@ -120,8 +120,8 @@ fn copy_app_config_files(app_path: &Path, build_dir: &Path) -> Result<(), String
 
 fn find_wheel_file(build_dir: &Path) -> Result<String, String> {
     let mut wheel_files = Vec::new();
-    for entry in fs::read_dir(build_dir)
-        .map_err(|err| format!("Failed to read build directory: {err}"))?
+    for entry in
+        fs::read_dir(build_dir).map_err(|err| format!("Failed to read build directory: {err}"))?
     {
         let entry = entry.map_err(|err| format!("Failed to read build entry: {err}"))?;
         let path = entry.path();
@@ -151,16 +151,13 @@ async fn get_base_version(app_path: &Path) -> String {
         .output()
         .await;
 
-    match output {
-        Ok(result) => {
-            if result.status.success() {
-                let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
-                if !stdout.is_empty() {
-                    return stdout;
-                }
+    if let Ok(result) = output {
+        if result.status.success() {
+            let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
+            if !stdout.is_empty() {
+                return stdout;
             }
         }
-        Err(_) => {}
     }
 
     DEFAULT_FALLBACK_VERSION.to_string()

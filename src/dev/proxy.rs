@@ -1,20 +1,20 @@
-use axum::body::{to_bytes, Body};
+use axum::Router;
+use axum::body::{Body, to_bytes};
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequestParts, State};
-use axum::http::{header, HeaderMap, Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use axum::Router;
 use futures_util::SinkExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::select;
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
-use tokio_tungstenite::tungstenite::http::Request as WsRequest;
-use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::protocol::CloseFrame as TungsteniteCloseFrame;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+use tokio_tungstenite::tungstenite::http::Request as WsRequest;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame as TungsteniteCloseFrame;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tracing::{debug, info, warn};
 
 use crate::interop::{get_forwarded_user_header, get_token};
@@ -91,7 +91,7 @@ impl TokenManager {
             fetched_at: RwLock::new(Instant::now()),
         }
     }
-    
+
     pub async fn get_token_refreshing_if_needed(&self) -> Option<String> {
         // Check if token needs refresh
         let fetched_at = *self.fetched_at.read().await;
@@ -99,20 +99,20 @@ impl TokenManager {
             // Try to refresh, but don't fail if it doesn't work
             let _ = self.refresh_token().await;
         }
-        
+
         self.token.read().await.clone()
     }
-    
+
     async fn refresh_token(&self) -> Result<(), String> {
         debug!("Refreshing OAuth access token");
         let new_token = get_token()?;
-        
+
         let mut token = self.token.write().await;
         let mut fetched_at = self.fetched_at.write().await;
-        
+
         *token = Some(new_token);
         *fetched_at = Instant::now();
-        
+
         debug!("OAuth access token refreshed successfully");
         Ok(())
     }
@@ -182,7 +182,10 @@ pub fn ui_router(frontend_port: u16, dev_token: &str) -> Result<Router, String> 
 
 /// Creates the API utilities proxy router for FastAPI docs and OpenAPI schema
 /// Routes: /docs, /redoc, /openapi.json - proxied directly to backend without /api prefix
-pub fn api_utils_router(backend_port: u16, token_manager: Arc<TokenManager>) -> Result<Router, String> {
+pub fn api_utils_router(
+    backend_port: u16,
+    token_manager: Arc<TokenManager>,
+) -> Result<Router, String> {
     let forwarded_user_header = match get_forwarded_user_header() {
         Ok(value) => Some(value),
         Err(err) => {
@@ -231,7 +234,10 @@ async fn api_proxy_handler(State(state): State<ApiProxyState>, req: Request<Body
     .await
 }
 
-async fn api_utils_proxy_handler(State(state): State<ApiProxyState>, req: Request<Body>) -> Response {
+async fn api_utils_proxy_handler(
+    State(state): State<ApiProxyState>,
+    req: Request<Body>,
+) -> Response {
     // Pass through path directly without /api prefix (for /docs, /redoc, /openapi.json)
     let path_and_query = req
         .uri()
@@ -277,6 +283,7 @@ async fn ui_proxy_handler(State(state): State<UiProxyState>, req: Request<Body>)
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn proxy_request(
     req: Request<Body>,
     client: reqwest::Client,
@@ -313,6 +320,7 @@ async fn proxy_request(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn proxy_http(
     req: Request<Body>,
     client: reqwest::Client,
@@ -331,12 +339,7 @@ async fn proxy_http(
     let start = Instant::now();
 
     if should_log {
-        info!(
-            "~> {} {} {}",
-            target_name,
-            method,
-            path_and_query,
-        );
+        info!("~> {} {} {}", target_name, method, path_and_query,);
     }
 
     let url = format!("http://{host}:{target_port}{path_and_query}");
@@ -378,11 +381,7 @@ async fn proxy_http(
             // Always log proxy failures to help debug connectivity issues
             info!(
                 "<~ {} {} {} 502 [{}ms] (connection failed: {})",
-                target_name,
-                method,
-                path_and_query,
-                elapsed,
-                err
+                target_name, method, path_and_query, elapsed, err
             );
             return StatusCode::BAD_GATEWAY.into_response();
         }
@@ -503,9 +502,7 @@ fn axum_to_tungstenite(message: Message) -> TungsteniteMessage {
 
 fn tungstenite_to_axum(message: TungsteniteMessage) -> Option<Message> {
     match message {
-        TungsteniteMessage::Text(text) => {
-            Some(Message::Text(Utf8Bytes::from(text.to_string())))
-        }
+        TungsteniteMessage::Text(text) => Some(Message::Text(Utf8Bytes::from(text.to_string()))),
         TungsteniteMessage::Binary(binary) => Some(Message::Binary(binary)),
         TungsteniteMessage::Ping(ping) => Some(Message::Ping(ping)),
         TungsteniteMessage::Pong(pong) => Some(Message::Pong(pong)),
@@ -527,8 +524,7 @@ fn is_websocket_request(headers: &HeaderMap) -> bool {
         .get(header::UPGRADE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    connection.to_ascii_lowercase().contains("upgrade")
-        && upgrade.eq_ignore_ascii_case("websocket")
+    connection.to_ascii_lowercase().contains("upgrade") && upgrade.eq_ignore_ascii_case("websocket")
 }
 
 fn filter_headers(headers: HeaderMap) -> HeaderMap {

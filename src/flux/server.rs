@@ -35,11 +35,11 @@ struct AppState {
 pub async fn run_server() -> Result<(), String> {
     // Log startup
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
-    eprintln!("[{}] Flux daemon starting...", now);
+    eprintln!("[{now}] Flux daemon starting...");
 
     // Open storage
     let storage = Storage::open()?;
-    eprintln!("[{}] Storage initialized", now);
+    eprintln!("[{now}] Storage initialized");
 
     // Start cleanup scheduler as a background task
     let storage_for_cleanup = storage.clone();
@@ -92,16 +92,16 @@ async fn run_http_server(storage: Storage) -> Result<(), String> {
         .route("/health", get(health_check))
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{}", FLUX_PORT);
+    let addr = format!("0.0.0.0:{FLUX_PORT}");
     info!("Starting flux OTLP receiver on {}", addr);
 
     let listener = TcpListener::bind(&addr)
         .await
-        .map_err(|e| format!("Failed to bind to {}: {}", addr, e))?;
+        .map_err(|e| format!("Failed to bind to {addr}: {e}"))?;
 
     axum::serve(listener, app)
         .await
-        .map_err(|e| format!("Server error: {}", e))?;
+        .map_err(|e| format!("Server error: {e}"))?;
 
     Ok(())
 }
@@ -162,7 +162,7 @@ async fn handle_logs(
 /// Parse OTLP JSON logs.
 fn parse_json_logs(body: &[u8]) -> Result<Vec<LogRecord>, String> {
     let json: serde_json::Value =
-        serde_json::from_slice(body).map_err(|e| format!("Invalid JSON: {}", e))?;
+        serde_json::from_slice(body).map_err(|e| format!("Invalid JSON: {e}"))?;
 
     let mut records = Vec::new();
     let empty_vec: Vec<serde_json::Value> = vec![];
@@ -266,7 +266,7 @@ fn parse_json_logs(body: &[u8]) -> Result<Vec<LogRecord>, String> {
 /// Parse OTLP Protobuf logs.
 fn parse_protobuf_logs(body: &[u8]) -> Result<Vec<LogRecord>, String> {
     let request = ExportLogsServiceRequest::decode(body)
-        .map_err(|e| format!("Failed to decode protobuf: {}", e))?;
+        .map_err(|e| format!("Failed to decode protobuf: {e}"))?;
 
     let mut records = Vec::new();
 
@@ -291,7 +291,7 @@ fn parse_protobuf_logs(body: &[u8]) -> Result<Vec<LogRecord>, String> {
             resource_attrs_json = Some(serde_json::to_string(&attrs).unwrap_or_default());
 
             for kv in &resource.attributes {
-                let value = kv.value.as_ref().and_then(|v| any_value_to_string(v));
+                let value = kv.value.as_ref().and_then(any_value_to_string);
                 match kv.key.as_str() {
                     "service.name" => service_name = value,
                     "apx.app_path" => app_path = value,
@@ -318,22 +318,21 @@ fn parse_protobuf_logs(body: &[u8]) -> Result<Vec<LogRecord>, String> {
                     Some(record.severity_text.clone())
                 };
 
-                let body = record.body.as_ref().and_then(|v| any_value_to_string(v));
+                let body = record.body.as_ref().and_then(any_value_to_string);
 
-                let trace_id = if record.trace_id.is_empty()
-                    || record.trace_id.iter().all(|&b| b == 0)
+                let trace_id =
+                    if record.trace_id.is_empty() || record.trace_id.iter().all(|&b| b == 0) {
+                        None
+                    } else {
+                        Some(hex::encode(&record.trace_id))
+                    };
+
+                let span_id = if record.span_id.is_empty() || record.span_id.iter().all(|&b| b == 0)
                 {
                     None
                 } else {
-                    Some(hex::encode(&record.trace_id))
+                    Some(hex::encode(&record.span_id))
                 };
-
-                let span_id =
-                    if record.span_id.is_empty() || record.span_id.iter().all(|&b| b == 0) {
-                        None
-                    } else {
-                        Some(hex::encode(&record.span_id))
-                    };
 
                 let log_attrs: Vec<serde_json::Value> = record
                     .attributes
@@ -414,9 +413,7 @@ fn extract_any_value(value: Option<&serde_json::Value>) -> Option<String> {
 }
 
 /// Convert protobuf AnyValue to a string.
-fn any_value_to_string(
-    value: &opentelemetry_proto::tonic::common::v1::AnyValue,
-) -> Option<String> {
+fn any_value_to_string(value: &opentelemetry_proto::tonic::common::v1::AnyValue) -> Option<String> {
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
 
     match &value.value {
@@ -426,11 +423,7 @@ fn any_value_to_string(
         Some(Value::BoolValue(b)) => Some(b.to_string()),
         Some(Value::BytesValue(b)) => Some(hex::encode(b)),
         Some(Value::ArrayValue(arr)) => {
-            let items: Vec<String> = arr
-                .values
-                .iter()
-                .filter_map(|v| any_value_to_string(v))
-                .collect();
+            let items: Vec<String> = arr.values.iter().filter_map(any_value_to_string).collect();
             Some(format!("[{}]", items.join(", ")))
         }
         Some(Value::KvlistValue(kvlist)) => {
@@ -441,7 +434,7 @@ fn any_value_to_string(
                     let val = kv
                         .value
                         .as_ref()
-                        .and_then(|v| any_value_to_string(v))
+                        .and_then(any_value_to_string)
                         .unwrap_or_default();
                     format!("{}={}", kv.key, val)
                 })

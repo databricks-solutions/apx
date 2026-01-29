@@ -23,8 +23,7 @@ pub fn generate_openapi(project_root: &Path) -> Result<(), String> {
     // Ensure _metadata.py exists before importing the Python module
     write_metadata_file(project_root, &metadata)?;
 
-    let (spec_json, app_slug) =
-        generate_openapi_spec(project_root, &app_entrypoint, &app_slug)?;
+    let (spec_json, app_slug) = generate_openapi_spec(project_root, &app_entrypoint, &app_slug)?;
 
     let api_ts_path = project_root
         .join("src")
@@ -50,8 +49,7 @@ pub fn generate_openapi(project_root: &Path) -> Result<(), String> {
     }
 
     // Write the generated TypeScript code
-    fs::write(&api_ts_path, &ts_code)
-        .map_err(|err| format!("Failed to write api.ts: {err}"))?;
+    fs::write(&api_ts_path, &ts_code).map_err(|err| format!("Failed to write api.ts: {err}"))?;
 
     debug!(
         api_ts_path = %api_ts_path.display(),
@@ -103,7 +101,7 @@ pub fn start_openapi_watcher(
                 // React to shutdown signal
                 result = shutdown_rx.recv() => {
                     match result {
-                        Ok(Shutdown::Stop { .. }) | Err(_) => {
+                        Ok(Shutdown::Stop) | Err(_) => {
                             debug!("OpenAPI watcher stopping.");
                             break;
                         }
@@ -112,8 +110,8 @@ pub fn start_openapi_watcher(
 
                 _ = poll_interval.tick() => {
                     let latest = latest_python_mtime(&app_dir);
-                    let changed = latest.map_or(false, |modified| {
-                        last_mtime.map_or(true, |current| modified > current)
+                    let changed = latest.is_some_and(|modified| {
+                        last_mtime.is_none_or(|current| modified > current)
                     });
                     if changed {
                         if !pending {
@@ -141,7 +139,7 @@ pub fn start_openapi_watcher(
                                 has_python_change = true;
                                 if let Ok(metadata) = fs::metadata(path) {
                                     if let Ok(modified) = metadata.modified() {
-                                        if last_mtime.map_or(true, |current| modified > current) {
+                                        if last_mtime.is_none_or(|current| modified > current) {
                                             last_mtime = Some(modified);
                                         }
                                     }
@@ -162,19 +160,19 @@ pub fn start_openapi_watcher(
                         }
                     }
                 }
-                _ = async { debounce.as_mut().unwrap().await }, if debounce.is_some() => {
+                _ = async { if let Some(d) = debounce.as_mut() { d.await } }, if debounce.is_some() => {
                     debounce = None;
                     if pending {
                         pending = false;
                         let is_initial = is_initial_generation;
                         is_initial_generation = false;
-                        
+
                         if is_initial {
                             info!("Running initial OpenAPI generation...");
                         } else {
                             info!("Running OpenAPI regeneration...");
                         }
-                        
+
                         let output = TokioCommand::new("uv")
                             .arg("run")
                             .arg("apx")
@@ -222,13 +220,13 @@ pub fn start_openapi_watcher(
     Ok(())
 }
 
-fn is_python_path(path: &PathBuf) -> bool {
+fn is_python_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext == "py")
 }
 
-fn is_ignored_path(path: &PathBuf) -> bool {
+fn is_ignored_path(path: &Path) -> bool {
     const IGNORED_DIRS: [&str; 11] = [
         ".git",
         ".mypy_cache",
@@ -258,7 +256,7 @@ fn latest_python_mtime(root: &Path) -> Option<SystemTime> {
     let mut latest = None;
     for entry in WalkDir::new(root)
         .into_iter()
-        .filter_entry(|entry| !is_ignored_path(&entry.path().to_path_buf()))
+        .filter_entry(|entry| !is_ignored_path(entry.path()))
         .filter_map(Result::ok)
     {
         if !entry.file_type().is_file() {
@@ -270,7 +268,7 @@ fn latest_python_mtime(root: &Path) -> Option<SystemTime> {
         }
         if let Ok(metadata) = fs::metadata(&path) {
             if let Ok(modified) = metadata.modified() {
-                if latest.map_or(true, |current| modified > current) {
+                if latest.is_none_or(|current| modified > current) {
                     latest = Some(modified);
                 }
             }

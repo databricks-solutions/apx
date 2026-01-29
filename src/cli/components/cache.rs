@@ -1,13 +1,13 @@
+use super::models::{RegistryCatalogEntry, RegistryConfig, RegistryItem, UiConfig};
+use crate::common::read_project_metadata;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tracing::warn;
-use super::models::{RegistryItem, RegistryCatalogEntry, RegistryConfig, UiConfig};
-use crate::common::read_project_metadata;
 
 /// Current cache format version
 const CACHE_VERSION: u8 = 2;
@@ -22,10 +22,7 @@ const INITIAL_DELAY_MS: u64 = 125;
 /// Execute an async operation with exponential backoff retry.
 ///
 /// Retries up to 5 times with delays: 125ms, 250ms, 500ms, 1000ms, 2000ms (~4 seconds total).
-async fn fetch_with_retry<T, F, Fut>(
-    operation: F,
-    operation_name: &str,
-) -> Result<T, String>
+async fn fetch_with_retry<T, F, Fut>(operation: F, operation_name: &str) -> Result<T, String>
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
@@ -51,7 +48,9 @@ where
             }
         }
     }
-    Err(format!("{}: {} (after {} retries)", operation_name, last_error, MAX_RETRIES))
+    Err(format!(
+        "{operation_name}: {last_error} (after {MAX_RETRIES} retries)"
+    ))
 }
 
 /// Cached component item
@@ -92,15 +91,15 @@ pub struct RegistryIndexItem {
 }
 
 /// Get the base cache directory path
-/// 
+///
 /// Uses APX_CACHE_DIR environment variable if set, otherwise defaults to ~/.apx/cache.
 /// Returns the path to the components subdirectory.
 fn get_cache_base_dir() -> Result<PathBuf, String> {
     let cache_root = if let Ok(cache_dir) = std::env::var("APX_CACHE_DIR") {
         PathBuf::from(cache_dir)
     } else {
-        let home = dirs::home_dir()
-            .ok_or_else(|| "Could not determine home directory".to_string())?;
+        let home =
+            dirs::home_dir().ok_or_else(|| "Could not determine home directory".to_string())?;
         home.join(".apx").join("cache")
     };
     Ok(cache_root.join("components"))
@@ -142,9 +141,12 @@ fn get_registry_items_dir(registry_name: Option<&str>) -> Result<PathBuf, String
 }
 
 /// Get the path for a specific component cache file
-fn get_component_cache_path(component_name: &str, registry_name: Option<&str>) -> Result<PathBuf, String> {
+fn get_component_cache_path(
+    component_name: &str,
+    registry_name: Option<&str>,
+) -> Result<PathBuf, String> {
     let registry_dir = get_registry_items_dir(registry_name)?;
-    let filename = format!("{}.json", component_name);
+    let filename = format!("{component_name}.json");
     Ok(registry_dir.join(filename))
 }
 
@@ -223,8 +225,7 @@ pub fn save_cached_component(
 
     // Ensure parent directory exists
     if let Some(parent) = cache_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create cache directory: {e}"))?;
     }
 
     // Get current timestamp
@@ -243,17 +244,15 @@ pub fn save_cached_component(
 
     // Serialize to JSON
     let json_content = serde_json::to_string_pretty(&cached)
-        .map_err(|e| format!("Failed to serialize cache: {}", e))?;
+        .map_err(|e| format!("Failed to serialize cache: {e}"))?;
 
     // Write to temporary file first
     let temp_path = cache_path.with_extension("tmp");
 
-    fs::write(&temp_path, json_content)
-        .map_err(|e| format!("Failed to write cache file: {}", e))?;
+    fs::write(&temp_path, json_content).map_err(|e| format!("Failed to write cache file: {e}"))?;
 
     // Atomic rename
-    fs::rename(&temp_path, &cache_path)
-        .map_err(|e| format!("Failed to rename cache file: {}", e))?;
+    fs::rename(&temp_path, &cache_path).map_err(|e| format!("Failed to rename cache file: {e}"))?;
 
     Ok(())
 }
@@ -265,7 +264,8 @@ pub fn load_cached_registry_catalog() -> Result<Option<Vec<RegistryCatalogEntry>
         return Ok(None);
     }
     let content = fs::read_to_string(&cache_path).map_err(|e| e.to_string())?;
-    let cached: CachedRegistryCatalog = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let cached: CachedRegistryCatalog =
+        serde_json::from_str(&content).map_err(|e| e.to_string())?;
     if cached.version != CACHE_VERSION {
         return Ok(None);
     }
@@ -276,10 +276,18 @@ pub fn load_cached_registry_catalog() -> Result<Option<Vec<RegistryCatalogEntry>
 pub fn save_cached_registry_catalog(entries: &[RegistryCatalogEntry]) -> Result<(), String> {
     let cache_path = get_registries_catalog_path()?;
     if let Some(cache_dir) = cache_path.parent() {
-        fs::create_dir_all(cache_dir).map_err(|e| format!("Failed to create cache directory: {}", e))?;
+        fs::create_dir_all(cache_dir)
+            .map_err(|e| format!("Failed to create cache directory: {e}"))?;
     }
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    let cached = CachedRegistryCatalog { version: CACHE_VERSION, fetched_at: now, entries: entries.to_vec() };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let cached = CachedRegistryCatalog {
+        version: CACHE_VERSION,
+        fetched_at: now,
+        entries: entries.to_vec(),
+    };
     let json_content = serde_json::to_string_pretty(&cached).map_err(|e| e.to_string())?;
     let temp_path = cache_path.with_extension("tmp");
     fs::write(&temp_path, &json_content).map_err(|e| e.to_string())?;
@@ -288,7 +296,9 @@ pub fn save_cached_registry_catalog(entries: &[RegistryCatalogEntry]) -> Result<
 }
 
 /// Load cached registry index (registry.json)
-fn load_cached_registry_index(registry_name: Option<&str>) -> Result<Option<Vec<RegistryIndexItem>>, String> {
+fn load_cached_registry_index(
+    registry_name: Option<&str>,
+) -> Result<Option<Vec<RegistryIndexItem>>, String> {
     let cache_path = get_registry_index_path(registry_name)?;
     if !is_file_fresh(&cache_path, CACHE_TTL_HOURS) {
         return Ok(None);
@@ -302,13 +312,24 @@ fn load_cached_registry_index(registry_name: Option<&str>) -> Result<Option<Vec<
 }
 
 /// Save registry index to cache
-fn save_cached_registry_index(registry_name: Option<&str>, items: &[RegistryIndexItem]) -> Result<(), String> {
+fn save_cached_registry_index(
+    registry_name: Option<&str>,
+    items: &[RegistryIndexItem],
+) -> Result<(), String> {
     let cache_path = get_registry_index_path(registry_name)?;
     if let Some(cache_dir) = cache_path.parent() {
-        fs::create_dir_all(cache_dir).map_err(|e| format!("Failed to create cache directory: {}", e))?;
+        fs::create_dir_all(cache_dir)
+            .map_err(|e| format!("Failed to create cache directory: {e}"))?;
     }
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    let cached = CachedRegistryIndex { version: CACHE_VERSION, fetched_at: now, items: items.to_vec() };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let cached = CachedRegistryIndex {
+        version: CACHE_VERSION,
+        fetched_at: now,
+        items: items.to_vec(),
+    };
     let json_content = serde_json::to_string_pretty(&cached).map_err(|e| e.to_string())?;
     let temp_path = cache_path.with_extension("tmp");
     fs::write(&temp_path, &json_content).map_err(|e| e.to_string())?;
@@ -319,16 +340,24 @@ fn save_cached_registry_index(registry_name: Option<&str>, items: &[RegistryInde
 /// Get registry.json URL for a registry
 /// Default: https://ui.shadcn.com/r/styles/new-york/registry.json
 /// Custom: replace {name} with "registry" in template
-fn get_registry_index_url(registry_name: Option<&str>, registry_config: Option<&RegistryConfig>, style: &str) -> Option<String> {
+fn get_registry_index_url(
+    registry_name: Option<&str>,
+    registry_config: Option<&RegistryConfig>,
+    style: &str,
+) -> Option<String> {
     match (registry_name, registry_config) {
-        (None, _) => Some(format!("https://ui.shadcn.com/r/styles/{}/registry.json", style)),
+        (None, _) => Some(format!(
+            "https://ui.shadcn.com/r/styles/{style}/registry.json"
+        )),
         (Some(_), Some(config)) => {
             let template = match config {
                 RegistryConfig::Template(t) => t.clone(),
                 RegistryConfig::Advanced(a) => a.url.clone(),
             };
             // Replace {name} with "registry" and remove {style} if present
-            let url = template.replace("{name}", "registry").replace("{style}", style);
+            let url = template
+                .replace("{name}", "registry")
+                .replace("{style}", style);
             Some(url)
         }
         _ => None,
@@ -349,7 +378,7 @@ async fn fetch_and_cache_registry_index(
     }
 
     let url = get_registry_index_url(registry_name, registry_config, style)
-        .ok_or_else(|| format!("Cannot determine registry URL for {:?}", registry_name))?;
+        .ok_or_else(|| format!("Cannot determine registry URL for {registry_name:?}"))?;
 
     tracing::debug!("Fetching registry index from: {}", url);
 
@@ -358,37 +387,56 @@ async fn fetch_and_cache_registry_index(
         || {
             let url = url.clone();
             async move {
-                client.get(&url).send().await
-                    .map_err(|e| format!("Failed to fetch registry index {}: {}", url, e))?
+                client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("Failed to fetch registry index {url}: {e}"))?
                     .error_for_status()
-                    .map_err(|e| format!("Registry index {} returned error: {}", url, e))?
-                    .json::<serde_json::Value>().await
-                    .map_err(|e| format!("Invalid JSON from registry index {}: {}", url, e))
+                    .map_err(|e| format!("Registry index {url} returned error: {e}"))?
+                    .json::<serde_json::Value>()
+                    .await
+                    .map_err(|e| format!("Invalid JSON from registry index {url}: {e}"))
             }
         },
-        &format!("fetch registry index from {}", url),
+        &format!("fetch registry index from {url}"),
     )
     .await?;
 
     // Parse items - can be at root level as array or in "items" field
-    let items_array = json_value.get("items")
+    let items_array = json_value
+        .get("items")
         .and_then(|v| v.as_array())
         .or_else(|| json_value.as_array());
 
     let items: Vec<RegistryIndexItem> = match items_array {
-        Some(arr) => arr.iter()
+        Some(arr) => arr
+            .iter()
             .filter_map(|item| {
                 let name = item.get("name")?.as_str()?.to_string();
                 Some(RegistryIndexItem {
                     name,
-                    description: item.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    dependencies: item.get("dependencies")
+                    description: item
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    dependencies: item
+                        .get("dependencies")
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
                         .unwrap_or_default(),
-                    registry_dependencies: item.get("registryDependencies")
+                    registry_dependencies: item
+                        .get("registryDependencies")
                         .and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
                         .unwrap_or_default(),
                 })
             })
@@ -398,7 +446,11 @@ async fn fetch_and_cache_registry_index(
 
     if !items.is_empty() {
         let _ = save_cached_registry_index(registry_name, &items);
-        tracing::debug!("Cached {} items from registry {:?}", items.len(), registry_name.unwrap_or("default"));
+        tracing::debug!(
+            "Cached {} items from registry {:?}",
+            items.len(),
+            registry_name.unwrap_or("default")
+        );
     }
 
     Ok(items)
@@ -425,10 +477,7 @@ pub fn needs_registry_refresh(registries: &HashMap<String, RegistryConfig>) -> b
 
 /// Sync registry.json files only (not individual items, except default shadcn)
 /// Returns true if any registry was refreshed
-pub async fn sync_registry_indexes(
-    app_dir: &Path,
-    force: bool,
-) -> Result<bool, String> {
+pub async fn sync_registry_indexes(app_dir: &Path, force: bool) -> Result<bool, String> {
     let metadata = read_project_metadata(app_dir)?;
     let cfg = UiConfig::from_metadata(&metadata, app_dir);
     let client = reqwest::Client::new();
@@ -453,9 +502,20 @@ pub async fn sync_registry_indexes(
         let path = get_registry_index_path(Some(registry_name))?;
         if force || !is_file_fresh(&path, CACHE_TTL_HOURS) {
             tracing::debug!("Fetching registry index for {}", registry_name);
-            match fetch_and_cache_registry_index(&client, Some(registry_name), Some(registry_config), style).await {
+            match fetch_and_cache_registry_index(
+                &client,
+                Some(registry_name),
+                Some(registry_config),
+                style,
+            )
+            .await
+            {
                 Ok(items) => {
-                    tracing::debug!("Cached {} items in {} registry index", items.len(), registry_name);
+                    tracing::debug!(
+                        "Cached {} items in {} registry index",
+                        items.len(),
+                        registry_name
+                    );
                     refreshed = true;
                 }
                 Err(e) => tracing::warn!("Failed to fetch {} registry index: {}", registry_name, e),
@@ -482,7 +542,8 @@ pub fn get_all_registry_indexes() -> Result<HashMap<String, Vec<RegistryIndexIte
             continue;
         }
 
-        let registry_name = path.file_name()
+        let registry_name = path
+            .file_name()
             .and_then(|n| n.to_str())
             .map(|s| s.to_string())
             .unwrap_or_default();
@@ -493,7 +554,8 @@ pub fn get_all_registry_indexes() -> Result<HashMap<String, Vec<RegistryIndexIte
         }
 
         let content = fs::read_to_string(&index_path).map_err(|e| e.to_string())?;
-        let cached: CachedRegistryIndex = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+        let cached: CachedRegistryIndex =
+            serde_json::from_str(&content).map_err(|e| e.to_string())?;
 
         result.insert(registry_name, cached.items);
     }

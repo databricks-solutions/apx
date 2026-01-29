@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::cli::run_cli_async;
-use crate::common::{spinner, format_elapsed_ms};
+use crate::common::{format_elapsed_ms, spinner};
 use crate::dev::client::stop as stop_server;
 use crate::dev::common::{lock_path, read_lock, remove_lock};
 use crate::dev::process::ProcessManager;
@@ -43,7 +43,11 @@ pub async fn stop_dev_server(app_dir: &Path) -> Result<bool, String> {
     }
 
     let lock = read_lock(&lock_path)?;
-    debug!(port = lock.port, pid = lock.pid, "Loaded dev server lockfile.");
+    debug!(
+        port = lock.port,
+        pid = lock.pid,
+        "Loaded dev server lockfile."
+    );
 
     let start_time = Instant::now();
     let stop_spinner = spinner("Stopping dev server...");
@@ -53,7 +57,10 @@ pub async fn stop_dev_server(app_dir: &Path) -> Result<bool, String> {
         Ok(()) => {
             debug!("Dev server stopped gracefully via HTTP.");
             stop_spinner.finish_and_clear();
-            println!("✅ Dev server stopped in {}\n", format_elapsed_ms(start_time));
+            println!(
+                "✅ Dev server stopped in {}\n",
+                format_elapsed_ms(start_time)
+            );
             return Ok(true);
         }
         Err(err) => {
@@ -68,7 +75,10 @@ pub async fn stop_dev_server(app_dir: &Path) -> Result<bool, String> {
         Ok(()) => {
             debug!("Dev server process tree killed; removing lockfile.");
             remove_lock(&lock_path)?;
-            println!("✅ Dev server stopped in {}\n", format_elapsed_ms(start_time));
+            println!(
+                "✅ Dev server stopped in {}\n",
+                format_elapsed_ms(start_time)
+            );
             Ok(true)
         }
         Err(err) => {

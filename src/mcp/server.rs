@@ -1,11 +1,11 @@
-use crate::mcp::core::{McpServer, ToolResult};
-use crate::dotenv::DotenvFile;
-use crate::databricks_sdk_doc::SDKSource;
-use crate::search::docs_index::SDKDocsIndex;
-use crate::cli::components::{SharedCacheState, sync_registry_indexes, needs_registry_refresh};
-use crate::search::ComponentIndex;
+use crate::cli::components::{SharedCacheState, needs_registry_refresh, sync_registry_indexes};
 use crate::common::read_project_metadata;
+use crate::databricks_sdk_doc::SDKSource;
+use crate::dotenv::DotenvFile;
 use crate::interop::generate_openapi_spec;
+use crate::mcp::core::{McpServer, ToolResult};
+use crate::search::ComponentIndex;
+use crate::search::docs_index::SDKDocsIndex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
-use tokio::sync::{broadcast, Mutex, Notify};
+use tokio::sync::{Mutex, Notify, broadcast};
 
 /// Parameters for SDK indexing, pre-computed synchronously to avoid Python GIL issues
 pub struct SdkIndexParams {
@@ -56,10 +56,10 @@ pub struct AppContext {
 }
 
 /// Initialize all indexes in background (component index, then SDK docs index)
-/// 
+///
 /// All database operations are done sequentially in a single task to avoid
 /// Lance's internal task conflicts when multiple connections access the database.
-/// 
+///
 /// This is called when the MCP server starts.
 pub fn init_all_indexes(
     ctx: &AppContext,
@@ -95,7 +95,7 @@ pub fn init_all_indexes(
             Some(Ok(refreshed)) => {
                 if refreshed {
                     tracing::info!("Registry indexes refreshed, rebuilding search index");
-                    
+
                     // Check for shutdown during rebuild
                     let rebuild_result = tokio::select! {
                         result = rebuild_search_index() => Some(result),
@@ -139,24 +139,26 @@ pub fn init_all_indexes(
         // ============================================
         if let Some(params) = sdk_params {
             tracing::info!("Initializing Databricks SDK documentation index");
-            
+
             let version = match params.sdk_version {
                 Some(v) => {
                     tracing::debug!("Using pre-computed SDK version: {}", v);
                     v
                 }
                 None => {
-                    tracing::warn!("Databricks SDK not installed. The docs tool will not be available.");
+                    tracing::warn!(
+                        "Databricks SDK not installed. The docs tool will not be available."
+                    );
                     index_state.sdk_indexed.store(true, Ordering::SeqCst);
                     index_state.sdk_ready.notify_waiters();
-                    
+
                     // Mark as done
                     let mut guard = cache_state.lock().await;
                     guard.is_running = false;
                     return;
                 }
             };
-            
+
             // Create SDK docs index
             let index_result = tokio::select! {
                 result = async { SDKDocsIndex::new() } => Some(result),
@@ -172,10 +174,13 @@ pub fn init_all_indexes(
                     idx
                 }
                 Some(Err(e)) => {
-                    tracing::warn!("Failed to initialize SDK doc index: {}. The docs tool will not be available.", e);
+                    tracing::warn!(
+                        "Failed to initialize SDK doc index: {}. The docs tool will not be available.",
+                        e
+                    );
                     index_state.sdk_indexed.store(true, Ordering::SeqCst);
                     index_state.sdk_ready.notify_waiters();
-                    
+
                     let mut guard = cache_state.lock().await;
                     guard.is_running = false;
                     return;
@@ -183,7 +188,7 @@ pub fn init_all_indexes(
                 None => {
                     index_state.sdk_indexed.store(true, Ordering::SeqCst);
                     index_state.sdk_ready.notify_waiters();
-                    
+
                     let mut guard = cache_state.lock().await;
                     guard.is_running = false;
                     return;
@@ -212,7 +217,10 @@ pub fn init_all_indexes(
                     *params.sdk_doc_index.lock().await = Some(index);
                 }
                 Some(Err(e)) => {
-                    tracing::warn!("Failed to bootstrap SDK docs: {}. The docs tool will not be available.", e);
+                    tracing::warn!(
+                        "Failed to bootstrap SDK docs: {}. The docs tool will not be available.",
+                        e
+                    );
                 }
                 None => {
                     tracing::debug!("Shutdown during SDK bootstrap");
@@ -242,7 +250,7 @@ async fn rebuild_search_index() -> Result<(), String> {
     let db_path = ComponentIndex::default_path()?;
     let index = ComponentIndex::new(db_path)?;
     let table_name = ComponentIndex::table_name("components");
-    
+
     index.build_index_from_registries(&table_name).await
 }
 
@@ -278,30 +286,32 @@ async fn wait_for_index_ready(
     index_name: &str,
 ) -> Result<(), String> {
     const TIMEOUT_SECS: u64 = 15;
-    
+
     // Check if already ready
     if is_ready.load(Ordering::SeqCst) {
         return Ok(());
     }
 
-    tracing::debug!("Waiting up to {}s for {} index to be ready", TIMEOUT_SECS, index_name);
+    tracing::debug!(
+        "Waiting up to {}s for {} index to be ready",
+        TIMEOUT_SECS,
+        index_name
+    );
 
     // Wait with timeout
-    match tokio::time::timeout(
-        Duration::from_secs(TIMEOUT_SECS),
-        ready_notify.notified(),
-    )
-    .await
-    {
+    match tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), ready_notify.notified()).await {
         Ok(_) => {
             tracing::debug!("{} index is now ready", index_name);
             Ok(())
         }
         Err(_) => {
-            tracing::warn!("{} index not ready after {}s timeout", index_name, TIMEOUT_SECS);
+            tracing::warn!(
+                "{} index not ready after {}s timeout",
+                index_name,
+                TIMEOUT_SECS
+            );
             Err(format!(
-                "{} index is not yet ready, please rerun the query in 5 seconds",
-                index_name
+                "{index_name} index is not yet ready, please rerun the query in 5 seconds"
             ))
         }
     }
@@ -400,58 +410,57 @@ struct RouteInfo {
 
 async fn routes_resource(ctx: Arc<AppContext>) -> Result<String, String> {
     let metadata = read_project_metadata(&ctx.app_dir)?;
-    let (openapi_content, _) = generate_openapi_spec(
-        &ctx.app_dir,
-        &metadata.app_entrypoint,
-        &metadata.app_slug,
-    )?;
-    
+    let (openapi_content, _) =
+        generate_openapi_spec(&ctx.app_dir, &metadata.app_entrypoint, &metadata.app_slug)?;
+
     let openapi: Value = serde_json::from_str(&openapi_content)
-        .map_err(|e| format!("Failed to parse OpenAPI schema: {}", e))?;
-    
+        .map_err(|e| format!("Failed to parse OpenAPI schema: {e}"))?;
+
     let routes = parse_openapi_operations(&openapi)?;
-    
-    serde_json::to_string_pretty(&routes)
-        .map_err(|e| format!("Failed to serialize routes: {}", e))
+
+    serde_json::to_string_pretty(&routes).map_err(|e| format!("Failed to serialize routes: {e}"))
 }
 
 fn parse_openapi_operations(openapi: &Value) -> Result<Vec<RouteInfo>, String> {
     let mut routes = Vec::new();
-    
+
     let paths = openapi
         .get("paths")
         .and_then(|p| p.as_object())
         .ok_or_else(|| "OpenAPI schema missing 'paths' object".to_string())?;
-    
+
     for (path, path_item) in paths {
         let methods_obj = path_item
             .as_object()
-            .ok_or_else(|| format!("Path '{}' is not an object", path))?;
-        
+            .ok_or_else(|| format!("Path '{path}' is not an object"))?;
+
         for (method, operation) in methods_obj {
             // Skip non-HTTP method keys like "parameters", "summary", etc.
             let method_upper = method.to_uppercase();
-            if !matches!(method_upper.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS") {
+            if !matches!(
+                method_upper.as_str(),
+                "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
+            ) {
                 continue;
             }
-            
-            let operation_obj = operation.as_object().ok_or_else(|| {
-                format!("Operation '{}' at path '{}' is not an object", method, path)
-            })?;
-            
+
+            let operation_obj = operation
+                .as_object()
+                .ok_or_else(|| format!("Operation '{method}' at path '{path}' is not an object"))?;
+
             let operation_id = operation_obj
                 .get("operationId")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            
+
             let description = operation_obj
                 .get("summary")
                 .or_else(|| operation_obj.get("description"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            
+
             routes.push(RouteInfo {
                 id: operation_id,
                 method: method_upper,
@@ -460,7 +469,7 @@ fn parse_openapi_operations(openapi: &Value) -> Result<Vec<RouteInfo>, String> {
             });
         }
     }
-    
+
     Ok(routes)
 }
 
@@ -576,10 +585,9 @@ async fn start_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
     use crate::dev::common::CLIENT_HOST;
 
     match start_dev_server(&ctx.app_dir).await {
-        Ok(port) => ToolResult::success(format!(
-            "Dev server started at http://{}:{}",
-            CLIENT_HOST, port
-        )),
+        Ok(port) => {
+            ToolResult::success(format!("Dev server started at http://{CLIENT_HOST}:{port}"))
+        }
         Err(e) => ToolResult::error(e),
     }
 }
@@ -598,10 +606,7 @@ async fn restart_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
     use crate::cli::dev::restart::restart_dev_server;
 
     match restart_dev_server(&ctx.app_dir).await {
-        Ok(port) => ToolResult::success(format!(
-            "Dev server restarted at http://localhost:{}",
-            port
-        )),
+        Ok(port) => ToolResult::success(format!("Dev server restarted at http://localhost:{port}")),
         Err(e) => ToolResult::error(e),
     }
 }
@@ -657,25 +662,19 @@ async fn databricks_apps_logs_tool(
     // Resolve app_name if not provided
     let app_name = match args.app_name.as_ref() {
         Some(name) if !name.trim().is_empty() => name.trim().to_string(),
-        _ => {
-            match resolve_app_name_from_databricks_yml(cwd) {
-                Ok(name) => {
-                    resolved_from_yml = true;
-                    name
-                }
-                Err(e) => {
-                    return ToolResult::error(format!("Failed to auto-detect app name: {e}"));
-                }
+        _ => match resolve_app_name_from_databricks_yml(cwd) {
+            Ok(name) => {
+                resolved_from_yml = true;
+                name
             }
-        }
+            Err(e) => {
+                return ToolResult::error(format!("Failed to auto-detect app name: {e}"));
+            }
+        },
     };
 
     // Build command and track arguments for response
-    let mut cmd_args = vec![
-        "apps".to_string(),
-        "logs".to_string(),
-        app_name.clone(),
-    ];
+    let mut cmd_args = vec!["apps".to_string(), "logs".to_string(), app_name.clone()];
     let mut cmd = Command::new("databricks");
     cmd.args(&cmd_args)
         .arg("--tail-lines")
@@ -684,7 +683,7 @@ async fn databricks_apps_logs_tool(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    
+
     cmd_args.push("--tail-lines".to_string());
     cmd_args.push(args.tail_lines.to_string());
 
@@ -722,11 +721,8 @@ async fn databricks_apps_logs_tool(
 
     // Run command with timeout
     let start = Instant::now();
-    let result = tokio::time::timeout(
-        Duration::from_secs_f64(args.timeout_seconds),
-        cmd.output(),
-    )
-    .await;
+    let result =
+        tokio::time::timeout(Duration::from_secs_f64(args.timeout_seconds), cmd.output()).await;
 
     let (returncode, stdout, stderr, duration_ms) = match result {
         Ok(Ok(output)) => {
@@ -758,7 +754,7 @@ async fn databricks_apps_logs_tool(
     let stderr_t = truncate(&stderr, args.max_output_chars);
 
     if returncode != 0 {
-        let combined = format!("{}\n{}", stderr, stdout).to_lowercase();
+        let combined = format!("{stderr}\n{stdout}").to_lowercase();
         // Check for unsupported subcommand error
         if combined.contains("unknown command \"logs\"")
             || combined.contains("unknown command logs")
@@ -768,22 +764,20 @@ async fn databricks_apps_logs_tool(
             return ToolResult::error(format!(
                 "Databricks CLI does not support `databricks apps logs` in this version. \
                 Please upgrade Databricks CLI to v0.280.0 or higher.\n\n\
-                Command: {}\n\
-                Exit code: {}\n\
-                stderr:\n{}\n\
-                stdout:\n{}",
-                cmd_str, returncode, stderr_t, stdout_t
+                Command: {cmd_str}\n\
+                Exit code: {returncode}\n\
+                stderr:\n{stderr_t}\n\
+                stdout:\n{stdout_t}"
             ));
         }
 
         // Forward any other CLI error
         return ToolResult::error(format!(
             "`databricks apps logs` failed.\n\n\
-            Command: {}\n\
-            Exit code: {}\n\
-            stderr:\n{}\n\
-            stdout:\n{}",
-            cmd_str, returncode, stderr_t, stdout_t
+            Command: {cmd_str}\n\
+            Exit code: {returncode}\n\
+            stderr:\n{stderr_t}\n\
+            stdout:\n{stdout_t}"
         ));
     }
 
@@ -836,7 +830,7 @@ fn truncate(s: &str, max_chars: i32) -> String {
         ""
     };
     let truncated = s.len() - head_len - tail_len;
-    format!("{}\n\n...[truncated {} chars]...\n\n{}", head, truncated, tail)
+    format!("{head}\n\n...[truncated {truncated} chars]...\n\n{tail}")
 }
 
 fn resolve_app_name_from_databricks_yml(project_dir: &Path) -> Result<String, String> {
@@ -903,8 +897,8 @@ async fn search_registry_components_tool(
     ctx: Arc<AppContext>,
     args: SearchRegistryComponentsArgs,
 ) -> ToolResult {
-    use crate::common::read_project_metadata;
     use crate::cli::components::UiConfig;
+    use crate::common::read_project_metadata;
 
     // Wait for component index to be ready (15 second timeout)
     if let Err(e) = wait_for_index_ready(
@@ -934,12 +928,12 @@ async fn search_registry_components_tool(
     // Get or create index
     let db_path = match ComponentIndex::default_path() {
         Ok(path) => path,
-        Err(e) => return ToolResult::error(format!("Failed to get database path: {}", e)),
+        Err(e) => return ToolResult::error(format!("Failed to get database path: {e}")),
     };
 
     let index = match ComponentIndex::new(db_path) {
         Ok(idx) => idx,
-        Err(e) => return ToolResult::error(format!("Failed to initialize index: {}", e)),
+        Err(e) => return ToolResult::error(format!("Failed to initialize index: {e}")),
     };
 
     let table_name = ComponentIndex::table_name("components");
@@ -947,7 +941,7 @@ async fn search_registry_components_tool(
     // Search - index should be ready at this point
     let search_results = match index.search(&table_name, &args.query, args.limit).await {
         Ok(results) => results,
-        Err(e) => return ToolResult::error(format!("Search failed: {}", e)),
+        Err(e) => return ToolResult::error(format!("Search failed: {e}")),
     };
 
     #[derive(serde::Serialize)]
@@ -979,7 +973,7 @@ async fn search_registry_components_tool(
 
     match serde_json::to_string_pretty(&response) {
         Ok(json) => ToolResult::success(json),
-        Err(e) => ToolResult::error(format!("Failed to serialize results: {}", e)),
+        Err(e) => ToolResult::error(format!("Failed to serialize results: {e}")),
     }
 }
 
@@ -1017,9 +1011,12 @@ async fn add_component_tool(ctx: Arc<AppContext>, args: AddComponentArgs) -> Too
             // The component is already cached, and the next cache population
             // cycle will include it in the index.
             tracing::info!("Component {} added successfully", args.component_id);
-            ToolResult::success(format!("Successfully added component: {}", args.component_id))
+            ToolResult::success(format!(
+                "Successfully added component: {}",
+                args.component_id
+            ))
         }
-        Err(e) => ToolResult::error(format!("Failed to add component: {}", e)),
+        Err(e) => ToolResult::error(format!("Failed to add component: {e}")),
     }
 }
 
@@ -1048,7 +1045,10 @@ async fn docs_tool(ctx: Arc<AppContext>, args: DocsArgs) -> ToolResult {
     };
 
     // Search
-    match index.search(&args.source, &args.query, args.num_results).await {
+    match index
+        .search(&args.source, &args.query, args.num_results)
+        .await
+    {
         Ok(results) => {
             #[derive(Serialize)]
             struct DocsResponse {
@@ -1069,16 +1069,19 @@ async fn docs_tool(ctx: Arc<AppContext>, args: DocsArgs) -> ToolResult {
                     SDKSource::DatabricksSdkPython => "databricks-sdk-python".to_string(),
                 },
                 query: args.query,
-                results: results.into_iter().map(|r| DocsResult {
-                    text: r.text,
-                    source_file: r.source_file,
-                    score: r.score,
-                }).collect(),
+                results: results
+                    .into_iter()
+                    .map(|r| DocsResult {
+                        text: r.text,
+                        source_file: r.source_file,
+                        score: r.score,
+                    })
+                    .collect(),
             };
 
             match serde_json::to_string_pretty(&response) {
                 Ok(json) => ToolResult::success(json),
-                Err(e) => ToolResult::error(format!("Failed to serialize results: {}", e)),
+                Err(e) => ToolResult::error(format!("Failed to serialize results: {e}")),
             }
         }
         Err(e) => ToolResult::error(e),
@@ -1090,27 +1093,24 @@ async fn get_route_info_tool(ctx: Arc<AppContext>, args: GetRouteInfoArgs) -> To
         Ok(m) => m,
         Err(e) => return ToolResult::error(e),
     };
-    
-    let openapi_content = match generate_openapi_spec(
-        &ctx.app_dir,
-        &metadata.app_entrypoint,
-        &metadata.app_slug,
-    ) {
-        Ok((content, _)) => content,
-        Err(e) => return ToolResult::error(format!("Failed to generate OpenAPI spec: {}", e)),
-    };
-    
+
+    let openapi_content =
+        match generate_openapi_spec(&ctx.app_dir, &metadata.app_entrypoint, &metadata.app_slug) {
+            Ok((content, _)) => content,
+            Err(e) => return ToolResult::error(format!("Failed to generate OpenAPI spec: {e}")),
+        };
+
     let openapi: Value = match serde_json::from_str(&openapi_content) {
         Ok(spec) => spec,
-        Err(e) => return ToolResult::error(format!("Failed to parse OpenAPI schema: {}", e)),
+        Err(e) => return ToolResult::error(format!("Failed to parse OpenAPI schema: {e}")),
     };
-    
+
     // Find the operation by operationId
     let paths = match openapi.get("paths").and_then(|p| p.as_object()) {
         Some(p) => p,
         None => return ToolResult::error("OpenAPI schema missing 'paths' object".to_string()),
     };
-    
+
     let mut found_method = None;
     for (_, path_item) in paths {
         if let Some(methods_obj) = path_item.as_object() {
@@ -1129,46 +1129,51 @@ async fn get_route_info_tool(ctx: Arc<AppContext>, args: GetRouteInfoArgs) -> To
             }
         }
     }
-    
+
     let method = match found_method {
         Some(m) => m,
-        None => return ToolResult::error(format!("Operation ID '{}' not found in OpenAPI schema", args.operation_id)),
+        None => {
+            return ToolResult::error(format!(
+                "Operation ID '{}' not found in OpenAPI schema",
+                args.operation_id
+            ));
+        }
     };
-    
+
     // Generate the appropriate code example based on the HTTP method
     let example = if method == "GET" {
         generate_query_example(&args.operation_id)
     } else {
         generate_mutation_example(&args.operation_id)
     };
-    
+
     #[derive(Serialize)]
     struct RouteInfoResponse {
         operation_id: String,
         method: String,
         example: String,
     }
-    
+
     let response = RouteInfoResponse {
         operation_id: args.operation_id,
         method,
         example,
     };
-    
+
     match serde_json::to_string_pretty(&response) {
         Ok(json) => ToolResult::success(json),
-        Err(e) => ToolResult::error(format!("Failed to serialize response: {}", e)),
+        Err(e) => ToolResult::error(format!("Failed to serialize response: {e}")),
     }
 }
 
 fn generate_query_example(operation_id: &str) -> String {
     // Convert operationId to PascalCase for the hook name
     let capitalized = capitalize_first(operation_id);
-    let hook_name = format!("use{}", capitalized);
-    let suspense_hook_name = format!("{}Suspense", hook_name);
-    let result_type = format!("{}QueryResult", capitalized);
-    let error_type = format!("{}QueryError", capitalized);
-    
+    let hook_name = format!("use{capitalized}");
+    let suspense_hook_name = format!("{hook_name}Suspense");
+    let result_type = format!("{capitalized}QueryResult");
+    let error_type = format!("{capitalized}QueryError");
+
     format!(
         r#"// Standard query hook
 import {{ {hook_name} }} from "@/lib/api";
@@ -1199,22 +1204,18 @@ const SuspenseComponent = () => {{
 // </Suspense>
 
 // Available types for this query:
-// import type {{ {result_type}, {error_type} }} from "@/lib/api";"#,
-        hook_name = hook_name,
-        suspense_hook_name = suspense_hook_name,
-        result_type = result_type,
-        error_type = error_type
+// import type {{ {result_type}, {error_type} }} from "@/lib/api";"#
     )
 }
 
 fn generate_mutation_example(operation_id: &str) -> String {
     // Convert operationId to PascalCase for the hook name
     let capitalized = capitalize_first(operation_id);
-    let hook_name = format!("use{}", capitalized);
-    let body_type = format!("{}MutationBody", capitalized);
-    let result_type = format!("{}MutationResult", capitalized);
-    let error_type = format!("{}MutationError", capitalized);
-    
+    let hook_name = format!("use{capitalized}");
+    let body_type = format!("{capitalized}MutationBody");
+    let result_type = format!("{capitalized}MutationResult");
+    let error_type = format!("{capitalized}MutationError");
+
     format!(
         r#"import {{ {hook_name} }} from "@/lib/api";
 
@@ -1229,11 +1230,7 @@ const Component = () => {{
 }};
 
 // Available types for this mutation:
-// import type {{ {body_type}, {result_type}, {error_type} }} from "@/lib/api";"#,
-        hook_name = hook_name,
-        body_type = body_type,
-        result_type = result_type,
-        error_type = error_type
+// import type {{ {body_type}, {result_type}, {error_type} }} from "@/lib/api";"#
     )
 }
 

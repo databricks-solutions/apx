@@ -1,12 +1,5 @@
 #![forbid(unsafe_code)]
-
-#![deny(
-    warnings,
-    unused_must_use,
-    dead_code,
-    missing_debug_implementations
-)]
-
+#![deny(warnings, unused_must_use, dead_code, missing_debug_implementations)]
 #![deny(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -227,7 +220,7 @@ pub(crate) fn init_tracing() {
     };
 
     // Check if OTLP logging is enabled (set by dev server subprocess)
-    let otel_enabled = std::env::var("APX_OTEL_LOGS").map_or(false, |v| v == "1");
+    let otel_enabled = std::env::var("APX_OTEL_LOGS").is_ok_and(|v| v == "1");
 
     // Get app directory from environment (set by start.rs when spawning dev server)
     let app_dir = std::env::var("APX_APP_DIR").ok();
@@ -260,11 +253,15 @@ fn init_tracing_fmt_only(filter: &str) {
     }
 }
 
-fn init_tracing_with_otel(service_name: &str, filter: &str, app_dir: Option<&str>) -> Result<(), String> {
+fn init_tracing_with_otel(
+    service_name: &str,
+    filter: &str,
+    app_dir: Option<&str>,
+) -> Result<(), String> {
     use opentelemetry::KeyValue;
     use opentelemetry_otlp::WithExportConfig;
-    use opentelemetry_sdk::logs::SdkLoggerProvider;
     use opentelemetry_sdk::Resource;
+    use opentelemetry_sdk::logs::SdkLoggerProvider;
 
     let endpoint = format!("http://127.0.0.1:{}/v1/logs", flux::FLUX_PORT);
 
@@ -275,9 +272,7 @@ fn init_tracing_with_otel(service_name: &str, filter: &str, app_dir: Option<&str
         .map_err(|e| format!("Failed to create OTLP exporter: {e}"))?;
 
     // Build resource attributes including app_path if available
-    let mut attributes = vec![
-        KeyValue::new("service.name", service_name.to_string()),
-    ];
+    let mut attributes = vec![KeyValue::new("service.name", service_name.to_string())];
     if let Some(app_path) = app_dir {
         attributes.push(KeyValue::new("apx.app_path", app_path.to_string()));
     }
@@ -287,8 +282,9 @@ fn init_tracing_with_otel(service_name: &str, filter: &str, app_dir: Option<&str
         .with_batch_exporter(exporter)
         .build();
 
-    let otel_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&provider)
-        .with_filter(EnvFilter::new(filter));
+    let otel_layer =
+        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&provider)
+            .with_filter(EnvFilter::new(filter));
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
@@ -330,14 +326,16 @@ fn get_dotenv_vars() -> PyResult<HashMap<String, String>> {
         .ok_or_else(|| PyRuntimeError::new_err("Failed to determine app directory"))?;
 
     let dotenv_path = app_dir.join(".env");
-    
+
     if !dotenv_path.exists() {
-        warn!(".env file not found at {}, using empty environment", dotenv_path.display());
+        warn!(
+            ".env file not found at {}, using empty environment",
+            dotenv_path.display()
+        );
         return Ok(HashMap::new());
     }
-    
-    let dotenv = dotenv::DotenvFile::read(&dotenv_path)
-        .map_err(|e| PyRuntimeError::new_err(e))?;
+
+    let dotenv = dotenv::DotenvFile::read(&dotenv_path).map_err(PyRuntimeError::new_err)?;
     Ok(dotenv.get_vars())
 }
 
@@ -356,6 +354,5 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[pyfunction(name = "generate_openapi")]
 fn generate_openapi_py(project_root: PathBuf) -> PyResult<()> {
-    api_generator::generate_openapi(&project_root)
-        .map_err(|err| PyRuntimeError::new_err(err))
+    api_generator::generate_openapi(&project_root).map_err(PyRuntimeError::new_err)
 }

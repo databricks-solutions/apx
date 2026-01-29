@@ -2,7 +2,7 @@ use futures_util::future::BoxFuture;
 use schemars::schema_for;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -61,6 +61,7 @@ impl JsonRpcResponse {
         }
     }
 
+    #[allow(clippy::expect_used)]
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("JsonRpcResponse serialization should never fail")
     }
@@ -90,13 +91,14 @@ impl JsonRpcError {
     }
 
     pub fn method_not_found(id: Value, method: &str) -> Self {
-        Self::new(id, METHOD_NOT_FOUND, format!("Method not found: {}", method))
+        Self::new(id, METHOD_NOT_FOUND, format!("Method not found: {method}"))
     }
 
     pub fn invalid_params(id: Value, message: impl Into<String>) -> Self {
         Self::new(id, INVALID_PARAMS, message)
     }
 
+    #[allow(clippy::expect_used)]
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("JsonRpcError serialization should never fail")
     }
@@ -233,19 +235,22 @@ impl<C: Send + Sync + 'static> McpServer<C> {
         Fut: Future<Output = ToolResult> + Send + 'static,
     {
         let schema = schema_for!(A);
+        #[allow(clippy::expect_used)]
         let input_schema =
             serde_json::to_value(&schema).expect("Tool input schema should serialize");
         let handler = Arc::new(handler);
-        let handler = Arc::new(move |ctx: Arc<C>, arguments: Value| -> BoxFuture<'static, ToolResult> {
-            let handler = Arc::clone(&handler);
-            Box::pin(async move {
-                let parsed: Result<A, _> = serde_json::from_value(arguments);
-                match parsed {
-                    Ok(args) => handler(ctx, args).await,
-                    Err(err) => ToolResult::error(format!("Invalid tool arguments: {}", err)),
-                }
-            })
-        });
+        let handler = Arc::new(
+            move |ctx: Arc<C>, arguments: Value| -> BoxFuture<'static, ToolResult> {
+                let handler = Arc::clone(&handler);
+                Box::pin(async move {
+                    let parsed: Result<A, _> = serde_json::from_value(arguments);
+                    match parsed {
+                        Ok(args) => handler(ctx, args).await,
+                        Err(err) => ToolResult::error(format!("Invalid tool arguments: {err}")),
+                    }
+                })
+            },
+        );
 
         self.tools.insert(
             name.to_string(),
@@ -271,11 +276,12 @@ impl<C: Send + Sync + 'static> McpServer<C> {
         Fut: Future<Output = Result<String, String>> + Send + 'static,
     {
         let handler = Arc::new(handler);
-        let handler =
-            Arc::new(move |ctx: Arc<C>| -> BoxFuture<'static, Result<String, String>> {
+        let handler = Arc::new(
+            move |ctx: Arc<C>| -> BoxFuture<'static, Result<String, String>> {
                 let handler = Arc::clone(&handler);
                 Box::pin(async move { handler(ctx).await })
-            });
+            },
+        );
         self.resources.insert(
             uri.to_string(),
             ResourceDef {
@@ -315,7 +321,7 @@ impl<C: Send + Sync + 'static> McpServer<C> {
         let tool = self
             .tools
             .get(name)
-            .ok_or_else(|| format!("Unknown tool: {}", name))?;
+            .ok_or_else(|| format!("Unknown tool: {name}"))?;
         Ok((tool.handler)(Arc::clone(&self.ctx), arguments).await)
     }
 
@@ -323,7 +329,7 @@ impl<C: Send + Sync + 'static> McpServer<C> {
         let resource = self
             .resources
             .get(uri)
-            .ok_or_else(|| format!("Resource not found: {}", uri))?;
+            .ok_or_else(|| format!("Resource not found: {uri}"))?;
         let text = (resource.handler)(Arc::clone(&self.ctx)).await?;
         Ok(ResourceContent {
             uri: uri.to_string(),
@@ -378,7 +384,7 @@ impl<C: Send + Sync + 'static> McpServer<C> {
                 Err(e) => {
                     // Error - signal shutdown to background tasks
                     let _ = shutdown_tx.send(());
-                    return Err(format!("Error reading from stdin: {}", e));
+                    return Err(format!("Error reading from stdin: {e}"));
                 }
             }
         }
@@ -394,15 +400,15 @@ impl<C: Send + Sync + 'static> McpServer<C> {
         stdout
             .write_all(response.as_bytes())
             .await
-            .map_err(|e| format!("Failed to write response: {}", e))?;
+            .map_err(|e| format!("Failed to write response: {e}"))?;
         stdout
             .write_all(b"\n")
             .await
-            .map_err(|e| format!("Failed to write newline: {}", e))?;
+            .map_err(|e| format!("Failed to write newline: {e}"))?;
         stdout
             .flush()
             .await
-            .map_err(|e| format!("Failed to flush stdout: {}", e))?;
+            .map_err(|e| format!("Failed to flush stdout: {e}"))?;
         Ok(())
     }
 
@@ -418,7 +424,7 @@ impl<C: Send + Sync + 'static> McpServer<C> {
             Err(_) => return Some(JsonRpcError::parse_error().to_json()),
         };
 
-        if let Err(_) = request.validate() {
+        if request.validate().is_err() {
             return Some(JsonRpcError::parse_error().to_json());
         }
 
@@ -466,11 +472,12 @@ impl<C: Send + Sync + 'static> McpServer<C> {
         let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
 
         match self.call_tool(tool_name, arguments).await {
-            Ok(result) => JsonRpcResponse::new(
-                id,
-                serde_json::to_value(result).expect("ToolResult serialization should never fail"),
-            )
-            .to_json(),
+            Ok(result) => {
+                #[allow(clippy::expect_used)]
+                let value = serde_json::to_value(result)
+                    .expect("ToolResult serialization should never fail");
+                JsonRpcResponse::new(id, value).to_json()
+            }
             Err(err) => JsonRpcError::invalid_params(id, err).to_json(),
         }
     }

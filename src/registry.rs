@@ -106,7 +106,7 @@ impl Registry {
     }
 
     /// Get the port for a project, or allocate a new one if not registered.
-    /// 
+    ///
     /// If `preferred_port` is provided and different from the currently registered port,
     /// the registry will be updated to use the preferred port.
     pub fn get_or_allocate_port(
@@ -164,6 +164,7 @@ impl Registry {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -191,18 +192,19 @@ mod tests {
         // Add some ports
         registry.data.servers.insert(
             "/project1".to_string(),
-            ServerEntry { port: DEV_PORT_START },
+            ServerEntry {
+                port: DEV_PORT_START,
+            },
         );
         registry.data.servers.insert(
             "/project2".to_string(),
-            ServerEntry { port: DEV_PORT_START + 1 },
+            ServerEntry {
+                port: DEV_PORT_START + 1,
+            },
         );
 
         // Next should be DEV_PORT_START + 2
-        assert_eq!(
-            registry.allocate_next_port().unwrap(),
-            DEV_PORT_START + 2
-        );
+        assert_eq!(registry.allocate_next_port().unwrap(), DEV_PORT_START + 2);
     }
 
     #[test]
@@ -213,18 +215,19 @@ mod tests {
         // Add ports with a gap
         registry.data.servers.insert(
             "/project1".to_string(),
-            ServerEntry { port: DEV_PORT_START },
+            ServerEntry {
+                port: DEV_PORT_START,
+            },
         );
         registry.data.servers.insert(
             "/project2".to_string(),
-            ServerEntry { port: DEV_PORT_START + 2 },
+            ServerEntry {
+                port: DEV_PORT_START + 2,
+            },
         );
 
         // Should fill the gap at DEV_PORT_START + 1
-        assert_eq!(
-            registry.allocate_next_port().unwrap(),
-            DEV_PORT_START + 1
-        );
+        assert_eq!(registry.allocate_next_port().unwrap(), DEV_PORT_START + 1);
     }
 
     #[test]
@@ -236,11 +239,15 @@ mod tests {
         let existing_path = temp_dir.path().to_string_lossy().to_string();
         registry.data.servers.insert(
             existing_path.clone(),
-            ServerEntry { port: DEV_PORT_START },
+            ServerEntry {
+                port: DEV_PORT_START,
+            },
         );
         registry.data.servers.insert(
             "/non/existing/path".to_string(),
-            ServerEntry { port: DEV_PORT_START + 1 },
+            ServerEntry {
+                port: DEV_PORT_START + 1,
+            },
         );
 
         let removed = registry.cleanup_stale_entries();
@@ -261,10 +268,10 @@ mod tests {
             path: path.clone(),
             data: RegistryFile::default(),
         };
-        registry.data.servers.insert(
-            "/test/project".to_string(),
-            ServerEntry { port: 9001 },
-        );
+        registry
+            .data
+            .servers
+            .insert("/test/project".to_string(), ServerEntry { port: 9001 });
         registry.save().unwrap();
 
         // Load and verify

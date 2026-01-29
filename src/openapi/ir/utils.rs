@@ -11,12 +11,53 @@ use crate::openapi::spec::EnumValue;
 /// TypeScript reserved words that cannot be used as identifiers.
 pub static TS_RESERVED_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
-        "break", "case", "catch", "class", "const", "continue", "debugger", "default",
-        "delete", "do", "else", "enum", "export", "extends", "false", "finally", "for",
-        "function", "if", "import", "in", "instanceof", "new", "null", "return", "super",
-        "switch", "this", "throw", "true", "try", "typeof", "var", "void", "while", "with",
-        "yield", "let", "static", "implements", "interface", "package", "private",
-        "protected", "public", "await", "async",
+        "break",
+        "case",
+        "catch",
+        "class",
+        "const",
+        "continue",
+        "debugger",
+        "default",
+        "delete",
+        "do",
+        "else",
+        "enum",
+        "export",
+        "extends",
+        "false",
+        "finally",
+        "for",
+        "function",
+        "if",
+        "import",
+        "in",
+        "instanceof",
+        "new",
+        "null",
+        "return",
+        "super",
+        "switch",
+        "this",
+        "throw",
+        "true",
+        "try",
+        "typeof",
+        "var",
+        "void",
+        "while",
+        "with",
+        "yield",
+        "let",
+        "static",
+        "implements",
+        "interface",
+        "package",
+        "private",
+        "protected",
+        "public",
+        "await",
+        "async",
     ]
     .into_iter()
     .collect()
@@ -71,9 +112,9 @@ pub fn format_param_access(obj: &str, prop: &str, required: bool) -> String {
             format!("{}?.[\"{}\"]", obj, escape_js_string(prop))
         }
     } else if required {
-        format!("{}.{}", obj, prop)
+        format!("{obj}.{prop}")
     } else {
-        format!("{}?.{}", obj, prop)
+        format!("{obj}?.{prop}")
     }
 }
 
@@ -87,7 +128,7 @@ pub fn sanitize_ts_identifier(name: &str) -> String {
     }
 
     // Split on separators (-, ., space) and convert to camelCase
-    let parts: Vec<&str> = name.split(|c| c == '-' || c == '.' || c == ' ').collect();
+    let parts: Vec<&str> = name.split(['-', '.', ' ']).collect();
 
     let mut result = String::new();
     for (i, part) in parts.iter().enumerate() {
@@ -119,12 +160,12 @@ pub fn sanitize_ts_identifier(name: &str) -> String {
         .map(|c| c.is_ascii_digit())
         .unwrap_or(false)
     {
-        result = format!("_{}", result);
+        result = format!("_{result}");
     }
 
     // Check for reserved words (case-sensitive)
     if TS_RESERVED_WORDS.contains(result.as_str()) {
-        result = format!("_{}", result);
+        result = format!("_{result}");
     }
 
     result
@@ -170,8 +211,8 @@ pub fn enum_value_to_literal(v: &EnumValue) -> TsLiteral {
 pub fn enum_value_to_key(v: &EnumValue, index: usize) -> String {
     match v {
         EnumValue::String(s) => quote_if_needed(s),
-        EnumValue::Integer(n) => format!("VALUE_{}", n),
-        EnumValue::Float(_) => format!("VALUE_{}", index),
+        EnumValue::Integer(n) => format!("VALUE_{n}"),
+        EnumValue::Float(_) => format!("VALUE_{index}"),
         EnumValue::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         EnumValue::Null => "NULL".to_string(),
     }
@@ -191,6 +232,7 @@ pub fn make_unknown_record() -> TsType {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

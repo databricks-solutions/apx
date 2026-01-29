@@ -132,9 +132,9 @@ pub fn handle_spawn_error(tool: &str, error: std::io::Error) -> String {
             }
         )
     } else {
-        format!("Failed to spawn '{}': {}", tool, error)
+        format!("Failed to spawn '{tool}': {error}")
     };
-    eprintln!("{}", msg);
+    eprintln!("{msg}");
     msg
 }
 
@@ -370,7 +370,7 @@ pub async fn generate_version_file(
     };
 
     // Write the version file
-    let content = format!("version = \"{}\"\n", version);
+    let content = format!("version = \"{version}\"\n");
     tracing::debug!("Writing version file to {}", version_path.display());
     std::fs::write(&version_path, content)
         .map_err(|err| format!("Failed to write version file: {err}"))?;

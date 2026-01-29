@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, trace};
 
-use crate::dev::common::{lock_path, read_lock, CLIENT_HOST};
+use crate::dev::common::{CLIENT_HOST, lock_path, read_lock};
 
 #[cfg(target_os = "windows")]
 const BUN_FILENAME: &str = "bun.exe";
@@ -146,21 +146,21 @@ pub(crate) fn generate_openapi_spec(
 fn try_fetch_openapi_from_server(project_root: &Path) -> Option<String> {
     let lock_file = lock_path(project_root);
     let lock = read_lock(&lock_file).ok()?;
-    
+
     let url = format!("http://{}:{}/openapi.json", CLIENT_HOST, lock.port);
     debug!("Trying to fetch OpenAPI from server at {}", url);
-    
+
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_millis(200))
         .build()
         .ok()?;
-    
+
     let response = client.get(&url).send().ok()?;
-    
+
     if !response.status().is_success() {
         return None;
     }
-    
+
     response.text().ok()
 }
 
@@ -184,44 +184,54 @@ fn generate_openapi_spec_from_module(
         let sys = py.import("sys")?;
         let path_any = sys.getattr("path")?;
         let path = path_any.cast::<PyList>()?;
-        
-        trace!("sys.path before modifications: {:?}", path.extract::<Vec<String>>());
-        
+
+        trace!(
+            "sys.path before modifications: {:?}",
+            path.extract::<Vec<String>>()
+        );
+
         if src_root.exists() && !path.contains(src_root_str.as_str())? {
             path.insert(0, src_root_str.as_str())?;
             debug!("Added src_root to sys.path: {}", src_root_str);
         } else {
-            debug!("src_root NOT added (exists: {}, already in path: {})", 
-                src_root.exists(), 
+            debug!(
+                "src_root NOT added (exists: {}, already in path: {})",
+                src_root.exists(),
                 path.contains(src_root_str.as_str()).unwrap_or(false)
             );
         }
-        
+
         if !path.contains(project_root_str.as_str())? {
             path.insert(0, project_root_str.as_str())?;
             debug!("Added project_root to sys.path: {}", project_root_str);
         } else {
             debug!("project_root already in sys.path");
         }
-        
-        trace!("sys.path after modifications: {:?}", path.extract::<Vec<String>>());
 
-        let (module_path, attr_name) = app_entrypoint
-            .split_once(':')
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Invalid app-entrypoint format"))?;
+        trace!(
+            "sys.path after modifications: {:?}",
+            path.extract::<Vec<String>>()
+        );
 
-        debug!("Attempting to import module: {} (attr: {})", module_path, attr_name);
-        
+        let (module_path, attr_name) = app_entrypoint.split_once(':').ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("Invalid app-entrypoint format")
+        })?;
+
+        debug!(
+            "Attempting to import module: {} (attr: {})",
+            module_path, attr_name
+        );
+
         let importlib = py.import("importlib")?;
         let module = importlib.call_method1("import_module", (module_path,))?;
         debug!("Successfully imported module: {}", module_path);
-        
+
         let app = module.getattr(attr_name)?;
         debug!("Successfully got attribute: {}", attr_name);
-        
+
         let spec = app.call_method0("openapi")?;
         debug!("Successfully generated OpenAPI spec");
-        
+
         let json = py.import("json")?;
         let dumps_kwargs = PyDict::new(py);
         dumps_kwargs.set_item("indent", 2)?;
@@ -232,7 +242,6 @@ fn generate_openapi_spec_from_module(
         Ok((spec_json, app_slug.to_string()))
     })
     .map_err(|err| format!("Failed to generate OpenAPI schema: {err}"))
-    .map(|(spec_json, app_slug)| (spec_json, app_slug))
 }
 
 /// Get the installed Databricks SDK version
@@ -263,14 +272,20 @@ pub(crate) fn get_databricks_sdk_version() -> Result<Option<String>, String> {
                     }
                     Err(e) => {
                         // databricks-sdk not installed
-                        debug!("get_databricks_sdk_version: databricks-sdk not installed: {}", e);
+                        debug!(
+                            "get_databricks_sdk_version: databricks-sdk not installed: {}",
+                            e
+                        );
                         Ok(None)
                     }
                 }
             }
             Err(e) => {
                 // importlib.metadata not available
-                debug!("get_databricks_sdk_version: importlib.metadata not available: {}", e);
+                debug!(
+                    "get_databricks_sdk_version: importlib.metadata not available: {}",
+                    e
+                );
                 Ok(None)
             }
         }

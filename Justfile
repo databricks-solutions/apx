@@ -3,6 +3,8 @@
 fmt:
     uv tool run ruff format .
     bun x prettier --write .
+    cargo fmt --all
+    
 
 lint:
     uv tool run ruff check .
@@ -13,7 +15,10 @@ build *args:
 
 types:
     cargo check
+    cargo fmt --all -- --check
+    cargo clippy --all-targets -- -D warnings
     uv tool run ty check
+
     
 
 check: lint types

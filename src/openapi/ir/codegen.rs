@@ -11,8 +11,8 @@ use super::api::{
 };
 use super::emit::Emit;
 use super::types::{
-    ImportItem, TsExpr, TsFunction, TsImport, TsLiteral, TsModule, TsParam, TsProp, TsStmt,
-    TsType, TsTypeDef, TypeDefKind, TypeRef, VarKind,
+    ImportItem, TsExpr, TsFunction, TsImport, TsLiteral, TsModule, TsParam, TsProp, TsStmt, TsType,
+    TsTypeDef, TypeDefKind, TypeRef, VarKind,
 };
 use super::utils::{escape_js_string, format_param_access, needs_bracket_notation};
 
@@ -227,9 +227,9 @@ fn codegen_fetch_function(fetch: &FetchIR) -> TsFunction {
     let return_type = if ts_response_type == "void" {
         TsType::Ref("Promise<void>".into())
     } else if fetch.response.has_void_status {
-        TsType::Ref(format!("Promise<{{ data: {} }} | void>", ts_response_type))
+        TsType::Ref(format!("Promise<{{ data: {ts_response_type} }} | void>"))
     } else {
-        TsType::Ref(format!("Promise<{{ data: {} }}>", ts_response_type))
+        TsType::Ref(format!("Promise<{{ data: {ts_response_type} }}>"))
     };
 
     // Build function body
@@ -317,25 +317,17 @@ fn codegen_fetch_body(
                 ty: None,
                 init: TsExpr::Ternary {
                     cond: Box::new(TsExpr::Ident("queryString".into())),
-                    then_expr: Box::new(TsExpr::Raw(format!(
-                        "`{}?${{queryString}}`",
-                        path_template
-                    ))),
-                    else_expr: Box::new(TsExpr::Raw(format!("`{}`", path_template))),
+                    then_expr: Box::new(TsExpr::Raw(format!("`{path_template}?${{queryString}}`"))),
+                    else_expr: Box::new(TsExpr::Raw(format!("`{path_template}`"))),
                 },
             });
 
             // Fetch call with url variable
-            stmts.push(codegen_fetch_call(
-                "url",
-                true,
-                fetch,
-                body_content_type,
-            ));
+            stmts.push(codegen_fetch_call("url", true, fetch, body_content_type));
         } else {
             // Just path params, use template literal directly
             stmts.push(codegen_fetch_call(
-                &format!("`{}`", path_template),
+                &format!("`{path_template}`"),
                 false,
                 fetch,
                 body_content_type,
@@ -355,7 +347,7 @@ fn codegen_fetch_body(
             .join("");
 
         stmts.push(codegen_fetch_call(
-            &format!("\"{}\"", path),
+            &format!("\"{path}\""),
             false,
             fetch,
             body_content_type,
@@ -380,14 +372,12 @@ fn codegen_fetch_body(
         stmts.push(TsStmt::Raw("if (res.status === 204) return;".into()));
         let method = response_method_for_content_type(fetch.response.content_type);
         stmts.push(TsStmt::Raw(format!(
-            "return {{ data: await res.{}() }};",
-            method
+            "return {{ data: await res.{method}() }};"
         )));
     } else {
         let method = response_method_for_content_type(fetch.response.content_type);
         stmts.push(TsStmt::Raw(format!(
-            "return {{ data: await res.{}() }};",
-            method
+            "return {{ data: await res.{method}() }};"
         )));
     }
 
@@ -397,7 +387,7 @@ fn codegen_fetch_body(
 /// Generate the fetch() call statement.
 fn codegen_fetch_call(
     url_expr: &str,
-    is_variable: bool,
+    _is_variable: bool,
     fetch: &FetchIR,
     body_content_type: Option<BodyContentType>,
 ) -> TsStmt {
@@ -416,7 +406,8 @@ fn codegen_fetch_call(
                     fetch_options.push_str("\"Content-Type\": \"application/json\", ");
                 }
                 BodyContentType::UrlEncoded => {
-                    fetch_options.push_str("\"Content-Type\": \"application/x-www-form-urlencoded\", ");
+                    fetch_options
+                        .push_str("\"Content-Type\": \"application/x-www-form-urlencoded\", ");
                 }
                 BodyContentType::FormData => {
                     // Don't set Content-Type for FormData - browser sets it with boundary
@@ -460,20 +451,13 @@ fn codegen_fetch_call(
     }
 
     // Generate the full fetch statement
-    let url_part = if is_variable {
-        url_expr.to_string()
-    } else {
-        url_expr.to_string()
-    };
+    let url_part = url_expr.to_string();
 
     TsStmt::VarDecl {
         kind: VarKind::Const,
         name: "res".into(),
         ty: None,
-        init: TsExpr::Raw(format!(
-            "await fetch({}, {{ {} }})",
-            url_part, fetch_options
-        )),
+        init: TsExpr::Raw(format!("await fetch({url_part}, {{ {fetch_options} }})")),
     }
 }
 
@@ -487,7 +471,7 @@ fn build_path_template_string(template: &[UrlPart]) -> String {
                 if needs_bracket_notation(name) {
                     format!("${{params[\"{}\"]}}", escape_js_string(name))
                 } else {
-                    format!("${{params.{}}}", name)
+                    format!("${{params.{name}}}")
                 }
             }
         })
@@ -538,10 +522,7 @@ fn codegen_query_key_function(qk: &QueryKeyIR) -> TsFunction {
         type_params: vec![],
         params,
         return_type: None,
-        body: vec![TsStmt::Raw(format!(
-            "return {};",
-            body_expr.emit()
-        ))],
+        body: vec![TsStmt::Raw(format!("return {};", body_expr.emit()))],
         is_async: false,
         is_export: true,
         is_arrow: true,
@@ -554,20 +535,22 @@ fn codegen_hook(hook: &HookIR) -> TsFunction {
     let wrapped_type = if response_str == "void" {
         "void".to_string()
     } else {
-        format!("{{ data: {} }}", response_str)
+        format!("{{ data: {response_str} }}")
     };
 
     match hook.kind {
-        HookKind::Query | HookKind::SuspenseQuery => {
-            codegen_query_hook(hook, &wrapped_type)
-        }
+        HookKind::Query | HookKind::SuspenseQuery => codegen_query_hook(hook, &wrapped_type),
         HookKind::Mutation => codegen_mutation_hook(hook, &wrapped_type),
     }
 }
 
 /// Generate a query hook (useQuery or useSuspenseQuery).
+#[allow(clippy::expect_used)]
 fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> TsFunction {
-    let key_fn = hook.query_key_fn.as_ref().unwrap();
+    let key_fn = hook
+        .query_key_fn
+        .as_ref()
+        .expect("query_key_fn must be set for query hooks");
     let hook_fn = if hook.kind == HookKind::Query {
         "useQuery"
     } else {
@@ -582,8 +565,7 @@ fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> TsFunction {
     let (options_param_type, body) = if let Some(vars) = &hook.vars_type {
         let vars_str = vars.emit();
         let options_type_str = format!(
-            "{{ params?: {}; query?: Omit<{}<{}, ApiError, TData>, \"queryKey\" | \"queryFn\"> }}",
-            vars_str, options_type, wrapped_type
+            "{{ params?: {vars_str}; query?: Omit<{options_type}<{wrapped_type}, ApiError, TData>, \"queryKey\" | \"queryFn\"> }}"
         );
         let body = format!(
             "return {}({{ queryKey: {}(options?.params), queryFn: () => {}(options?.params), ...options?.query }});",
@@ -592,8 +574,7 @@ fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> TsFunction {
         (options_type_str, body)
     } else {
         let options_type_str = format!(
-            "{{ query?: Omit<{}<{}, ApiError, TData>, \"queryKey\" | \"queryFn\"> }}",
-            options_type, wrapped_type
+            "{{ query?: Omit<{options_type}<{wrapped_type}, ApiError, TData>, \"queryKey\" | \"queryFn\"> }}"
         );
         let body = format!(
             "return {}({{ queryKey: {}(), queryFn: () => {}(), ...options?.query }});",
@@ -651,15 +632,11 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: &str) -> TsFunction {
         format!("() => {}()", hook.fetch_fn)
     };
 
-    let options_type_str = format!(
-        "{{ mutation?: UseMutationOptions<{}, ApiError, {}> }}",
-        wrapped_type, vars_str
-    );
+    let options_type_str =
+        format!("{{ mutation?: UseMutationOptions<{wrapped_type}, ApiError, {vars_str}> }}");
 
-    let body = format!(
-        "return useMutation({{ mutationFn: {}, ...options?.mutation }});",
-        mutation_fn
-    );
+    let body =
+        format!("return useMutation({{ mutationFn: {mutation_fn}, ...options?.mutation }});");
 
     TsFunction {
         name: hook.name.clone(),
@@ -678,6 +655,7 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: &str) -> TsFunction {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

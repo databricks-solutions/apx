@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 use reqwest;
 
 use crate::bun_binary_path;
-use crate::common::{handle_spawn_error, read_project_metadata, ApxCommand, UvCommand};
+use crate::common::{ApxCommand, UvCommand, handle_spawn_error, read_project_metadata};
 use crate::dev::common::CLIENT_HOST;
 use crate::dev::otel::forward_log_to_flux;
 use crate::dotenv::DotenvFile;
@@ -52,7 +52,7 @@ impl fmt::Display for LogSource {
 fn format_log_line(source: LogSource, message: &str) -> String {
     let now = chrono::Utc::now();
     let timestamp = now.format("%Y-%m-%d %H:%M:%S%.3f");
-    format!("{} | {:>4} | {}", timestamp, source, message)
+    format!("{timestamp} | {source:>4} | {message}")
 }
 
 #[derive(Debug)]
@@ -134,14 +134,20 @@ impl ProcessManager {
             match Self::ensure_bun_path() {
                 Ok(bun_path) => {
                     if let Err(e) = pm.spawn_pglite(&bun_path).await {
-                        warn!("⚠️ Failed to start PGlite database: {}. Continuing without DB.", e);
+                        warn!(
+                            "⚠️ Failed to start PGlite database: {}. Continuing without DB.",
+                            e
+                        );
                         // Don't return - continue with other processes
                     } else {
                         debug!("PGlite database started successfully");
                     }
                 }
                 Err(e) => {
-                    warn!("⚠️ Bun not available for PGlite: {}. Continuing without DB.", e);
+                    warn!(
+                        "⚠️ Bun not available for PGlite: {}. Continuing without DB.",
+                        e
+                    );
                 }
             }
 
@@ -155,7 +161,10 @@ impl ProcessManager {
 
             // 3. Uvicorn (critical)
             debug!("Starting uvicorn backend process...");
-            if let Err(e) = pm.spawn_uvicorn(&pm.app_dir, pm.app_entrypoint.clone()).await {
+            if let Err(e) = pm
+                .spawn_uvicorn(&pm.app_dir, pm.app_entrypoint.clone())
+                .await
+            {
                 warn!("Failed to start backend: {}", e);
                 return; // Critical failure
             }
@@ -219,7 +228,10 @@ impl ProcessManager {
     pub async fn status(&self) -> (String, String, String) {
         // Run all three checks in parallel - no mutex held during HTTP probes
         let (frontend_status, backend_status, db_status) = tokio::join!(
-            self.status_for_process(&self.frontend_child, Some(("localhost", self.frontend_port))),
+            self.status_for_process(
+                &self.frontend_child,
+                Some(("localhost", self.frontend_port))
+            ),
             self.status_for_process(&self.backend_child, Some((&self.host, self.backend_port))),
             self.status_for_process(&self.db_child, None), // DB: no HTTP check, just process status
         );
@@ -275,9 +287,7 @@ impl ProcessManager {
         );
         cmd.env("OTEL_SERVICE_NAME", format!("{}_ui", self.app_slug));
 
-        let child = cmd
-            .spawn()
-            .map_err(|err| handle_spawn_error("apx", err))?;
+        let child = cmd.spawn().map_err(|err| handle_spawn_error("apx", err))?;
 
         let mut guard = self.frontend_child.lock().await;
         *guard = Some(child);
@@ -374,7 +384,7 @@ impl ProcessManager {
         let config_dir = app_dir.join(".apx");
         tokio::fs::create_dir_all(&config_dir)
             .await
-            .map_err(|e| format!("Failed to create .apx directory: {}", e))?;
+            .map_err(|e| format!("Failed to create .apx directory: {e}"))?;
 
         let config_path = config_dir.join("uvicorn_logging.json");
         // APX adds: timestamp | source | channel | <this output>
@@ -429,7 +439,7 @@ impl ProcessManager {
 
         tokio::fs::write(&config_path, config_content)
             .await
-            .map_err(|e| format!("Failed to write uvicorn logging config: {}", e))?;
+            .map_err(|e| format!("Failed to write uvicorn logging config: {e}"))?;
 
         Ok(config_path.display().to_string())
     }
@@ -473,7 +483,7 @@ impl ProcessManager {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        Err(format!("PGlite not ready on {}:{}", host, port))
+        Err(format!("PGlite not ready on {host}:{port}"))
     }
 
     /// Change the PGlite database password using tokio-postgres.
@@ -482,14 +492,12 @@ impl ProcessManager {
     async fn change_db_password(host: &str, port: u16, new_password: &str) -> Result<(), String> {
         use tokio_postgres::NoTls;
 
-        let conn_str = format!(
-            "host={} port={} user=postgres password=postgres dbname=postgres",
-            host, port
-        );
+        let conn_str =
+            format!("host={host} port={port} user=postgres password=postgres dbname=postgres");
 
         let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
             .await
-            .map_err(|e| format!("Failed to connect to PGlite: {}", e))?;
+            .map_err(|e| format!("Failed to connect to PGlite: {e}"))?;
 
         // Spawn connection task with a handle so we can wait for it
         let conn_handle = tokio::spawn(async move {
@@ -500,12 +508,12 @@ impl ProcessManager {
 
         // Escape single quotes for SQL safety
         let escaped = new_password.replace('\'', "''");
-        let query = format!("ALTER USER postgres WITH PASSWORD '{}'", escaped);
+        let query = format!("ALTER USER postgres WITH PASSWORD '{escaped}'");
 
         let result = client
             .execute(&query, &[])
             .await
-            .map_err(|e| format!("Failed to change password: {}", e));
+            .map_err(|e| format!("Failed to change password: {e}"));
 
         // Drop the client to signal the connection to close
         drop(client);
@@ -722,7 +730,7 @@ impl ProcessManager {
 
         let mut child = cmd
             .spawn()
-            .map_err(|err| format!("Failed to start {} process: {err}", source))?;
+            .map_err(|err| format!("Failed to start {source} process: {err}"))?;
 
         // Spawn tasks to read stdout/stderr, prefix with source, and forward to flux
         let service_name = format!("{}_{}", self.app_slug, source);
@@ -848,7 +856,7 @@ impl ProcessManager {
             .map_err(|err| handle_spawn_error("uvicorn", err))?;
 
         // Spawn tasks to read stdout/stderr, prefix with source, and forward to flux
-        let service_name = format!("{}_app", app_slug);
+        let service_name = format!("{app_slug}_app");
         let app_path = app_dir.display().to_string();
 
         if let Some(stdout) = child.stdout.take() {
@@ -1102,7 +1110,7 @@ impl ProcessManager {
     /// Check the status of a process.
     /// If http_check is Some((host, port)), also performs an HTTP health probe.
     /// If http_check is None (for DB), just checks if the process is running.
-    /// 
+    ///
     /// IMPORTANT: Mutex is released before HTTP probe to avoid blocking other operations.
     async fn status_for_process(
         &self,
@@ -1115,7 +1123,7 @@ impl ProcessManager {
             match guard.as_mut() {
                 None => return "stopped".to_string(),
                 Some(process) => match process.try_wait() {
-                    Ok(None) => true,  // Still running
+                    Ok(None) => true, // Still running
                     Ok(Some(_)) => return "stopped".to_string(),
                     Err(_) => return "error".to_string(),
                 },
@@ -1142,7 +1150,7 @@ impl ProcessManager {
     /// Check if a service is healthy by making an HTTP GET request to its root path.
     /// Returns true if the service responds with any non-5xx status code.
     async fn http_health_probe(host: &str, port: u16) -> bool {
-        let url = format!("http://{}:{}/", host, port);
+        let url = format!("http://{host}:{port}/");
         let client = match reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
             .build()
@@ -1238,4 +1246,3 @@ impl ProcessManager {
         }
     }
 }
-

@@ -89,11 +89,11 @@ pub async fn run_inner(args: CheckArgs) -> Result<(), String> {
         } else {
             String::new()
         };
-        
+
         if !combined_output.is_empty() {
-            println!("{}", combined_output);
+            println!("{combined_output}");
         }
-        
+
         errors.push(format!(
             "[tsc] TypeScript compilation failed: {}",
             if combined_output.is_empty() {
@@ -118,11 +118,11 @@ pub async fn run_inner(args: CheckArgs) -> Result<(), String> {
         } else {
             String::new()
         };
-        
+
         if !combined_output.is_empty() {
-            println!("{}", combined_output);
+            println!("{combined_output}");
         }
-        
+
         errors.push(format!(
             "[ty] Python type check failed: {}",
             if combined_output.is_empty() {

@@ -1,10 +1,10 @@
 //! APX dev server with flux-based logging.
 
+use axum::Json;
+use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
-use axum::Json;
-use axum::Router;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,14 +13,14 @@ use tokio::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::api_generator::start_openapi_watcher;
-use crate::dev::common::{lock_path, remove_lock, Shutdown};
+use crate::dev::common::{Shutdown, lock_path, remove_lock};
 use crate::dev::logging::BrowserLogPayload;
 use crate::dev::otel::build_otlp_log_payload_from_ms;
 use crate::dev::process::ProcessManager;
 use crate::dev::proxy;
 use crate::dotenv::DotenvFile;
-use crate::interop::get_token;
 use crate::flux;
+use crate::interop::get_token;
 
 /// Shared application state for the dev server.
 #[derive(Clone)]
@@ -42,7 +42,6 @@ struct HealthResponse {
     db_status: String,
 }
 
-
 /// Run the dev server with a pre-bound listener.
 /// The listener is passed in to avoid TOCTOU race conditions with port allocation.
 pub async fn run_server(
@@ -54,7 +53,10 @@ pub async fn run_server(
 ) -> Result<(), String> {
     // Ensure flux is running for log collection
     if let Err(e) = flux::ensure_running() {
-        warn!("Failed to start flux: {}. Logging may not work correctly.", e);
+        warn!(
+            "Failed to start flux: {}. Logging may not work correctly.",
+            e
+        );
     }
 
     // Extract port and host from the pre-bound listener
@@ -78,7 +80,9 @@ pub async fn run_server(
     let initial_token = match get_token() {
         Ok(token) => Some(token),
         Err(err) => {
-            warn!("Failed to get OAuth access token: {err}. API proxy will not forward authentication headers.");
+            warn!(
+                "Failed to get OAuth access token: {err}. API proxy will not forward authentication headers."
+            );
             None
         }
     };
@@ -88,9 +92,14 @@ pub async fn run_server(
     let (shutdown_tx, _) = broadcast::channel::<Shutdown>(16);
 
     // Create ProcessManager (doesn't spawn processes yet)
-    let process_manager = Arc::new(
-        ProcessManager::new(&app_dir, &host, port, backend_port, frontend_port, db_port)?,
-    );
+    let process_manager = Arc::new(ProcessManager::new(
+        &app_dir,
+        &host,
+        port,
+        backend_port,
+        frontend_port,
+        db_port,
+    )?);
 
     // Spawn processes in background (DB → Vite → Uvicorn)
     // This returns immediately - health endpoint will report status as processes come up
@@ -120,7 +129,7 @@ pub async fn run_server(
     let http_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+        .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
     let state = AppState {
         shutdown_tx: shutdown_tx.clone(),
@@ -262,11 +271,11 @@ fn start_filesystem_watcher(
 
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
     let (frontend_status, backend_status, db_status) = state.process_manager.status().await;
-    
+
     // DB is non-critical - only frontend and backend must be healthy for "ok" status
     let all_healthy = frontend_status == "healthy" && backend_status == "healthy";
     let status = if all_healthy { "ok" } else { "starting" };
-    
+
     (
         StatusCode::OK,
         Json(HealthResponse {
@@ -284,9 +293,7 @@ async fn browser_logs(
 ) -> StatusCode {
     let mut message = format!(
         "[browser:{}:{}] {}",
-        payload.level,
-        payload.source,
-        payload.message
+        payload.level, payload.source, payload.message
     );
     if let Some(stack) = payload.stack {
         message.push('\n');

@@ -51,15 +51,14 @@ impl Storage {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create database directory: {}", e))?;
+                .map_err(|e| format!("Failed to create database directory: {e}"))?;
         }
 
-        let conn = Connection::open(path)
-            .map_err(|e| format!("Failed to open database: {}", e))?;
+        let conn = Connection::open(path).map_err(|e| format!("Failed to open database: {e}"))?;
 
         // Enable WAL mode for better concurrency
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
-            .map_err(|e| format!("Failed to set pragmas: {}", e))?;
+            .map_err(|e| format!("Failed to set pragmas: {e}"))?;
 
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -71,7 +70,7 @@ impl Storage {
 
     /// Initialize the database schema.
     fn init_schema(&self) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
 
         conn.execute_batch(
             r#"
@@ -97,7 +96,7 @@ impl Storage {
             CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at);
             "#,
         )
-        .map_err(|e| format!("Failed to initialize schema: {}", e))?;
+        .map_err(|e| format!("Failed to initialize schema: {e}"))?;
 
         debug!("Flux storage schema initialized");
         Ok(())
@@ -109,8 +108,10 @@ impl Storage {
             return Ok(0);
         }
 
-        let mut conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
-        let tx = conn.transaction().map_err(|e| format!("Transaction error: {}", e))?;
+        let mut conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Transaction error: {e}"))?;
 
         let mut count = 0;
         {
@@ -124,7 +125,7 @@ impl Storage {
                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                     "#,
                 )
-                .map_err(|e| format!("Prepare error: {}", e))?;
+                .map_err(|e| format!("Prepare error: {e}"))?;
 
             for record in records {
                 stmt.execute(params![
@@ -140,12 +141,12 @@ impl Storage {
                     record.trace_id,
                     record.span_id,
                 ])
-                .map_err(|e| format!("Insert error: {}", e))?;
+                .map_err(|e| format!("Insert error: {e}"))?;
                 count += 1;
             }
         }
 
-        tx.commit().map_err(|e| format!("Commit error: {}", e))?;
+        tx.commit().map_err(|e| format!("Commit error: {e}"))?;
         Ok(count)
     }
 
@@ -158,7 +159,7 @@ impl Storage {
         since_ns: i64,
         limit: Option<usize>,
     ) -> Result<Vec<LogRecord>, String> {
-        let conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
 
         // Use effective_ts to handle logs where timestamp_ns is 0 (e.g., APX internal logs)
         const EFFECTIVE_TS: &str = "COALESCE(NULLIF(timestamp_ns, 0), observed_timestamp_ns)";
@@ -173,9 +174,8 @@ impl Storage {
                 WHERE (app_path LIKE ?1 OR ?1 LIKE '%' || app_path || '%')
                   AND {EFFECTIVE_TS} >= ?2
                 ORDER BY {EFFECTIVE_TS} ASC
-                LIMIT {}
-                "#,
-                lim
+                LIMIT {lim}
+                "#
             ),
             (Some(_), None) => format!(
                 r#"
@@ -196,9 +196,8 @@ impl Storage {
                 FROM logs
                 WHERE {EFFECTIVE_TS} >= ?1
                 ORDER BY {EFFECTIVE_TS} ASC
-                LIMIT {}
-                "#,
-                lim
+                LIMIT {lim}
+                "#
             ),
             (None, None) => format!(
                 r#"
@@ -212,20 +211,22 @@ impl Storage {
             ),
         };
 
-        let mut stmt = conn.prepare(&sql).map_err(|e| format!("Prepare error: {}", e))?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("Prepare error: {e}"))?;
 
         let rows = if let Some(path) = app_path {
-            let pattern = format!("%{}%", path);
+            let pattern = format!("%{path}%");
             stmt.query_map(params![pattern, since_ns], map_row)
-                .map_err(|e| format!("Query error: {}", e))?
+                .map_err(|e| format!("Query error: {e}"))?
         } else {
             stmt.query_map(params![since_ns], map_row)
-                .map_err(|e| format!("Query error: {}", e))?
+                .map_err(|e| format!("Query error: {e}"))?
         };
 
         let mut records = Vec::new();
         for row in rows {
-            records.push(row.map_err(|e| format!("Row error: {}", e))?);
+            records.push(row.map_err(|e| format!("Row error: {e}"))?);
         }
 
         Ok(records)
@@ -233,10 +234,12 @@ impl Storage {
 
     /// Get the latest log ID for change detection in follow mode.
     pub fn get_latest_id(&self) -> Result<i64, String> {
-        let conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
         let id: i64 = conn
-            .query_row("SELECT COALESCE(MAX(id), 0) FROM logs", [], |row| row.get(0))
-            .map_err(|e| format!("Query error: {}", e))?;
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM logs", [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| format!("Query error: {e}"))?;
         Ok(id)
     }
 
@@ -247,12 +250,12 @@ impl Storage {
         app_path: Option<&str>,
         after_id: i64,
     ) -> Result<Vec<LogRecord>, String> {
-        let conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
 
         // Use effective_ts to handle logs where timestamp_ns is 0 (e.g., APX internal logs)
         const EFFECTIVE_TS: &str = "COALESCE(NULLIF(timestamp_ns, 0), observed_timestamp_ns)";
 
-        let (sql, needs_app_path) = if let Some(_) = app_path {
+        let (sql, needs_app_path) = if app_path.is_some() {
             (
                 format!(
                     r#"
@@ -282,20 +285,22 @@ impl Storage {
             )
         };
 
-        let mut stmt = conn.prepare(&sql).map_err(|e| format!("Prepare error: {}", e))?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("Prepare error: {e}"))?;
 
-        let rows = if needs_app_path {
-            let pattern = format!("%{}%", app_path.unwrap());
+        let rows = if let Some(app) = app_path.filter(|_| needs_app_path) {
+            let pattern = format!("%{app}%");
             stmt.query_map(params![after_id, pattern], map_row)
-                .map_err(|e| format!("Query error: {}", e))?
+                .map_err(|e| format!("Query error: {e}"))?
         } else {
             stmt.query_map(params![after_id], map_row)
-                .map_err(|e| format!("Query error: {}", e))?
+                .map_err(|e| format!("Query error: {e}"))?
         };
 
         let mut records = Vec::new();
         for row in rows {
-            records.push(row.map_err(|e| format!("Row error: {}", e))?);
+            records.push(row.map_err(|e| format!("Row error: {e}"))?);
         }
 
         Ok(records)
@@ -303,7 +308,7 @@ impl Storage {
 
     /// Delete logs older than the retention period (7 days).
     pub fn cleanup_old_logs(&self) -> Result<usize, String> {
-        let conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
 
         let cutoff = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -312,7 +317,7 @@ impl Storage {
 
         let deleted = conn
             .execute("DELETE FROM logs WHERE created_at < ?1", params![cutoff])
-            .map_err(|e| format!("Delete error: {}", e))?;
+            .map_err(|e| format!("Delete error: {e}"))?;
 
         if deleted > 0 {
             debug!("Cleaned up {} old log records", deleted);
@@ -324,10 +329,10 @@ impl Storage {
     /// Get the total count of logs.
     #[allow(dead_code)]
     pub fn count_logs(&self) -> Result<i64, String> {
-        let conn = self.conn.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM logs", [], |row| row.get(0))
-            .map_err(|e| format!("Query error: {}", e))?;
+            .map_err(|e| format!("Query error: {e}"))?;
         Ok(count)
     }
 }
@@ -361,6 +366,7 @@ pub fn db_path() -> Result<PathBuf, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use tempfile::tempdir;

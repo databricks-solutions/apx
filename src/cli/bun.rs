@@ -2,9 +2,9 @@ use crate::bun_binary_path;
 use crate::cli::run_cli_async;
 use clap::Args;
 use tokio::process::Command as TokioCommand;
-use tracing::debug;
-use tokio::signal;
 use tokio::select;
+use tokio::signal;
+use tracing::debug;
 
 #[derive(Args, Debug, Clone)]
 pub struct BunArgs {

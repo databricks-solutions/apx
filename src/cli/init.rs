@@ -1,21 +1,24 @@
 use clap::{Args, ValueEnum};
 use dialoguer::{Confirm, Input, Select};
 use rand::seq::SliceRandom;
-use tracing::debug;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tera::Context;
 use tokio::process::Command;
+use tracing::debug;
 use walkdir::WalkDir;
 
 use crate::bun_binary_path;
+use crate::cli::components::add::{ComponentInput, add_components};
 use crate::cli::run_cli_async;
-use crate::cli::components::add::{add_components, ComponentInput};
-use crate::common::{bun_install, read_project_metadata, write_metadata_file, spinner, format_elapsed_ms, run_with_spinner, run_with_spinner_async};
-use crate::dotenv::DotenvFile;
 use crate::common::list_profiles;
+use crate::common::{
+    bun_install, format_elapsed_ms, read_project_metadata, run_with_spinner,
+    run_with_spinner_async, spinner, write_metadata_file,
+};
+use crate::dotenv::DotenvFile;
 use crate::interop::templates_dir;
 
 const APX_INDEX_URL: &str = "https://databricks-solutions.github.io/apx/simple";
@@ -139,7 +142,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     let app_slug = app_name.replace("-", "_");
 
     if args.template.is_none() {
-        let choices = vec![Template::Minimal, Template::Essential, Template::Stateful];
+        let choices = [Template::Minimal, Template::Essential, Template::Stateful];
         let default_idx = 1; // Default to essential
         let selection = Select::new()
             .with_prompt("Which template would you like to use?")
@@ -195,7 +198,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
             .interact()
             .map_err(|err| format!("Failed to read assistant choice: {err}"))?;
         if should_setup {
-            let choices = vec![
+            let choices = [
                 Assistant::Cursor,
                 Assistant::Vscode,
                 Assistant::Codex,
@@ -215,7 +218,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
     // Skip layout selection for minimal template (always uses basic layout)
     if !matches!(template, Template::Minimal) && args.layout.is_none() {
-        let choices = vec![Layout::Sidebar, Layout::Basic];
+        let choices = [Layout::Sidebar, Layout::Basic];
         let selection = Select::new()
             .with_prompt("Which layout would you like to use?")
             .items(&["sidebar", "basic"])
@@ -327,7 +330,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
         // If git initialization failed, warn but continue
         if let Err(err) = git_result {
-            println!("⚠️  Git initialization failed: {}", err);
+            println!("⚠️  Git initialization failed: {err}");
             println!("   Continuing with project setup...");
         }
     }
@@ -341,7 +344,10 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
                 // For editable mode, use APX_DEV_PATH  + check if is's a valid directory
                 let apx_path = std::env::var("APX_DEV_PATH").unwrap_or_else(|_| ".".to_string());
                 if !Path::new(&apx_path).is_dir() {
-                    return Err(format!("APX_DEV_PATH is not a valid directory: {}", &apx_path));
+                    return Err(format!(
+                        "APX_DEV_PATH is not a valid directory: {}",
+                        &apx_path
+                    ));
                 }
                 InstallArgs::Editable {
                     path: PathBuf::from(apx_path),
@@ -361,9 +367,9 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     let frontend_task = if !args.skip_frontend_dependencies {
         let app_path = app_path.clone();
         let bun_path = bun_path.clone();
-        Some(tokio::spawn(
-            async move { bun_install(&app_path, &bun_path).await },
-        ))
+        Some(tokio::spawn(async move {
+            bun_install(&app_path, &bun_path).await
+        }))
     } else {
         None
     };
@@ -410,7 +416,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     if !args.skip_frontend_dependencies && !matches!(template, Template::Minimal) {
         // Build list of components to add
         let mut components_to_add = vec![ComponentInput::new("button")];
-        
+
         if matches!(layout, Layout::Sidebar) {
             components_to_add.extend([
                 ComponentInput::new("avatar"),
@@ -424,16 +430,19 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
         let components_start = Instant::now();
         let spinner = spinner("🎨 Adding components...");
-        
+
         let result = add_components(&app_path, &components_to_add, true).await?;
-        
+
         spinner.finish_and_clear();
-        println!("✅ Components added ({})", format_elapsed_ms(components_start));
-        
+        println!(
+            "✅ Components added ({})",
+            format_elapsed_ms(components_start)
+        );
+
         // Print details at debug level or if there are warnings
         if !result.warnings.is_empty() {
             for warning in &result.warnings {
-                eprintln!("   ⚠️  {}", warning);
+                eprintln!("   ⚠️  {warning}");
             }
         }
     }
@@ -494,7 +503,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     }
 
     println!();
-    println!("✨ Project {} initialized successfully!", app_name);
+    println!("✨ Project {app_name} initialized successfully!");
     println!(
         "🚀 Run `cd {} && uv run apx dev start` to get started!",
         app_path
@@ -505,9 +514,8 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     Ok(())
 }
 
-
 fn normalize_app_name(app_name: &str) -> Result<String, String> {
-    let normalized = app_name.to_lowercase().replace(' ', "-").replace('_', "-");
+    let normalized = app_name.to_lowercase().replace([' ', '_'], "-");
     if !normalized
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -612,7 +620,6 @@ fn process_template_directory(
     Ok(())
 }
 
-
 async fn is_in_git_repo(path: &Path) -> Result<bool, String> {
     let output = Command::new("git")
         .arg("rev-parse")
@@ -621,8 +628,8 @@ async fn is_in_git_repo(path: &Path) -> Result<bool, String> {
         .output()
         .await
         .map_err(|err| format!("Failed to check git repository: {err}"))?;
-    let is_inside = output.status.success()
-        && String::from_utf8_lossy(&output.stdout).trim() == "true";
+    let is_inside =
+        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true";
     if is_inside {
         return Ok(true);
     }
@@ -660,20 +667,15 @@ async fn run_command(cmd: &mut Command, error_msg: &str) -> Result<(), String> {
 }
 
 enum InstallArgs {
-    Standard {
-        version: String,
-    },
-    Editable {
-        path: PathBuf,
-    },
+    Standard { version: String },
+    Editable { path: PathBuf },
 }
 
-
-use toml_edit::{DocumentMut, Item, Table, ArrayOfTables, Array, Value, InlineTable};
+use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
 pub fn ensure_apx_uv_config(pyproject: &Path) -> Result<(), String> {
-    let contents = fs::read_to_string(pyproject)
-        .map_err(|e| format!("Failed to read pyproject.toml: {e}"))?;
+    let contents =
+        fs::read_to_string(pyproject).map_err(|e| format!("Failed to read pyproject.toml: {e}"))?;
 
     let mut doc = contents
         .parse::<DocumentMut>()
@@ -688,11 +690,9 @@ pub fn ensure_apx_uv_config(pyproject: &Path) -> Result<(), String> {
         .as_array_of_tables_mut()
         .ok_or("tool.uv.index is not an array")?;
 
-    let exists = indexes.iter().any(|tbl| {
-        tbl.get("name")
-            .and_then(|v| v.as_str())
-            == Some("apx-index")
-    });
+    let exists = indexes
+        .iter()
+        .any(|tbl| tbl.get("name").and_then(|v| v.as_str()) == Some("apx-index"));
 
     if !exists {
         let mut tbl = Table::new();
@@ -726,9 +726,9 @@ pub fn configure_editable_apx(pyproject: &Path, apx_path: &Path) -> Result<(), S
     debug!("Configuring editable apx in pyproject.toml");
     debug!("  pyproject path: {}", pyproject.display());
     debug!("  apx path: {}", apx_path.display());
-    
-    let contents = fs::read_to_string(pyproject)
-        .map_err(|e| format!("Failed to read pyproject.toml: {e}"))?;
+
+    let contents =
+        fs::read_to_string(pyproject).map_err(|e| format!("Failed to read pyproject.toml: {e}"))?;
 
     let mut doc = contents
         .parse::<DocumentMut>()
@@ -745,7 +745,7 @@ pub fn configure_editable_apx(pyproject: &Path, apx_path: &Path) -> Result<(), S
     // Add apx = { path = "...", editable = true }
     let apx_path_str = apx_path.to_string_lossy().to_string();
     debug!("  Setting apx source path to: {}", apx_path_str);
-    
+
     let mut apx_source = InlineTable::new();
     apx_source.insert("path", Value::from(apx_path_str.as_str()));
     apx_source.insert("editable", Value::from(true));
@@ -773,13 +773,11 @@ pub fn configure_editable_apx(pyproject: &Path, apx_path: &Path) -> Result<(), S
 
     let output = doc.to_string();
     debug!("  Writing updated pyproject.toml");
-    fs::write(pyproject, output)
-        .map_err(|e| format!("Failed to write pyproject.toml: {e}"))?;
+    fs::write(pyproject, output).map_err(|e| format!("Failed to write pyproject.toml: {e}"))?;
 
     debug!("  Editable apx configuration complete");
     Ok(())
 }
-
 
 async fn setup_backend(app_path: &Path, install_args: InstallArgs) -> Result<(), String> {
     generate_metadata_file(app_path)?;
@@ -790,7 +788,7 @@ async fn setup_backend(app_path: &Path, install_args: InstallArgs) -> Result<(),
         InstallArgs::Standard { version } => {
             ensure_apx_uv_config(&pyproject_path)?;
             let versioned_package = format!("apx=={version}");
-            
+
             let mut add_cmd = Command::new("uv");
             add_cmd
                 .arg("add")
@@ -798,30 +796,31 @@ async fn setup_backend(app_path: &Path, install_args: InstallArgs) -> Result<(),
                 .arg(versioned_package)
                 .current_dir(app_path);
             run_command(&mut add_cmd, "Failed to add apx package").await?;
-        },
+        }
         InstallArgs::Editable { path } => {
             // editable path must be an existing local path
             debug!("Setting up editable apx installation");
             debug!("  app_path: {}", app_path.display());
             debug!("  editable path: {}", path.display());
-            
+
             if !path.is_dir() {
-                return Err(format!("Editable path is not a directory: {}", path.display()));
+                return Err(format!(
+                    "Editable path is not a directory: {}",
+                    path.display()
+                ));
             }
-            
+
             // Configure pyproject.toml with editable source
             configure_editable_apx(&pyproject_path, &path)?;
             debug!("pyproject.toml configured for editable apx");
-            
+
             // Run uv sync to install dependencies
             debug!("Running uv sync");
             let mut sync_cmd = Command::new("uv");
-            sync_cmd
-                .arg("sync")
-                .current_dir(app_path);
+            sync_cmd.arg("sync").current_dir(app_path);
             run_command(&mut sync_cmd, "Failed to sync dependencies").await?;
             debug!("uv sync completed successfully");
-        },
+        }
     }
     Ok(())
 }
@@ -839,4 +838,3 @@ async fn is_command_available(cmd: &str) -> bool {
         .map(|output| output.status.success())
         .unwrap_or(false)
 }
-

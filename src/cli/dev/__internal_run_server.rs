@@ -5,8 +5,8 @@ use tracing::{debug, warn};
 
 use crate::cli::run_cli_async;
 use crate::dev::common::{
-    find_random_port_in_range, BACKEND_PORT_END, BACKEND_PORT_START, BIND_HOST, DB_PORT_END,
-    DB_PORT_START, FRONTEND_PORT_END, FRONTEND_PORT_START,
+    BACKEND_PORT_END, BACKEND_PORT_START, BIND_HOST, DB_PORT_END, DB_PORT_START, FRONTEND_PORT_END,
+    FRONTEND_PORT_START, find_random_port_in_range,
 };
 use crate::dev::server::run_server;
 use crate::interop::validate_credentials;
@@ -100,7 +100,6 @@ async fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
     }
 
     Err(format!(
-        "Failed to start dev server after {} attempts. Last error: {}",
-        MAX_PORT_RETRIES, last_error
+        "Failed to start dev server after {MAX_PORT_RETRIES} attempts. Last error: {last_error}"
     ))
 }

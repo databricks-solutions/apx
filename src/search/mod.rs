@@ -10,4 +10,4 @@ pub use component_index::ComponentIndex;
 
 // Re-export for external use
 #[allow(unused_imports)]
-pub use docs_index::{SDKDocsIndex, DocSearchResult};
+pub use docs_index::{DocSearchResult, SDKDocsIndex};

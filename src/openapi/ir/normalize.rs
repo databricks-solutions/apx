@@ -124,7 +124,9 @@ fn normalize_schemas(schemas: &HashMap<String, Schema>) -> Result<Vec<TsTypeDef>
     names.sort();
 
     for name in names {
-        let schema = schemas.get(name).unwrap();
+        let Some(schema) = schemas.get(name) else {
+            continue;
+        };
         let type_def = normalize_schema_to_typedef(name, schema)?;
         type_defs.push(type_def);
     }
@@ -185,7 +187,9 @@ fn normalize_properties(
     names.sort();
 
     for name in names {
-        let schema = properties.get(name).unwrap();
+        let Some(schema) = properties.get(name) else {
+            continue;
+        };
         let ty = schema_to_ts_type(schema)?;
         props.push(TsProp {
             name: name.clone(),
@@ -280,7 +284,7 @@ fn json_value_to_ts_type(value: &serde_json::Value) -> TsType {
 
 /// Normalize intersection type (allOf)
 fn normalize_intersection(schemas: &[Schema]) -> Result<TsType, String> {
-    let types: Vec<_> = schemas
+    let mut types: Vec<_> = schemas
         .iter()
         .map(schema_to_ts_type)
         .collect::<Result<Vec<_>, _>>()?;
@@ -289,7 +293,9 @@ fn normalize_intersection(schemas: &[Schema]) -> Result<TsType, String> {
         return Ok(TsType::Primitive(TsPrimitive::Unknown));
     }
     if types.len() == 1 {
-        return Ok(types.into_iter().next().unwrap());
+        if let Some(ty) = types.pop() {
+            return Ok(ty);
+        }
     }
 
     Ok(TsType::Intersection(types))
@@ -316,10 +322,11 @@ fn normalize_union(
                 } else {
                     None
                 }
-            } else if let Some(ref_path) = &schema.ref_path {
-                Some(ref_to_type_name(ref_path))
             } else {
-                None
+                schema
+                    .ref_path
+                    .as_ref()
+                    .map(|ref_path| ref_to_type_name(ref_path))
             };
 
             if let Some(value) = disc_value {
@@ -400,10 +407,10 @@ fn normalize_object_type(schema: &Schema) -> Result<TsType, String> {
     match (has_properties, has_additional) {
         (true, true) => {
             // Intersection of props and record
-            let props = normalize_properties(
-                schema.properties.as_ref().unwrap(),
-                schema.required.as_ref(),
-            )?;
+            let Some(properties) = schema.properties.as_ref() else {
+                return Ok(make_unknown_record());
+            };
+            let props = normalize_properties(properties, schema.required.as_ref())?;
             let additional_type = normalize_additional_properties(schema)?;
             Ok(TsType::Intersection(vec![
                 TsType::Object(props),
@@ -411,10 +418,10 @@ fn normalize_object_type(schema: &Schema) -> Result<TsType, String> {
             ]))
         }
         (true, false) => {
-            let props = normalize_properties(
-                schema.properties.as_ref().unwrap(),
-                schema.required.as_ref(),
-            )?;
+            let Some(properties) = schema.properties.as_ref() else {
+                return Ok(make_unknown_record());
+            };
+            let props = normalize_properties(properties, schema.required.as_ref())?;
             Ok(TsType::Object(props))
         }
         (false, true) => normalize_additional_properties(schema),
@@ -665,9 +672,7 @@ fn normalize_response(op: &Operation) -> Result<ResponseIR, String> {
     let has_void_status = op.responses.contains_key("204");
 
     // Priority order for success responses: 200, 201, 202, 203, 206, 207, then default, then 2XX
-    let status_codes = [
-        "200", "201", "202", "203", "206", "207", "default", "2XX",
-    ];
+    let status_codes = ["200", "201", "202", "203", "206", "207", "default", "2XX"];
 
     for status in status_codes {
         if let Some(response) = op.responses.get(status) {
@@ -848,11 +853,9 @@ fn find_matching_param(placeholder: &str, params: &[&ParamIR]) -> Option<String>
 /// Build query key IR
 fn build_query_key_ir(name: &str, path: &str, params: &Option<ParamsIR>) -> QueryKeyIR {
     QueryKeyIR {
-        fn_name: format!("{}Key", name),
+        fn_name: format!("{name}Key"),
         base_key: path.to_string(),
-        params_type: params
-            .as_ref()
-            .map(|p| TypeRef::Named(p.type_name.clone())),
+        params_type: params.as_ref().map(|p| TypeRef::Named(p.type_name.clone())),
     }
 }
 
@@ -870,14 +873,12 @@ fn build_hooks(
 
     match kind {
         OperationKind::Query => {
-            let vars_type = params
-                .as_ref()
-                .map(|p| TypeRef::Named(p.type_name.clone()));
+            let vars_type = params.as_ref().map(|p| TypeRef::Named(p.type_name.clone()));
             let key_fn = query_key.as_ref().map(|k| k.fn_name.clone());
 
             // useQuery
             hooks.push(HookIR {
-                name: format!("use{}", capitalized),
+                name: format!("use{capitalized}"),
                 kind: HookKind::Query,
                 response_type: response.ty.clone(),
                 vars_type: vars_type.clone(),
@@ -887,7 +888,7 @@ fn build_hooks(
 
             // useSuspenseQuery
             hooks.push(HookIR {
-                name: format!("use{}Suspense", capitalized),
+                name: format!("use{capitalized}Suspense"),
                 kind: HookKind::SuspenseQuery,
                 response_type: response.ty.clone(),
                 vars_type,
@@ -920,7 +921,7 @@ fn build_hooks(
             };
 
             hooks.push(HookIR {
-                name: format!("use{}", capitalized),
+                name: format!("use{capitalized}"),
                 kind: HookKind::Mutation,
                 response_type: response.ty.clone(),
                 vars_type,
@@ -932,4 +933,3 @@ fn build_hooks(
 
     hooks
 }
-

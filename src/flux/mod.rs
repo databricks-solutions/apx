@@ -32,8 +32,8 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-pub use server::{run_server, FLUX_PORT};
-pub use storage::{db_path, flux_dir, LogRecord, Storage};
+pub use server::{FLUX_PORT, run_server};
+pub use storage::{LogRecord, Storage, db_path, flux_dir};
 
 // ============================================================================
 // Lock file management
@@ -86,11 +86,11 @@ pub fn read_lock() -> Result<Option<FluxLock>, String> {
         return Ok(None);
     }
 
-    let contents = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read flux lock file: {}", e))?;
+    let contents =
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read flux lock file: {e}"))?;
 
     let lock: FluxLock = serde_json::from_str(&contents)
-        .map_err(|e| format!("Failed to parse flux lock file: {}", e))?;
+        .map_err(|e| format!("Failed to parse flux lock file: {e}"))?;
 
     Ok(Some(lock))
 }
@@ -101,21 +101,20 @@ pub fn write_lock(lock: &FluxLock) -> Result<(), String> {
 
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create lock directory: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create lock directory: {e}"))?;
     }
 
-    let contents = serde_json::to_string_pretty(lock)
-        .map_err(|e| format!("Failed to serialize lock: {}", e))?;
+    let contents =
+        serde_json::to_string_pretty(lock).map_err(|e| format!("Failed to serialize lock: {e}"))?;
 
-    fs::write(&path, contents).map_err(|e| format!("Failed to write flux lock file: {}", e))
+    fs::write(&path, contents).map_err(|e| format!("Failed to write flux lock file: {e}"))
 }
 
 /// Remove the lock file.
 pub fn remove_lock() -> Result<(), String> {
     let path = lock_path()?;
     if path.exists() {
-        fs::remove_file(&path).map_err(|e| format!("Failed to remove flux lock file: {}", e))?;
+        fs::remove_file(&path).map_err(|e| format!("Failed to remove flux lock file: {e}"))?;
     }
     Ok(())
 }
@@ -145,7 +144,7 @@ fn spawn_daemon() -> Result<u32, String> {
 
     // Ensure log directory exists
     if let Some(parent) = log_file.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Failed to create log directory: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create log directory: {e}"))?;
     }
 
     // Open log file for daemon output
@@ -153,11 +152,11 @@ fn spawn_daemon() -> Result<u32, String> {
         .create(true)
         .append(true)
         .open(&log_file)
-        .map_err(|e| format!("Failed to open log file: {}", e))?;
+        .map_err(|e| format!("Failed to open log file: {e}"))?;
 
     let log_stderr = log
         .try_clone()
-        .map_err(|e| format!("Failed to clone log file handle: {}", e))?;
+        .map_err(|e| format!("Failed to clone log file handle: {e}"))?;
 
     // Spawn apx via uv to ensure correct Python environment
     let apx_cmd = crate::common::ApxCommand::new();
@@ -192,7 +191,7 @@ fn wait_for_ready(timeout_ms: u64) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    Err(format!("Flux did not start within {}ms", timeout_ms))
+    Err(format!("Flux did not start within {timeout_ms}ms"))
 }
 
 /// Start flux daemon.
@@ -202,7 +201,7 @@ fn wait_for_ready(timeout_ms: u64) -> Result<(), String> {
 pub fn start() -> Result<(), String> {
     // Create the flux directory if it doesn't exist
     let dir = flux_dir()?;
-    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create flux directory: {}", e))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create flux directory: {e}"))?;
 
     // Check if already running via lock file
     if let Some(lock) = read_lock()? {

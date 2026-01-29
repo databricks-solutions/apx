@@ -4,11 +4,14 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tokio::process::Command;
 
+use crate::common::{format_elapsed_ms, read_project_metadata, spinner};
 use crate::{bun_binary_path, cli::run_cli_async};
-use crate::common::{read_project_metadata, spinner, format_elapsed_ms};
 
-use super::{plan_add, AddPlan, PlannedFile, collect_css_mutations, apply_css_updates, UiConfig, ResolvedComponent};
 use super::cache::sync_registry_indexes;
+use super::{
+    AddPlan, PlannedFile, ResolvedComponent, UiConfig, apply_css_updates, collect_css_mutations,
+    plan_add,
+};
 use crate::cli::components::utils::format_relative_path;
 
 fn resolve_app_dir(app_path: Option<PathBuf>) -> PathBuf {
@@ -34,7 +37,7 @@ fn print_plan_summary(plan: &AddPlan) {
     if !plan.component_deps.is_empty() {
         println!("Dependencies:");
         for dep in &plan.component_deps {
-            println!("  - {}", dep);
+            println!("  - {dep}");
         }
     }
 
@@ -42,7 +45,7 @@ fn print_plan_summary(plan: &AddPlan) {
         println!("Warnings:");
         for warning in &plan.warnings {
             let indented = warning.replace('\n', "\n    ");
-            println!("  - {}", indented);
+            println!("  - {indented}");
         }
     }
 }
@@ -72,8 +75,7 @@ fn write_file_if_changed(
     }
 
     if let Some(parent) = file.absolute_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create directory: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {e}"))?;
     }
 
     std::fs::write(&file.absolute_path, &file.content)
@@ -119,7 +121,7 @@ pub struct AddComponentsResult {
 }
 
 /// Add one or more components without console output.
-/// 
+///
 /// This is the core API used by both the CLI `add` command and the `init` command.
 /// It handles:
 /// - Resolving all components and their dependencies
@@ -127,7 +129,7 @@ pub struct AddComponentsResult {
 /// - Writing files to disk
 /// - Installing npm dependencies (once, batched)
 /// - Updating CSS with required variables/rules
-/// 
+///
 /// The caller is responsible for console output (spinners, success messages, etc.)
 pub async fn add_components(
     app_dir: &Path,
@@ -152,7 +154,8 @@ pub async fn add_components(
 
     for input in components {
         // Parse component name to extract registry prefix if present (e.g., @animate-ui/button)
-        let (registry, component_name) = if input.name.starts_with('@') && input.registry.is_none() {
+        let (registry, component_name) = if input.name.starts_with('@') && input.registry.is_none()
+        {
             if let Some((prefix, name)) = input.name.split_once('/') {
                 (Some(prefix.to_string()), name.to_string())
             } else {
@@ -162,14 +165,7 @@ pub async fn add_components(
             (input.registry.clone(), input.name.clone())
         };
 
-        let plan = plan_add(
-            &client,
-            app_dir,
-            &cfg,
-            registry.as_deref(),
-            &component_name,
-        )
-        .await?;
+        let plan = plan_add(&client, app_dir, &cfg, registry.as_deref(), &component_name).await?;
 
         // Deduplicate files across components
         for file in plan.files_to_write {
@@ -219,8 +215,7 @@ pub async fn add_components(
             }
             Err(e) => {
                 result.warnings.push(format!(
-                    "Failed to automatically update CSS: {}. You may need to manually add CSS variables.",
-                    e
+                    "Failed to automatically update CSS: {e}. You may need to manually add CSS variables."
                 ));
             }
         }
@@ -282,7 +277,7 @@ pub async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
     };
 
     // Print component name in yellow
-    println!("✨ Adding component \x1b[33m{}\x1b[0m", display_name);
+    println!("✨ Adding component \x1b[33m{display_name}\x1b[0m");
 
     // Use the API
     let input = match args.registry {
@@ -309,14 +304,17 @@ pub async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
     }
 
     if let Some(css_path) = &result.css_updated_path {
-        println!("🎨 CSS file updated: {}", css_path);
+        println!("🎨 CSS file updated: {css_path}");
     }
 
     for warning in &result.warnings {
-        eprintln!("\n⚠️  WARNING: {}", warning);
+        eprintln!("\n⚠️  WARNING: {warning}");
     }
 
-    println!("\n🎉 Component added in {}\n", format_elapsed_ms(start_time));
+    println!(
+        "\n🎉 Component added in {}\n",
+        format_elapsed_ms(start_time)
+    );
 
     Ok(())
 }

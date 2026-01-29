@@ -10,8 +10,8 @@ pub use models::{CssRules, RegistryCatalogEntry, RegistryConfig, RegistryItem, U
 
 // Re-export cache functions
 pub use cache::{
-    new_cache_state, SharedCacheState,
-    sync_registry_indexes, get_all_registry_indexes, needs_registry_refresh,
+    SharedCacheState, get_all_registry_indexes, needs_registry_refresh, new_cache_state,
+    sync_registry_indexes,
 };
 
 use serde_json::Value;
@@ -23,7 +23,6 @@ use url::Url;
 
 use crate::cli::components::css_updater::{CssMutation, CssUpdater};
 use crate::cli::components::models::TailwindConfig;
-
 
 /// Default shadcn/ui registry item template.
 ///
@@ -42,10 +41,7 @@ const INITIAL_DELAY_MS: u64 = 125;
 /// Execute an async operation with exponential backoff retry.
 ///
 /// Retries up to 5 times with delays: 125ms, 250ms, 500ms, 1000ms, 2000ms (~4 seconds total).
-async fn fetch_with_retry<T, F, Fut>(
-    operation: F,
-    operation_name: &str,
-) -> Result<T, String>
+async fn fetch_with_retry<T, F, Fut>(operation: F, operation_name: &str) -> Result<T, String>
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
@@ -71,7 +67,9 @@ where
             }
         }
     }
-    Err(format!("{}: {} (after {} retries)", operation_name, last_error, MAX_RETRIES))
+    Err(format!(
+        "{operation_name}: {last_error} (after {MAX_RETRIES} retries)"
+    ))
 }
 
 pub async fn fetch_registry_catalog_impl(
@@ -225,10 +223,7 @@ pub fn resolve_component_request(
         .get(registry_name)
         .ok_or_else(|| {
             let available: Vec<&String> = cfg.registries.keys().collect();
-            format!(
-                "Unknown registry: {registry_name}. Available registries: {:?}",
-                available
-            )
+            format!("Unknown registry: {registry_name}. Available registries: {available:?}")
         })?
         .clone();
 
@@ -293,7 +288,9 @@ pub async fn fetch_component_impl(
 ) -> Result<(RegistryItem, Vec<String>), String> {
     // Try cache first if we have component name
     if let Some(component_name_val) = component_name {
-        if let Ok(Some((item, warnings))) = cache::load_cached_component(component_name_val, registry_name) {
+        if let Ok(Some((item, warnings))) =
+            cache::load_cached_component(component_name_val, registry_name)
+        {
             return Ok((item, warnings));
         }
     }
@@ -307,7 +304,8 @@ pub async fn fetch_component_impl(
 
     // Save to cache if we have component name
     if let Some(component_name_val) = component_name {
-        let _ = cache::save_cached_component(component_name_val, registry_name, &result.0, &result.1);
+        let _ =
+            cache::save_cached_component(component_name_val, registry_name, &result.0, &result.1);
     }
 
     Ok(result)
@@ -342,7 +340,7 @@ pub(crate) async fn fetch_http_component(
                     .map_err(|e| format!("Invalid component spec: {e}"))
             }
         },
-        &format!("fetch component from {}", url_str),
+        &format!("fetch component from {url_str}"),
     )
     .await?;
 
@@ -448,7 +446,8 @@ pub async fn resolve_component_closure(
                     &req,
                     current_registry.as_deref(),
                     Some(component.as_str()),
-                ).await?;
+                )
+                .await?;
 
                 for dep in &spec.dependencies {
                     component_deps.insert(dep.to_string());
@@ -620,12 +619,12 @@ pub async fn plan_add(
 fn rewrite_registry_imports(content: &str) -> String {
     let mut result = String::with_capacity(content.len());
     let mut remaining = content;
-    
+
     // First pass: Strip @/registry/{style}/ → @/
     while let Some(pos) = remaining.find("@/registry/") {
         result.push_str(&remaining[..pos]);
         let after_prefix = &remaining[pos + "@/registry/".len()..];
-        
+
         // Find the next '/' which marks the end of the style name
         if let Some(slash_pos) = after_prefix.find('/') {
             // Skip the style name and the slash, replace with "@/"
@@ -638,11 +637,11 @@ fn rewrite_registry_imports(content: &str) -> String {
         }
     }
     result.push_str(remaining);
-    
+
     // Second pass: Transform @/ui/ → @/components/ui/
     // This handles the case where shadcn components import from "@/ui/..." shorthand
     let result = result.replace("@/ui/", "@/components/ui/");
-    
+
     // Third pass: Transform Tailwind v3 class syntax to v4
     tw_transform::transform_tailwind_v3_to_v4(&result)
 }
@@ -773,7 +772,6 @@ fn validate_registry_item(item: &RegistryItem) -> Result<(), String> {
                 item.name, file.path
             ));
         }
-
     }
     Ok(())
 }
@@ -844,8 +842,6 @@ fn render_declaration_value(value: &Value) -> Result<String, String> {
     }
 }
 
-
-
 pub fn apply_css_updates(css_path: &Path, mutations: Vec<CssMutation>) -> Result<(), String> {
     let source =
         std::fs::read_to_string(css_path).map_err(|e| format!("Failed to read CSS file: {e}"))?;
@@ -893,9 +889,9 @@ fn convert_tailwind_to_mutations(tailwind: &TailwindConfig, mutations: &mut Vec<
                 for (variant, val) in variants {
                     if let Some(val_str) = val.as_str() {
                         let var_name = if variant == "DEFAULT" {
-                            format!("--color-{}", color_name)
+                            format!("--color-{color_name}")
                         } else {
-                            format!("--color-{}-{}", color_name, variant)
+                            format!("--color-{color_name}-{variant}")
                         };
                         theme_vars.push((var_name, val_str.to_string()));
                     }
@@ -903,7 +899,7 @@ fn convert_tailwind_to_mutations(tailwind: &TailwindConfig, mutations: &mut Vec<
             }
             // Simple format: "hsl(var(--brand))"
             Value::String(val_str) => {
-                theme_vars.push((format!("--color-{}", color_name), val_str.clone()));
+                theme_vars.push((format!("--color-{color_name}"), val_str.clone()));
             }
             _ => {}
         }
@@ -913,7 +909,7 @@ fn convert_tailwind_to_mutations(tailwind: &TailwindConfig, mutations: &mut Vec<
     // e.g., { "accordion-down": "accordion-down 0.2s ease-out" }
     // becomes: --animate-accordion-down: accordion-down 0.2s ease-out;
     for (name, value) in &extend.animation {
-        theme_vars.push((format!("--animate-{}", name), value.clone()));
+        theme_vars.push((format!("--animate-{name}"), value.clone()));
     }
 
     // Convert fontFamily to @theme inline mappings
@@ -930,20 +926,20 @@ fn convert_tailwind_to_mutations(tailwind: &TailwindConfig, mutations: &mut Vec<
             _ => continue,
         };
         if !font_value.is_empty() {
-            theme_vars.push((format!("--font-{}", name), font_value));
+            theme_vars.push((format!("--font-{name}"), font_value));
         }
     }
 
     // Convert borderRadius to @theme inline mappings
     // e.g., { "custom": "0.5rem" } -> --radius-custom: 0.5rem;
     for (name, value) in &extend.border_radius {
-        theme_vars.push((format!("--radius-{}", name), value.clone()));
+        theme_vars.push((format!("--radius-{name}"), value.clone()));
     }
 
     // Convert spacing to @theme inline mappings
     // e.g., { "custom": "2rem" } -> --spacing-custom: 2rem;
     for (name, value) in &extend.spacing {
-        theme_vars.push((format!("--spacing-{}", name), value.clone()));
+        theme_vars.push((format!("--spacing-{name}"), value.clone()));
     }
 
     // Add all theme vars as a single mutation
@@ -958,7 +954,7 @@ fn convert_tailwind_to_mutations(tailwind: &TailwindConfig, mutations: &mut Vec<
         let body = render_keyframes(frames);
         if !body.is_empty() {
             mutations.push(CssMutation::AddCssBlock {
-                at_rule: format!("@keyframes {}", keyframe_name),
+                at_rule: format!("@keyframes {keyframe_name}"),
                 body,
             });
         }
@@ -1000,7 +996,7 @@ pub fn collect_css_mutations(components: &[ResolvedComponent]) -> Vec<CssMutatio
                 let vars: Vec<(String, String)> = css_vars
                     .theme
                     .iter()
-                    .map(|(k, v)| (format!("--{}", k), v.clone()))
+                    .map(|(k, v)| (format!("--{k}"), v.clone()))
                     .collect();
                 mutations.push(CssMutation::AddThemeMappings { vars });
             }
@@ -1010,7 +1006,7 @@ pub fn collect_css_mutations(components: &[ResolvedComponent]) -> Vec<CssMutatio
                 let vars: Vec<(String, String)> = css_vars
                     .light
                     .iter()
-                    .map(|(k, v)| (format!("--{}", k), v.clone()))
+                    .map(|(k, v)| (format!("--{k}"), v.clone()))
                     .collect();
                 mutations.push(CssMutation::AddCssVars {
                     selector: ":root".to_string(),
@@ -1023,7 +1019,7 @@ pub fn collect_css_mutations(components: &[ResolvedComponent]) -> Vec<CssMutatio
                 let vars: Vec<(String, String)> = css_vars
                     .dark
                     .iter()
-                    .map(|(k, v)| (format!("--{}", k), v.clone()))
+                    .map(|(k, v)| (format!("--{k}"), v.clone()))
                     .collect();
                 mutations.push(CssMutation::AddCssVars {
                     selector: ".dark".to_string(),

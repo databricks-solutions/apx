@@ -130,7 +130,10 @@ pub enum FetchArgIR {
     /// Parameters argument
     Params { ty: TypeRef, optional: bool },
     /// Request body argument
-    Body { ty: TypeRef, content_type: BodyContentType },
+    Body {
+        ty: TypeRef,
+        content_type: BodyContentType,
+    },
     /// RequestInit options
     Options,
 }

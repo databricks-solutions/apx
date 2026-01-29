@@ -9,9 +9,11 @@ use crate::cli::dev::logs::LogsArgs;
 // StartupLogStreamer is imported locally in wait_for_healthy_with_logs
 use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
-use crate::common::{ApxCommand, ensure_dir, spinner, format_elapsed_ms, handle_spawn_error, run_preflight_checks};
-use crate::dev::client::{health, status, stop, HealthCheckConfig};
-use crate::dev::common::{lock_path, read_lock, remove_lock, write_lock, DevLock, BIND_HOST};
+use crate::common::{
+    ApxCommand, ensure_dir, format_elapsed_ms, handle_spawn_error, run_preflight_checks, spinner,
+};
+use crate::dev::client::{HealthCheckConfig, health, status, stop};
+use crate::dev::common::{BIND_HOST, DevLock, lock_path, read_lock, remove_lock, write_lock};
 use crate::dev::process::ProcessManager;
 use crate::flux;
 use crate::registry::Registry;
@@ -69,7 +71,13 @@ async fn run_detached(args: StartArgs) -> Result<(), String> {
         return Ok(());
     }
 
-    let _ = spawn_server(&app_dir, None, args.skip_credentials_validation, args.timeout).await?;
+    let _ = spawn_server(
+        &app_dir,
+        None,
+        args.skip_credentials_validation,
+        args.timeout,
+    )
+    .await?;
     Ok(())
 }
 
@@ -79,7 +87,13 @@ async fn run_attached(args: StartArgs) -> Result<(), String> {
         println!("✅ Dev server already running at http://localhost:{port}, attaching logs...\n");
         port
     } else {
-        spawn_server(&app_dir, None, args.skip_credentials_validation, args.timeout).await?
+        spawn_server(
+            &app_dir,
+            None,
+            args.skip_credentials_validation,
+            args.timeout,
+        )
+        .await?
     };
 
     // Use the SQLite-based log following (reads from flux storage)
@@ -116,7 +130,10 @@ async fn resolve_existing_server(app_dir: &Path) -> Result<Option<u16>, String> 
     if is_healthy {
         Ok(Some(lock.port))
     } else {
-        println!("⚠️  Dev server unreachable at http://localhost:{}", lock.port);
+        println!(
+            "⚠️  Dev server unreachable at http://localhost:{}",
+            lock.port
+        );
         Ok(None)
     }
 }
@@ -135,24 +152,27 @@ pub async fn start_dev_server(app_dir: &Path) -> Result<u16, String> {
 async fn run_preflight(app_dir: &Path) -> Result<(), String> {
     println!("🛫 Preflight check started...");
     let preflight_start = Instant::now();
-    
+
     let bun_path = bun_binary_path()?;
     let preflight_spinner = spinner("  Running preflight checks...");
-    
+
     let result = run_preflight_checks(app_dir, &bun_path).await;
     preflight_spinner.finish_and_clear();
-    
+
     match result {
         Ok(preflight) => {
             println!("  ✓ verified project layout ({}ms)", preflight.layout_ms);
             println!("  ✓ uv sync ({}ms)", preflight.uv_sync_ms);
             println!("  ✓ version file ({}ms)", preflight.version_ms);
             if let Some(bun_ms) = preflight.bun_install_ms {
-                println!("  ✓ bun install ({}ms)", bun_ms);
+                println!("  ✓ bun install ({bun_ms}ms)");
             } else {
                 println!("  ✓ node_modules (cached)");
             }
-            println!("✅ Ready for takeoff! ({})\n", format_elapsed_ms(preflight_start));
+            println!(
+                "✅ Ready for takeoff! ({})\n",
+                format_elapsed_ms(preflight_start)
+            );
             Ok(())
         }
         Err(e) => {
@@ -171,43 +191,47 @@ pub(crate) async fn spawn_server(
 ) -> Result<u16, String> {
     let start_time = Instant::now();
     prepare_app_dir(app_dir)?;
-    
+
     // Run preflight checks (generates _metadata.py, _version.py, installs deps)
     run_preflight(app_dir).await?;
-    
+
     let lock_path = lock_path(app_dir);
 
     println!("🚀 Starting dev server...");
-    
+
     // Start flux for log collection (before subprocess so it's ready to receive logs)
     if let Err(e) = flux::ensure_running() {
         debug!("Failed to start flux: {e}. Logs may not be collected.");
     }
-    
+
     // Load registry and cleanup stale entries (projects that no longer exist)
     let mut registry = Registry::load()?;
     let stale = registry.cleanup_stale_entries();
     if !stale.is_empty() {
         debug!("Cleaned up {} stale registry entries", stale.len());
     }
-    
+
     // Get or allocate port from registry
     let port = registry.get_or_allocate_port(app_dir, preferred_port)?;
     registry.save()?;
-    
+
     // Ensure the port is available (wait if needed)
     wait_for_port_available(port).await?;
-    
+
     // Spawn apx via uv to ensure correct Python environment
     let apx_cmd = ApxCommand::new();
-    
+
     let command = format!(
         "{} dev __internal__run_server --app-dir {} --host {} --port {}{}",
         apx_cmd.display(),
         app_dir.display(),
         BIND_HOST,
         port,
-        if skip_credentials_validation { " --skip-credentials-validation" } else { "" }
+        if skip_credentials_validation {
+            " --skip-credentials-validation"
+        } else {
+            ""
+        }
     );
 
     let mut cmd = apx_cmd.tokio_command();
@@ -219,11 +243,11 @@ pub(crate) async fn spawn_server(
         .arg(BIND_HOST)
         .arg("--port")
         .arg(port.to_string());
-    
+
     if skip_credentials_validation {
         cmd.arg("--skip-credentials-validation");
     }
-    
+
     // Canonicalize app_dir for consistent path matching in logs
     let canonical_app_dir = app_dir
         .canonicalize()
@@ -264,7 +288,7 @@ pub(crate) async fn spawn_server(
         if let Some(pid) = child.id() {
             let _ = ProcessManager::kill_process_tree_async(pid, "dev-server".to_string()).await;
         }
-        let _ = child.kill(); // Fallback in case tree kill missed the root
+        drop(child.kill()); // Fallback in case tree kill missed the root
 
         // Clean up lock file if it exists
         let _ = remove_lock(&lock_path);
@@ -273,7 +297,7 @@ pub(crate) async fn spawn_server(
         if let Ok(logs) = crate::cli::dev::logs::fetch_logs(app_dir, "30s").await {
             let logs = logs.trim();
             if !logs.is_empty() {
-                eprintln!("\n📋 Recent logs:\n{}\n", logs);
+                eprintln!("\n📋 Recent logs:\n{logs}\n");
             }
         }
 
@@ -284,7 +308,10 @@ pub(crate) async fn spawn_server(
     let lock = DevLock::new(pid, port, command, app_dir);
     write_lock(&lock_path, &lock)?;
 
-    println!("✅ Dev server started at http://localhost:{port} in {}\n", format_elapsed_ms(start_time));
+    println!(
+        "✅ Dev server started at http://localhost:{port} in {}\n",
+        format_elapsed_ms(start_time)
+    );
     Ok(port)
 }
 
@@ -307,8 +334,7 @@ async fn wait_for_port_available(port: u16) -> Result<(), String> {
         tokio::time::sleep(Duration::from_millis(PORT_WAIT_INTERVAL_MS)).await;
     }
     Err(format!(
-        "Port {port} is still in use after {}ms. Another process may be using it.",
-        PORT_WAIT_TIMEOUT_MS
+        "Port {port} is still in use after {PORT_WAIT_TIMEOUT_MS}ms. Another process may be using it."
     ))
 }
 
@@ -319,7 +345,7 @@ async fn wait_for_healthy_with_logs(
     app_dir: &Path,
 ) -> Result<(), String> {
     use crate::cli::dev::startup_logs::StartupLogStreamer;
-    
+
     // Give server time to start Python/tokio before polling
     debug!(
         "Starting health check with config: timeout={}s, retry_delay={}ms, initial_delay={}ms",
@@ -358,7 +384,7 @@ async fn wait_for_healthy_with_logs(
                             );
                             first_response_logged = true;
                         }
-                        
+
                         if status_response.status == "ok" {
                             debug!(
                                 "Health check PASSED on attempt {} after {}ms - services ready (frontend: {}, backend: {}, db: {})",
@@ -368,15 +394,15 @@ async fn wait_for_healthy_with_logs(
                                 status_response.backend_status,
                                 status_response.db_status
                             );
-                            
+
                             // Check if DB failed to start (non-critical warning)
                             if status_response.db_status != "healthy" {
                                 println!("⚠️  Database not available: local development will work but DB features disabled");
                             }
-                            
+
                             return Ok(());
                         }
-                        
+
                         // Log every attempt - we need to see what's happening
                         let status_str = format!(
                             "status={}, fe={}, be={}, db={}",
@@ -385,12 +411,12 @@ async fn wait_for_healthy_with_logs(
                             status_response.backend_status,
                             status_response.db_status
                         );
-                        
+
                         // Only log if status changed or every 5 seconds to reduce spam
-                        let should_log = last_overall_status.as_ref() != Some(&status_str) 
+                        let should_log = last_overall_status.as_ref() != Some(&status_str)
                             || attempt_count <= 5
                             || elapsed_ms % 5000 < 250;
-                        
+
                         if should_log {
                             debug!(
                                 "Health check attempt {} ({}ms) - {} [waiting for status='ok']",

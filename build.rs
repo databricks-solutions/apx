@@ -35,14 +35,18 @@ fn main() {
     if !bun_source.exists() {
         panic!("Missing Bun binary at {}", bun_source.display());
     }
-    let bun_dest_name = if target_os == "windows" { "bun.exe" } else { "bun" };
+    let bun_dest_name = if target_os == "windows" {
+        "bun.exe"
+    } else {
+        "bun"
+    };
     let bun_dest = output_dir.join(bun_dest_name);
     fs::copy(&bun_source, &bun_dest).expect("Failed to copy Bun binary");
     set_executable_permissions(&bun_dest);
 
     // Watch for changes
     println!("cargo:rerun-if-changed={}", bun_source.display());
-    println!("cargo:rerun-if-changed={}/", BUN_BIN_DIR);
+    println!("cargo:rerun-if-changed={BUN_BIN_DIR}/");
 
     // Watch for changes in the plugin.ts asset file
     let plugin_ts = manifest_dir.join("src/apx/assets/plugin.ts");

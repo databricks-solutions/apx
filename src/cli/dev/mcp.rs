@@ -1,10 +1,10 @@
-use clap::Args;
-use crate::cli::run_cli_async;
 use crate::cli::components::new_cache_state;
-use crate::mcp::server::{build_server, AppContext, IndexState, SdkIndexParams};
+use crate::cli::run_cli_async;
 use crate::interop::get_databricks_sdk_version;
+use crate::mcp::server::{AppContext, IndexState, SdkIndexParams, build_server};
+use clap::Args;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 
 #[derive(Args)]
 pub struct McpArgs {}

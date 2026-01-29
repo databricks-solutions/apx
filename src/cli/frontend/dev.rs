@@ -52,7 +52,7 @@ async fn run_inner(args: DevArgs) -> Result<(), String> {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     let mut child = run_dev(&app_path).await?;
-    
+
     // Wait for the child process
     let status = child
         .wait()
