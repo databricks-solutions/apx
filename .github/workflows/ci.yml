@@ -73,6 +73,7 @@ jobs:
       - name: Prepare virtual environment
         run: |
           uv venv
+          uv pip install maturin
 
       - name: Download binaries
         run: uv run --script scripts/get_binaries.py
@@ -81,10 +82,7 @@ jobs:
         uses: extractions/setup-just@v2
 
       - name: Build project in development mode
-        run: |
-          uv venv
-          uv pip install maturin 
-          maturin develop --uv
+        run: maturin develop --uv
 
       - name: Configure git for tests
         run: |
