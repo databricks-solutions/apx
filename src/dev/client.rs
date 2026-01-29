@@ -4,6 +4,7 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use std::time::Duration;
 use tracing::{debug, warn};
+use serde_json;
 
 use crate::dev::common::CLIENT_HOST;
 
@@ -127,31 +128,45 @@ pub async fn status(port: u16) -> Result<StatusResponse, String> {
     let url = build_url(CLIENT_HOST, port, "/_apx/health");
     debug!(%url, "Sending dev server status request.");
     let response = client
-        .get(url)
+        .get(&url)
         .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
         .send()
         .await
         .map_err(|err| {
-            debug!(error = %err, "Status request failed.");
+            debug!(error = %err, %url, "Status request failed to connect.");
             format!("Status request failed: {err}")
         })?;
     
-    if response.status() != StatusCode::OK {
+    let http_status = response.status();
+    debug!(%url, status = %http_status, "Received HTTP response for status request.");
+    
+    if http_status != StatusCode::OK {
         return Err(format!(
             "Status request failed with status {}",
-            response.status()
+            http_status
         ));
     }
     
-    let status_response: StatusResponse = response.json().await.map_err(|err| {
-        warn!(error = %err, "Failed to parse status response.");
+    // Get response body as text first for debugging
+    let body_text = response.text().await.map_err(|err| {
+        warn!(error = %err, %url, "Failed to read status response body.");
+        format!("Failed to read status response body: {err}")
+    })?;
+    
+    debug!(%url, body = %body_text, "Status response body received.");
+    
+    let status_response: StatusResponse = serde_json::from_str(&body_text).map_err(|err| {
+        warn!(error = %err, %url, body = %body_text, "Failed to parse status response JSON.");
         format!("Failed to parse status response: {err}")
     })?;
     
     debug!(
+        %url,
+        status = %status_response.status,
         frontend_status = %status_response.frontend_status,
         backend_status = %status_response.backend_status,
-        "Received dev server status response."
+        db_status = %status_response.db_status,
+        "Parsed status response successfully."
     );
     Ok(status_response)
 }

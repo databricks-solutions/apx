@@ -1,44 +1,22 @@
-//! Inline scrolling log display for dev server startup.
+//! Log streaming for dev server startup.
 //!
-//! Shows a fixed-height (5 lines) scrolling region that displays real-time logs
-//! during server startup, then clears when complete.
+//! Prints real-time logs line-by-line during server startup.
 
 use chrono::{Local, TimeZone, Utc};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::collections::VecDeque;
 use std::path::Path;
 
 use crate::flux::{LogRecord, Storage};
 
-/// Number of log lines to display in the scrolling window
-const LOG_WINDOW_SIZE: usize = 5;
-
-/// Inline scrolling log display using indicatif MultiProgress.
-pub struct StartupLogDisplay {
-    #[allow(dead_code)]
-    multi: MultiProgress,
-    lines: Vec<ProgressBar>,
-    buffer: VecDeque<String>,
+/// Simple log streamer that prints logs line-by-line to stdout.
+pub struct StartupLogStreamer {
     last_log_id: i64,
     storage: Option<Storage>,
     app_path: String,
 }
 
-impl StartupLogDisplay {
-    /// Create a new startup log display for the given app directory.
+impl StartupLogStreamer {
+    /// Create a new log streamer for the given app directory.
     pub fn new(app_dir: &Path) -> Self {
-        let multi = MultiProgress::new();
-        let style = ProgressStyle::with_template("{msg}").unwrap_or_else(|_| ProgressStyle::default_bar());
-
-        let lines: Vec<_> = (0..LOG_WINDOW_SIZE)
-            .map(|_| {
-                let pb = multi.add(ProgressBar::new_spinner());
-                pb.set_style(style.clone());
-                pb.set_message("");
-                pb
-            })
-            .collect();
-
         let app_path = app_dir
             .canonicalize()
             .unwrap_or_else(|_| app_dir.to_path_buf())
@@ -52,77 +30,43 @@ impl StartupLogDisplay {
             .unwrap_or(0);
 
         Self {
-            multi,
-            lines,
-            buffer: VecDeque::with_capacity(LOG_WINDOW_SIZE),
             last_log_id,
             storage,
             app_path,
         }
     }
 
-    /// Poll for new logs and update the display.
-    /// Returns the number of new log lines added.
-    pub fn poll(&mut self) -> usize {
+    /// Print any new logs since the last call.
+    /// Returns the number of new log lines printed.
+    pub fn print_new_logs(&mut self) -> usize {
         let storage = match &self.storage {
             Some(s) => s,
             None => return 0,
         };
 
-        // Query logs and collect lines to add (to avoid borrow conflicts)
+        // Query logs since last ID
         let records = match storage.query_logs_after_id(Some(&self.app_path), self.last_log_id) {
             Ok(r) => r,
             Err(_) => return 0,
         };
 
-        let lines_to_add: Vec<_> = records
-            .iter()
-            .filter(|r| !should_skip_log(r))
-            .map(|r| format_log_record(r))
-            .collect();
-
-        let new_last_id = storage.get_latest_id().ok();
-
-        // Now we can mutably borrow self
-        let added = lines_to_add.len();
-        for line in lines_to_add {
-            self.push_line(line);
+        let mut count = 0;
+        for record in &records {
+            if !should_skip_log(record) {
+                println!("{}", format_log_record(record));
+                count += 1;
+            }
         }
 
         // Update last_log_id
-        if let Some(new_id) = new_last_id {
+        if let Some(new_id) = storage.get_latest_id().ok() {
             if new_id > self.last_log_id {
                 self.last_log_id = new_id;
             }
         }
 
-        added
+        count
     }
-
-    /// Add a log line, scrolling the display if necessary.
-    fn push_line(&mut self, line: String) {
-        self.buffer.push_back(line);
-        if self.buffer.len() > LOG_WINDOW_SIZE {
-            self.buffer.pop_front();
-        }
-        self.refresh();
-    }
-
-    /// Refresh all progress bars with current buffer contents.
-    fn refresh(&self) {
-        for (i, pb) in self.lines.iter().enumerate() {
-            let msg = self.buffer.get(i).map(|s| s.as_str()).unwrap_or("");
-            pb.set_message(msg.to_string());
-        }
-    }
-
-    /// Clear the display (called on success or failure).
-    pub fn finish_and_clear(&self) {
-        for pb in &self.lines {
-            pb.finish_and_clear();
-        }
-    }
-
 }
 
 /// Format a log record for terminal display (simplified version).

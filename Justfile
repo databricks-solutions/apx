@@ -31,7 +31,7 @@ pm message:
     git push
 
 
-gen folder profile *args: develop
+gen folder profile *args: uv-sync
     rm -rf /tmp/{{folder}}
     RUST_LOG=DEBUG APX_DEV_PATH="{{justfile_directory()}}" uv run --no-sync apx init /tmp/{{folder}} -p {{profile}}  {{args}}
     cd /tmp/{{folder}} && uv run apx dev check
@@ -62,3 +62,6 @@ release *tag:
 
 sync:
     cargo check
+
+uv-sync:
+    RUST_LOG=debug uv sync

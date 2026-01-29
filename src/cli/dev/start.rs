@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::bun_binary_path;
 use crate::cli::dev::logs::LogsArgs;
-use crate::cli::dev::startup_logs::StartupLogDisplay;
+// StartupLogStreamer is imported locally in wait_for_healthy_with_logs
 use crate::cli::dev::stop::stop_dev_server;
 use crate::cli::run_cli_async;
 use crate::common::{ApxCommand, ensure_dir, spinner, format_elapsed_ms, handle_spawn_error, run_preflight_checks};
@@ -312,50 +312,117 @@ async fn wait_for_port_available(port: u16) -> Result<(), String> {
     ))
 }
 
-/// Wait for dev server to become healthy while displaying streaming logs.
-/// Shows an inline scrolling log window that clears when done.
+/// Wait for dev server to become healthy while streaming logs line-by-line.
 async fn wait_for_healthy_with_logs(
     port: u16,
     config: &HealthCheckConfig,
     app_dir: &Path,
 ) -> Result<(), String> {
+    use crate::cli::dev::startup_logs::StartupLogStreamer;
+    
     // Give server time to start Python/tokio before polling
+    debug!(
+        "Starting health check with config: timeout={}s, retry_delay={}ms, initial_delay={}ms",
+        config.timeout_secs, config.retry_delay_ms, config.initial_delay_ms
+    );
     tokio::time::sleep(Duration::from_millis(config.initial_delay_ms)).await;
 
-    let deadline = Instant::now() + Duration::from_secs(config.timeout_secs);
-    let mut log_display = StartupLogDisplay::new(app_dir);
-    let mut first_attempt = true;
+    let start_time = Instant::now();
+    let deadline = start_time + Duration::from_secs(config.timeout_secs);
+    let mut log_streamer = StartupLogStreamer::new(app_dir);
+    let mut attempt_count = 0u32;
+    let mut last_overall_status: Option<String> = None;
+    let mut first_response_logged = false;
+    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
 
     while Instant::now() < deadline {
-        // Poll for new logs and update display
-        log_display.poll();
-
-        // Check health status
-        match status(port).await {
-            Ok(status_response) if status_response.status == "ok" => {
-                log_display.finish_and_clear();
-                return Ok(());
+        tokio::select! {
+            _ = &mut ctrl_c => {
+                debug!("Received Ctrl+C, aborting startup");
+                return Err("Startup interrupted by user".to_string());
             }
-            Ok(status_response) => {
-                if first_attempt {
-                    debug!(
-                        "Services not ready - frontend: {}, backend: {}, db: {}",
-                        status_response.frontend_status,
-                        status_response.backend_status,
-                        status_response.db_status
-                    );
-                    first_attempt = false;
+            _ = tokio::time::sleep(Duration::from_millis(config.retry_delay_ms)) => {
+                // Print any new logs line-by-line
+                log_streamer.print_new_logs();
+                attempt_count += 1;
+                let elapsed_ms = start_time.elapsed().as_millis();
+
+                // Check health status
+                match status(port).await {
+                    Ok(status_response) => {
+                        // Log first successful connection to server
+                        if !first_response_logged {
+                            debug!(
+                                "Server responding after {}ms (attempt {}) - now waiting for services",
+                                elapsed_ms, attempt_count
+                            );
+                            first_response_logged = true;
+                        }
+                        
+                        if status_response.status == "ok" {
+                            debug!(
+                                "Health check PASSED on attempt {} after {}ms - services ready (frontend: {}, backend: {}, db: {})",
+                                attempt_count,
+                                elapsed_ms,
+                                status_response.frontend_status,
+                                status_response.backend_status,
+                                status_response.db_status
+                            );
+                            
+                            // Check if DB failed to start (non-critical warning)
+                            if status_response.db_status != "healthy" {
+                                println!("⚠️  Database not available: local development will work but DB features disabled");
+                            }
+                            
+                            return Ok(());
+                        }
+                        
+                        // Log every attempt - we need to see what's happening
+                        let status_str = format!(
+                            "status={}, fe={}, be={}, db={}",
+                            status_response.status,
+                            status_response.frontend_status,
+                            status_response.backend_status,
+                            status_response.db_status
+                        );
+                        
+                        // Only log if status changed or every 5 seconds to reduce spam
+                        let should_log = last_overall_status.as_ref() != Some(&status_str) 
+                            || attempt_count <= 5
+                            || elapsed_ms % 5000 < 250;
+                        
+                        if should_log {
+                            debug!(
+                                "Health check attempt {} ({}ms) - {} [waiting for status='ok']",
+                                attempt_count, elapsed_ms, status_str
+                            );
+                        }
+                        last_overall_status = Some(status_str);
+                    }
+                    Err(e) => {
+                        // Log connection errors - every attempt for first 5, then every 5s
+                        let should_log = attempt_count <= 5 || elapsed_ms % 5000 < 250;
+                        if should_log {
+                            debug!(
+                                "Health check attempt {} ({}ms) - connection failed: {}",
+                                attempt_count, elapsed_ms, e
+                            );
+                        }
+                        last_overall_status = None;
+                    }
                 }
             }
-            Err(_) => {
-                // Server not responding yet, keep waiting
-            }
         }
-
-        tokio::time::sleep(Duration::from_millis(config.retry_delay_ms)).await;
     }
 
-    log_display.finish_and_clear();
+    // Log final state before returning error
+    debug!(
+        "Health check TIMED OUT after {} attempts ({}ms). Last state: {:?}",
+        attempt_count,
+        start_time.elapsed().as_millis(),
+        last_overall_status
+    );
+
     Err(format!(
         "Dev server failed to become healthy after {}s timeout",
         config.timeout_secs

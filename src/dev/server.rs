@@ -87,9 +87,15 @@ pub async fn run_server(
     // Create the single shutdown broadcast channel
     let (shutdown_tx, _) = broadcast::channel::<Shutdown>(16);
 
+    // Create ProcessManager (doesn't spawn processes yet)
     let process_manager = Arc::new(
-        ProcessManager::start(&app_dir, &host, port, backend_port, frontend_port, db_port).await?,
+        ProcessManager::new(&app_dir, &host, port, backend_port, frontend_port, db_port)?,
     );
+
+    // Spawn processes in background (DB → Vite → Uvicorn)
+    // This returns immediately - health endpoint will report status as processes come up
+    process_manager.start_processes();
+    debug!("Process spawning started in background");
 
     // Start .env watcher with shutdown receiver
     start_env_watcher(
@@ -257,11 +263,8 @@ fn start_filesystem_watcher(
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
     let (frontend_status, backend_status, db_status) = state.process_manager.status().await;
     
-    // Determine overall status - all services must be healthy
-    let all_healthy = frontend_status == "healthy" 
-        && backend_status == "healthy" 
-        && db_status == "healthy";
-    
+    // DB is non-critical - only frontend and backend must be healthy for "ok" status
+    let all_healthy = frontend_status == "healthy" && backend_status == "healthy";
     let status = if all_healthy { "ok" } else { "starting" };
     
     (
@@ -270,7 +273,7 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRespon
             status,
             frontend_status,
             backend_status,
-            db_status,
+            db_status, // Reported but doesn't affect overall status
         }),
     )
 }

@@ -74,7 +74,9 @@ pub struct ProcessManager {
 }
 
 impl ProcessManager {
-    pub async fn start(
+    /// Create a new ProcessManager without spawning processes.
+    /// Call `start_processes()` to spawn processes in the background.
+    pub fn new(
         app_dir: &Path,
         host: &str,
         dev_server_port: u16,
@@ -82,8 +84,6 @@ impl ProcessManager {
         frontend_port: u16,
         db_port: u16,
     ) -> Result<Self, String> {
-        let bun_path = Self::ensure_bun_path()?;
-
         // Note: Preflight checks (metadata, uv sync, bun install) are done client-side in start.rs
         let metadata = read_project_metadata(app_dir)?;
 
@@ -94,7 +94,18 @@ impl ProcessManager {
 
         let dev_token = Self::generate_dev_token();
         let db_password = Self::generate_dev_token(); // Random password for PGlite
-        let manager = Self {
+
+        debug!(
+            app_dir = %app_dir.display(),
+            host = %host,
+            dev_server_port,
+            backend_port,
+            frontend_port,
+            db_port,
+            "Creating ProcessManager"
+        );
+
+        Ok(Self {
             frontend_child: Arc::new(Mutex::new(None)),
             backend_child: Arc::new(Mutex::new(None)),
             db_child: Arc::new(Mutex::new(None)),
@@ -109,24 +120,50 @@ impl ProcessManager {
             app_slug,
             app_entrypoint,
             dotenv_vars,
-        };
+        })
+    }
 
-        debug!("Spawning frontend dev process");
-        manager.spawn_bun_dev(app_dir).await?;
-        debug!("Spawning PGLite database process");
-        manager.spawn_pglite(&bun_path).await?;
-        debug!("Spawning uvicorn process");
-        manager
-            .spawn_uvicorn(app_dir, metadata.app_entrypoint)
-            .await?;
+    /// Spawn processes in background (DB → Vite → Uvicorn).
+    /// DB is non-critical - failures are logged but don't block other processes.
+    /// This method spawns a background task and returns immediately.
+    pub fn start_processes(self: &Arc<Self>) {
+        let pm = Arc::clone(self);
+        tokio::spawn(async move {
+            // 1. DB (non-critical) - warn on failure but continue
+            debug!("Starting PGlite database process...");
+            match Self::ensure_bun_path() {
+                Ok(bun_path) => {
+                    if let Err(e) = pm.spawn_pglite(&bun_path).await {
+                        warn!("⚠️ Failed to start PGlite database: {}. Continuing without DB.", e);
+                        // Don't return - continue with other processes
+                    } else {
+                        debug!("PGlite database started successfully");
+                    }
+                }
+                Err(e) => {
+                    warn!("⚠️ Bun not available for PGlite: {}. Continuing without DB.", e);
+                }
+            }
 
-        debug!("Starting file watcher for backend restart");
-        manager.start_backend_file_watcher();
+            // 2. Vite (critical)
+            debug!("Starting Vite frontend process...");
+            if let Err(e) = pm.spawn_bun_dev(&pm.app_dir).await {
+                warn!("Failed to start frontend: {}", e);
+                return; // Critical failure
+            }
+            debug!("Vite frontend started successfully");
 
-        debug!(
-            "Frontend and backend processes spawned, services will become healthy as they start listening"
-        );
-        Ok(manager)
+            // 3. Uvicorn (critical)
+            debug!("Starting uvicorn backend process...");
+            if let Err(e) = pm.spawn_uvicorn(&pm.app_dir, pm.app_entrypoint.clone()).await {
+                warn!("Failed to start backend: {}", e);
+                return; // Critical failure
+            }
+            debug!("Uvicorn backend started successfully");
+
+            debug!("All processes spawned, starting file watcher");
+            pm.start_backend_file_watcher();
+        });
     }
 
     pub fn dev_token(&self) -> &str {
@@ -177,25 +214,15 @@ impl ProcessManager {
         debug!("All processes stopped.");
     }
 
+    /// Get the status of all managed processes.
+    /// Runs all three checks in parallel using tokio::join! to avoid blocking.
     pub async fn status(&self) -> (String, String, String) {
-        let frontend_status = Self::status_for_child(
-            &self.frontend_child,
-            "localhost",
-            self.frontend_port,
-        )
-        .await;
-        let backend_status = Self::status_for_child(
-            &self.backend_child,
-            &self.host,
-            self.backend_port,
-        )
-        .await;
-        let db_status = Self::status_for_child(
-            &self.db_child,
-            &self.host,
-            self.db_port,
-        )
-        .await;
+        // Run all three checks in parallel - no mutex held during HTTP probes
+        let (frontend_status, backend_status, db_status) = tokio::join!(
+            self.status_for_process(&self.frontend_child, Some(("localhost", self.frontend_port))),
+            self.status_for_process(&self.backend_child, Some((&self.host, self.backend_port))),
+            self.status_for_process(&self.db_child, None), // DB: no HTTP check, just process status
+        );
         (frontend_status, backend_status, db_status)
     }
 
@@ -1072,26 +1099,43 @@ impl ProcessManager {
         }
     }
 
-    async fn status_for_child(
+    /// Check the status of a process.
+    /// If http_check is Some((host, port)), also performs an HTTP health probe.
+    /// If http_check is None (for DB), just checks if the process is running.
+    /// 
+    /// IMPORTANT: Mutex is released before HTTP probe to avoid blocking other operations.
+    async fn status_for_process(
+        &self,
         child: &Arc<Mutex<Option<Child>>>,
-        host: &str,
-        port: u16,
+        http_check: Option<(&str, u16)>,
     ) -> String {
-        let mut guard = child.lock().await;
-        match guard.as_mut() {
-            None => "stopped".to_string(),
-            Some(process) => match process.try_wait() {
-                Ok(None) => {
-                    // Process is running, check if it responds to HTTP requests
-                    if Self::http_health_probe(host, port).await {
-                        "healthy".to_string()
-                    } else {
-                        "starting".to_string()
-                    }
+        // Quick mutex access to check process state - released before HTTP probe
+        let process_running = {
+            let mut guard = child.lock().await;
+            match guard.as_mut() {
+                None => return "stopped".to_string(),
+                Some(process) => match process.try_wait() {
+                    Ok(None) => true,  // Still running
+                    Ok(Some(_)) => return "stopped".to_string(),
+                    Err(_) => return "error".to_string(),
+                },
+            }
+        }; // Mutex released here!
+
+        // Process is running - for DB that's healthy, for others need HTTP check
+        if !process_running {
+            return "stopped".to_string();
+        }
+
+        match http_check {
+            None => "healthy".to_string(), // DB: running = healthy
+            Some((host, port)) => {
+                if Self::http_health_probe(host, port).await {
+                    "healthy".to_string()
+                } else {
+                    "starting".to_string()
                 }
-                Ok(Some(_)) => "stopped".to_string(),
-                Err(_) => "error".to_string(),
-            },
+            }
         }
     }
 
