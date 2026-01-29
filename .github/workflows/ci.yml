@@ -71,9 +71,10 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Prepare virtual environment
-        run: |
-          uv venv
-          uv pip install maturin
+        run: uv venv
+
+      - name: Install maturin
+        run: uv tool install maturin
 
       - name: Download binaries
         run: uv run --script scripts/get_binaries.py
