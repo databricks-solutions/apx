@@ -46,6 +46,7 @@ target/
 .uv-cache/
 
 .cursor/plans
+.claude/plans/
 
 /assets/models
 .reports
