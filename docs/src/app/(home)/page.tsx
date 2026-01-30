@@ -87,9 +87,7 @@ export default function HomePage() {
       <section className="px-6 py-16">
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-12">
-            <h2 className="text-3xl md:text-4xl font-bold mb-4">
-              Quickstart
-            </h2>
+            <h2 className="text-3xl md:text-4xl font-bold mb-4">Quickstart</h2>
           </div>
           <TerminalDemo />
         </div>
@@ -187,7 +185,8 @@ export default function HomePage() {
               On the shoulders of giants
             </h2>
             <p className="text-fd-muted-foreground text-lg max-w-2xl mx-auto flex items-center justify-center gap-2 text-balance">
-              apx combines proven, reliable tools and frameworks to provide a complete toolkit for Databricks apps development
+              apx combines proven, reliable tools and frameworks to provide a
+              complete toolkit for Databricks apps development
             </p>
           </div>
 

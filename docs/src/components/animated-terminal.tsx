@@ -141,9 +141,12 @@ export function AnimatedTerminal() {
   const handlePlay = () => {
     setVisibleLines(0);
     setIsPlaying(true);
-    setTimeout(() => {
-      setIsPlaying(false);
-    }, terminalOutput.reduce((acc, line) => acc + line.delay, 0));
+    setTimeout(
+      () => {
+        setIsPlaying(false);
+      },
+      terminalOutput.reduce((acc, line) => acc + line.delay, 0),
+    );
   };
 
   const handleCopy = async () => {
@@ -164,9 +167,7 @@ export function AnimatedTerminal() {
         <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 bg-white/5">
           <div className="flex items-center gap-2">
             <Terminal className="w-4 h-4 text-green-400" />
-            <span className="text-sm font-mono text-gray-300">
-              apx init
-            </span>
+            <span className="text-sm font-mono text-gray-300">apx init</span>
           </div>
           <div className="flex items-center gap-2">
             <button
