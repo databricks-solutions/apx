@@ -2,7 +2,7 @@ use clap::Args;
 use std::path::PathBuf;
 
 use crate::cli::run_cli_async;
-use crate::common::BunCommand;
+use crate::common::{BunCommand, run_preflight_checks};
 use tokio::process::Command as TokioCommand;
 use tracing::debug;
 
@@ -23,6 +23,9 @@ pub async fn run_inner(args: CheckArgs) -> Result<(), String> {
     let app_dir = args
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    // Run preflight checks (installs deps if needed)
+    run_preflight_checks(&app_dir).await?;
 
     // Run tsc -b --incremental in one tokio thread
     let bun = BunCommand::new()?;
