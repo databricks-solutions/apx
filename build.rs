@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::os::unix::fs::PermissionsExt;
 
 const BUN_BIN_DIR: &str = ".bins/bun";
+const AGENT_BIN_DIR: &str = ".bins/agent";
 const OUTPUT_DIR: &str = "src/apx/binaries";
 
 fn main() {
@@ -29,7 +30,22 @@ fn main() {
     }
 
     // Copy Bun binary
-    let bun_src_name = bun_binary_name(&target_os, &target_arch)
+    copy_bun_binary(&manifest_dir, &output_dir, &target_os, &target_arch);
+
+    // Copy Agent binary
+    copy_agent_binary(&manifest_dir, &output_dir, &target_os, &target_arch);
+
+    // Watch for changes
+    println!("cargo:rerun-if-changed={BUN_BIN_DIR}/");
+    println!("cargo:rerun-if-changed={AGENT_BIN_DIR}/");
+
+    // Watch for changes in the plugin.ts asset file
+    let plugin_ts = manifest_dir.join("src/apx/assets/plugin.ts");
+    println!("cargo:rerun-if-changed={}", plugin_ts.display());
+}
+
+fn copy_bun_binary(manifest_dir: &PathBuf, output_dir: &PathBuf, target_os: &str, target_arch: &str) {
+    let bun_src_name = bun_binary_name(target_os, target_arch)
         .unwrap_or_else(|| panic!("Unsupported target for bun: {target_os}-{target_arch}"));
     let bun_source = manifest_dir.join(BUN_BIN_DIR).join(bun_src_name);
     if !bun_source.exists() {
@@ -43,14 +59,36 @@ fn main() {
     let bun_dest = output_dir.join(bun_dest_name);
     fs::copy(&bun_source, &bun_dest).expect("Failed to copy Bun binary");
     set_executable_permissions(&bun_dest);
-
-    // Watch for changes
     println!("cargo:rerun-if-changed={}", bun_source.display());
-    println!("cargo:rerun-if-changed={BUN_BIN_DIR}/");
+}
 
-    // Watch for changes in the plugin.ts asset file
-    let plugin_ts = manifest_dir.join("src/apx/assets/plugin.ts");
-    println!("cargo:rerun-if-changed={}", plugin_ts.display());
+fn copy_agent_binary(manifest_dir: &PathBuf, output_dir: &PathBuf, target_os: &str, target_arch: &str) {
+    let agent_src_name = match agent_binary_name(target_os, target_arch) {
+        Some(name) => name,
+        None => {
+            // Agent binary not available for this platform - skip silently
+            // This allows development on platforms where agent binary hasn't been cross-compiled yet
+            println!("cargo:warning=Agent binary not available for {target_os}-{target_arch}, skipping");
+            return;
+        }
+    };
+
+    let agent_source = manifest_dir.join(AGENT_BIN_DIR).join(agent_src_name);
+    if !agent_source.exists() {
+        // Agent binary not yet built - skip with warning
+        println!("cargo:warning=Agent binary not found at {}, skipping", agent_source.display());
+        return;
+    }
+
+    let agent_dest_name = if target_os == "windows" {
+        "apx-agent.exe"
+    } else {
+        "apx-agent"
+    };
+    let agent_dest = output_dir.join(agent_dest_name);
+    fs::copy(&agent_source, &agent_dest).expect("Failed to copy Agent binary");
+    set_executable_permissions(&agent_dest);
+    println!("cargo:rerun-if-changed={}", agent_source.display());
 }
 
 #[cfg(unix)]
@@ -74,6 +112,17 @@ fn bun_binary_name(target_os: &str, target_arch: &str) -> Option<&'static str> {
         ("linux", "aarch64") => Some("bun-linux-aarch64"),
         ("linux", "x86_64") => Some("bun-linux-x64"),
         ("windows", "x86_64") => Some("bun-windows-x64.exe"),
+        _ => None,
+    }
+}
+
+fn agent_binary_name(target_os: &str, target_arch: &str) -> Option<&'static str> {
+    match (target_os, target_arch) {
+        ("macos", "aarch64") => Some("apx-agent-darwin-aarch64"),
+        ("macos", "x86_64") => Some("apx-agent-darwin-x64"),
+        ("linux", "aarch64") => Some("apx-agent-linux-aarch64"),
+        ("linux", "x86_64") => Some("apx-agent-linux-x64"),
+        ("windows", "x86_64") => Some("apx-agent-windows-x64.exe"),
         _ => None,
     }
 }

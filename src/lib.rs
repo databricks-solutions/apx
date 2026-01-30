@@ -18,6 +18,7 @@ use std::sync::OnceLock;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
+mod agent;
 mod api_generator;
 mod cli;
 mod common;

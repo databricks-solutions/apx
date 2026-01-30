@@ -369,12 +369,25 @@ pub fn db_path() -> Result<PathBuf, String> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_db_path() -> PathBuf {
+        let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "apx-test-{}-{}",
+            std::process::id(),
+            counter
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("test.db")
+    }
 
     #[test]
     fn test_storage_create_and_insert() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
+        let db_path = temp_db_path();
         let storage = Storage::open_at(&db_path).unwrap();
 
         let record = LogRecord {
@@ -396,12 +409,14 @@ mod tests {
 
         let total = storage.count_logs().unwrap();
         assert_eq!(total, 1);
+
+        // Cleanup
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
     }
 
     #[test]
     fn test_storage_query() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
+        let db_path = temp_db_path();
         let storage = Storage::open_at(&db_path).unwrap();
 
         let record = LogRecord {
@@ -423,5 +438,8 @@ mod tests {
         let records = storage.query_logs(Some("/tmp/test"), 0, None).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].body, Some("Test log message".to_string()));
+
+        // Cleanup
+        let _ = fs::remove_dir_all(db_path.parent().unwrap());
     }
 }

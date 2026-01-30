@@ -5,7 +5,7 @@
 use chrono::{Local, TimeZone, Utc};
 use std::path::Path;
 
-use crate::flux::{LogRecord, Storage};
+use apx_common::{LogRecord, Storage};
 
 /// Simple log streamer that prints logs line-by-line to stdout.
 pub struct StartupLogStreamer {

@@ -150,6 +150,8 @@ dependencies = [
 name = "apx"
 version = "0.1.28"
 dependencies = [
+ "apx-agent",
+ "apx-common",
  "arrow",
  "axum",
  "biome_css_parser",
@@ -195,6 +197,36 @@ dependencies = [
  "url",
  "walkdir",
  "zip",
+]
+
+[[package]]
+name = "apx-agent"
+version = "0.1.28"
+dependencies = [
+ "apx-common",
+ "axum",
+ "chrono",
+ "clap",
+ "hex",
+ "opentelemetry-proto 0.31.0",
+ "prost 0.14.3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "apx-common"
+version = "0.1.28"
+dependencies = [
+ "chrono",
+ "dirs 5.0.1",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

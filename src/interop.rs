@@ -13,6 +13,11 @@ const BUN_FILENAME: &str = "bun.exe";
 #[cfg(not(target_os = "windows"))]
 const BUN_FILENAME: &str = "bun";
 
+#[cfg(target_os = "windows")]
+const AGENT_FILENAME: &str = "apx-agent.exe";
+#[cfg(not(target_os = "windows"))]
+const AGENT_FILENAME: &str = "apx-agent";
+
 pub(crate) fn get_bun_binary_path(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let bun_path = resolve_bun_binary_path(py)?;
     let pathlib = py.import("pathlib")?;
@@ -76,6 +81,18 @@ fn resolve_bun_binary_path(py: Python<'_>) -> PyResult<PathBuf> {
     let fspath = bun_path.getattr("__fspath__")?.call0()?;
     let bun_path_str: String = fspath.extract()?;
     Ok(PathBuf::from(bun_path_str))
+}
+
+/// Resolve the path to the bundled apx-agent binary via importlib.resources
+pub(crate) fn resolve_apx_agent_binary_path(py: Python<'_>) -> PyResult<PathBuf> {
+    let importlib = py.import("importlib.resources")?;
+    let files = importlib.getattr("files")?;
+    let apx_resources = files.call1(("apx",))?;
+    let binaries_dir = apx_resources.getattr("joinpath")?.call1(("binaries",))?;
+    let agent_path = binaries_dir.getattr("joinpath")?.call1((AGENT_FILENAME,))?;
+    let fspath = agent_path.getattr("__fspath__")?.call0()?;
+    let agent_path_str: String = fspath.extract()?;
+    Ok(PathBuf::from(agent_path_str))
 }
 
 /// Get the path to the frontend entrypoint.ts asset

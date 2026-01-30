@@ -1,0 +1,13 @@
+[package]
+name = "apx-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+tracing.workspace = true

@@ -11,7 +11,7 @@ use tracing::debug;
 
 use crate::cli::run_cli_async;
 use crate::dev::common::{lock_path, read_lock};
-use crate::flux::{LogRecord, Storage, db_path};
+use apx_common::{LogRecord, Storage, db_path};
 
 /// Time window for aggregating similar messages (in milliseconds)
 const AGGREGATION_WINDOW_MS: i64 = 2000;

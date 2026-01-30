@@ -3,6 +3,7 @@
 //! This module implements an Axum HTTP server that receives OpenTelemetry logs
 //! via OTLP HTTP protocol, supporting both JSON and Protobuf content types.
 
+use apx_common::{FLUX_PORT, LogRecord, Storage};
 use axum::{
     Router,
     body::Bytes,
@@ -17,18 +18,13 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
-use super::storage::{LogRecord, Storage};
-
-/// Flux port for OTLP HTTP receiver
-pub const FLUX_PORT: u16 = 11111;
-
 /// Application state shared across handlers.
 #[derive(Clone)]
 struct AppState {
     storage: Storage,
 }
 
-/// Run the flux server (entry point for `apx flux __run`).
+/// Run the flux server (entry point for `apx-agent`).
 ///
 /// This function initializes storage, starts the cleanup scheduler,
 /// and runs the HTTP server. It blocks forever (or until error).

@@ -1,0 +1,23 @@
+[package]
+name = "apx-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "apx-agent"
+path = "src/main.rs"
+
+[dependencies]
+apx-common.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+opentelemetry-proto.workspace = true
+prost.workspace = true
+hex.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+chrono.workspace = true
