@@ -1727,4 +1727,87 @@ mod tests {
             "Hooks should use ApiError type in options: {ts_code}"
         );
     }
+
+    #[test]
+    fn test_optional_params_after_required_body() {
+        // Test that optional params are placed after required body in function signature
+        // This is required by TypeScript: required params must come before optional ones
+        // See: https://github.com/anthropics/claude-code/issues/47
+        let openapi_json = r##"{
+  "openapi": "3.1.0",
+  "info": { "title": "Param Order Test API", "version": "1.0.0" },
+  "paths": {
+    "/api/agent/chat": {
+      "post": {
+        "operationId": "agentChat",
+        "parameters": [
+          {
+            "name": "X-Forwarded-Access-Token",
+            "in": "header",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AgentMessageIn" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AgentResponseOut" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentMessageIn": {
+        "type": "object",
+        "required": ["message"],
+        "properties": { "message": { "type": "string" } }
+      },
+      "AgentResponseOut": {
+        "type": "object",
+        "required": ["response"],
+        "properties": { "response": { "type": "string" } }
+      }
+    }
+  }
+}"##;
+
+        let result = generate(openapi_json);
+        assert!(result.is_ok(), "Generation failed: {:?}", result.err());
+
+        let ts_code = result.unwrap();
+        println!("=== PARAM ORDER CODE ===\n{ts_code}\n=== END ===");
+
+        // The function should have required 'data' before optional 'params'
+        // Correct: (data: AgentMessageIn, params?: AgentChatParams, options?: RequestInit)
+        // Wrong:   (params?: AgentChatParams, data: AgentMessageIn, options?: RequestInit)
+        assert!(
+            ts_code.contains("export const agentChat = async"),
+            "Missing agentChat function"
+        );
+
+        // Verify the order: data comes before params? (using regex-like check)
+        // The signature should be: (data: AgentMessageIn, params?: ...
+        // NOT: (params?: ..., data: AgentMessageIn
+        let has_correct_order = ts_code.contains("data: AgentMessageIn, params?:");
+        let has_wrong_order = ts_code.contains("params?: AgentChatParams, data:");
+
+        assert!(
+            has_correct_order && !has_wrong_order,
+            "Required 'data' param should come before optional 'params' param. Generated code:\n{ts_code}"
+        );
+    }
 }

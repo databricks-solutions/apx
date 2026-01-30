@@ -722,16 +722,27 @@ fn build_fetch_ir(
 ) -> FetchIR {
     let mut args = Vec::new();
 
-    // Add params argument if needed
-    if let Some(p) = params {
-        let has_required = p.fields.iter().any(|f| f.required);
-        args.push(FetchArgIR::Params {
-            ty: TypeRef::Named(p.type_name.clone()),
-            optional: !has_required,
-        });
+    // Determine if params is optional
+    let params_optional = params
+        .as_ref()
+        .map(|p| !p.fields.iter().any(|f| f.required))
+        .unwrap_or(true);
+
+    // Add arguments in correct order: required params first, then optional
+    // Body is always required when present, so it goes before optional params
+    // Order: body (required) -> params (if required) -> params (if optional) -> options (optional)
+
+    if !params_optional {
+        // Params has required fields, add it first
+        if let Some(p) = params {
+            args.push(FetchArgIR::Params {
+                ty: TypeRef::Named(p.type_name.clone()),
+                optional: false,
+            });
+        }
     }
 
-    // Add body argument if needed
+    // Add body argument if needed (always required)
     if let Some(b) = body {
         args.push(FetchArgIR::Body {
             ty: b.ty.clone(),
@@ -739,7 +750,17 @@ fn build_fetch_ir(
         });
     }
 
-    // Always add options
+    if params_optional {
+        // Params is optional, add it after required body
+        if let Some(p) = params {
+            args.push(FetchArgIR::Params {
+                ty: TypeRef::Named(p.type_name.clone()),
+                optional: true,
+            });
+        }
+    }
+
+    // Always add options (always optional, so it goes last)
     args.push(FetchArgIR::Options);
 
     // Build URL IR
