@@ -136,9 +136,6 @@ enum FluxCommands {
     Start(cli::flux::start::StartArgs),
     /// Stop the flux OTEL collector daemon
     Stop(cli::flux::stop::StopArgs),
-    /// Internal: run flux server
-    #[command(name = "__run", hide = true)]
-    Run(cli::flux::__run::RunArgs),
 }
 
 #[pyfunction]
@@ -189,7 +186,6 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
             Some(Commands::Flux(flux_cmd)) => match flux_cmd {
                 FluxCommands::Start(args) => cli::flux::start::run(args).await,
                 FluxCommands::Stop(args) => cli::flux::stop::run(args).await,
-                FluxCommands::Run(args) => cli::flux::__run::run(args).await,
             },
             Some(Commands::GenerateOpenapi(args)) => cli::__generate_openapi::run(args),
             None => {

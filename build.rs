@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -44,7 +44,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", plugin_ts.display());
 }
 
-fn copy_bun_binary(manifest_dir: &PathBuf, output_dir: &PathBuf, target_os: &str, target_arch: &str) {
+fn copy_bun_binary(manifest_dir: &Path, output_dir: &Path, target_os: &str, target_arch: &str) {
     let bun_src_name = bun_binary_name(target_os, target_arch)
         .unwrap_or_else(|| panic!("Unsupported target for bun: {target_os}-{target_arch}"));
     let bun_source = manifest_dir.join(BUN_BIN_DIR).join(bun_src_name);
@@ -62,13 +62,15 @@ fn copy_bun_binary(manifest_dir: &PathBuf, output_dir: &PathBuf, target_os: &str
     println!("cargo:rerun-if-changed={}", bun_source.display());
 }
 
-fn copy_agent_binary(manifest_dir: &PathBuf, output_dir: &PathBuf, target_os: &str, target_arch: &str) {
+fn copy_agent_binary(manifest_dir: &Path, output_dir: &Path, target_os: &str, target_arch: &str) {
     let agent_src_name = match agent_binary_name(target_os, target_arch) {
         Some(name) => name,
         None => {
             // Agent binary not available for this platform - skip silently
             // This allows development on platforms where agent binary hasn't been cross-compiled yet
-            println!("cargo:warning=Agent binary not available for {target_os}-{target_arch}, skipping");
+            println!(
+                "cargo:warning=Agent binary not available for {target_os}-{target_arch}, skipping"
+            );
             return;
         }
     };
@@ -76,7 +78,10 @@ fn copy_agent_binary(manifest_dir: &PathBuf, output_dir: &PathBuf, target_os: &s
     let agent_source = manifest_dir.join(AGENT_BIN_DIR).join(agent_src_name);
     if !agent_source.exists() {
         // Agent binary not yet built - skip with warning
-        println!("cargo:warning=Agent binary not found at {}, skipping", agent_source.display());
+        println!(
+            "cargo:warning=Agent binary not found at {}, skipping",
+            agent_source.display()
+        );
         return;
     }
 
@@ -92,7 +97,7 @@ fn copy_agent_binary(manifest_dir: &PathBuf, output_dir: &PathBuf, target_os: &s
 }
 
 #[cfg(unix)]
-fn set_executable_permissions(path: &PathBuf) {
+fn set_executable_permissions(path: &Path) {
     let mut perms = fs::metadata(path)
         .expect("Failed to read binary metadata")
         .permissions();
@@ -101,7 +106,7 @@ fn set_executable_permissions(path: &PathBuf) {
 }
 
 #[cfg(not(unix))]
-fn set_executable_permissions(_path: &PathBuf) {
+fn set_executable_permissions(_path: &Path) {
     // No-op on Windows
 }
 

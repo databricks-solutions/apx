@@ -21,7 +21,6 @@ import os
 import platform
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -79,6 +78,12 @@ ALL_TARGETS: tuple[Target, ...] = (
         arch="x64",
         needs_cross=True,
     ),
+    Target(
+        rust_target="x86_64-pc-windows-msvc",
+        platform="windows",
+        arch="x64",
+        needs_cross=False,  # Native on Windows
+    ),
 )
 
 
@@ -95,19 +100,28 @@ def get_current_target() -> Target | None:
     else:
         return None
 
-    # Normalize platform names
+    # Normalize platform names and determine rust target
     if system == "darwin":
         plat = "darwin"
+        rust_target = f"{arch.replace('x64', 'x86_64')}-apple-darwin"
     elif system == "linux":
         plat = "linux"
+        rust_target = f"{arch.replace('x64', 'x86_64')}-unknown-linux-gnu"
     elif system == "windows":
         plat = "windows"
+        # Use MSVC target on native Windows
+        rust_target = "x86_64-pc-windows-msvc"
     else:
         return None
 
-    # Find matching target
+    # Find matching target by rust_target (more precise)
     for target in ALL_TARGETS:
-        if target.platform == plat and target.arch == arch:
+        if target.rust_target == rust_target:
+            return target
+
+    # Fallback: find by platform and arch
+    for target in ALL_TARGETS:
+        if target.platform == plat and target.arch == arch and not target.needs_cross:
             return target
     return None
 
@@ -117,7 +131,11 @@ def build_target(target: Target, output_dir: Path, release: bool = True) -> None
     typer.echo(f"\n=== Building for {target.rust_target} ===")
 
     # Determine build tool
-    if target.needs_cross:
+    # Skip cross if we're building for the current host platform
+    current = get_current_target()
+    needs_cross = target.needs_cross and (current is None or target != current)
+
+    if needs_cross:
         # Check if cross is available
         if shutil.which("cross") is None:
             typer.echo(

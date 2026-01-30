@@ -56,6 +56,11 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88.0"
+
       # ============================================
       # Cache Cargo dependencies
       # ============================================
@@ -114,6 +119,35 @@ jobs:
         run: uv run --script scripts/get_binaries.py
 
       # ============================================
+      # Build apx-agent binary
+      # ============================================
+      - name: Cache apx-agent binary
+        id: cache-agent
+        uses: actions/cache@v5
+        with:
+          path: .bins/agent
+          key: apx-agent-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('crates/agent/**', 'crates/common/**', 'Cargo.lock') }}
+
+      # Map matrix target to Rust target for agent build
+      - name: Build apx-agent (Linux x86_64)
+        if: steps.cache-agent.outputs.cache-hit != 'true' && matrix.platform == 'linux' && matrix.target == 'x86_64'
+        run: uv run --script scripts/build_agent.py --target x86_64-unknown-linux-gnu
+
+      - name: Build apx-agent (Linux aarch64)
+        if: steps.cache-agent.outputs.cache-hit != 'true' && matrix.platform == 'linux' && matrix.target == 'aarch64'
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross
+          uv run --script scripts/build_agent.py --target aarch64-unknown-linux-gnu
+
+      - name: Build apx-agent (macOS)
+        if: steps.cache-agent.outputs.cache-hit != 'true' && matrix.platform == 'macos'
+        run: uv run --script scripts/build_agent.py --target ${{ matrix.target }}
+
+      - name: Build apx-agent (Windows)
+        if: steps.cache-agent.outputs.cache-hit != 'true' && matrix.platform == 'windows'
+        run: uv run --script scripts/build_agent.py --target x86_64-pc-windows-msvc
+
+      # ============================================
       # Build Wheels - All Platforms
       # ============================================
       - name: Build wheels (Linux)
@@ -127,6 +161,7 @@ jobs:
           sccache: true
           docker-options: >-
             -v ${{ github.workspace }}/.protoc:/protoc
+            -v ${{ github.workspace }}/.bins/agent:/project/.bins/agent
             -e PROTOC=/protoc/bin/protoc
 
       - name: Build wheels (macOS/Windows)

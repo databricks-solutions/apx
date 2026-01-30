@@ -76,13 +76,6 @@ impl UvCommand {
         Self { tool }
     }
 
-    /// Create a new std::process::Command for spawning the tool via uv.
-    pub fn command(&self) -> std::process::Command {
-        let mut cmd = std::process::Command::new("uv");
-        cmd.args(["run", self.tool]);
-        cmd
-    }
-
     /// Create a new tokio::process::Command for spawning the tool via uv.
     pub fn tokio_command(&self) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new("uv");
@@ -117,11 +110,6 @@ impl ApxCommand {
         Self {
             inner: UvCommand::new("apx"),
         }
-    }
-
-    /// Create a new std::process::Command for spawning apx.
-    pub fn command(&self) -> std::process::Command {
-        self.inner.command()
     }
 
     /// Create a new tokio::process::Command for spawning apx.

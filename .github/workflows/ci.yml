@@ -74,6 +74,18 @@ jobs:
         if: steps.cache-bun-binaries.outputs.cache-hit != 'true'
         run: uv run --script scripts/get_binaries.py
 
+      # Build apx-agent binary (cached based on crate source files)
+      - name: Cache apx-agent binary
+        id: cache-agent
+        uses: actions/cache@v5
+        with:
+          path: .bins/agent
+          key: apx-agent-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/agent/**', 'crates/common/**', 'Cargo.lock') }}
+
+      - name: Build apx-agent
+        if: steps.cache-agent.outputs.cache-hit != 'true'
+        run: uv run --script scripts/build_agent.py --target x86_64-unknown-linux-gnu
+
       # Run checks
       - name: Cargo check
         run: cargo check --all-targets
@@ -83,3 +95,6 @@ jobs:
 
       - name: Cargo clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --workspace

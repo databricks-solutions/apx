@@ -28,19 +28,15 @@ use tracing::{debug, info, warn};
 
 // Re-export from apx-common crate
 pub use apx_common::{
-    FluxLock, FLUX_PORT,
-    flux_dir, is_flux_listening, is_running, log_path,
-    read_lock, remove_lock, write_lock,
+    FLUX_PORT, FluxLock, flux_dir, is_flux_listening, is_running, log_path, read_lock, remove_lock,
+    write_lock,
 };
-
-// Re-export run_server from apx-agent for backward compatibility with __run.rs
-pub use apx_agent::run_server;
 
 // ============================================================================
 // Daemon management
 // ============================================================================
 
-/// Spawn flux as a detached daemon process using the current apx executable.
+/// Spawn flux as a detached daemon process using the apx-agent binary.
 fn spawn_daemon() -> Result<u32, String> {
     let log_file = log_path()?;
 
@@ -60,19 +56,17 @@ fn spawn_daemon() -> Result<u32, String> {
         .try_clone()
         .map_err(|e| format!("Failed to clone log file handle: {e}"))?;
 
-    // Spawn apx via uv to ensure correct Python environment
-    let apx_cmd = crate::common::ApxCommand::new();
+    // Get the agent binary path (installs if needed)
+    let agent_path = crate::agent::ensure_installed()?;
 
-    debug!("Spawning flux daemon: {} flux __run", apx_cmd.display());
+    debug!("Spawning flux daemon: {}", agent_path.display());
 
-    let mut cmd = apx_cmd.command();
-    let child = cmd
-        .args(["flux", "__run"])
+    let child = std::process::Command::new(&agent_path)
         .stdin(Stdio::null())
         .stdout(log)
         .stderr(log_stderr)
         .spawn()
-        .map_err(|e| crate::common::handle_spawn_error("apx", e))?;
+        .map_err(|e| format!("Failed to spawn agent: {e}"))?;
 
     let pid = child.id();
     info!("Spawned flux daemon with pid={}", pid);

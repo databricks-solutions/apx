@@ -3,10 +3,6 @@
 //! This module handles version checking and installation of the apx-agent binary.
 //! The agent is bundled with the apx package and installed to ~/.apx/ on first use.
 
-// Module will be integrated in a later step when flux::start() is updated
-// to spawn the external agent binary instead of `apx flux __run`
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 use std::process::Command;
 use tracing::info;
@@ -47,10 +43,7 @@ pub fn installed_version() -> Option<String> {
 
     let version_str = String::from_utf8(output.stdout).ok()?;
     // Parse "apx-agent 0.1.28" → "0.1.28"
-    version_str
-        .split_whitespace()
-        .nth(1)
-        .map(|s| s.to_string())
+    version_str.split_whitespace().nth(1).map(|s| s.to_string())
 }
 
 /// Ensure agent binary is installed and up-to-date
@@ -89,8 +82,7 @@ fn install_agent() -> Result<(), String> {
     }
 
     // Copy binary
-    std::fs::copy(&bundled, &installed)
-        .map_err(|e| format!("Failed to copy agent binary: {e}"))?;
+    std::fs::copy(&bundled, &installed).map_err(|e| format!("Failed to copy agent binary: {e}"))?;
 
     // Set executable permissions on Unix
     #[cfg(unix)]

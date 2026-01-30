@@ -376,11 +376,7 @@ mod tests {
 
     fn temp_db_path() -> PathBuf {
         let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "apx-test-{}-{}",
-            std::process::id(),
-            counter
-        ));
+        let dir = std::env::temp_dir().join(format!("apx-test-{}-{}", std::process::id(), counter));
         fs::create_dir_all(&dir).unwrap();
         dir.join("test.db")
     }
