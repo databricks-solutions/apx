@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::bun_binary_path;
+use crate::generate_openapi;
 
 /// Dev dependencies required by apx frontend entrypoint.ts
 /// These must be installed before running any frontend command
@@ -480,6 +481,7 @@ pub struct PreflightResult {
     pub metadata: ProjectMetadata,
     pub layout_ms: u128,
     pub uv_sync_ms: u128,
+    pub openapi_ms: u128,
     pub version_ms: u128,
     pub bun_install_ms: Option<u128>,
 }
@@ -490,8 +492,9 @@ pub struct PreflightResult {
 /// It performs the following steps:
 /// 1. Verifies project layout (generates `_metadata.py` and creates `__dist__`)
 /// 2. Runs `uv sync` to install Python dependencies
-/// 3. Generates `_version.py` via uv-dynamic-versioning (with fallback)
-/// 4. Runs `bun install` if `node_modules` is missing
+/// 3. Generates OpenAPI client (`lib/api.ts`) from the backend
+/// 4. Generates `_version.py` via uv-dynamic-versioning (with fallback)
+/// 5. Runs `bun install` if `node_modules` is missing
 ///
 /// Returns timing information for each step.
 pub async fn run_preflight_checks(app_dir: &Path) -> Result<PreflightResult, String> {
@@ -506,12 +509,17 @@ pub async fn run_preflight_checks(app_dir: &Path) -> Result<PreflightResult, Str
     uv_sync(app_dir).await?;
     let uv_sync_ms = uv_start.elapsed().as_millis();
 
-    // Step 3: Generate version file
+    // Step 3: Generate OpenAPI client (requires Python deps from step 2)
+    let openapi_start = Instant::now();
+    generate_openapi(app_dir)?;
+    let openapi_ms = openapi_start.elapsed().as_millis();
+
+    // Step 4: Generate version file
     let version_start = Instant::now();
     generate_version_file(app_dir, &metadata).await?;
     let version_ms = version_start.elapsed().as_millis();
 
-    // Step 4: Run bun install if node_modules is missing
+    // Step 5: Run bun install if node_modules is missing
     let node_modules_dir = app_dir.join("node_modules");
     let bun_install_ms = if !node_modules_dir.exists() {
         let bun_start = Instant::now();
@@ -525,6 +533,7 @@ pub async fn run_preflight_checks(app_dir: &Path) -> Result<PreflightResult, Str
         metadata,
         layout_ms,
         uv_sync_ms,
+        openapi_ms,
         version_ms,
         bun_install_ms,
     })

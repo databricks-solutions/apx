@@ -9,11 +9,15 @@ use tokio::process::Command;
 use tracing::debug;
 use walkdir::WalkDir;
 
+use crate::cli::components::add::{ComponentInput, add_components};
 use crate::cli::run_cli_async;
 use crate::common::list_profiles;
-use crate::common::{BunCommand, run_with_spinner, run_with_spinner_async};
+use crate::common::{
+    BunCommand, format_elapsed_ms, run_with_spinner, run_with_spinner_async, spinner,
+};
 use crate::dotenv::DotenvFile;
 use crate::interop::templates_dir;
+use std::time::Instant;
 
 const APX_INDEX_URL: &str = "https://databricks-solutions.github.io/apx/simple";
 
@@ -375,6 +379,39 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
                 Ok(())
             },
         )?;
+    }
+
+    // Add shadcn components for non-minimal templates
+    if !matches!(template, Template::Minimal) {
+        let mut components_to_add = vec![ComponentInput::new("button")];
+
+        if matches!(layout, Layout::Sidebar) {
+            components_to_add.extend([
+                ComponentInput::new("avatar"),
+                ComponentInput::new("sidebar"),
+                ComponentInput::new("separator"),
+                ComponentInput::new("skeleton"),
+                ComponentInput::new("badge"),
+                ComponentInput::new("card"),
+            ]);
+        }
+
+        let components_start = Instant::now();
+        let sp = spinner("🎨 Adding components...");
+
+        let result = add_components(&app_path, &components_to_add, true).await?;
+
+        sp.finish_and_clear();
+        println!(
+            "✅ Components added ({})",
+            format_elapsed_ms(components_start)
+        );
+
+        if !result.warnings.is_empty() {
+            for warning in &result.warnings {
+                eprintln!("   ⚠️  {warning}");
+            }
+        }
     }
 
     println!();
