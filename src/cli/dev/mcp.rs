@@ -1,5 +1,6 @@
 use crate::cli::components::new_cache_state;
 use crate::cli::run_cli_async;
+use crate::common::run_preflight_checks;
 use crate::interop::get_databricks_sdk_version;
 use crate::mcp::server::{AppContext, IndexState, SdkIndexParams, build_server};
 use clap::Args;
@@ -12,6 +13,9 @@ pub struct McpArgs {}
 pub async fn run(_args: McpArgs) -> i32 {
     run_cli_async(|| async {
         let app_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+        // Run preflight checks (installs deps if needed)
+        run_preflight_checks(&app_dir).await?;
 
         // Create shutdown channel
         let (shutdown_tx, _) = broadcast::channel::<()>(1);

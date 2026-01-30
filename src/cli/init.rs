@@ -4,20 +4,14 @@ use rand::seq::SliceRandom;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 use tera::Context;
 use tokio::process::Command;
 use tracing::debug;
 use walkdir::WalkDir;
 
-use crate::cli::components::add::{ComponentInput, add_components};
 use crate::cli::run_cli_async;
 use crate::common::list_profiles;
-use crate::common::{
-    BunCommand, bun_install_streaming, format_elapsed_ms, multi_progress, multi_spinner,
-    read_project_metadata, run_command_streaming, run_with_spinner, run_with_spinner_async,
-    spinner, write_metadata_file,
-};
+use crate::common::{BunCommand, run_with_spinner, run_with_spinner_async};
 use crate::dotenv::DotenvFile;
 use crate::interop::templates_dir;
 
@@ -87,21 +81,6 @@ pub struct InitArgs {
         help = "The layout to use. Will prompt if not provided"
     )]
     pub layout: Option<Layout>,
-    #[arg(
-        long = "skip-frontend-dependencies",
-        help = "Skip installing frontend dependencies (bun packages)."
-    )]
-    pub skip_frontend_dependencies: bool,
-    #[arg(
-        long = "skip-backend-dependencies",
-        help = "Skip installing backend dependencies (uv sync)."
-    )]
-    pub skip_backend_dependencies: bool,
-    #[arg(
-        long = "skip-build",
-        help = "Skip building the project after initialization."
-    )]
-    pub skip_build: bool,
 }
 
 pub async fn run(args: InitArgs) -> i32 {
@@ -335,158 +314,24 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
         }
     }
 
-    // Install dependencies with real-time progress display
-    if !args.skip_backend_dependencies || !args.skip_frontend_dependencies {
-        let mp = multi_progress();
-        let dependencies_start = Instant::now();
+    // Configure apx in pyproject.toml (dependencies will be installed on first command)
+    let pyproject_path = app_path.join("pyproject.toml");
+    let apx_version = env!("CARGO_PKG_VERSION");
 
-        // Create spinners for each task
-        let backend_spinner = if !args.skip_backend_dependencies {
-            Some(multi_spinner(&mp, "🐍 Python: preparing..."))
-        } else {
-            None
-        };
-
-        let frontend_spinner = if !args.skip_frontend_dependencies {
-            Some(multi_spinner(&mp, "📦 Frontend: preparing..."))
-        } else {
-            None
-        };
-
-        // Spawn backend task
-        let backend_task = if let Some(spinner) = backend_spinner.clone() {
-            let app_path = app_path.clone();
-            let apx_editable = std::env::var("APX_DEV_PATH").is_ok();
-            Some(tokio::spawn(async move {
-                let install_args = if apx_editable {
-                    let apx_path =
-                        std::env::var("APX_DEV_PATH").unwrap_or_else(|_| ".".to_string());
-                    if !Path::new(&apx_path).is_dir() {
-                        return Err(format!(
-                            "APX_DEV_PATH is not a valid directory: {}",
-                            &apx_path
-                        ));
-                    }
-                    InstallArgs::Editable {
-                        path: PathBuf::from(apx_path),
-                    }
-                } else {
-                    InstallArgs::Standard {
-                        version: env!("CARGO_PKG_VERSION").to_string(),
-                    }
-                };
-                setup_backend_streaming(&app_path, install_args, &spinner).await
-            }))
-        } else {
-            None
-        };
-
-        // Spawn frontend task
-        let frontend_task = if let Some(spinner) = frontend_spinner.clone() {
-            let app_path = app_path.clone();
-            Some(tokio::spawn(async move {
-                bun_install_streaming(&app_path, &spinner).await
-            }))
-        } else {
-            None
-        };
-
-        // Wait for both tasks to complete
-        let backend_result = if let Some(handle) = backend_task {
-            Some(
-                handle
-                    .await
-                    .unwrap_or_else(|_| Err("Backend setup panicked".to_string())),
-            )
-        } else {
-            None
-        };
-
-        let frontend_result = if let Some(handle) = frontend_task {
-            Some(
-                handle
-                    .await
-                    .unwrap_or_else(|_| Err("Frontend setup panicked".to_string())),
-            )
-        } else {
-            None
-        };
-
-        // Clear spinners and show final status
-        if let Some(spinner) = backend_spinner {
-            if backend_result.as_ref().is_some_and(|r| r.is_ok()) {
-                spinner.finish_with_message("🐍 Python: done");
-            } else {
-                spinner.finish_with_message("🐍 Python: failed");
-            }
+    if let Ok(apx_dev_path) = std::env::var("APX_DEV_PATH") {
+        // Editable mode: configure path-based source
+        let apx_path = PathBuf::from(&apx_dev_path);
+        if !apx_path.is_dir() {
+            return Err(format!(
+                "APX_DEV_PATH is not a valid directory: {apx_dev_path}"
+            ));
         }
-        if let Some(spinner) = frontend_spinner {
-            if frontend_result.as_ref().is_some_and(|r| r.is_ok()) {
-                spinner.finish_with_message("📦 Frontend: done");
-            } else {
-                spinner.finish_with_message("📦 Frontend: failed");
-            }
-        }
-
-        // Check for errors
-        if let Some(Err(err)) = frontend_result {
-            return Err(err);
-        }
-        if let Some(Err(err)) = backend_result {
-            return Err(err);
-        }
-
-        println!(
-            "✅ Dependencies installed ({})",
-            format_elapsed_ms(dependencies_start)
-        );
-    }
-
-    // Skip adding shadcn components for minimal template
-    if !args.skip_frontend_dependencies && !matches!(template, Template::Minimal) {
-        // Build list of components to add
-        let mut components_to_add = vec![ComponentInput::new("button")];
-
-        if matches!(layout, Layout::Sidebar) {
-            components_to_add.extend([
-                ComponentInput::new("avatar"),
-                ComponentInput::new("sidebar"),
-                ComponentInput::new("separator"),
-                ComponentInput::new("skeleton"),
-                ComponentInput::new("badge"),
-                ComponentInput::new("card"),
-            ]);
-        }
-
-        let components_start = Instant::now();
-        let spinner = spinner("🎨 Adding components...");
-
-        let result = add_components(&app_path, &components_to_add, true).await?;
-
-        spinner.finish_and_clear();
-        println!(
-            "✅ Components added ({})",
-            format_elapsed_ms(components_start)
-        );
-
-        // Print details at debug level or if there are warnings
-        if !result.warnings.is_empty() {
-            for warning in &result.warnings {
-                eprintln!("   ⚠️  {warning}");
-            }
-        }
-    }
-
-    if !args.skip_build {
-        run_with_spinner_async("🔧 Building project...", "✅ Project built", || async {
-            let mut cmd = Command::new("uv");
-            cmd.arg("run")
-                .arg("apx")
-                .arg("build")
-                .current_dir(&app_path);
-            run_command(&mut cmd, "Failed to build project").await
-        })
-        .await?;
+        configure_editable_apx(&pyproject_path, &apx_path)?;
+        debug!("Configured editable apx from APX_DEV_PATH");
+    } else {
+        // Standard mode: configure index-based source with version
+        ensure_apx_uv_config(&pyproject_path, apx_version)?;
+        debug!("Configured apx {} from index", apx_version);
     }
 
     if let Some(assistant) = args.assistant.take() {
@@ -534,13 +379,12 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
     println!();
     println!("✨ Project {app_name} initialized successfully!");
+    let canonical_path = app_path.canonicalize().unwrap_or_else(|_| app_path.clone());
     println!(
-        "🚀 Run `cd {} && uv run apx dev start` to get started!",
-        app_path
-            .canonicalize()
-            .unwrap_or_else(|_| app_path.clone())
-            .display()
+        "🚀 Run `cd {} && apx dev start` to get started!",
+        canonical_path.display()
     );
+    println!("   (Dependencies will be installed automatically on first run)");
     Ok(())
 }
 
@@ -696,14 +540,12 @@ async fn run_command(cmd: &mut Command, error_msg: &str) -> Result<(), String> {
     Err(message)
 }
 
-enum InstallArgs {
-    Standard { version: String },
-    Editable { path: PathBuf },
-}
-
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
-pub fn ensure_apx_uv_config(pyproject: &Path) -> Result<(), String> {
+/// Configure pyproject.toml for standard apx installation from index.
+/// Adds [[tool.uv.index]] for apx-index, [tool.uv.sources].apx pointing to that index,
+/// and "apx=={version}" to [dependency-groups].dev.
+pub fn ensure_apx_uv_config(pyproject: &Path, version: &str) -> Result<(), String> {
     let contents =
         fs::read_to_string(pyproject).map_err(|e| format!("Failed to read pyproject.toml: {e}"))?;
 
@@ -741,6 +583,26 @@ pub fn ensure_apx_uv_config(pyproject: &Path) -> Result<(), String> {
         let mut apx = Table::new();
         apx["index"] = "apx-index".into();
         sources["apx"] = Item::Table(apx);
+    }
+
+    // --- [dependency-groups].dev ---
+    let dep_groups = doc["dependency-groups"].or_insert(Item::Table(Table::new()));
+    let dep_groups = dep_groups
+        .as_table_mut()
+        .ok_or("dependency-groups is not a table")?;
+
+    let dev_deps = dep_groups["dev"].or_insert(Item::Value(Value::Array(Array::new())));
+    let dev_array = dev_deps
+        .as_array_mut()
+        .ok_or("dependency-groups.dev is not an array")?;
+
+    // Add "apx=={version}" if not present (check for any apx entry)
+    let apx_exists = dev_array
+        .iter()
+        .any(|v| v.as_str().map(|s| s.starts_with("apx")).unwrap_or(false));
+    if !apx_exists {
+        let apx_spec = format!("apx=={version}");
+        dev_array.push(apx_spec.as_str());
     }
 
     fs::write(pyproject, doc.to_string())
@@ -809,67 +671,6 @@ pub fn configure_editable_apx(pyproject: &Path, apx_path: &Path) -> Result<(), S
     Ok(())
 }
 
-use indicatif::ProgressBar;
-
-/// Backend setup with streaming output to a progress bar.
-async fn setup_backend_streaming(
-    app_path: &Path,
-    install_args: InstallArgs,
-    spinner: &ProgressBar,
-) -> Result<(), String> {
-    generate_metadata_file(app_path)?;
-
-    let pyproject_path = app_path.join("pyproject.toml");
-
-    match install_args {
-        InstallArgs::Standard { version } => {
-            ensure_apx_uv_config(&pyproject_path)?;
-            let versioned_package = format!("apx=={version}");
-
-            spinner.set_message("🐍 Python: adding apx package...");
-
-            let mut add_cmd = Command::new("uv");
-            add_cmd
-                .arg("add")
-                .arg("--dev")
-                .arg(versioned_package)
-                .current_dir(app_path);
-
-            run_command_streaming(add_cmd, spinner, "🐍 uv:", "Failed to add apx package").await?;
-        }
-        InstallArgs::Editable { path } => {
-            debug!("Setting up editable apx installation");
-            debug!("  app_path: {}", app_path.display());
-            debug!("  editable path: {}", path.display());
-
-            if !path.is_dir() {
-                return Err(format!(
-                    "Editable path is not a directory: {}",
-                    path.display()
-                ));
-            }
-
-            configure_editable_apx(&pyproject_path, &path)?;
-            debug!("pyproject.toml configured for editable apx");
-
-            spinner.set_message("🐍 Python: syncing dependencies...");
-
-            let mut sync_cmd = Command::new("uv");
-            sync_cmd.arg("sync").current_dir(app_path);
-
-            run_command_streaming(sync_cmd, spinner, "🐍 uv:", "Failed to sync dependencies")
-                .await?;
-            debug!("uv sync completed successfully");
-        }
-    }
-    Ok(())
-}
-
-fn generate_metadata_file(app_path: &Path) -> Result<(), String> {
-    let metadata = read_project_metadata(app_path)?;
-    write_metadata_file(app_path, &metadata)
-}
-
 async fn is_command_available(cmd: &str) -> bool {
     Command::new(cmd)
         .arg("--version")
@@ -877,4 +678,142 @@ async fn is_command_available(cmd: &str) -> bool {
         .await
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Create a minimal pyproject.toml for testing
+    fn create_test_pyproject(dir: &Path) -> PathBuf {
+        let pyproject_path = dir.join("pyproject.toml");
+        let content = r#"[project]
+name = "test-app"
+version = "0.1.0"
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+"#;
+        fs::write(&pyproject_path, content).unwrap();
+        pyproject_path
+    }
+
+    #[test]
+    fn test_ensure_apx_uv_config_adds_index_and_sources() {
+        let temp_dir = TempDir::new().unwrap();
+        let pyproject_path = create_test_pyproject(temp_dir.path());
+
+        // Run the function
+        ensure_apx_uv_config(&pyproject_path, "0.1.27").unwrap();
+
+        // Read and parse the result
+        let content = fs::read_to_string(&pyproject_path).unwrap();
+
+        // Verify index was added
+        assert!(content.contains("[[tool.uv.index]]"));
+        assert!(content.contains("name = \"apx-index\""));
+        assert!(content.contains("https://databricks-solutions.github.io/apx/simple"));
+
+        // Verify sources was added
+        assert!(content.contains("[tool.uv.sources]"));
+        assert!(content.contains("[tool.uv.sources.apx]"));
+        assert!(content.contains("index = \"apx-index\""));
+
+        // Verify dev dependency was added
+        assert!(content.contains("apx==0.1.27"));
+    }
+
+    #[test]
+    fn test_ensure_apx_uv_config_idempotent() {
+        let temp_dir = TempDir::new().unwrap();
+        let pyproject_path = create_test_pyproject(temp_dir.path());
+
+        // Run twice
+        ensure_apx_uv_config(&pyproject_path, "0.1.27").unwrap();
+        ensure_apx_uv_config(&pyproject_path, "0.1.28").unwrap(); // different version
+
+        // Read and parse the result
+        let content = fs::read_to_string(&pyproject_path).unwrap();
+
+        // Should only have one apx-index entry
+        assert_eq!(content.matches("name = \"apx-index\"").count(), 1);
+
+        // Should only have one apx dependency (the first one)
+        assert!(content.contains("apx==0.1.27"));
+        assert!(!content.contains("apx==0.1.28"));
+    }
+
+    #[test]
+    fn test_configure_editable_apx() {
+        let temp_dir = TempDir::new().unwrap();
+        let pyproject_path = create_test_pyproject(temp_dir.path());
+
+        // Create a fake apx path
+        let apx_path = temp_dir.path().join("apx-dev");
+        fs::create_dir(&apx_path).unwrap();
+
+        // Run the function
+        configure_editable_apx(&pyproject_path, &apx_path).unwrap();
+
+        // Read and parse the result
+        let content = fs::read_to_string(&pyproject_path).unwrap();
+
+        // Verify editable source was added
+        assert!(content.contains("[tool.uv.sources]"));
+        assert!(content.contains("editable = true"));
+        assert!(content.contains(&apx_path.to_string_lossy().to_string()));
+
+        // Verify dev dependency was added (just "apx", not versioned)
+        let doc: DocumentMut = content.parse().unwrap();
+        let dev_deps = doc["dependency-groups"]["dev"].as_array().unwrap();
+        let has_apx = dev_deps.iter().any(|v| v.as_str() == Some("apx"));
+        assert!(has_apx, "Expected 'apx' in dev dependencies");
+    }
+
+    #[test]
+    fn test_configure_editable_apx_idempotent() {
+        let temp_dir = TempDir::new().unwrap();
+        let pyproject_path = create_test_pyproject(temp_dir.path());
+
+        let apx_path = temp_dir.path().join("apx-dev");
+        fs::create_dir(&apx_path).unwrap();
+
+        // Run twice
+        configure_editable_apx(&pyproject_path, &apx_path).unwrap();
+        configure_editable_apx(&pyproject_path, &apx_path).unwrap();
+
+        // Read and parse the result
+        let content = fs::read_to_string(&pyproject_path).unwrap();
+        let doc: DocumentMut = content.parse().unwrap();
+
+        // Should only have one apx in dev dependencies
+        let dev_deps = doc["dependency-groups"]["dev"].as_array().unwrap();
+        let apx_count = dev_deps
+            .iter()
+            .filter(|v| v.as_str() == Some("apx"))
+            .count();
+        assert_eq!(
+            apx_count, 1,
+            "Expected exactly one 'apx' in dev dependencies"
+        );
+    }
+
+    #[test]
+    fn test_normalize_app_name_basic() {
+        assert_eq!(normalize_app_name("my-app").unwrap(), "my-app");
+        assert_eq!(normalize_app_name("MyApp").unwrap(), "myapp");
+        assert_eq!(normalize_app_name("my_app").unwrap(), "my-app");
+        assert_eq!(normalize_app_name("my app").unwrap(), "my-app");
+    }
+
+    #[test]
+    fn test_normalize_app_name_invalid() {
+        assert!(normalize_app_name("my@app").is_err());
+        assert!(normalize_app_name("my/app").is_err());
+        assert!(normalize_app_name("my.app").is_err());
+    }
 }

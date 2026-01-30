@@ -1,4 +1,4 @@
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -362,19 +362,6 @@ pub async fn bun_install(app_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Run `bun install` with real-time streaming output to a progress bar.
-pub async fn bun_install_streaming(app_dir: &Path, spinner: &ProgressBar) -> Result<(), String> {
-    let bun = BunCommand::new()?;
-    let mut cmd = bun.tokio_command();
-    cmd.arg("install");
-    if let Ok(cache_dir) = std::env::var("BUN_CACHE_DIR") {
-        cmd.arg("--cache-dir").arg(cache_dir);
-    }
-    cmd.current_dir(app_dir);
-
-    run_command_streaming(cmd, spinner, "📦 bun:", "bun install failed").await
-}
-
 /// Ensure all entrypoint.ts dependencies are installed.
 /// Runs `bun add --dev` for required dependencies (idempotent - safe if already installed).
 pub async fn ensure_entrypoint_deps(app_dir: &Path) -> Result<(), String> {
@@ -561,86 +548,6 @@ pub fn spinner(message: &str) -> ProgressBar {
     spinner.enable_steady_tick(Duration::from_millis(80));
     spinner.set_message(message.to_string());
     spinner
-}
-
-/// Create a multi-progress container for parallel task progress display.
-pub fn multi_progress() -> MultiProgress {
-    MultiProgress::new()
-}
-
-/// Create a spinner attached to a multi-progress container.
-pub fn multi_spinner(mp: &MultiProgress, message: &str) -> ProgressBar {
-    let spinner = mp.add(ProgressBar::new_spinner());
-    spinner.set_style(
-        ProgressStyle::with_template("{spinner:.cyan} {msg}")
-            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
-    );
-    spinner.enable_steady_tick(Duration::from_millis(80));
-    spinner.set_message(message.to_string());
-    spinner
-}
-
-/// Run a command and stream its output to a progress bar in real-time.
-/// The progress bar message will be updated with each line of output.
-pub async fn run_command_streaming(
-    mut cmd: Command,
-    spinner: &ProgressBar,
-    prefix: &str,
-    error_msg: &str,
-) -> Result<(), String> {
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = cmd.spawn().map_err(|err| format!("{error_msg}: {err}"))?;
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    let prefix_stdout = prefix.to_string();
-    let prefix_stderr = prefix.to_string();
-    let spinner_stdout = spinner.clone();
-    let spinner_stderr = spinner.clone();
-
-    // Spawn tasks to read stdout and stderr concurrently
-    let stdout_task = tokio::spawn(async move {
-        if let Some(stdout) = stdout {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    spinner_stdout.set_message(format!("{prefix_stdout} {trimmed}"));
-                }
-            }
-        }
-    });
-
-    let stderr_task = tokio::spawn(async move {
-        if let Some(stderr) = stderr {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    spinner_stderr.set_message(format!("{prefix_stderr} {trimmed}"));
-                }
-            }
-        }
-    });
-
-    // Wait for both readers and the process to complete
-    let _ = tokio::join!(stdout_task, stderr_task);
-
-    let status = child
-        .wait()
-        .await
-        .map_err(|err| format!("{error_msg}: {err}"))?;
-
-    if !status.success() {
-        return Err(format!("{error_msg}: exit code {status}"));
-    }
-
-    Ok(())
 }
 
 /// Output captured from a streaming command.

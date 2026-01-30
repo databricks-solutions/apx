@@ -48,16 +48,20 @@ uvx --index https://databricks-solutions.github.io/apx/simple apx init [OPTIONS]
 
 ### Options
 
-| Option                         | Description                                              |
-| ------------------------------ | -------------------------------------------------------- |
-| `-n, --name <APP_NAME>`        | The name of the project                                  |
-| `-t, --template <TEMPLATE>`    | Template to use: `minimal`, `essential`, `stateful`      |
-| `-p, --profile <PROFILE>`      | Databricks profile to use                                |
-| `-a, --assistant <ASSISTANT>`  | AI assistant type: `cursor`, `vscode`, `codex`, `claude` |
-| `-l, --layout <LAYOUT>`        | Layout to use: `basic`, `sidebar`                        |
-| `--skip-frontend-dependencies` | Skip installing bun packages                             |
-| `--skip-backend-dependencies`  | Skip running uv sync                                     |
-| `--skip-build`                 | Skip building after initialization                       |
+| Option                        | Description                                              |
+| ----------------------------- | -------------------------------------------------------- |
+| `-n, --name <APP_NAME>`       | The name of the project                                  |
+| `-t, --template <TEMPLATE>`   | Template to use: `minimal`, `essential`, `stateful`      |
+| `-p, --profile <PROFILE>`     | Databricks profile to use                                |
+| `-a, --assistant <ASSISTANT>` | AI assistant type: `cursor`, `vscode`, `codex`, `claude` |
+| `-l, --layout <LAYOUT>`       | Layout to use: `basic`, `sidebar`                        |
+
+<Callout type="info">
+  **Note:** The `init` command only creates project files and configures
+  `pyproject.toml`. Dependencies (Python packages via `uv sync` and frontend
+  packages via `bun install`) are installed automatically on the first run of
+  any command like `apx dev start`, `apx build`, or `apx frontend build`.
+</Callout>
 
 ### Templates
 

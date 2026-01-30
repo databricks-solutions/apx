@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::cli::run_cli_async;
 use crate::common::{
     BunCommand, ensure_entrypoint_deps, format_elapsed_ms, run_command_streaming_with_output,
-    spinner,
+    run_preflight_checks, spinner,
 };
 
 use super::common::prepare_frontend_args;
@@ -28,6 +28,9 @@ async fn run_inner(args: BuildArgs) -> Result<(), String> {
     let app_path = args
         .app_path
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    // Run preflight checks (installs deps if needed)
+    run_preflight_checks(&app_path).await?;
 
     run_build(&app_path, true).await
 }
