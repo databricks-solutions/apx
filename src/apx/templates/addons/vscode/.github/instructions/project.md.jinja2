@@ -56,10 +56,9 @@ uv run apx dev check
 
 **View logs** (stored in `~/.apx/{app_id}/logs/`):
 ```bash
-uv run apx dev logs              # All logs
-uv run apx dev logs --ui         # Frontend only
-uv run apx dev logs --backend    # Backend only
-uv run apx dev tail              # Live stream
+uv run apx dev logs              # Recent logs (default: last 10m)
+uv run apx dev logs -d 1h        # Logs from last hour
+uv run apx dev logs -f           # Follow/stream logs live
 ```
 
 **Stop servers:**
