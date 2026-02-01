@@ -14,7 +14,7 @@ alwaysApply: true
 - **Databricks SDK:** Use the apx MCP `docs` tool to search Databricks SDK documentation instead of guessing or hallucinating API signatures.
 
 ## Package Management
-- **Frontend:** Always use `uv run apx bun` to run bun commands (e.g., `uv run apx bun install`, `uv run apx bun add <package>`). This ensures bun is always available via apx's bundled binary.
+- **Frontend:** Bun might not be present on user's $PATH. It's recommended to use prebundled bun (e.g., `uv run apx bun install` or `uv run apx bun add <dependency>`), unless user explicitly stated otherwise.
 - **Python:** Always use `uv` (never `pip`)
 
 ## Component Management
