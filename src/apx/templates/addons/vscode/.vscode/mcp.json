@@ -1,16 +1,12 @@
 {
   "mcpServers": {
-    "shadcn": {
-      "command": "bun",
-      "args": ["x", "--bun", "shadcn@latest", "mcp"]
-    },
     "apx": {
       "command": "uv",
-      "args": ["run", "apx", "dev", "mcp"]
+      "args": ["run", "apx", "mcp"]
     },
     "playwright": {
-      "command": "bun",
-      "args": ["x", "--bun", "@playwright/mcp@latest"]
+      "command": "uv",
+      "args": ["run", "apx", "bun", "x", "--bun", "@playwright/mcp@latest"]
     }
   }
 }
