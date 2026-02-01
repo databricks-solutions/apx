@@ -1744,16 +1744,16 @@ mod tests {
         }
       }
     },
-    "/tires/{barcode}/{date_utc}/{plant_id}": {
+    "/cats/{catId}/{date_utc}/{shelter_id}": {
       "get": {
-        "operationId": "getTire",
+        "operationId": "getCutieCat",
         "parameters": [
-          { "name": "barcode", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "catId", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "date_utc", "in": "path", "required": true, "schema": { "type": "string", "format": "date" } },
-          { "name": "plant_id", "in": "path", "required": true, "schema": { "type": "string" } }
+          { "name": "shelter_id", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
-          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Tire" } } } }
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CutieCat" } } } }
         }
       }
     }
@@ -1761,7 +1761,7 @@ mod tests {
   "components": {
     "schemas": {
       "Item": { "type": "object", "properties": { "id": { "type": "string" } } },
-      "Tire": { "type": "object", "properties": { "barcode": { "type": "string" } } }
+      "CutieCat": { "type": "object", "properties": { "name": { "type": "string" } } }
     }
   }
 }"##;
@@ -1792,10 +1792,10 @@ mod tests {
             "Hook should call fetch with options.params (not options?.params). Generated:\n{ts_code}"
         );
 
-        // Same for useGetTire with multiple path params
+        // Same for useGetCutieCat with multiple path params
         assert!(
-            ts_code.contains("{ params: GetTireParams;"),
-            "useGetTire should have required params. Generated:\n{ts_code}"
+            ts_code.contains("{ params: GetCutieCatParams;"),
+            "useGetCutieCat should have required params. Generated:\n{ts_code}"
         );
     }
 
