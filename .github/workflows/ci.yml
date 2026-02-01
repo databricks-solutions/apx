@@ -62,6 +62,12 @@ jobs:
           echo "${{ github.workspace }}/.protoc/bin" >> $GITHUB_PATH
           echo "PROTOC=${{ github.workspace }}/.protoc/bin/protoc" >> $GITHUB_ENV
 
+      # some tests are using `bun x tsc` to typecheck the code
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.8
+
       # Download Binaries (Bun)
       - name: Cache Bun binaries
         id: cache-bun-binaries
