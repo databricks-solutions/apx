@@ -3,7 +3,7 @@ members = [".", "crates/common", "crates/agent"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.28"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.92"
 
@@ -86,7 +86,7 @@ schemars = "1.2.0"
 
 [package]
 name = "apx"
-version = "0.2.1"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 build = "build.rs"

@@ -221,6 +221,14 @@ pub struct HookIR {
     pub fetch_fn: String,
     /// Query key function (for queries)
     pub query_key_fn: Option<String>,
+    /// Whether params are required (has required path/query params)
+    pub params_required: bool,
+    /// Response content type (for determining actual TS type: Blob, string, etc.)
+    pub response_content_type: ResponseContentType,
+    /// Whether a 204 void status exists alongside content response
+    pub response_has_void_status: bool,
+    /// For mutations: whether body argument comes before params in fetch function
+    pub body_before_params: bool,
 }
 
 /// Query key function IR

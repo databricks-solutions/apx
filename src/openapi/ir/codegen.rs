@@ -531,11 +531,22 @@ fn codegen_query_key_function(qk: &QueryKeyIR) -> TsFunction {
 
 /// Generate a React Query hook.
 fn codegen_hook(hook: &HookIR) -> TsFunction {
+    // Determine the actual TypeScript response type based on content type
     let response_str = hook.response_type.emit();
-    let wrapped_type = if response_str == "void" {
+    let ts_response_type = match hook.response_content_type {
+        ResponseContentType::Text => "string".to_string(),
+        ResponseContentType::Blob => "Blob".to_string(),
+        ResponseContentType::Unknown => "Response".to_string(),
+        ResponseContentType::Json => response_str.clone(),
+    };
+
+    // Build wrapped type, accounting for void status
+    let wrapped_type = if ts_response_type == "void" {
         "void".to_string()
+    } else if hook.response_has_void_status {
+        format!("{{ data: {ts_response_type} }} | void")
     } else {
-        format!("{{ data: {response_str} }}")
+        format!("{{ data: {ts_response_type} }}")
     };
 
     match hook.kind {
@@ -562,16 +573,25 @@ fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> TsFunction {
         "UseSuspenseQueryOptions"
     };
 
-    let (options_param_type, body) = if let Some(vars) = &hook.vars_type {
+    let (options_param_type, body, options_optional) = if let Some(vars) = &hook.vars_type {
         let vars_str = vars.emit();
+        // When params are required, make params non-optional in the type
+        let params_modifier = if hook.params_required { "" } else { "?" };
         let options_type_str = format!(
-            "{{ params?: {vars_str}; query?: Omit<{options_type}<{wrapped_type}, ApiError, TData>, \"queryKey\" | \"queryFn\"> }}"
+            "{{ params{params_modifier}: {vars_str}; query?: Omit<{options_type}<{wrapped_type}, ApiError, TData>, \"queryKey\" | \"queryFn\"> }}"
         );
+        // When params are required, access as options.params (not options?.params)
+        let param_access = if hook.params_required {
+            "options.params"
+        } else {
+            "options?.params"
+        };
         let body = format!(
-            "return {}({{ queryKey: {}(options?.params), queryFn: () => {}(options?.params), ...options?.query }});",
+            "return {}({{ queryKey: {}({param_access}), queryFn: () => {}({param_access}), ...options?.query }});",
             hook_fn, key_fn, hook.fetch_fn
         );
-        (options_type_str, body)
+        // options parameter is optional only when params are optional
+        (options_type_str, body, !hook.params_required)
     } else {
         let options_type_str = format!(
             "{{ query?: Omit<{options_type}<{wrapped_type}, ApiError, TData>, \"queryKey\" | \"queryFn\"> }}"
@@ -580,7 +600,7 @@ fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> TsFunction {
             "return {}({{ queryKey: {}(), queryFn: () => {}(), ...options?.query }});",
             hook_fn, key_fn, hook.fetch_fn
         );
-        (options_type_str, body)
+        (options_type_str, body, true)
     };
 
     TsFunction {
@@ -589,7 +609,7 @@ fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> TsFunction {
         params: vec![TsParam {
             name: "options".into(),
             ty: Some(TsType::Ref(options_param_type)),
-            optional: true,
+            optional: options_optional,
         }],
         return_type: None,
         body: vec![TsStmt::Raw(body)],
@@ -616,7 +636,12 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: &str) -> TsFunction {
                     let has_data = props.iter().any(|p| p.name == "data");
                     match (has_params, has_data) {
                         (true, true) => {
-                            format!("(vars) => {}(vars.params, vars.data)", hook.fetch_fn)
+                            // Use correct argument order based on fetch function signature
+                            if hook.body_before_params {
+                                format!("(vars) => {}(vars.data, vars.params)", hook.fetch_fn)
+                            } else {
+                                format!("(vars) => {}(vars.params, vars.data)", hook.fetch_fn)
+                            }
                         }
                         (true, false) => {
                             format!("(vars) => {}(vars.params)", hook.fetch_fn)

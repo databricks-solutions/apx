@@ -1,0 +1,9 @@
+[env]
+# PyO3 uses PYO3_PYTHON to find the Python interpreter at build time
+PYO3_PYTHON = { value = ".venv/bin/python", relative = true }
+
+# The uv-managed Python has "/install" as its embedded prefix (relocatable build).
+# We must set PYTHONHOME at runtime to the actual Python installation location
+# so the embedded Python can find its stdlib.
+# This path is resolved from .venv/bin/python -> actual uv Python installation.
+PYTHONHOME = "/Users/ivan.trusov/.local/share/uv/python/cpython-3.11.10-macos-aarch64-none"

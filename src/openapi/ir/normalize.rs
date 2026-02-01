@@ -473,8 +473,22 @@ fn normalize_operation(
     // Normalize response
     let response = normalize_response(op)?;
 
+    // Determine if params is optional (used by both fetch and hooks)
+    let params_optional = params
+        .as_ref()
+        .map(|p| !p.fields.iter().any(|f| f.required))
+        .unwrap_or(true);
+
     // Build fetch IR
-    let fetch = build_fetch_ir(&name, path, method, &params, &body, &response);
+    let fetch = build_fetch_ir(
+        &name,
+        path,
+        method,
+        &params,
+        &body,
+        &response,
+        params_optional,
+    );
 
     // Build query key (for queries only)
     let query_key = if kind == OperationKind::Query {
@@ -484,7 +498,15 @@ fn normalize_operation(
     };
 
     // Build hooks
-    let hooks = build_hooks(&name, kind, &params, &body, &response, &query_key);
+    let hooks = build_hooks(
+        &name,
+        kind,
+        &params,
+        params_optional,
+        &body,
+        &response,
+        &query_key,
+    );
 
     Ok(OperationIR {
         name,
@@ -720,14 +742,9 @@ fn build_fetch_ir(
     params: &Option<ParamsIR>,
     body: &Option<BodyIR>,
     response: &ResponseIR,
+    params_optional: bool,
 ) -> FetchIR {
     let mut args = Vec::new();
-
-    // Determine if params is optional
-    let params_optional = params
-        .as_ref()
-        .map(|p| !p.fields.iter().any(|f| f.required))
-        .unwrap_or(true);
 
     // Add arguments in correct order: required params first, then optional
     // Body is always required when present, so it goes before optional params
@@ -886,6 +903,7 @@ fn build_hooks(
     name: &str,
     kind: OperationKind,
     params: &Option<ParamsIR>,
+    params_optional: bool,
     body: &Option<BodyIR>,
     response: &ResponseIR,
     query_key: &Option<QueryKeyIR>,
@@ -897,6 +915,8 @@ fn build_hooks(
         OperationKind::Query => {
             let vars_type = params.as_ref().map(|p| TypeRef::Named(p.type_name.clone()));
             let key_fn = query_key.as_ref().map(|k| k.fn_name.clone());
+            // params_required is true when there are params and at least one is required
+            let params_required = params.is_some() && !params_optional;
 
             // useQuery
             hooks.push(HookIR {
@@ -906,6 +926,10 @@ fn build_hooks(
                 vars_type: vars_type.clone(),
                 fetch_fn: name.to_string(),
                 query_key_fn: key_fn.clone(),
+                params_required,
+                response_content_type: response.content_type,
+                response_has_void_status: response.has_void_status,
+                body_before_params: false,
             });
 
             // useSuspenseQuery
@@ -916,29 +940,52 @@ fn build_hooks(
                 vars_type,
                 fetch_fn: name.to_string(),
                 query_key_fn: key_fn,
+                params_required,
+                response_content_type: response.content_type,
+                response_has_void_status: response.has_void_status,
+                body_before_params: false,
             });
         }
         OperationKind::Mutation => {
+            // Determine if body comes before params in fetch function signature
+            // Body comes first when params are optional (since body is always required)
+            let body_before_params = params_optional && body.is_some() && params.is_some();
+
             // Determine vars type
+            // For FormData, use FormData type instead of the schema type
             let vars_type = match (params.as_ref(), body.as_ref()) {
-                (Some(p), Some(b)) => Some(TypeRef::Inline(Box::new(TsType::Object(vec![
-                    TsProp {
-                        name: "params".to_string(),
-                        ty: TsType::Ref(p.type_name.clone()),
-                        optional: false,
-                    },
-                    TsProp {
-                        name: "data".to_string(),
-                        ty: b.ty.to_ts_type(),
-                        optional: false,
-                    },
-                ])))),
+                (Some(p), Some(b)) => {
+                    let data_ty = if b.content_type == BodyContentType::FormData {
+                        TsType::Ref("FormData".into())
+                    } else {
+                        b.ty.to_ts_type()
+                    };
+                    Some(TypeRef::Inline(Box::new(TsType::Object(vec![
+                        TsProp {
+                            name: "params".to_string(),
+                            ty: TsType::Ref(p.type_name.clone()),
+                            optional: false,
+                        },
+                        TsProp {
+                            name: "data".to_string(),
+                            ty: data_ty,
+                            optional: false,
+                        },
+                    ]))))
+                }
                 (Some(p), None) => Some(TypeRef::Inline(Box::new(TsType::Object(vec![TsProp {
                     name: "params".to_string(),
                     ty: TsType::Ref(p.type_name.clone()),
                     optional: false,
                 }])))),
-                (None, Some(b)) => Some(b.ty.clone()),
+                (None, Some(b)) => {
+                    // For FormData, use FormData type
+                    if b.content_type == BodyContentType::FormData {
+                        Some(TypeRef::Inline(Box::new(TsType::Ref("FormData".into()))))
+                    } else {
+                        Some(b.ty.clone())
+                    }
+                }
                 (None, None) => None,
             };
 
@@ -949,6 +996,10 @@ fn build_hooks(
                 vars_type,
                 fetch_fn: name.to_string(),
                 query_key_fn: None,
+                params_required: false, // Mutations handle params through vars_type
+                response_content_type: response.content_type,
+                response_has_void_status: response.has_void_status,
+                body_before_params,
             });
         }
     }

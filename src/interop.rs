@@ -4,7 +4,7 @@ use pyo3::types::{PyDict, PyList};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::time::Duration;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::dev::common::{CLIENT_HOST, lock_path, read_lock};
 
@@ -41,7 +41,7 @@ static SYSTEM_BUN_WARNING: Once = Once::new();
 fn warn_if_system_bun_exists() {
     SYSTEM_BUN_WARNING.call_once(|| {
         if let Some(system_bun) = find_system_bun() {
-            warn!(
+            debug!(
                 "System bun found at '{}'. apx will use its bundled bun instead.",
                 system_bun.display()
             );

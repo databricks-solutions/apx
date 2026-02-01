@@ -35,6 +35,7 @@ mod sources;
 
 pub use api_generator::generate_openapi;
 pub(crate) use interop::bun_binary_path;
+pub use openapi::generate as generate_openapi_ts;
 
 static APP_DIR: OnceLock<PathBuf> = OnceLock::new();
 
