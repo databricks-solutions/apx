@@ -2096,7 +2096,8 @@ mod tests {
   "name": "apx-ts-typecheck",
   "private": true,
   "dependencies": {
-    "@tanstack/react-query": "^5"
+    "@tanstack/react-query": "^5",
+    "typescript": "^5"
   }
 }
 "#;
@@ -2152,7 +2153,7 @@ mod tests {
         // Run tsc from the test environment directory with explicit compiler options
         // Using `bun x` which is equivalent to `bunx`
         let output = Command::new("bun")
-            .arg("x")
+            .arg("run")
             .args([
                 "tsc",
                 "--noEmit",
