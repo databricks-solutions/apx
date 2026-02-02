@@ -24,6 +24,7 @@ use crate::common::{ApxCommand, BunCommand, UvCommand, handle_spawn_error, read_
 use crate::dev::common::CLIENT_HOST;
 use crate::dev::otel::forward_log_to_flux;
 use crate::dotenv::DotenvFile;
+use crate::python_logging::{DevConfig, resolve_log_config};
 
 #[derive(Debug, Clone, Copy)]
 enum LogSource {
@@ -70,6 +71,7 @@ pub struct ProcessManager {
     app_slug: String,
     app_entrypoint: String,
     dotenv_vars: Arc<Mutex<HashMap<String, String>>>,
+    dev_config: DevConfig,
 }
 
 impl ProcessManager {
@@ -90,6 +92,7 @@ impl ProcessManager {
         let dotenv_vars = Arc::new(Mutex::new(dotenv.get_vars()));
         let app_slug = metadata.app_slug.clone();
         let app_entrypoint = metadata.app_entrypoint.clone();
+        let dev_config = metadata.dev_config.clone();
 
         let dev_token = Self::generate_dev_token();
         let db_password = Self::generate_dev_token(); // Random password for PGlite
@@ -119,6 +122,7 @@ impl ProcessManager {
             app_slug,
             app_entrypoint,
             dotenv_vars,
+            dev_config,
         })
     }
 
@@ -301,8 +305,10 @@ impl ProcessManager {
         //   2026-01-28 14:09:02.413 |  app | INFO: Uvicorn running...
         // ============================================================================
 
-        // Create uvicorn logging config for consistent log format
-        let log_config = self.create_uvicorn_log_config(app_dir).await?;
+        // Resolve uvicorn logging config (inline TOML, external Python file, or default)
+        let log_config_result =
+            resolve_log_config(&self.dev_config, &self.app_slug, app_dir).await?;
+        let log_config = log_config_result.to_string_path();
 
         // Run uvicorn via uv to ensure correct Python environment
         let mut cmd = UvCommand::new("uvicorn").tokio_command();
@@ -375,72 +381,6 @@ impl ProcessManager {
         let mut guard = self.backend_child.lock().await;
         *guard = Some(child);
         Ok(())
-    }
-
-    /// Create a uvicorn logging config file (JSON format, no pyyaml dependency).
-    /// Always overwrites the existing config to ensure format updates are applied.
-    async fn create_uvicorn_log_config(&self, app_dir: &Path) -> Result<String, String> {
-        let config_dir = app_dir.join(".apx");
-        tokio::fs::create_dir_all(&config_dir)
-            .await
-            .map_err(|e| format!("Failed to create .apx directory: {e}"))?;
-
-        let config_path = config_dir.join("uvicorn_logging.json");
-        // APX adds: timestamp | source | channel | <this output>
-        // So we only need: location | message
-        //
-        // IMPORTANT: Uvicorn's access logger passes values as positional args, not named fields.
-        // Use %(message)s to get the pre-formatted message, not %(client_addr)s etc.
-        let config_content = r#"{
-  "version": 1,
-  "disable_existing_loggers": false,
-  "formatters": {
-    "default": {
-      "format": "%(module)s.%(funcName)s | %(message)s"
-    },
-    "access": {
-      "format": "%(message)s"
-    }
-  },
-  "handlers": {
-    "default": {
-      "class": "logging.StreamHandler",
-      "stream": "ext://sys.stderr",
-      "formatter": "default"
-    },
-    "access": {
-      "class": "logging.StreamHandler",
-      "stream": "ext://sys.stdout",
-      "formatter": "access"
-    }
-  },
-  "loggers": {
-    "uvicorn": {
-      "handlers": ["default"],
-      "level": "INFO",
-      "propagate": false
-    },
-    "uvicorn.error": {
-      "level": "INFO",
-      "propagate": true
-    },
-    "uvicorn.access": {
-      "handlers": ["access"],
-      "level": "INFO",
-      "propagate": false
-    }
-  },
-  "root": {
-    "level": "INFO",
-    "handlers": ["default"]
-  }
-}"#;
-
-        tokio::fs::write(&config_path, config_content)
-            .await
-            .map_err(|e| format!("Failed to write uvicorn logging config: {e}"))?;
-
-        Ok(config_path.display().to_string())
     }
 
     async fn spawn_pglite(&self, bun: &BunCommand) -> Result<(), String> {
@@ -581,6 +521,7 @@ impl ProcessManager {
         let dev_server_port = self.dev_server_port;
         let dev_token = self.dev_token.clone();
         let db_password = self.db_password.clone();
+        let dev_config = self.dev_config.clone();
 
         tokio::spawn(async move {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(100);
@@ -700,6 +641,7 @@ impl ProcessManager {
                         &db_password,
                         &dotenv_vars,
                         &backend_child,
+                        &dev_config,
                     )
                     .await
                     {
@@ -804,6 +746,7 @@ impl ProcessManager {
         db_password: &str,
         dotenv_vars: &Arc<Mutex<HashMap<String, String>>>,
         backend_child: &Arc<Mutex<Option<Child>>>,
+        dev_config: &DevConfig,
     ) -> Result<(), String> {
         // ============================================================================
         // Backend logs are captured via stdout/stderr and forwarded to flux.
@@ -811,9 +754,9 @@ impl ProcessManager {
         // See spawn_uvicorn() for detailed explanation.
         // ============================================================================
 
-        // Reuse the existing log config file (created by spawn_uvicorn)
-        let log_config = app_dir.join(".apx").join("uvicorn_logging.json");
-        let log_config_str = log_config.display().to_string();
+        // Resolve uvicorn logging config (inline TOML, external Python file, or default)
+        let log_config_result = resolve_log_config(dev_config, app_slug, app_dir).await?;
+        let log_config_str = log_config_result.to_string_path();
 
         // Run uvicorn via uv to ensure correct Python environment
         let mut cmd = UvCommand::new("uvicorn").tokio_command();

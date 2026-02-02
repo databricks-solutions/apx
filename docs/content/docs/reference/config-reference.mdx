@@ -81,3 +81,66 @@ This allows you to run:
 ```bash
 apx add @animate-ui/fade-in
 ```
+
+### `[tool.apx.dev]`
+
+Development server configuration options.
+
+- **log_config_file**: Path to an external Python logging configuration file (relative to pyproject.toml). Mutually exclusive with `[tool.apx.dev.logging]`.
+
+Example:
+
+```toml
+[tool.apx.dev]
+log_config_file = "logging_config.py"
+```
+
+### `[tool.apx.dev.logging]`
+
+Inline Python logging configuration using the standard [logging.dictConfig](https://docs.python.org/3/library/logging.config.html#logging.config.dictConfig) format. This configuration is **merged** with the default uvicorn logging setup, allowing you to add custom loggers or override specific settings while preserving the standard uvicorn logging behavior.
+
+When you specify loggers, formatters, or handlers, they are merged with the defaults:
+
+- New entries are added
+- Existing entries with the same name are overridden
+
+Example with inline tables:
+
+```toml
+[tool.apx.dev.logging]
+version = 1
+disable_existing_loggers = false
+
+[tool.apx.dev.logging.formatters]
+default = { format = "%(levelname)s %(name)s %(message)s" }
+
+[tool.apx.dev.logging.handlers]
+console = { class = "logging.StreamHandler", formatter = "default", stream = "ext://sys.stdout" }
+
+[tool.apx.dev.logging.loggers]
+"uvicorn" = { level = "DEBUG", handlers = ["console"], propagate = false }
+"myapp"   = { level = "DEBUG", handlers = ["console"], propagate = false }
+```
+
+**Default loggers provided by apx:**
+
+| Logger           | Level | Description               |
+| ---------------- | ----- | ------------------------- |
+| `uvicorn`        | INFO  | Main uvicorn logger       |
+| `uvicorn.error`  | INFO  | Uvicorn error logger      |
+| `uvicorn.access` | INFO  | HTTP access logs          |
+| `{app_slug}`     | DEBUG | Your application's logger |
+
+**Configuration options:**
+
+- **version**: Must be `1` (required by Python's dictConfig)
+- **disable_existing_loggers**: Whether to disable existing loggers (default: `false`)
+- **formatters**: Log message formatters
+- **handlers**: Output handlers (console, file, etc.)
+- **loggers**: Logger configurations by name
+- **root**: Root logger configuration
+
+<Callout type="info">
+  You cannot use both `log_config_file` and `[tool.apx.dev.logging]` at the same
+  time.
+</Callout>

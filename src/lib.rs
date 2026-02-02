@@ -29,6 +29,7 @@ mod flux;
 mod interop;
 mod mcp;
 mod openapi;
+mod python_logging;
 mod registry;
 mod search;
 mod sources;

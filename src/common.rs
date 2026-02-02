@@ -9,6 +9,7 @@ use tokio::process::Command;
 
 use crate::bun_binary_path;
 use crate::generate_openapi;
+use crate::python_logging::{DevConfig, parse_dev_config};
 
 /// Dev dependencies required by apx frontend entrypoint.ts
 /// These must be installed before running any frontend command
@@ -201,6 +202,7 @@ pub struct ProjectMetadata {
     pub metadata_path: PathBuf,
     pub ui_root: PathBuf,
     pub ui_registries: HashMap<String, String>,
+    pub dev_config: DevConfig,
 }
 
 impl ProjectMetadata {
@@ -261,6 +263,9 @@ pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, Str
         })
         .unwrap_or_default();
 
+    // Parse dev configuration
+    let dev_config = parse_dev_config(&pyproject_value, project_root)?;
+
     Ok(ProjectMetadata {
         app_name,
         app_slug,
@@ -269,6 +274,7 @@ pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, Str
         metadata_path: PathBuf::from(metadata_path),
         ui_root: PathBuf::from(ui_root),
         ui_registries,
+        dev_config,
     })
 }
 
