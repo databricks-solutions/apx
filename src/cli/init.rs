@@ -1,4 +1,4 @@
-use clap::{Args, ValueEnum};
+use clap::Args;
 use dialoguer::{Confirm, Input, Select};
 use rand::seq::SliceRandom;
 use std::ffi::OsStr;
@@ -9,6 +9,7 @@ use tokio::process::Command;
 use tracing::debug;
 use walkdir::WalkDir;
 
+use crate::cli::common::{Assistant, Layout, Template};
 use crate::cli::components::add::{ComponentInput, add_components};
 use crate::cli::run_cli_async;
 use crate::common::list_profiles;
@@ -20,30 +21,6 @@ use crate::interop::templates_dir;
 use std::time::Instant;
 
 const APX_INDEX_URL: &str = "https://databricks-solutions.github.io/apx/simple";
-
-#[derive(ValueEnum, Clone, Debug)]
-#[value(rename_all = "lower")]
-pub enum Template {
-    Minimal,
-    Essential,
-    Stateful,
-}
-
-#[derive(ValueEnum, Clone, Debug)]
-#[value(rename_all = "lower")]
-pub enum Assistant {
-    Cursor,
-    Vscode,
-    Codex,
-    Claude,
-}
-
-#[derive(ValueEnum, Clone, Debug)]
-#[value(rename_all = "lower")]
-pub enum Layout {
-    Basic,
-    Sidebar,
-}
 
 #[derive(Args, Debug, Clone)]
 pub struct InitArgs {

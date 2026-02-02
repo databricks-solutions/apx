@@ -1,6 +1,7 @@
 pub mod __generate_openapi;
 pub mod build;
 pub mod bun;
+pub mod common;
 pub mod components;
 pub mod dev;
 pub mod flux;

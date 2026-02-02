@@ -7,13 +7,15 @@ use std::path::{Path, PathBuf};
 use tera::Context;
 use walkdir::WalkDir;
 
+use crate::cli::common::{Assistant, Layout, Template};
 use crate::cli::run_cli_async;
 use crate::interop::templates_dir;
 
 /// Available addons that can be applied
-#[derive(ValueEnum, Clone, Debug)]
+#[derive(ValueEnum, Clone, Debug, Copy)]
 #[value(rename_all = "lower")]
 pub enum Addon {
+    // Assistant addons (from common::Assistant)
     /// Cursor AI assistant rules
     Cursor,
     /// VSCode AI assistant rules
@@ -22,36 +24,38 @@ pub enum Addon {
     Claude,
     /// Codex AI assistant rules
     Codex,
+
+    // Template addons (from common::Template)
     /// Stateful addon with database support
     Stateful,
     /// Essential/base template files
     Essential,
-    /// Base template files (alias for essential)
-    Base,
+
+    // Layout addons (from common::Layout)
     /// Sidebar layout addon
     Sidebar,
-    /// Minimal UI addon
-    MinimalUi,
 }
 
 impl Addon {
     /// Get the directory name for this addon in the templates folder
     fn directory_name(&self) -> &str {
         match self {
-            Addon::Cursor => "cursor",
-            Addon::Vscode => "vscode",
-            Addon::Claude => "claude",
-            Addon::Codex => "codex",
-            Addon::Stateful => "stateful",
-            Addon::Essential | Addon::Base => "base",
-            Addon::Sidebar => "sidebar",
-            Addon::MinimalUi => "minimal-ui",
+            // Assistant addons
+            Addon::Cursor => Assistant::Cursor.directory_name(),
+            Addon::Vscode => Assistant::Vscode.directory_name(),
+            Addon::Claude => Assistant::Claude.directory_name(),
+            Addon::Codex => Assistant::Codex.directory_name(),
+            // Template addons
+            Addon::Stateful => Template::Stateful.directory_name(),
+            Addon::Essential => Template::Essential.directory_name(),
+            // Layout addons
+            Addon::Sidebar => Layout::Sidebar.directory_name().unwrap_or("sidebar"),
         }
     }
 
     /// Check if this addon is the base template (not in addons folder)
     fn is_base(&self) -> bool {
-        matches!(self, Addon::Essential | Addon::Base)
+        matches!(self, Addon::Essential)
     }
 }
 
