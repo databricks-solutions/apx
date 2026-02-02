@@ -110,7 +110,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
             .default(default_idx)
             .interact()
             .map_err(|err| format!("Failed to select template: {err}"))?;
-        args.template = Some(choices[selection].clone());
+        args.template = Some(choices[selection]);
     }
 
     if args.profile.is_none() {
@@ -170,7 +170,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
                 .default(0)
                 .interact()
                 .map_err(|err| format!("Failed to select assistant: {err}"))?;
-            args.assistant = Some(choices[selection].clone());
+            args.assistant = Some(choices[selection]);
         }
     }
 
@@ -185,7 +185,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
             .default(0)
             .interact()
             .map_err(|err| format!("Failed to select layout: {err}"))?;
-        args.layout = Some(choices[selection].clone());
+        args.layout = Some(choices[selection]);
     }
 
     // Minimal template always uses basic layout
