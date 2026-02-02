@@ -125,7 +125,7 @@ enum DevCommands {
     /// Check the project code for errors
     Check(cli::dev::check::CheckArgs),
     /// Apply an addon to an existing project
-    Apply,
+    Apply(cli::dev::apply::ApplyArgs),
     /// Internal: run dev server
     #[command(name = "__internal__run_server", hide = true)]
     InternalRunServer(cli::dev::__internal_run_server::InternalRunServerArgs),
@@ -176,10 +176,7 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
                 DevCommands::Restart(args) => cli::dev::restart::run(args).await,
                 DevCommands::Logs(args) => cli::dev::logs::run(args).await,
                 DevCommands::Check(args) => cli::dev::check::run(args).await,
-                DevCommands::Apply => {
-                    println!("Applying addon...");
-                    0
-                }
+                DevCommands::Apply(args) => cli::dev::apply::run(args).await,
                 DevCommands::InternalRunServer(args) => {
                     cli::dev::__internal_run_server::run(args).await
                 }

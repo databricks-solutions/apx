@@ -194,11 +194,22 @@ uv run apx dev check [APP_PATH]
 
 ### dev apply
 
-Apply an addon to an existing project.
+Apply an addon to an existing project. Shows a diff of changes and asks for confirmation before applying.
 
 ```bash
-uv run apx dev apply <ADDON>
+uv run apx dev apply <ADDON> [OPTIONS] [APP_PATH]
 ```
+
+#### Arguments
+
+- `ADDON`: The addon to apply (see available addons below)
+- `APP_PATH`: The path to the app (optional, defaults to current directory)
+
+#### Options
+
+| Option       | Description                                         |
+| ------------ | --------------------------------------------------- |
+| `-y, --yes`  | Skip confirmation prompt and apply changes directly |
 
 #### Available Addons
 
@@ -244,6 +255,22 @@ uv run apx dev apply <ADDON>
 
   </Tab>
 </Tabs>
+
+#### Example
+
+```bash
+# Apply Cursor rules with confirmation prompt
+uv run apx dev apply cursor
+
+# Apply stateful addon without confirmation
+uv run apx dev apply stateful -y
+```
+
+The command will:
+1. Show a list of new files to be created
+2. Show a diff for each file that will be modified
+3. Ask for confirmation (unless `-y` is provided)
+4. Apply the changes
 
 ---
 
