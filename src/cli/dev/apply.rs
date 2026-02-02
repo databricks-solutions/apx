@@ -116,10 +116,7 @@ impl FileChange {
         let diff = TextDiff::from_lines(existing, &self.new_content);
         let mut output = String::new();
 
-        output.push_str(&format!(
-            "\x1b[1m--- {} (current)\x1b[0m\n",
-            self.rel_path
-        ));
+        output.push_str(&format!("\x1b[1m--- {} (current)\x1b[0m\n", self.rel_path));
         output.push_str(&format!("\x1b[1m+++ {} (new)\x1b[0m\n", self.rel_path));
 
         for (idx, group) in diff.grouped_ops(3).iter().enumerate() {
@@ -165,7 +162,9 @@ async fn run_inner(args: ApplyArgs) -> Result<(), String> {
     let addon_source = if args.addon.is_base() {
         templates_dir.join(args.addon.directory_name())
     } else {
-        templates_dir.join("addons").join(args.addon.directory_name())
+        templates_dir
+            .join("addons")
+            .join(args.addon.directory_name())
     };
 
     if !addon_source.exists() {
@@ -225,10 +224,7 @@ async fn run_inner(args: ApplyArgs) -> Result<(), String> {
     }
 
     if unchanged_count > 0 {
-        println!(
-            "\x1b[90m{} file(s) unchanged\x1b[0m\n",
-            unchanged_count
-        );
+        println!("\x1b[90m{} file(s) unchanged\x1b[0m\n", unchanged_count);
     }
 
     // Summary line
