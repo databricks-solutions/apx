@@ -84,19 +84,6 @@ impl UvCommand {
         cmd
     }
 
-    /// Create a new tokio::process::Command with additional uv arguments.
-    ///
-    /// The `uv_args` are inserted between `run` and the tool name.
-    /// Example: `UvCommand::new("python").tokio_command_with_uv_args(&["--no-sync"])`
-    /// produces: `uv run --no-sync python`
-    pub fn tokio_command_with_uv_args(&self, uv_args: &[&str]) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new("uv");
-        cmd.arg("run");
-        cmd.args(uv_args);
-        cmd.arg(self.tool);
-        cmd
-    }
-
     /// Format the command for display/logging.
     pub fn display(&self) -> String {
         format!("uv run {}", self.tool)

@@ -25,8 +25,8 @@ use crate::dev::common::CLIENT_HOST;
 use crate::dev::otel::forward_log_to_flux;
 use crate::dotenv::DotenvFile;
 use crate::python_logging::{
-    default_logging_config, resolve_log_config, write_logging_config_json, DevConfig,
-    LogConfigResult,
+    DevConfig, LogConfigResult, default_logging_config, resolve_log_config,
+    write_logging_config_json,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -808,8 +808,7 @@ impl ProcessManager {
                     config_path.display()
                 );
 
-                let mut validation_cmd =
-                    UvCommand::new("python").tokio_command_with_uv_args(&["--no-sync"]);
+                let mut validation_cmd = UvCommand::new("python").tokio_command();
                 validation_cmd
                     .args(["-c", &validation_script])
                     .current_dir(app_dir)
@@ -837,9 +836,10 @@ impl ProcessManager {
 
                     // Generate and write default config
                     let default_config = default_logging_config(app_slug);
-                    let fallback_path = write_logging_config_json(&default_config, app_dir)
-                        .await
-                        .map_err(|e| format!("Failed to write fallback logging config: {e}"))?;
+                    let fallback_path =
+                        write_logging_config_json(&default_config, app_dir)
+                            .await
+                            .map_err(|e| format!("Failed to write fallback logging config: {e}"))?;
                     fallback_path.display().to_string()
                 }
             }
