@@ -341,6 +341,7 @@ fn get_dotenv_vars() -> PyResult<HashMap<String, String>> {
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     init_tracing();
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(run_cli, m)?)?;
     m.add_function(wrap_pyfunction!(get_bun_binary_path, m)?)?;
     m.add_function(wrap_pyfunction!(generate_openapi_py, m)?)?;

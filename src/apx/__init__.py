@@ -1,8 +1,6 @@
 import sys
 
-from apx._core import get_bun_binary_path, run_cli
-
-__version__ = "0.1.0"
+from apx._core import get_bun_binary_path, run_cli, __version__
 
 
 def main() -> None:

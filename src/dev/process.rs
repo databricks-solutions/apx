@@ -55,6 +55,30 @@ fn format_log_line(source: LogSource, message: &str) -> String {
     format!("{timestamp} | {source:>4} | {message}")
 }
 
+/// Setup sitecustomize.py for Databricks SDK user-agent tracking.
+/// This is non-critical telemetry - failures are silently ignored.
+/// Returns the temp directory path if successful, None otherwise.
+fn setup_sitecustomize() -> Option<PathBuf> {
+    let temp_dir = tempfile::tempdir().ok()?;
+    let sitecustomize_path = temp_dir.path().join("sitecustomize.py");
+    std::fs::write(
+        &sitecustomize_path,
+        r#"import os
+try:
+    from databricks.sdk.core import with_user_agent_extra, with_product
+    from apx import __version__
+    if os.getenv('APX_UVICORN') == '1':
+        with_user_agent_extra('apx', __version__)
+        with_product('apx', __version__)
+except Exception:
+    pass
+"#,
+    )
+    .ok()?;
+    // Use into_path() to prevent automatic cleanup - dir persists for uvicorn's lifetime
+    Some(temp_dir.keep())
+}
+
 #[derive(Debug)]
 pub struct ProcessManager {
     frontend_child: Arc<Mutex<Option<Child>>>,
@@ -310,6 +334,9 @@ impl ProcessManager {
             resolve_log_config(&self.dev_config, &self.app_slug, app_dir).await?;
         let log_config = log_config_result.to_string_path();
 
+        // Setup sitecustomize.py for user-agent tracking (non-critical, best-effort)
+        let sitecustomize_dir = setup_sitecustomize();
+
         // Run uvicorn via uv to ensure correct Python environment
         let mut cmd = UvCommand::new("uvicorn").tokio_command();
         cmd.args([
@@ -336,8 +363,19 @@ impl ProcessManager {
         cmd.env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string());
         cmd.env("APX_DEV_SERVER_HOST", &self.host);
         cmd.env("APX_DEV_TOKEN", &self.dev_token);
+        cmd.env("APX_UVICORN", "1");
+
         // Force Python to flush stdout/stderr immediately (no buffering)
         cmd.env("PYTHONUNBUFFERED", "1");
+
+        // Prepend sitecustomize dir to PYTHONPATH if setup succeeded (non-critical)
+        if let Some(sitecustomize_path) = sitecustomize_dir {
+            let pythonpath = match std::env::var("PYTHONPATH") {
+                Ok(existing) => format!("{}:{}", sitecustomize_path.display(), existing),
+                Err(_) => sitecustomize_path.display().to_string(),
+            };
+            cmd.env("PYTHONPATH", pythonpath);
+        }
 
         // Apply dotenv variables
         let vars = self.dotenv_vars.lock().await;
