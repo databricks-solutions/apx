@@ -156,6 +156,7 @@ opentelemetry-proto.workspace = true
 prost.workspace = true
 similar.workspace = true
 tempfile.workspace = true
+serde_with = { version = "3.16.1", default-features = false, features = ["macros"] }
 
 [dev-dependencies]
 tempfile.workspace = true

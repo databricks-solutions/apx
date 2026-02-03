@@ -7,6 +7,7 @@
 //! When neither is specified, generates a default logging configuration.
 
 use serde::{Deserialize, Serialize};
+use serde_with::skip_serializing_none;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,7 @@ pub struct DevConfig {
 }
 
 /// Python logging.dictConfig format
+#[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     pub version: i32,
@@ -36,6 +38,7 @@ pub struct LoggingConfig {
 }
 
 /// Formatter configuration
+#[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FormatterConfig {
     #[serde(default)]
@@ -47,6 +50,7 @@ pub struct FormatterConfig {
 }
 
 /// Handler configuration
+#[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandlerConfig {
     #[serde(rename = "class")]
@@ -64,6 +68,7 @@ pub struct HandlerConfig {
 }
 
 /// Logger configuration
+#[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggerConfig {
     #[serde(default)]
@@ -75,6 +80,7 @@ pub struct LoggerConfig {
 }
 
 /// Root logger configuration
+#[skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RootLoggerConfig {
     #[serde(default)]
@@ -788,5 +794,46 @@ console = { class = "logging.StreamHandler", formatter = "custom", stream = "ext
 
         // User's myapp logger should also be present
         assert!(merged.loggers.contains_key("myapp"));
+    }
+
+    /// Test that the default logging config can be loaded by Python's logging.config.dictConfig.
+    /// This ensures the generated JSON is valid and doesn't contain unexpected fields like
+    /// `filename: null` that would cause StreamHandler to fail.
+    #[test]
+    fn test_default_config_python_validation() {
+        use std::io::Write;
+
+        let config = default_logging_config("testapp");
+        let json = serde_json::to_string_pretty(&config).expect("Failed to serialize config");
+
+        // Write config to temp file
+        let mut temp_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+        temp_file
+            .write_all(json.as_bytes())
+            .expect("Failed to write config");
+        let config_path = temp_file.path().to_string_lossy().to_string();
+
+        // Validate using Python's logging.config.dictConfig
+        let output = std::process::Command::new("uv")
+            .args([
+                "run",
+                "--no-sync",
+                "python",
+                "-c",
+                &format!(
+                    "import json, logging.config; logging.config.dictConfig(json.load(open('{}')))",
+                    config_path
+                ),
+            ])
+            .output()
+            .expect("Failed to run Python validation");
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            panic!(
+                "Default logging config failed Python validation:\n{}\n\nConfig JSON:\n{}",
+                stderr, json
+            );
+        }
     }
 }

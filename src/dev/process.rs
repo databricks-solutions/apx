@@ -24,7 +24,10 @@ use crate::common::{ApxCommand, BunCommand, UvCommand, handle_spawn_error, read_
 use crate::dev::common::CLIENT_HOST;
 use crate::dev::otel::forward_log_to_flux;
 use crate::dotenv::DotenvFile;
-use crate::python_logging::{DevConfig, resolve_log_config};
+use crate::python_logging::{
+    default_logging_config, resolve_log_config, write_logging_config_json, DevConfig,
+    LogConfigResult,
+};
 
 #[derive(Debug, Clone, Copy)]
 enum LogSource {
@@ -794,7 +797,53 @@ impl ProcessManager {
 
         // Resolve uvicorn logging config (inline TOML, external Python file, or default)
         let log_config_result = resolve_log_config(dev_config, app_slug, app_dir).await?;
-        let log_config_str = log_config_result.to_string_path();
+
+        // Validate JSON configs before use (skip validation for Python file configs)
+        let log_config_str = match &log_config_result {
+            LogConfigResult::PythonFile(path) => path.display().to_string(),
+            LogConfigResult::JsonConfig(config_path) => {
+                // Validate the JSON config can be loaded by Python's logging.config.dictConfig
+                let validation_script = format!(
+                    "import json, logging.config; logging.config.dictConfig(json.load(open('{}')))",
+                    config_path.display()
+                );
+
+                let mut validation_cmd =
+                    UvCommand::new("python").tokio_command_with_uv_args(&["--no-sync"]);
+                validation_cmd
+                    .args(["-c", &validation_script])
+                    .current_dir(app_dir)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped());
+
+                let output = validation_cmd
+                    .output()
+                    .await
+                    .map_err(|e| format!("Failed to validate logging config: {e}"))?;
+
+                if output.status.success() {
+                    config_path.display().to_string()
+                } else {
+                    // Validation failed - log error and fall back to default config
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    warn!(
+                        "Logging config validation failed, falling back to default:\n{}",
+                        stderr
+                    );
+                    eprintln!(
+                        "⚠️  Custom logging config is invalid, using default config:\n{}",
+                        stderr
+                    );
+
+                    // Generate and write default config
+                    let default_config = default_logging_config(app_slug);
+                    let fallback_path = write_logging_config_json(&default_config, app_dir)
+                        .await
+                        .map_err(|e| format!("Failed to write fallback logging config: {e}"))?;
+                    fallback_path.display().to_string()
+                }
+            }
+        };
 
         // Run uvicorn via uv to ensure correct Python environment
         let mut cmd = UvCommand::new("uvicorn").tokio_command();
