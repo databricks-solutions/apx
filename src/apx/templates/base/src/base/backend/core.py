@@ -8,7 +8,7 @@ import logging
 from contextlib import asynccontextmanager
 from importlib import resources
 from pathlib import Path
-from typing import Annotated, ClassVar, Optional
+from typing import Annotated, ClassVar, Optional, TypeAlias
 
 from databricks.sdk import WorkspaceClient
 from dotenv import load_dotenv
@@ -31,13 +31,19 @@ if env_file.exists():
 
 class AppConfig(BaseSettings):
     model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
-        env_file=env_file, env_prefix=f"{app_slug.upper()}_", extra="ignore"
+        env_file=env_file,
+        env_prefix=f"{app_slug.upper()}_",
+        extra="ignore",
+        env_nested_delimiter="__",
     )
     app_name: str = Field(default=app_name)
 
     @property
     def static_assets_path(self) -> Path:
         return Path(str(resources.files(app_slug))).joinpath("__dist__")
+
+    def __hash__(self) -> int:
+        return hash(self.app_name)
 
 
 # --- Logger ---
@@ -112,8 +118,8 @@ def bootstrap_app(app: FastAPI) -> None:
         app.state.workspace_client = ws
 
         if existing_lifespan:
-            async with existing_lifespan(app) as state:
-                yield state
+            async with existing_lifespan(app):
+                yield
         else:
             yield
 
@@ -172,15 +178,15 @@ def get_user_ws(
 class Dependency:
     """FastAPI dependency injection shorthand for route handler parameters."""
 
-    Client = Annotated[WorkspaceClient, Depends(get_ws)]
+    Client: TypeAlias = Annotated[WorkspaceClient, Depends(get_ws)]
     """Databricks WorkspaceClient using app-level service principal credentials.
     Recommended usage: `ws: Dependency.Client`"""
 
-    UserClient = Annotated[WorkspaceClient, Depends(get_user_ws)]
+    UserClient: TypeAlias = Annotated[WorkspaceClient, Depends(get_user_ws)]
     """WorkspaceClient authenticated on behalf of the current user via OBO token.
     Requires the X-Forwarded-Access-Token header.
     Recommended usage: `user_ws: Dependency.UserClient`"""
 
-    Config = Annotated[AppConfig, Depends(get_config)]
+    Config: TypeAlias = Annotated[AppConfig, Depends(get_config)]
     """Application configuration loaded from environment variables.
     Recommended usage: `config: Dependency.Config`"""

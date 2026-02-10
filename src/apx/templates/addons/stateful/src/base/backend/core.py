@@ -11,7 +11,7 @@ import os
 from contextlib import asynccontextmanager
 from importlib import resources
 from pathlib import Path
-from typing import Annotated, ClassVar, Generator, Optional
+from typing import Annotated, ClassVar, Generator, Optional, TypeAlias
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
@@ -163,26 +163,20 @@ def create_db_engine(config: AppConfig, ws: WorkspaceClient) -> Engine:
     dev_port = _get_dev_db_port()
     engine_url = _build_engine_url(config, ws, dev_port)
 
-    if dev_port:
-        engine = create_engine(
-            engine_url,
-            pool_recycle=10,
-            pool_size=4,
-        )
-    else:
-        engine = create_engine(
-            engine_url,
-            pool_recycle=45 * 60,
-            connect_args={"sslmode": "require"},
-            pool_size=4,
-        )
+    engine = create_engine(
+        engine_url,
+        pool_recycle=45 * 60 if not dev_port else None,
+        connect_args={"sslmode": "require"} if not dev_port else None,
+        pool_size=4,
+    )
 
-        def before_connect(dialect, conn_rec, cargs, cparams):
-            cred = ws.database.generate_database_credential(
-                instance_names=[config.db.instance_name]
-            )
-            cparams["password"] = cred.token
+    def before_connect(dialect, conn_rec, cargs, cparams):
+        cred = ws.database.generate_database_credential(
+            instance_names=[config.db.instance_name]
+        )
+        cparams["password"] = cred.token
 
+    if not dev_port:
         event.listens_for(engine, "do_connect")(before_connect)
 
     return engine
@@ -253,8 +247,8 @@ def bootstrap_app(app: FastAPI) -> None:
         app.state.workspace_client = ws
 
         if existing_lifespan:
-            async with existing_lifespan(app) as state:
-                yield state
+            async with existing_lifespan(app):
+                yield
         else:
             yield
 
@@ -326,19 +320,19 @@ def get_session(request: Request) -> Generator[Session, None, None]:
 class Dependency:
     """FastAPI dependency injection shorthand for route handler parameters."""
 
-    Client = Annotated[WorkspaceClient, Depends(get_ws)]
+    Client: TypeAlias = Annotated[WorkspaceClient, Depends(get_ws)]
     """Databricks WorkspaceClient using app-level service principal credentials.
     Recommended usage: `ws: Dependency.Client`"""
 
-    UserClient = Annotated[WorkspaceClient, Depends(get_user_ws)]
+    UserClient: TypeAlias = Annotated[WorkspaceClient, Depends(get_user_ws)]
     """WorkspaceClient authenticated on behalf of the current user via OBO token.
     Requires the X-Forwarded-Access-Token header.
     Recommended usage: `user_ws: Dependency.UserClient`"""
 
-    Config = Annotated[AppConfig, Depends(get_config)]
+    Config: TypeAlias = Annotated[AppConfig, Depends(get_config)]
     """Application configuration loaded from environment variables.
     Recommended usage: `config: Dependency.Config`"""
 
-    Session = Annotated[Session, Depends(get_session)]
+    Session: TypeAlias = Annotated[Session, Depends(get_session)]
     """SQLModel database session, scoped to the current request.
     Recommended usage: `session: Dependency.Session`"""
