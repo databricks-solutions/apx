@@ -243,19 +243,19 @@ class Order(SQLModel, table=True):
 ### Database Operations
 
 ```python
-from sqlmodel import Session, select
-from backend.runtime import get_engine
+from sqlmodel import select
+from backend.core import Dependency
 
-def get_orders():
-    with Session(get_engine()) as session:
-        return session.exec(select(Order)).all()
+@api.get("/orders")
+def get_orders(session: Dependency.Session):
+    return session.exec(select(Order)).all()
 
-def create_order(order: Order):
-    with Session(get_engine()) as session:
-        session.add(order)
-        session.commit()
-        session.refresh(order)
-        return order
+@api.post("/orders")
+def create_order(order: Order, session: Dependency.Session):
+    session.add(order)
+    session.commit()
+    session.refresh(order)
+    return order
 ```
 
 ### Development vs Production
@@ -266,6 +266,114 @@ def create_order(order: Order):
 | Production  | Lakebase | Configured via `PGAPPNAME` environment variable inside Apps runtime |
 
 The same SQLModel code works in both environments - apx handles the connection configuration automatically. Since PGlite is PostgreSQL-compatible, you get the same SQL behavior in development as you will in production.
+
+---
+
+## Dependency Injection Pattern
+
+apx provides a clean, type-safe dependency injection pattern through the `Dependency` class in `backend/core.py`. This pattern simplifies access to common resources like Databricks clients, configuration, and database sessions.
+
+### Available Dependencies
+
+All dependencies are accessed via the `Dependency` class:
+
+| Dependency | Type | Description | Recommended Usage |
+|------------|------|-------------|-------------------|
+| `Dependency.Client` | `WorkspaceClient` | App-level Databricks client (service principal) | `ws: Dependency.Client` |
+| `Dependency.UserClient` | `WorkspaceClient` | User-scoped Databricks client (OBO token) | `user_ws: Dependency.UserClient` |
+| `Dependency.Config` | `AppConfig` | Application configuration | `config: Dependency.Config` |
+| `Dependency.Session` | `Session` | Database session (stateful template only) | `session: Dependency.Session` |
+
+### Basic Usage
+
+Import the `Dependency` class and use it in your route handler function signatures:
+
+```python
+from fastapi import APIRouter
+from backend.core import Dependency
+
+api = APIRouter()
+
+@api.get("/clusters")
+def list_clusters(ws: Dependency.Client):
+    """List clusters using app-level credentials."""
+    return ws.clusters.list()
+
+@api.get("/current-user")
+def get_current_user(user_ws: Dependency.UserClient):
+    """Get current user info using their token."""
+    return user_ws.current_user.me()
+
+@api.get("/config")
+def get_app_config(config: Dependency.Config):
+    """Access application configuration."""
+    return {"app_name": config.app_name}
+```
+
+### User-Scoped Operations (OBO)
+
+The `Dependency.UserClient` provides on-behalf-of (OBO) authentication, allowing you to perform operations as the authenticated user. This requires the `X-Forwarded-Access-Token` header (automatically provided by Databricks Apps):
+
+```python
+@api.get("/my-jobs")
+def get_my_jobs(user_ws: Dependency.UserClient):
+    """List jobs visible to the current user."""
+    jobs = user_ws.jobs.list(name="my-job-prefix")
+    return [{"id": j.job_id, "name": j.settings.name} for j in jobs]
+
+@api.post("/create-notebook")
+def create_notebook(user_ws: Dependency.UserClient):
+    """Create a notebook in the user's workspace."""
+    result = user_ws.workspace.import_(
+        path="/Users/me/my-notebook",
+        content="# My Notebook",
+        format="SOURCE",
+        language="PYTHON"
+    )
+    return {"path": result.path}
+```
+
+### Multiple Dependencies
+
+You can combine multiple dependencies in a single route handler:
+
+```python
+from sqlmodel import select
+from backend.models import Order
+
+@api.get("/orders/stats")
+def get_order_stats(
+    session: Dependency.Session,
+    user_ws: Dependency.UserClient,
+    config: Dependency.Config
+):
+    """Get order statistics for the current user."""
+    # Access database
+    orders = session.exec(select(Order)).all()
+    
+    # Get user info
+    user = user_ws.current_user.me()
+    
+    # Use config
+    app_name = config.app_name
+    
+    return {
+        "app": app_name,
+        "user": user.user_name,
+        "total_orders": len(orders),
+        "total_revenue": sum(o.total for o in orders)
+    }
+```
+
+### Type Safety
+
+The `Dependency` class provides full type safety and IDE autocomplete. When you hover over a dependency in your IDE, you'll see:
+
+- The actual type (e.g., `WorkspaceClient`, `AppConfig`, `Session`)
+- Documentation about what the dependency provides
+- Recommended parameter naming convention
+
+This makes it easy to discover available methods and catch type errors early.
 
 ---
 

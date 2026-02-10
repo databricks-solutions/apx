@@ -1,11 +1,8 @@
-from typing import Annotated
-
-from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.iam import User as UserOut
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 
 from .._metadata import api_prefix
-from .dependencies import get_obo_ws
+from .core import Dependency
 from .models import VersionOut
 
 api = APIRouter(prefix=api_prefix)
@@ -17,5 +14,5 @@ async def version():
 
 
 @api.get("/current-user", response_model=UserOut, operation_id="currentUser")
-def me(obo_ws: Annotated[WorkspaceClient, Depends(get_obo_ws)]):
-    return obo_ws.current_user.me()
+def me(user_ws: Dependency.UserClient):
+    return user_ws.current_user.me()

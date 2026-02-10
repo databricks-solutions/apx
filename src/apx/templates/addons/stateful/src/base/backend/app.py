@@ -4,36 +4,37 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .._metadata import app_name, dist_dir
-from .config import AppConfig
+from .core import (
+    add_not_found_handler,
+    bootstrap_app,
+    create_db_engine,
+    initialize_models,
+    validate_db,
+)
 from .router import api
-from .runtime import Runtime
-from .utils import add_not_found_handler
-from .logger import logger
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize config and runtime, store in app.state for dependency injection
-    config = AppConfig()
-    logger.info(f"Starting app with configuration:\n{config}")
+    # config and workspace_client are already in app.state (set by bootstrap_app)
+    config = app.state.config
+    ws = app.state.workspace_client
 
-    runtime = Runtime(config)
-    runtime.validate_db()
-    runtime.initialize_models()
+    engine = create_db_engine(config, ws)
+    validate_db(engine, config)
+    initialize_models(engine)
 
-    # Store in app.state for access via dependencies
-    app.state.config = config
-    app.state.runtime = runtime
-
+    app.state.engine = engine
     yield
 
 
-app = FastAPI(title=f"{app_name}", lifespan=lifespan)
+app = FastAPI(title=app_name, lifespan=lifespan)
+bootstrap_app(app)  # wraps lifespan: config+ws init runs BEFORE the DB lifespan
+
 ui = StaticFiles(directory=dist_dir, html=True)
 
 # note the order of includes and mounts!
 app.include_router(api)
 app.mount("/", ui)
-
 
 add_not_found_handler(app)

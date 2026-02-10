@@ -20,7 +20,7 @@ src/{{app_name}}/
     ├── app.py             # Main FastAPI app
     ├── router.py          # API routes
     ├── models.py          # Pydantic models
-    └── config.py          # Configuration
+    └── core.py            # Config, logging, Dependency class, bootstrap
 ```
 
 ## 🔧 CLI Commands
@@ -106,6 +106,26 @@ const { data } = useGetItemsSuspense(selector());
 @router.get("/items", response_model=list[ItemOut], operation_id="getItems")
 async def get_items():
     ...
+```
+
+### Dependency Injection
+```python
+from backend.core import Dependency
+
+# Use Databricks client
+@api.get("/clusters")
+def list_clusters(ws: Dependency.Client):
+    return ws.clusters.list()
+
+# Use user-scoped client (OBO)
+@api.get("/me")
+def get_me(user_ws: Dependency.UserClient):
+    return user_ws.current_user.me()
+
+# Use database session (stateful template)
+@api.get("/orders")
+def get_orders(session: Dependency.Session):
+    return session.exec(select(Order)).all()
 ```
 
 ## 🔗 Resources
