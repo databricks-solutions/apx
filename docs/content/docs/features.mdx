@@ -277,12 +277,12 @@ apx provides a clean, type-safe dependency injection pattern through the `Depend
 
 All dependencies are accessed via the `Dependency` class:
 
-| Dependency | Type | Description | Recommended Usage |
-|------------|------|-------------|-------------------|
-| `Dependency.Client` | `WorkspaceClient` | App-level Databricks client (service principal) | `ws: Dependency.Client` |
-| `Dependency.UserClient` | `WorkspaceClient` | User-scoped Databricks client (OBO token) | `user_ws: Dependency.UserClient` |
-| `Dependency.Config` | `AppConfig` | Application configuration | `config: Dependency.Config` |
-| `Dependency.Session` | `Session` | Database session (stateful template only) | `session: Dependency.Session` |
+| Dependency              | Type              | Description                                     | Recommended Usage                |
+| ----------------------- | ----------------- | ----------------------------------------------- | -------------------------------- |
+| `Dependency.Client`     | `WorkspaceClient` | App-level Databricks client (service principal) | `ws: Dependency.Client`          |
+| `Dependency.UserClient` | `WorkspaceClient` | User-scoped Databricks client (OBO token)       | `user_ws: Dependency.UserClient` |
+| `Dependency.Config`     | `AppConfig`       | Application configuration                       | `config: Dependency.Config`      |
+| `Dependency.Session`    | `Session`         | Database session (stateful template only)       | `session: Dependency.Session`    |
 
 ### Basic Usage
 
@@ -350,13 +350,13 @@ def get_order_stats(
     """Get order statistics for the current user."""
     # Access database
     orders = session.exec(select(Order)).all()
-    
+
     # Get user info
     user = user_ws.current_user.me()
-    
+
     # Use config
     app_name = config.app_name
-    
+
     return {
         "app": app_name,
         "user": user.user_name,

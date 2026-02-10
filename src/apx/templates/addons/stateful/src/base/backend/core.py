@@ -193,9 +193,7 @@ def validate_db(engine: Engine, config: AppConfig) -> None:
     dev_port = _get_dev_db_port()
 
     if dev_port:
-        logger.info(
-            f"Validating local dev database connection at localhost:{dev_port}"
-        )
+        logger.info(f"Validating local dev database connection at localhost:{dev_port}")
     else:
         logger.info(
             f"Validating database connection to instance {config.db.instance_name}"
