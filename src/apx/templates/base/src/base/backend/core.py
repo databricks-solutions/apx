@@ -51,21 +51,6 @@ class AppConfig(BaseSettings):
 logger = logging.getLogger(app_name)
 
 
-def get_logger(name: Optional[str] = None) -> logging.Logger:
-    """
-    Get a logger instance.
-
-    Args:
-        name: Logger name. If None, returns the default app logger.
-
-    Returns:
-        Logger instance.
-    """
-    if name is None:
-        return logger
-    return logging.getLogger(name)
-
-
 # --- Utils ---
 
 
