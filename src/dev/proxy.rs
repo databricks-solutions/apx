@@ -388,14 +388,6 @@ async fn proxy_http(
     };
     let status = response.status();
     let headers = response.headers().clone();
-    let body = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            warn!(error = %err, "Failed to read proxy response body.");
-            return StatusCode::BAD_GATEWAY.into_response();
-        }
-    };
-
     if should_log {
         let elapsed = start.elapsed().as_millis();
         info!(
@@ -408,6 +400,8 @@ async fn proxy_http(
         );
     }
 
+    let body_stream = response.bytes_stream();
+
     let mut builder = Response::builder().status(status);
     for (name, value) in headers.iter() {
         if is_hop_header(name.as_str()) {
@@ -416,7 +410,7 @@ async fn proxy_http(
         builder = builder.header(name, value);
     }
     builder
-        .body(Body::from(body))
+        .body(Body::from_stream(body_stream))
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 
