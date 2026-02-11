@@ -18,6 +18,7 @@ pub const ENTRYPOINT_DEV_DEPS: &[&str] = &[
     "@tailwindcss/vite",
     "@vitejs/plugin-react",
     "@tanstack/router-plugin",
+    "@tanstack/router-generator",
     "@opentelemetry/sdk-logs",
     "@opentelemetry/exporter-logs-otlp-http",
     "@opentelemetry/api-logs",

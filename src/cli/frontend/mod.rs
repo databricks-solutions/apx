@@ -1,3 +1,3 @@
 pub mod build;
-mod common;
+pub(crate) mod common;
 pub mod dev;

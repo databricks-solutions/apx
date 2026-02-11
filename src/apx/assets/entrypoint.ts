@@ -2,6 +2,7 @@ import { build, createServer, type InlineConfig, type Plugin } from "vite";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
+import { Generator, getConfig } from "@tanstack/router-generator";
 import type { IncomingMessage, ServerResponse } from "http";
 import {
   LoggerProvider,
@@ -362,6 +363,18 @@ async function runBuild() {
   await build(config);
 }
 
+async function runGenerate() {
+  const config = getConfig({
+    target: "react",
+    autoCodeSplitting: true,
+    routesDirectory: `${uiRoot}/routes`,
+    generatedRouteTree: `${uiRoot}/types/routeTree.gen.ts`,
+  });
+
+  const generator = new Generator({ config, root: uiRoot });
+  await generator.run();
+}
+
 // Main entry point
 if (mode === "dev") {
   runDev().catch((err) => {
@@ -373,7 +386,12 @@ if (mode === "dev") {
     logError(`Failed to build: ${err}`);
     process.exit(1);
   });
+} else if (mode === "generate") {
+  runGenerate().catch((err) => {
+    logError(`Failed to generate route tree: ${err}`);
+    process.exit(1);
+  });
 } else {
-  logError(`Invalid mode: ${mode}. Expected "dev" or "build".`);
+  logError(`Invalid mode: ${mode}. Expected "dev", "build", or "generate".`);
   process.exit(1);
 }

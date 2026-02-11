@@ -1,8 +1,9 @@
 use clap::Args;
 use std::path::PathBuf;
 
+use crate::cli::frontend::common::prepare_frontend_args;
 use crate::cli::run_cli_async;
-use crate::common::{BunCommand, run_preflight_checks};
+use crate::common::{BunCommand, ensure_entrypoint_deps, run_preflight_checks};
 use tokio::process::Command as TokioCommand;
 use tracing::debug;
 
@@ -26,6 +27,9 @@ pub async fn run_inner(args: CheckArgs) -> Result<(), String> {
 
     // Run preflight checks (installs deps if needed)
     run_preflight_checks(&app_dir).await?;
+
+    // Generate route tree (must complete before tsc)
+    generate_route_tree(&app_dir).await?;
 
     // Run tsc -b --incremental in one tokio thread
     let bun = BunCommand::new()?;
@@ -145,5 +149,37 @@ pub async fn run_inner(args: CheckArgs) -> Result<(), String> {
     }
 
     // If no errors, just move forward
+    Ok(())
+}
+
+async fn generate_route_tree(app_dir: &std::path::Path) -> Result<(), String> {
+    println!("Generating route tree...");
+
+    // Ensure entrypoint deps are installed (includes @tanstack/router-generator)
+    ensure_entrypoint_deps(app_dir).await?;
+
+    // Prepare frontend args for "generate" mode
+    let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "generate")?;
+
+    // Run: bun run <entrypoint.ts> generate <uiRoot> <outDir> <publicDir>
+    let bun = BunCommand::new()?;
+    let output = bun
+        .tokio_command()
+        .arg("run")
+        .arg(&entrypoint)
+        .args(&args)
+        .env("APX_APP_NAME", &app_name)
+        .current_dir(app_dir)
+        .output()
+        .await
+        .map_err(|err| format!("Failed to run route tree generation: {err}"))?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Route tree generation failed:\n{stdout}\n{stderr}"));
+    }
+
+    println!("Route tree generated");
     Ok(())
 }
