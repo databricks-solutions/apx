@@ -11,7 +11,7 @@ import os
 from contextlib import asynccontextmanager
 from importlib import resources
 from pathlib import Path
-from typing import Annotated, ClassVar, Generator, Optional, TypeAlias
+from typing import Annotated, Any, ClassVar, Generator, TypeAlias
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
@@ -148,12 +148,16 @@ def create_db_engine(config: AppConfig, ws: WorkspaceClient) -> Engine:
     dev_port = _get_dev_db_port()
     engine_url = _build_engine_url(config, ws, dev_port)
 
-    engine = create_engine(
-        engine_url,
-        pool_recycle=45 * 60 if not dev_port else None,
-        connect_args={"sslmode": "require"} if not dev_port else None,
-        pool_size=4,
-    )
+    engine_kwargs: dict[str, Any] = {
+        "pool_size": 4,
+        "pool_recycle": 45 * 60
+    }
+    
+    if not dev_port:
+        engine_kwargs["connect_args"] = {"sslmode": "require"}
+    
+    engine = create_engine(engine_url, **engine_kwargs)
+
 
     def before_connect(dialect, conn_rec, cargs, cparams):
         cred = ws.database.generate_database_credential(
