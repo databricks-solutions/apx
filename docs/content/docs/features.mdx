@@ -244,13 +244,16 @@ class Order(SQLModel, table=True):
 
 ```python
 from sqlmodel import select
-from backend.core import Dependency
+from .core import Dependency, create_router
+from .models import Order
 
-@api.get("/orders")
+router = create_router()
+
+@router.get("/orders", response_model=list[Order], operation_id="getOrders")
 def get_orders(session: Dependency.Session):
     return session.exec(select(Order)).all()
 
-@api.post("/orders")
+@router.post("/orders", response_model=Order, operation_id="createOrder")
 def create_order(order: Order, session: Dependency.Session):
     session.add(order)
     session.commit()
@@ -286,42 +289,46 @@ All dependencies are accessed via the `Dependency` class:
 
 ### Basic Usage
 
-Import the `Dependency` class and use it in your route handler function signatures:
+Import `Dependency` and `create_router` from `.core` and use them in your route handlers:
 
 ```python
-from fastapi import APIRouter
-from backend.core import Dependency
+from .core import Dependency, create_router
 
-api = APIRouter()
+router = create_router()
 
-@api.get("/clusters")
+@router.get("/clusters", response_model=list[ClusterOut], operation_id="listClusters")
 def list_clusters(ws: Dependency.Client):
     """List clusters using app-level credentials."""
     return ws.clusters.list()
 
-@api.get("/current-user")
+@router.get("/current-user", response_model=UserOut, operation_id="currentUser")
 def get_current_user(user_ws: Dependency.UserClient):
     """Get current user info using their token."""
     return user_ws.current_user.me()
 
-@api.get("/config")
+@router.get("/config", response_model=AppSettingsOut, operation_id="getAppConfig")
 def get_app_config(config: Dependency.Config):
     """Access application configuration."""
-    return {"app_name": config.app_name}
+    return AppSettingsOut(app_name=config.app_name)
 ```
+
+<Callout type="info">
+  Always use `create_router()` instead of `APIRouter()` directly — it
+  automatically sets the correct API prefix for your app.
+</Callout>
 
 ### User-Scoped Operations (OBO)
 
 The `Dependency.UserClient` provides on-behalf-of (OBO) authentication, allowing you to perform operations as the authenticated user. This requires the `X-Forwarded-Access-Token` header (automatically provided by Databricks Apps):
 
 ```python
-@api.get("/my-jobs")
+@router.get("/my-jobs", response_model=list[JobOut], operation_id="getMyJobs")
 def get_my_jobs(user_ws: Dependency.UserClient):
     """List jobs visible to the current user."""
     jobs = user_ws.jobs.list(name="my-job-prefix")
     return [{"id": j.job_id, "name": j.settings.name} for j in jobs]
 
-@api.post("/create-notebook")
+@router.post("/create-notebook", response_model=NotebookOut, operation_id="createNotebook")
 def create_notebook(user_ws: Dependency.UserClient):
     """Create a notebook in the user's workspace."""
     result = user_ws.workspace.import_(
@@ -339,31 +346,78 @@ You can combine multiple dependencies in a single route handler:
 
 ```python
 from sqlmodel import select
-from backend.models import Order
+from .models import Order
 
-@api.get("/orders/stats")
+@router.get("/orders/stats", response_model=OrderStatsOut, operation_id="getOrderStats")
 def get_order_stats(
     session: Dependency.Session,
     user_ws: Dependency.UserClient,
     config: Dependency.Config
 ):
     """Get order statistics for the current user."""
-    # Access database
     orders = session.exec(select(Order)).all()
-
-    # Get user info
     user = user_ws.current_user.me()
 
-    # Use config
-    app_name = config.app_name
-
-    return {
-        "app": app_name,
-        "user": user.user_name,
-        "total_orders": len(orders),
-        "total_revenue": sum(o.total for o in orders)
-    }
+    return OrderStatsOut(
+        app=config.app_name,
+        user=user.user_name,
+        total_orders=len(orders),
+        total_revenue=sum(o.total for o in orders)
+    )
 ```
+
+### Extending AppConfig
+
+Add custom configuration fields to `AppConfig` in `core.py`. Fields are populated from environment variables with the `{APP_SLUG}_` prefix:
+
+```python
+class AppConfig(BaseSettings):
+    model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
+        env_file=env_file,
+        env_prefix=f"{app_slug.upper()}_",
+        extra="ignore",
+        env_nested_delimiter="__",
+    )
+    app_name: str = Field(default=app_name)
+
+    # Custom fields - set via env vars like MYAPP_MY_API_KEY
+    my_api_key: str = Field(default="")
+    max_results: int = Field(default=100)
+```
+
+Then access via `Dependency.Config`:
+
+```python
+@router.get("/search", response_model=list[SearchResult], operation_id="search")
+def search(query: str, config: Dependency.Config):
+    return external_api.search(query, api_key=config.my_api_key, limit=config.max_results)
+```
+
+### Custom Lifespan
+
+Use the `lifespan` parameter in `create_app` for custom startup/shutdown logic. The default lifespan (which initializes `app.state.config` and `app.state.workspace_client`) runs first, so your custom lifespan can use them:
+
+```python
+from contextlib import asynccontextmanager
+from .core import create_app, create_router, Dependency
+
+router = create_router()
+
+@asynccontextmanager
+async def custom_lifespan(app):
+    # app.state.config and app.state.workspace_client are already available
+    app.state.my_resource = await init_something(app.state.config)
+    yield
+    await app.state.my_resource.cleanup()
+
+app = create_app(routers=[router], lifespan=custom_lifespan)
+```
+
+<Callout type="info">
+  For stateful apps, `app.state.engine` (SQLAlchemy engine) is also available
+  inside the custom lifespan — the database is initialized before your lifespan
+  runs.
+</Callout>
 
 ### Type Safety
 

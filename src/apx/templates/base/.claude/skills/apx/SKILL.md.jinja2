@@ -108,24 +108,59 @@ async def get_items():
     ...
 ```
 
-### Dependency Injection
-```python
-from backend.core import Dependency
+### Dependencies & Dependency Injection
 
-# Use Databricks client
-@api.get("/clusters")
+The `Dependency` class in `src/{{app_name}}/backend/core.py` provides typed FastAPI dependencies:
+
+| Dependency | Type | Description |
+|---|---|---|
+| `Dependency.Client` | `WorkspaceClient` | App-level service principal credentials |
+| `Dependency.UserClient` | `WorkspaceClient` | On behalf of user (OBO token via `X-Forwarded-Access-Token` header) |
+| `Dependency.Config` | `AppConfig` | Configuration from environment variables (`{APP_SLUG}_` prefix) |
+| `Dependency.Session` | `Session` | SQLModel database session (stateful apps only) |
+
+```python
+from .core import Dependency, create_router
+
+router = create_router()
+
+# Service principal client
+@router.get("/clusters", response_model=list[ClusterOut], operation_id="listClusters")
 def list_clusters(ws: Dependency.Client):
     return ws.clusters.list()
 
-# Use user-scoped client (OBO)
-@api.get("/me")
-def get_me(user_ws: Dependency.UserClient):
+# User-scoped client (OBO)
+@router.get("/me", response_model=UserOut, operation_id="currentUser")
+def me(user_ws: Dependency.UserClient):
     return user_ws.current_user.me()
 
-# Use database session (stateful template)
-@api.get("/orders")
+# Application config
+@router.get("/settings", response_model=AppSettingsOut, operation_id="getSettings")
+def get_settings(config: Dependency.Config):
+    return AppSettingsOut(app_name=config.app_name)
+
+# Database session (stateful apps only)
+@router.get("/orders", response_model=list[OrderOut], operation_id="getOrders")
 def get_orders(session: Dependency.Session):
     return session.exec(select(Order)).all()
+```
+
+### Extending AppConfig
+```python
+class AppConfig(BaseSettings):
+    app_name: str = Field(default=app_name)
+    my_setting: str = Field(default="value")  # env var: {APP_SLUG}_MY_SETTING
+```
+
+### Custom Lifespan
+```python
+@asynccontextmanager
+async def custom_lifespan(app: FastAPI):
+    # app.state.config and app.state.workspace_client already available
+    app.state.my_resource = await init_something(app.state.config)
+    yield
+
+app = create_app(routers=[router], lifespan=custom_lifespan)
 ```
 
 ## 🔗 Resources
