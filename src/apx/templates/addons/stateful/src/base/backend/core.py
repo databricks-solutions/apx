@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import logging
 import os
-from contextlib import asynccontextmanager
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib import resources
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Generator, TypeAlias
@@ -16,13 +17,17 @@ from typing import Annotated, Any, ClassVar, Generator, TypeAlias
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import Engine, create_engine, event
 from sqlmodel import Session, SQLModel, text
+from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import Response
+from starlette.staticfiles import NotModifiedResponse, StaticFiles
+from starlette.types import Scope
 
 from .._metadata import api_prefix, app_name, app_slug, dist_dir
 
@@ -73,10 +78,42 @@ class AppConfig(BaseSettings):
 logger = logging.getLogger(app_name)
 
 
+# --- Static Files ---
+
+
+class CachedStaticFiles(StaticFiles):
+    """StaticFiles with proper Cache-Control headers for SPA deployments.
+
+    - Hashed assets (Vite `assets/` dir): cached immutably (hash changes on every build).
+    - Everything else (index.html, etc.): `no-cache` — always revalidate via ETag/304.
+    """
+
+    def file_response(
+        self,
+        full_path: str | os.PathLike[str],
+        stat_result: os.stat_result,
+        scope: Scope,
+        status_code: int = 200,
+    ) -> Response:
+        request_headers = Headers(scope=scope)
+        response = FileResponse(
+            full_path, status_code=status_code, stat_result=stat_result
+        )
+
+        if "/assets/" in str(full_path):
+            response.headers["cache-control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["cache-control"] = "no-cache"
+
+        if self.is_not_modified(response.headers, request_headers):
+            return NotModifiedResponse(response.headers)
+        return response
+
+
 # --- Utils ---
 
 
-def add_not_found_handler(app: FastAPI) -> None:
+def _add_not_found_handler(app: FastAPI) -> None:
     """Register a handler that serves the SPA index.html for non-API 404s."""
 
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
@@ -148,16 +185,12 @@ def create_db_engine(config: AppConfig, ws: WorkspaceClient) -> Engine:
     dev_port = _get_dev_db_port()
     engine_url = _build_engine_url(config, ws, dev_port)
 
-    engine_kwargs: dict[str, Any] = {
-        "pool_size": 4,
-        "pool_recycle": 45 * 60
-    }
-    
+    engine_kwargs: dict[str, Any] = {"pool_size": 4, "pool_recycle": 45 * 60}
+
     if not dev_port:
         engine_kwargs["connect_args"] = {"sslmode": "require"}
-    
-    engine = create_engine(engine_url, **engine_kwargs)
 
+    engine = create_engine(engine_url, **engine_kwargs)
 
     def before_connect(dialect, conn_rec, cargs, cparams):
         cred = ws.database.generate_database_credential(
@@ -213,35 +246,73 @@ def initialize_models(engine: Engine) -> None:
     logger.info("Database models initialized successfully")
 
 
-# --- Bootstrap ---
+# --- Lifespan ---
 
 
-def bootstrap_app(app: FastAPI) -> None:
+@asynccontextmanager
+async def _default_lifespan(app: FastAPI):
+    """Default lifespan that initializes config, workspace client, and database."""
+    config = AppConfig()
+    logger.info(f"Starting app with configuration:\n{config}")
+    ws = WorkspaceClient()
+
+    app.state.config = config
+    app.state.workspace_client = ws
+
+    engine = create_db_engine(config, ws)
+    validate_db(engine, config)
+    initialize_models(engine)
+
+    app.state.engine = engine
+
+    yield
+
+    engine.dispose()
+
+
+# --- Factory ---
+
+
+def create_app(
+    *,
+    routers: list[APIRouter] | None = None,
+    lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
+) -> FastAPI:
+    """Create and configure a FastAPI application.
+
+    Args:
+        routers: List of APIRouter instances to include in the app.
+        lifespan: Optional async context manager for custom startup/shutdown logic.
+                  When provided, `app.state.config`, `app.state.workspace_client`,
+                  and `app.state.engine` are already available.
+
+    Returns:
+        Configured FastAPI application instance.
     """
-    Bootstrap the FastAPI application by wrapping its lifespan to initialize
-    config and WorkspaceClient into app.state.
-
-    If the app already has a lifespan, it is wrapped so that config and
-    workspace_client are available in app.state before the original lifespan runs.
-    """
-    existing_lifespan = app.router.lifespan_context
 
     @asynccontextmanager
-    async def wrapped_lifespan(app: FastAPI):
-        config = AppConfig()
-        logger.info(f"Starting app with configuration:\n{config}")
-        ws = WorkspaceClient()
-
-        app.state.config = config
-        app.state.workspace_client = ws
-
-        if existing_lifespan:
-            async with existing_lifespan(app):
+    async def _composed_lifespan(app: FastAPI):
+        async with _default_lifespan(app):
+            if lifespan:
+                async with lifespan(app):
+                    yield
+            else:
                 yield
-        else:
-            yield
 
-    app.router.lifespan_context = wrapped_lifespan
+    app = FastAPI(title=app_name, lifespan=_composed_lifespan)
+
+    for router in routers or []:
+        app.include_router(router)
+
+    app.mount("/", CachedStaticFiles(directory=dist_dir, html=True))
+    _add_not_found_handler(app)
+
+    return app
+
+
+def create_router() -> APIRouter:
+    """Create an APIRouter with the application's API prefix."""
+    return APIRouter(prefix=api_prefix)
 
 
 # --- Dependencies ---
