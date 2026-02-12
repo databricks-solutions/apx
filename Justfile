@@ -80,3 +80,7 @@ uv-sync:
 
 release-registry:
     gh workflow run deploy-registry.yml
+
+[working-directory: "crates/studio"]
+studio:
+    bun tauri dev

@@ -1,0 +1,1 @@
+{"root":["./ui/app.tsx","./ui/main.tsx","./ui/vite-env.d.ts","./ui/components/empty-state.tsx","./ui/components/header.tsx","./ui/components/project-card.tsx","./ui/components/project-list.tsx","./ui/components/ui/badge.tsx","./ui/components/ui/button.tsx","./ui/components/ui/card.tsx","./ui/components/ui/tooltip.tsx","./ui/lib/tauri.ts","./ui/lib/utils.ts"],"version":"5.9.3"}
