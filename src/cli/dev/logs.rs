@@ -273,13 +273,6 @@ fn format_log_record(record: &LogRecord, colorize: bool) -> String {
         "apx"
     };
 
-    // Severity to channel
-    let severity = record.severity_text.as_deref().unwrap_or("INFO");
-    let channel = match severity.to_uppercase().as_str() {
-        "ERROR" | "FATAL" | "CRITICAL" => "err",
-        _ => "out",
-    };
-
     let message = record.body.as_deref().unwrap_or("");
 
     if colorize {
@@ -290,9 +283,9 @@ fn format_log_record(record: &LogRecord, colorize: bool) -> String {
             _ => "\x1b[33m",     // yellow
         };
         let reset = "\x1b[0m";
-        format!("{color_code}{timestamp} | {source} | {channel} | {message}{reset}")
+        format!("{color_code}{timestamp} | {source} | {message}{reset}")
     } else {
-        format!("{timestamp} | {source} | {channel} | {message}")
+        format!("{timestamp} | {source} | {message}")
     }
 }
 
@@ -515,8 +508,8 @@ fn format_aggregated(count: usize, timestamp_ms: i64, template: &str, colorize: 
     if colorize {
         let color_code = "\x1b[32m"; // green for db
         let reset = "\x1b[0m";
-        format!("{color_code}{timestamp} | {source} | out | {message}{reset}")
+        format!("{color_code}{timestamp} | {source} | {message}{reset}")
     } else {
-        format!("{timestamp} | {source} | out | {message}")
+        format!("{timestamp} | {source} | {message}")
     }
 }

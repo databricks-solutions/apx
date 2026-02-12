@@ -354,7 +354,7 @@ pub fn default_logging_config(app_slug: &str) -> LoggingConfig {
     formatters.insert(
         "default".to_string(),
         FormatterConfig {
-            format: Some("%(module)s.%(funcName)s | %(message)s".to_string()),
+            format: Some("%(levelname)-7s / %(name)-30.30s / %(message)s".to_string()),
             datefmt: None,
             class_name: None,
         },
@@ -424,6 +424,15 @@ pub fn default_logging_config(app_slug: &str) -> LoggingConfig {
             handlers: Some(vec!["default".to_string()]),
             level: Some("DEBUG".to_string()),
             propagate: Some(false),
+        },
+    );
+    // Silence Databricks SDK internal logging (auth probes, config loading, etc.)
+    loggers.insert(
+        "databricks.sdk".to_string(),
+        LoggerConfig {
+            handlers: None,
+            level: Some("INFO".to_string()),
+            propagate: Some(true),
         },
     );
 
@@ -544,12 +553,20 @@ mod tests {
         assert!(config.loggers.contains_key("uvicorn.error"));
         assert!(config.loggers.contains_key("uvicorn.access"));
         assert!(config.loggers.contains_key("myapp"));
+        assert!(config.loggers.contains_key("databricks.sdk"));
 
         // App logger should be at DEBUG level
         if let Some(app_logger) = config.loggers.get("myapp") {
             assert_eq!(app_logger.level, Some("DEBUG".to_string()));
         } else {
             panic!("myapp logger should exist");
+        }
+
+        // Databricks SDK logger should be at INFO level
+        if let Some(sdk_logger) = config.loggers.get("databricks.sdk") {
+            assert_eq!(sdk_logger.level, Some("INFO".to_string()));
+        } else {
+            panic!("databricks.sdk logger should exist");
         }
     }
 
