@@ -1,0 +1,28 @@
+[package]
+name = "apx-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+apx-core = { path = "../core" }
+apx-mcp = { path = "../mcp" }
+apx-common.workspace = true
+clap.workspace = true
+dialoguer.workspace = true
+indicatif.workspace = true
+tera.workspace = true
+walkdir.workspace = true
+similar.workspace = true
+rand.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

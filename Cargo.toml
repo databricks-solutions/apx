@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/common", "crates/agent", "crates/studio"]
+members = [".", "crates/common", "crates/agent", "crates/studio", "crates/core", "crates/mcp", "crates/cli"]
 resolver = "2"
 
 [workspace.package]
@@ -11,6 +11,9 @@ rust-version = "1.92"
 # Internal crates
 apx-common = { path = "crates/common" }
 apx-agent = { path = "crates/agent" }
+apx-core = { path = "crates/core" }
+apx-mcp = { path = "crates/mcp" }
+apx-cli = { path = "crates/cli" }
 
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
@@ -108,55 +111,10 @@ opt-level = "z"
 panic = "abort"
 
 [dependencies]
-apx-common.workspace = true
-apx-agent.workspace = true
+apx-core.workspace = true
+apx-cli.workspace = true
 pyo3.workspace = true
-clap.workspace = true
-dirs.workspace = true
-dialoguer.workspace = true
-indicatif.workspace = true
-rand.workspace = true
-tera.workspace = true
-toml.workspace = true
-walkdir.workspace = true
-chrono.workspace = true
-axum.workspace = true
-reqwest.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-serde_yaml.workspace = true
-tokio.workspace = true
-tokio-stream.workspace = true
-tokio-util.workspace = true
-futures-util.workspace = true
-sysinfo.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
-opentelemetry.workspace = true
-opentelemetry_sdk.workspace = true
-opentelemetry-otlp.workspace = true
-opentelemetry-appender-tracing.workspace = true
-notify.workspace = true
-tokio-tungstenite.workspace = true
-tokio-postgres.workspace = true
-schemars.workspace = true
-biome_css_parser.workspace = true
-biome_css_syntax.workspace = true
-biome_rowan.workspace = true
-url.workspace = true
-lancedb.workspace = true
-arrow.workspace = true
-zip.workspace = true
-lance-index.workspace = true
-toml_edit.workspace = true
-rayon.workspace = true
-hex.workspace = true
-rusqlite.workspace = true
-opentelemetry-proto.workspace = true
-prost.workspace = true
-similar.workspace = true
-tempfile.workspace = true
-serde_with = { version = "3.16.1", default-features = false, features = ["macros"] }
 
 [dev-dependencies]
 tempfile.workspace = true

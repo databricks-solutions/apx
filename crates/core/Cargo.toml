@@ -1,0 +1,56 @@
+[package]
+name = "apx-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+apx-common.workspace = true
+apx-agent.workspace = true
+pyo3.workspace = true
+dirs.workspace = true
+indicatif.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+walkdir.workspace = true
+chrono.workspace = true
+axum.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+sysinfo.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry-appender-tracing.workspace = true
+opentelemetry-proto.workspace = true
+prost.workspace = true
+notify.workspace = true
+tokio-tungstenite.workspace = true
+tokio-postgres.workspace = true
+schemars.workspace = true
+biome_css_parser.workspace = true
+biome_css_syntax.workspace = true
+biome_rowan.workspace = true
+url.workspace = true
+lancedb.workspace = true
+arrow.workspace = true
+zip.workspace = true
+lance-index.workspace = true
+rayon.workspace = true
+hex.workspace = true
+rusqlite.workspace = true
+similar.workspace = true
+tempfile.workspace = true
+rand.workspace = true
+serde_with = { version = "3.16.1", default-features = false, features = ["macros"] }
+
+[dev-dependencies]
+tempfile.workspace = true

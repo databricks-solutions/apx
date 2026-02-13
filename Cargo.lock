@@ -150,6 +150,72 @@ dependencies = [
 name = "apx"
 version = "0.2.7"
 dependencies = [
+ "apx-cli",
+ "apx-core",
+ "pyo3",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "apx-agent"
+version = "0.2.7"
+dependencies = [
+ "apx-common",
+ "axum",
+ "chrono",
+ "clap",
+ "hex",
+ "opentelemetry-proto 0.31.0",
+ "prost 0.14.3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "apx-cli"
+version = "0.2.1"
+dependencies = [
+ "apx-common",
+ "apx-core",
+ "apx-mcp",
+ "chrono",
+ "clap",
+ "dialoguer",
+ "indicatif",
+ "rand 0.8.5",
+ "reqwest 0.13.1",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "tera",
+ "tokio",
+ "toml 0.8.23",
+ "toml_edit 0.24.0+spec-1.1.0",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
+name = "apx-common"
+version = "0.2.7"
+dependencies = [
+ "chrono",
+ "dirs 5.0.1",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "apx-core"
+version = "0.2.1"
+dependencies = [
  "apx-agent",
  "apx-common",
  "arrow",
@@ -158,8 +224,6 @@ dependencies = [
  "biome_css_syntax",
  "biome_rowan",
  "chrono",
- "clap",
- "dialoguer",
  "dirs 5.0.1",
  "futures-util",
  "hex",
@@ -186,7 +250,6 @@ dependencies = [
  "similar",
  "sysinfo",
  "tempfile",
- "tera",
  "tokio",
  "tokio-postgres",
  "tokio-stream",
@@ -202,32 +265,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "apx-agent"
-version = "0.2.7"
+name = "apx-mcp"
+version = "0.2.1"
 dependencies = [
- "apx-common",
- "axum",
- "chrono",
- "clap",
- "hex",
- "opentelemetry-proto 0.31.0",
- "prost 0.14.3",
+ "apx-core",
+ "futures-util",
+ "reqwest 0.13.1",
+ "schemars 1.2.0",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "apx-common"
-version = "0.2.7"
-dependencies = [
- "chrono",
- "dirs 5.0.1",
- "rusqlite",
- "serde",
- "serde_json",
  "tracing",
 ]
 
