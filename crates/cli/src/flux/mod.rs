@@ -1,2 +1,2 @@
-pub mod start;
-pub mod stop;
+pub(crate) mod start;
+pub(crate) mod stop;

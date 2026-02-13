@@ -179,7 +179,6 @@ dependencies = [
 name = "apx-cli"
 version = "0.2.1"
 dependencies = [
- "apx-common",
  "apx-core",
  "apx-mcp",
  "chrono",

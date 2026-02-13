@@ -7,6 +7,8 @@ use std::path::Path;
 
 use apx_common::{LogRecord, Storage};
 
+use super::logs::should_skip_log;
+
 /// Simple log streamer that prints logs line-by-line to stdout.
 pub struct StartupLogStreamer {
     last_log_id: i64,
@@ -63,7 +65,7 @@ impl StartupLogStreamer {
         let mut count = 0;
         for record in &records {
             if !should_skip_log(record) {
-                println!("{}", format_log_record(record));
+                println!("{}", format_startup_log(record));
                 count += 1;
             }
         }
@@ -79,15 +81,15 @@ impl StartupLogStreamer {
     }
 }
 
-/// Format a log record for terminal display (simplified version).
-fn format_log_record(record: &LogRecord) -> String {
+/// Format a log record for startup display (compact timestamp, always colorized, with channel).
+fn format_startup_log(record: &LogRecord) -> String {
     let effective_timestamp_ns = if record.timestamp_ns == 0 {
         record.observed_timestamp_ns
     } else {
         record.timestamp_ns
     };
     let timestamp_ms = effective_timestamp_ns / 1_000_000;
-    let timestamp = format_timestamp(timestamp_ms);
+    let timestamp = format_short_timestamp(timestamp_ms);
 
     // Determine source from service name
     let service_name = record.service_name.as_deref().unwrap_or("unknown");
@@ -123,7 +125,7 @@ fn format_log_record(record: &LogRecord) -> String {
 }
 
 /// Format a timestamp in milliseconds to `HH:MM:SS.mmm` format in local timezone.
-fn format_timestamp(timestamp_ms: i64) -> String {
+fn format_short_timestamp(timestamp_ms: i64) -> String {
     let datetime = Utc.timestamp_millis_opt(timestamp_ms).single();
     match datetime {
         Some(dt) => {
@@ -132,57 +134,4 @@ fn format_timestamp(timestamp_ms: i64) -> String {
         }
         None => "??:??:??.???".to_string(),
     }
-}
-
-/// Check if a log record should be skipped (internal/noisy logs).
-fn should_skip_log(record: &LogRecord) -> bool {
-    let message = record.body.as_deref().unwrap_or("");
-    let service_name = record.service_name.as_deref().unwrap_or("");
-    let severity_number = record.severity_number.unwrap_or(9);
-
-    // For apx service, only show INFO and higher (severity_number >= 5 is DEBUG)
-    if service_name == "_core" && severity_number < 5 {
-        return true;
-    }
-
-    // OpenTelemetry SDK internal logs
-    if message.starts_with("BatchLogProcessor.")
-        || message.starts_with("ReqwestBlockingClient.")
-        || message.starts_with("HttpLogsClient.")
-        || message.starts_with("HttpClient.")
-        || message.starts_with("Http::connect")
-    {
-        return true;
-    }
-
-    // HTTP connection pooling logs
-    if message.starts_with("starting new connection:")
-        || message.starts_with("connecting to ")
-        || message.starts_with("connected to ")
-        || message.starts_with("reuse idle connection")
-        || message.starts_with("pooling idle connection")
-    {
-        return true;
-    }
-
-    // Tokio-postgres internal debug logs
-    if message.starts_with("preparing query ")
-        || message.starts_with("DEBUG: parse ")
-        || message.starts_with("DEBUG: bind ")
-        || message.starts_with("executing statement ")
-    {
-        return true;
-    }
-
-    // Other internal noise
-    if message.starts_with("take? (")
-        || message.starts_with("wait at most")
-        || message.starts_with("connection ")
-        || message.contains(".cargo/registry/src/")
-        || message.starts_with("event /")
-    {
-        return true;
-    }
-
-    false
 }

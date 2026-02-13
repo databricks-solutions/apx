@@ -2085,11 +2085,15 @@ mod tests {
                     return Err(e.to_string());
                 }
 
-                // Check if node_modules/@tanstack/react-query already exists (skip bun install if so)
+                // Check if node_modules already has working dependencies (skip bun install if so)
                 let react_query_path = temp_dir.join("node_modules/@tanstack/react-query");
-                if react_query_path.exists() {
+                let tsc_path = temp_dir.join("node_modules/typescript/lib/tsc.js");
+                if react_query_path.exists() && tsc_path.exists() {
                     return Ok(temp_dir);
                 }
+
+                // Remove possibly corrupted node_modules before reinstalling
+                let _ = std::fs::remove_dir_all(temp_dir.join("node_modules"));
 
                 // Write package.json with @tanstack/react-query
                 let package_json = r#"{

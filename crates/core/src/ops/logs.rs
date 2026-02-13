@@ -217,16 +217,14 @@ fn get_aggregation_key(record: &LogRecord) -> Option<(String, &'static str)> {
 }
 
 /// Tracks aggregated messages within time windows
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct LogAggregator {
     buckets: HashMap<String, (usize, i64, i64, &'static str)>,
 }
 
 impl LogAggregator {
     pub fn new() -> Self {
-        Self {
-            buckets: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn add(&mut self, record: &LogRecord) -> bool {

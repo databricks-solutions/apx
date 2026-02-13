@@ -9,7 +9,7 @@ use tokio::process::Command;
 use tracing::debug;
 use walkdir::WalkDir;
 
-use crate::common::{Assistant, Layout, Template};
+use crate::common::{Assistant, Layout, Template, resolve_app_dir};
 use crate::components::add::{ComponentInput, add_components};
 use crate::run_cli_async_helper;
 use apx_core::common::list_profiles;
@@ -78,10 +78,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
         return Err("bun is not installed. Please install bun to continue.".to_string());
     }
 
-    let app_path = args
-        .app_path
-        .take()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let app_path = resolve_app_dir(args.app_path.take());
 
     let templates_dir = templates_dir()?;
 

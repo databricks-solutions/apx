@@ -9,15 +9,15 @@
     clippy::dbg_macro
 )]
 
-pub mod __generate_openapi;
-pub mod build;
-pub mod bun;
-pub mod common;
-pub mod components;
-pub mod dev;
-pub mod flux;
-pub mod frontend;
-pub mod init;
+pub(crate) mod __generate_openapi;
+pub(crate) mod build;
+pub(crate) mod bun;
+pub(crate) mod common;
+pub(crate) mod components;
+pub(crate) mod dev;
+pub(crate) mod flux;
+pub(crate) mod frontend;
+pub(crate) mod init;
 
 use clap::{CommandFactory, Parser, Subcommand};
 

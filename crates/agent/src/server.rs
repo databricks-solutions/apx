@@ -19,7 +19,7 @@ use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
 /// Application state shared across handlers.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct AppState {
     storage: Storage,
 }

@@ -20,14 +20,14 @@ pub mod dotenv;
 pub mod flux;
 pub mod frontend;
 pub mod interop;
-pub mod openapi;
 pub mod ops;
-pub mod python_logging;
-pub mod registry;
 pub mod search;
-pub mod sources;
 pub mod tracing_init;
 
-pub use api_generator::generate_openapi;
+pub(crate) mod openapi;
+pub(crate) mod python_logging;
+pub(crate) mod registry;
+pub(crate) mod sources;
+
 pub use interop::bun_binary_path;
 pub use openapi::generate as generate_openapi_ts;

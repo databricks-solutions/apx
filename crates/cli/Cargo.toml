@@ -7,7 +7,6 @@ rust-version.workspace = true
 [dependencies]
 apx-core = { path = "../core" }
 apx-mcp = { path = "../mcp" }
-apx-common.workspace = true
 clap.workspace = true
 dialoguer.workspace = true
 indicatif.workspace = true

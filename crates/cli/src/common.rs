@@ -1,6 +1,13 @@
 //! Common types shared across CLI commands
 
 use clap::ValueEnum;
+use std::path::PathBuf;
+
+/// Resolve the app directory from an optional path argument.
+/// Falls back to the current working directory, or "." if that fails.
+pub fn resolve_app_dir(app_path: Option<PathBuf>) -> PathBuf {
+    app_path.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
 
 /// Project template types
 #[derive(ValueEnum, Clone, Debug, Copy, PartialEq, Eq)]

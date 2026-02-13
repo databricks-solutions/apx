@@ -37,14 +37,20 @@ pub struct IndexState {
     pub sdk_indexed: Arc<AtomicBool>,
 }
 
-impl IndexState {
-    pub fn new() -> Self {
+impl Default for IndexState {
+    fn default() -> Self {
         Self {
             component_ready: Arc::new(Notify::new()),
             sdk_ready: Arc::new(Notify::new()),
             component_indexed: Arc::new(AtomicBool::new(false)),
             sdk_indexed: Arc::new(AtomicBool::new(false)),
         }
+    }
+}
+
+impl IndexState {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -623,7 +629,7 @@ async fn logs_tool(ctx: Arc<AppContext>, args: LogsArgs) -> ToolResult {
 }
 
 async fn refresh_openapi_tool(ctx: Arc<AppContext>, _args: RefreshOpenapiArgs) -> ToolResult {
-    use apx_core::generate_openapi;
+    use apx_core::api_generator::generate_openapi;
 
     match generate_openapi(&ctx.app_dir) {
         Ok(()) => ToolResult::success("OpenAPI regenerated".to_string()),

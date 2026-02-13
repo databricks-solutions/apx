@@ -1,6 +1,7 @@
 use clap::Args;
 use std::path::PathBuf;
 
+use crate::common::resolve_app_dir;
 use crate::run_cli_async_helper;
 use apx_core::ops::dev::stop_dev_server;
 use apx_core::ops::dev::{spawn_server, start_dev_server};
@@ -44,13 +45,13 @@ pub async fn run(args: StartArgs) -> i32 {
 }
 
 async fn run_detached(args: StartArgs) -> Result<(), String> {
-    let app_dir = resolve_app_dir(&args);
+    let app_dir = resolve_app_dir(args.app_path);
     let _ = start_dev_server(&app_dir).await?;
     Ok(())
 }
 
 async fn run_attached(args: StartArgs) -> Result<(), String> {
-    let app_dir = resolve_app_dir(&args);
+    let app_dir = resolve_app_dir(args.app_path);
 
     let _port = spawn_server(
         &app_dir,
@@ -72,10 +73,4 @@ async fn run_attached(args: StartArgs) -> Result<(), String> {
 
     stop_dev_server(&app_dir).await?;
     Ok(())
-}
-
-fn resolve_app_dir(args: &StartArgs) -> PathBuf {
-    args.app_path
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
