@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use crate::common::{BunCommand, OutputMode, ensure_entrypoint_deps, run_preflight_checks, spinner};
+use crate::common::{
+    BunCommand, OutputMode, ensure_entrypoint_deps, run_preflight_checks, spinner,
+};
 use crate::frontend::prepare_frontend_args;
 use tokio::process::Command as TokioCommand;
 use tracing::debug;
