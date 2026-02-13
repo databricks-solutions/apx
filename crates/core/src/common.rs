@@ -11,6 +11,15 @@ use crate::api_generator::generate_openapi;
 use crate::interop::bun_binary_path;
 use crate::python_logging::{DevConfig, parse_dev_config};
 
+/// Controls how progress output is displayed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OutputMode {
+    /// CLI: spinners + formatted output to stdout
+    Interactive,
+    /// MCP / headless: quiet progress to stderr only (nothing on stdout)
+    Quiet,
+}
+
 /// Dev dependencies required by apx frontend entrypoint.ts
 /// These must be installed before running any frontend command
 pub const ENTRYPOINT_DEV_DEPS: &[&str] = &[

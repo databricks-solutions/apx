@@ -638,9 +638,10 @@ async fn refresh_openapi_tool(ctx: Arc<AppContext>, _args: RefreshOpenapiArgs) -
 }
 
 async fn check_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
+    use apx_core::common::OutputMode;
     use apx_core::ops::check::run_check;
 
-    match run_check(&ctx.app_dir).await {
+    match run_check(&ctx.app_dir, OutputMode::Quiet).await {
         Ok(()) => ToolResult::success("All checks passed".to_string()),
         Err(e) => ToolResult::error(e),
     }
