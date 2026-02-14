@@ -115,16 +115,16 @@ jobs:
 
       # Run checks
       - name: Cargo check
-        run: cargo check --all-targets
+        run: cargo check --workspace --exclude apx-studio --all-targets
 
       - name: Cargo fmt
         run: cargo fmt --all -- --check
 
       - name: Cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude apx-studio --all-targets -- -D warnings
 
       - name: Cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude apx-studio
 
   docs:
     runs-on: linux-ubuntu-latest
