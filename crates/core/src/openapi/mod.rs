@@ -1047,6 +1047,72 @@ mod tests {
     }
 
     #[test]
+    fn test_response_binary_stream_returns_raw_response() {
+        // Test case: vendor-specific binary streaming content type should return
+        // the raw Response object (not call res.json() or res.blob()), so the
+        // caller can consume the ReadableStream incrementally.
+        let openapi_json = r##"{
+  "openapi": "3.1.0",
+  "info": { "title": "Streaming API", "version": "1.0.0" },
+  "paths": {
+    "/reports/export": {
+      "post": {
+        "operationId": "exportReport",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "format": { "type": "string" },
+                  "filters": { "type": "object" }
+                },
+                "required": ["format"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Binary stream of exported report data",
+            "content": {
+              "application/vnd.apache.parquet": {
+                "schema": { "type": "string", "format": "binary" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": { "schemas": {} }
+}"##;
+
+        let ts_code = generate_and_verify(openapi_json);
+        println!("=== BINARY STREAM CODE ===\n{ts_code}\n=== END ===");
+
+        // Must return raw Response — not consume the body with json()/blob()/text()
+        assert!(
+            ts_code.contains("{ data: res }"),
+            "Should return raw Response for unknown binary content type"
+        );
+        assert!(
+            !ts_code.contains("res.json()"),
+            "Should NOT call res.json() on a binary stream"
+        );
+        assert!(
+            !ts_code.contains("res.blob()"),
+            "Should NOT call res.blob() on a vendor stream type"
+        );
+        // Return type should be Response
+        assert!(
+            ts_code.contains("Promise<{ data: Response }>"),
+            "Return type should be Promise<{{ data: Response }}>"
+        );
+    }
+
+    #[test]
     fn test_body_multipart_formdata() {
         // Test case: multipart/form-data request body (file upload)
         let openapi_json = r##"{

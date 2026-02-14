@@ -370,15 +370,11 @@ fn codegen_fetch_body(
         stmts.push(TsStmt::Return(None));
     } else if fetch.response.has_void_status {
         stmts.push(TsStmt::Raw("if (res.status === 204) return;".into()));
-        let method = response_method_for_content_type(fetch.response.content_type);
-        stmts.push(TsStmt::Raw(format!(
-            "return {{ data: await res.{method}() }};"
-        )));
+        let expr = response_expr_for_content_type(fetch.response.content_type);
+        stmts.push(TsStmt::Raw(format!("return {{ data: {expr} }};")));
     } else {
-        let method = response_method_for_content_type(fetch.response.content_type);
-        stmts.push(TsStmt::Raw(format!(
-            "return {{ data: await res.{method}() }};"
-        )));
+        let expr = response_expr_for_content_type(fetch.response.content_type);
+        stmts.push(TsStmt::Raw(format!("return {{ data: {expr} }};")));
     }
 
     stmts
@@ -479,13 +475,15 @@ fn build_path_template_string(template: &[UrlPart]) -> String {
         .join("")
 }
 
-/// Get response method based on content type.
-fn response_method_for_content_type(content_type: ResponseContentType) -> &'static str {
+/// Get response expression based on content type.
+/// For JSON/Text/Blob, this awaits a body-consuming method.
+/// For Unknown, returns the raw `Response` object (preserving streaming capability).
+fn response_expr_for_content_type(content_type: ResponseContentType) -> &'static str {
     match content_type {
-        ResponseContentType::Json => "json",
-        ResponseContentType::Text => "text",
-        ResponseContentType::Blob => "blob",
-        ResponseContentType::Unknown => "json",
+        ResponseContentType::Json => "await res.json()",
+        ResponseContentType::Text => "await res.text()",
+        ResponseContentType::Blob => "await res.blob()",
+        ResponseContentType::Unknown => "res",
     }
 }
 
