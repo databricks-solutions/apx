@@ -40,10 +40,10 @@ pm message:
     git push
 
 
-gen folder profile *args: uv-sync
+gen folder profile *args: sync
     rm -rf /tmp/{{folder}}
-    RUST_LOG=DEBUG APX_DEV_PATH="{{justfile_directory()}}" uv run --no-sync apx init /tmp/{{folder}} -p {{profile}}  {{args}}
-    cd /tmp/{{folder}} && uv run apx dev check
+    RUST_LOG=DEBUG cargo run --bin apx -- init /tmp/{{folder}} -p {{profile}} {{args}}
+    cd /tmp/{{folder}} && RUSTUP_TOOLCHAIN=1.92.0 RUST_LOG=DEBUG cargo run --bin apx --manifest-path {{justfile_directory()}}/Cargo.toml -- dev check
 
 [working-directory: "docs"]
 docs *args:

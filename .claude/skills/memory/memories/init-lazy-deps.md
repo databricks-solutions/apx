@@ -41,4 +41,3 @@ Dependencies are installed via `run_preflight_checks()` on first run of: `apx bu
 ## Notes
 
 - Removed `--skip-frontend-dependencies`, `--skip-backend-dependencies`, `--skip-build` flags from init
-- `APX_DEV_PATH` env var still works for editable installs (configured in pyproject.toml, installed on first command)

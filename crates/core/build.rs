@@ -2,8 +2,8 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use zip::write::SimpleFileOptions;
 use zip::CompressionMethod;
+use zip::write::SimpleFileOptions;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -69,8 +69,7 @@ fn pack_assets(workspace_root: &Path, out_dir: &Path) {
     }
 
     // Add entrypoint.ts at the archive root
-    let entrypoint_content =
-        fs::read(&entrypoint_path).expect("Failed to read entrypoint.ts");
+    let entrypoint_content = fs::read(&entrypoint_path).expect("Failed to read entrypoint.ts");
     zip.start_file("entrypoint.ts", options)
         .expect("Failed to add entrypoint.ts to zip");
     zip.write_all(&entrypoint_content)

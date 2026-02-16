@@ -58,8 +58,6 @@ dev = [
 [tool.mypy]
 exclude = ['venv', '.venv', 'src/apx/templates', 'node_modules', 'experiments']
 
-[project.scripts]
-apx = "apx.__main__:main"
 
 [tool.maturin]
 bindings = "bin"
@@ -85,8 +83,3 @@ exclude = [
     "**/.jinja2",
     "experiments"
 ]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "function"
-generate_report_on_test = true

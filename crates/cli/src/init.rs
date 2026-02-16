@@ -296,21 +296,8 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     let pyproject_path = app_path.join("pyproject.toml");
     let apx_version = env!("CARGO_PKG_VERSION");
 
-    if let Ok(apx_dev_path) = std::env::var("APX_DEV_PATH") {
-        // Editable mode: configure path-based source
-        let apx_path = PathBuf::from(&apx_dev_path);
-        if !apx_path.is_dir() {
-            return Err(format!(
-                "APX_DEV_PATH is not a valid directory: {apx_dev_path}"
-            ));
-        }
-        configure_editable_apx(&pyproject_path, &apx_path)?;
-        debug!("Configured editable apx from APX_DEV_PATH");
-    } else {
-        // Standard mode: configure index-based source with version
-        ensure_apx_uv_config(&pyproject_path, apx_version)?;
-        debug!("Configured apx {} from index", apx_version);
-    }
+    ensure_apx_uv_config(&pyproject_path, apx_version)?;
+    debug!("Configured apx {} from index", apx_version);
 
     if let Some(assistant) = args.assistant.take() {
         let rules_dir = templates_dir.join("addons");
@@ -551,7 +538,7 @@ async fn run_command(cmd: &mut Command, error_msg: &str) -> Result<(), String> {
     Err(message)
 }
 
-use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
+use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
 
 /// Configure pyproject.toml for standard apx installation from index.
 /// Adds [[tool.uv.index]] for apx-index, [tool.uv.sources].apx pointing to that index,
@@ -619,66 +606,6 @@ pub fn ensure_apx_uv_config(pyproject: &Path, version: &str) -> Result<(), Strin
     fs::write(pyproject, doc.to_string())
         .map_err(|e| format!("Failed to write pyproject.toml: {e}"))?;
 
-    Ok(())
-}
-
-/// Configure pyproject.toml for editable apx installation.
-/// Adds apx to [tool.uv.sources] with path and editable=true,
-/// and appends "apx" to [dependency-groups].dev list.
-pub fn configure_editable_apx(pyproject: &Path, apx_path: &Path) -> Result<(), String> {
-    debug!("Configuring editable apx in pyproject.toml");
-    debug!("  pyproject path: {}", pyproject.display());
-    debug!("  apx path: {}", apx_path.display());
-
-    let contents =
-        fs::read_to_string(pyproject).map_err(|e| format!("Failed to read pyproject.toml: {e}"))?;
-
-    let mut doc = contents
-        .parse::<DocumentMut>()
-        .map_err(|e| format!("Invalid TOML: {e}"))?;
-
-    // --- [tool.uv.sources] ---
-    let tool = doc["tool"].or_insert(Item::Table(Table::new()));
-    let uv = tool["uv"].or_insert(Item::Table(Table::new()));
-    let sources = uv["sources"].or_insert(Item::Table(Table::new()));
-    let sources = sources
-        .as_table_mut()
-        .ok_or("tool.uv.sources is not a table")?;
-
-    // Add apx = { path = "...", editable = true }
-    let apx_path_str = apx_path.to_string_lossy().to_string();
-    debug!("  Setting apx source path to: {}", apx_path_str);
-
-    let mut apx_source = InlineTable::new();
-    apx_source.insert("path", Value::from(apx_path_str.as_str()));
-    apx_source.insert("editable", Value::from(true));
-    sources["apx"] = Item::Value(Value::InlineTable(apx_source));
-
-    // --- [dependency-groups].dev ---
-    let dep_groups = doc["dependency-groups"].or_insert(Item::Table(Table::new()));
-    let dep_groups = dep_groups
-        .as_table_mut()
-        .ok_or("dependency-groups is not a table")?;
-
-    let dev_deps = dep_groups["dev"].or_insert(Item::Value(Value::Array(Array::new())));
-    let dev_array = dev_deps
-        .as_array_mut()
-        .ok_or("dependency-groups.dev is not an array")?;
-
-    // Check if "apx" already exists in dev dependencies
-    let apx_exists = dev_array.iter().any(|v| v.as_str() == Some("apx"));
-    if !apx_exists {
-        debug!("  Adding 'apx' to dependency-groups.dev");
-        dev_array.push("apx");
-    } else {
-        debug!("  'apx' already in dependency-groups.dev");
-    }
-
-    let output = doc.to_string();
-    debug!("  Writing updated pyproject.toml");
-    fs::write(pyproject, output).map_err(|e| format!("Failed to write pyproject.toml: {e}"))?;
-
-    debug!("  Editable apx configuration complete");
     Ok(())
 }
 
@@ -756,61 +683,6 @@ dev = [
         // Should only have one apx dependency (the first one)
         assert!(content.contains("apx==0.1.27"));
         assert!(!content.contains("apx==0.1.28"));
-    }
-
-    #[test]
-    fn test_configure_editable_apx() {
-        let temp_dir = TempDir::new().unwrap();
-        let pyproject_path = create_test_pyproject(temp_dir.path());
-
-        // Create a fake apx path
-        let apx_path = temp_dir.path().join("apx-dev");
-        fs::create_dir(&apx_path).unwrap();
-
-        // Run the function
-        configure_editable_apx(&pyproject_path, &apx_path).unwrap();
-
-        // Read and parse the result
-        let content = fs::read_to_string(&pyproject_path).unwrap();
-
-        // Verify editable source was added
-        assert!(content.contains("[tool.uv.sources]"));
-        assert!(content.contains("editable = true"));
-        assert!(content.contains(&apx_path.to_string_lossy().to_string()));
-
-        // Verify dev dependency was added (just "apx", not versioned)
-        let doc: DocumentMut = content.parse().unwrap();
-        let dev_deps = doc["dependency-groups"]["dev"].as_array().unwrap();
-        let has_apx = dev_deps.iter().any(|v| v.as_str() == Some("apx"));
-        assert!(has_apx, "Expected 'apx' in dev dependencies");
-    }
-
-    #[test]
-    fn test_configure_editable_apx_idempotent() {
-        let temp_dir = TempDir::new().unwrap();
-        let pyproject_path = create_test_pyproject(temp_dir.path());
-
-        let apx_path = temp_dir.path().join("apx-dev");
-        fs::create_dir(&apx_path).unwrap();
-
-        // Run twice
-        configure_editable_apx(&pyproject_path, &apx_path).unwrap();
-        configure_editable_apx(&pyproject_path, &apx_path).unwrap();
-
-        // Read and parse the result
-        let content = fs::read_to_string(&pyproject_path).unwrap();
-        let doc: DocumentMut = content.parse().unwrap();
-
-        // Should only have one apx in dev dependencies
-        let dev_deps = doc["dependency-groups"]["dev"].as_array().unwrap();
-        let apx_count = dev_deps
-            .iter()
-            .filter(|v| v.as_str() == Some("apx"))
-            .count();
-        assert_eq!(
-            apx_count, 1,
-            "Expected exactly one 'apx' in dev dependencies"
-        );
     }
 
     #[test]
