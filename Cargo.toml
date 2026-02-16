@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/common", "crates/agent", "crates/studio", "crates/core", "crates/mcp", "crates/cli"]
+members = [".", "crates/common", "crates/agent", "crates/studio", "crates/core", "crates/mcp", "crates/cli", "crates/databricks_sdk"]
 resolver = "2"
 
 [workspace.package]
@@ -14,6 +14,7 @@ apx-agent = { path = "crates/agent" }
 apx-core = { path = "crates/core" }
 apx-mcp = { path = "crates/mcp" }
 apx-cli = { path = "crates/cli" }
+apx-databricks-sdk = { path = "crates/databricks_sdk" }
 
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
@@ -47,6 +48,7 @@ prost = "0.14.3"
 # Logging/tracing
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+thiserror = "2.0"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

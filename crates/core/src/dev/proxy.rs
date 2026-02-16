@@ -7,9 +7,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use futures_util::SinkExt;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::select;
-use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::tungstenite::http::Request as WsRequest;
@@ -17,7 +16,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame as TungsteniteCloseFram
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tracing::{debug, info, warn};
 
-use crate::interop::{get_forwarded_user_header, get_token};
+use apx_databricks_sdk::DatabricksClient;
 
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 const HOP_HEADERS: [&str; 8] = [
@@ -37,8 +36,6 @@ const APX_DEV_TOKEN_HEADER: &str = "x-apx-dev-token";
 const ACCESS_TOKEN_HEADER: &str = "X-Forwarded-Access-Token";
 // Header used to forward user identity to API
 const FORWARDED_USER_HEADER: &str = "X-Forwarded-User";
-const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(45 * 60); // 45 minutes
-
 /// Check if a request path should be logged (filters out Vite dev assets).
 fn should_log_request(path: &str, is_ui: bool) -> bool {
     // Skip Vite dev server internal paths
@@ -81,41 +78,23 @@ fn should_log_request(path: &str, is_ui: bool) -> bool {
 
 #[derive(Debug)]
 pub struct TokenManager {
-    token: RwLock<Option<String>>,
-    fetched_at: RwLock<Instant>,
+    client: Option<DatabricksClient>,
 }
 
 impl TokenManager {
-    pub fn new(initial_token: Option<String>) -> Self {
-        Self {
-            token: RwLock::new(initial_token),
-            fetched_at: RwLock::new(Instant::now()),
-        }
+    pub fn new(client: Option<DatabricksClient>) -> Self {
+        Self { client }
     }
 
     pub async fn get_token_refreshing_if_needed(&self) -> Option<String> {
-        // Check if token needs refresh
-        let fetched_at = *self.fetched_at.read().await;
-        if fetched_at.elapsed() >= TOKEN_REFRESH_INTERVAL {
-            // Try to refresh, but don't fail if it doesn't work
-            let _ = self.refresh_token().await;
+        let client = self.client.as_ref()?;
+        match client.access_token().await {
+            Ok(token) => Some(token),
+            Err(err) => {
+                warn!("Failed to get OAuth access token: {err}");
+                None
+            }
         }
-
-        self.token.read().await.clone()
-    }
-
-    async fn refresh_token(&self) -> Result<(), String> {
-        debug!("Refreshing OAuth access token");
-        let new_token = get_token()?;
-
-        let mut token = self.token.write().await;
-        let mut fetched_at = self.fetched_at.write().await;
-
-        *token = Some(new_token);
-        *fetched_at = Instant::now();
-
-        debug!("OAuth access token refreshed successfully");
-        Ok(())
     }
 }
 
@@ -146,14 +125,11 @@ fn build_proxy_client() -> Result<reqwest::Client, String> {
 }
 
 /// Creates the API proxy router (nested at /api)
-pub fn api_router(backend_port: u16, token_manager: Arc<TokenManager>) -> Result<Router, String> {
-    let forwarded_user_header = match get_forwarded_user_header() {
-        Ok(value) => Some(value),
-        Err(err) => {
-            warn!(error = %err, "Failed to get forwarded user header for API proxy");
-            None
-        }
-    };
+pub fn api_router(
+    backend_port: u16,
+    token_manager: Arc<TokenManager>,
+    forwarded_user_header: Option<String>,
+) -> Result<Router, String> {
     let state = ApiProxyState {
         client: build_proxy_client()?,
         host: "0.0.0.0".to_string(),
@@ -186,14 +162,8 @@ pub fn ui_router(frontend_port: u16, dev_token: &str) -> Result<Router, String> 
 pub fn api_utils_router(
     backend_port: u16,
     token_manager: Arc<TokenManager>,
+    forwarded_user_header: Option<String>,
 ) -> Result<Router, String> {
-    let forwarded_user_header = match get_forwarded_user_header() {
-        Ok(value) => Some(value),
-        Err(err) => {
-            warn!(error = %err, "Failed to get forwarded user header for API utilities proxy");
-            None
-        }
-    };
     let state = ApiProxyState {
         client: build_proxy_client()?,
         host: "0.0.0.0".to_string(),

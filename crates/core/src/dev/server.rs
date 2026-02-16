@@ -12,6 +12,8 @@ use tokio::sync::broadcast;
 use tokio::time::Duration;
 use tracing::{debug, info, warn};
 
+use apx_databricks_sdk::DatabricksClient;
+
 use crate::api_generator::start_openapi_watcher;
 use crate::dev::common::{Shutdown, lock_path, remove_lock};
 use crate::dev::logging::BrowserLogPayload;
@@ -20,7 +22,6 @@ use crate::dev::process::ProcessManager;
 use crate::dev::proxy;
 use crate::dotenv::DotenvFile;
 use crate::flux;
-use crate::interop::get_token;
 
 /// Shared application state for the dev server.
 #[derive(Clone)]
@@ -78,17 +79,40 @@ pub async fn run_server(
         "Starting dev server."
     );
 
-    // Fetch initial OAuth access token from Python (warn on failure, don't block startup)
-    let initial_token = match get_token() {
-        Ok(token) => Some(token),
-        Err(err) => {
+    // Resolve Databricks profile from env or .env file
+    let profile = resolve_databricks_profile(&app_dir);
+    let databricks_client = match &profile {
+        Some(p) => match DatabricksClient::new(p).await {
+            Ok(client) => Some(client),
+            Err(err) => {
+                warn!(
+                    "Failed to create Databricks client: {err}. API proxy will not forward authentication headers."
+                );
+                None
+            }
+        },
+        None => {
             warn!(
-                "Failed to get OAuth access token: {err}. API proxy will not forward authentication headers."
+                "No Databricks profile configured. API proxy will not forward authentication headers."
             );
             None
         }
     };
-    let token_manager = Arc::new(proxy::TokenManager::new(initial_token));
+
+    // Compute forwarded user header once at startup
+    let forwarded_user_header = match &databricks_client {
+        Some(client) => match apx_databricks_sdk::get_forwarded_user_header(client.profile()).await
+        {
+            Ok(header) => Some(header),
+            Err(err) => {
+                warn!(error = %err, "Failed to get forwarded user header");
+                None
+            }
+        },
+        None => None,
+    };
+
+    let token_manager = Arc::new(proxy::TokenManager::new(databricks_client));
 
     // Create the single shutdown broadcast channel
     let (shutdown_tx, _) = broadcast::channel::<Shutdown>(16);
@@ -141,10 +165,15 @@ pub async fn run_server(
     };
 
     // API router - proxied to backend with token manager
-    let api_router = proxy::api_router(backend_port, Arc::clone(&token_manager))?;
+    let api_router = proxy::api_router(
+        backend_port,
+        Arc::clone(&token_manager),
+        forwarded_user_header.clone(),
+    )?;
 
     // API utilities router - proxied to backend for FastAPI docs (/docs, /redoc, /openapi.json)
-    let api_utils_router = proxy::api_utils_router(backend_port, token_manager)?;
+    let api_utils_router =
+        proxy::api_utils_router(backend_port, token_manager, forwarded_user_header)?;
 
     // APX internal router
     let apx_router = Router::new()
@@ -337,4 +366,13 @@ async fn stop(State(state): State<AppState>) -> StatusCode {
     // Send the shutdown signal
     let _ = state.shutdown_tx.send(Shutdown::Stop);
     StatusCode::OK
+}
+
+/// Resolve the Databricks profile name from env var or `.env` file.
+fn resolve_databricks_profile(app_dir: &std::path::Path) -> Option<String> {
+    std::env::var("DATABRICKS_CONFIG_PROFILE").ok().or_else(|| {
+        DotenvFile::read(&app_dir.join(".env"))
+            .ok()
+            .and_then(|d| d.get_vars().get("DATABRICKS_CONFIG_PROFILE").cloned())
+    })
 }

@@ -1,5 +1,5 @@
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -36,40 +36,7 @@ pub const ENTRYPOINT_DEV_DEPS: &[&str] = &[
 
 /// List available Databricks CLI profiles from ~/.databrickscfg
 pub fn list_profiles() -> Result<Vec<String>, String> {
-    let home = dirs::home_dir().ok_or("Could not determine home directory")?;
-    let cfg_path = home.join(".databrickscfg");
-
-    if !cfg_path.exists() {
-        return Ok(vec![]);
-    }
-
-    let content = fs::read_to_string(&cfg_path)
-        .map_err(|e| format!("Failed to read {}: {e}", cfg_path.display()))?;
-
-    let mut seen = HashSet::new();
-    let mut profiles: Vec<String> = content
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                let name = trimmed[1..trimmed.len() - 1].to_string();
-                if seen.insert(name.clone()) {
-                    Some(name)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // Add DEFAULT if not already present (it's implicit in INI files)
-    if seen.insert("DEFAULT".to_string()) {
-        profiles.push("DEFAULT".to_string());
-    }
-
-    Ok(profiles)
+    apx_databricks_sdk::list_profile_names().map_err(|e| e.to_string())
 }
 
 /// Base command for running tools via `uv run`.

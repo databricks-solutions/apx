@@ -7,6 +7,7 @@ rust-version.workspace = true
 [dependencies]
 apx-common.workspace = true
 apx-agent.workspace = true
+apx-databricks-sdk.workspace = true
 pyo3.workspace = true
 dirs.workspace = true
 indicatif.workspace = true

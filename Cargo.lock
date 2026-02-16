@@ -181,6 +181,7 @@ version = "0.2.1"
 dependencies = [
  "apx-common",
  "apx-core",
+ "apx-databricks-sdk",
  "apx-mcp",
  "chrono",
  "clap",
@@ -218,6 +219,7 @@ version = "0.2.1"
 dependencies = [
  "apx-agent",
  "apx-common",
+ "apx-databricks-sdk",
  "arrow",
  "axum",
  "biome_css_parser",
@@ -262,6 +264,20 @@ dependencies = [
  "url",
  "walkdir",
  "zip",
+]
+
+[[package]]
+name = "apx-databricks-sdk"
+version = "0.2.1"
+dependencies = [
+ "chrono",
+ "dirs 5.0.1",
+ "reqwest 0.13.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -10,7 +10,6 @@ use apx_core::dev::common::{
     FRONTEND_PORT_START, find_random_port_in_range,
 };
 use apx_core::dev::server::run_server;
-use apx_core::interop::validate_credentials;
 
 /// Maximum number of retries for subprocess port allocation
 const MAX_PORT_RETRIES: u32 = 5;
@@ -37,8 +36,11 @@ async fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
     // Validate credentials before starting server (warn if skipped or failed)
     if args.skip_credentials_validation {
         warn!("Credentials validation skipped. API proxy may not work correctly.");
-    } else if let Err(err) = validate_credentials() {
-        warn!("Credentials validation failed: {err}. API proxy may not work correctly.");
+    } else {
+        let profile = std::env::var("DATABRICKS_CONFIG_PROFILE").unwrap_or_default();
+        if let Err(err) = apx_databricks_sdk::validate_credentials(&profile).await {
+            warn!("Credentials validation failed: {err}. API proxy may not work correctly.");
+        }
     }
 
     // Try to start the server with randomized subprocess ports

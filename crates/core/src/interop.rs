@@ -1,4 +1,3 @@
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::path::{Path, PathBuf};
@@ -139,47 +138,6 @@ pub fn templates_dir() -> Result<PathBuf, String> {
             .extract()
             .map_err(|err| format!("Failed to parse templates path: {err}"))?;
         Ok(PathBuf::from(templates_path))
-    })
-}
-
-pub fn validate_credentials() -> Result<(), String> {
-    Python::attach(|py| -> PyResult<()> {
-        let interop = py.import("apx.interop")?;
-        let result = interop.call_method0("credentials_valid")?;
-        let (valid, error): (bool, String) = result.extract()?;
-        if !valid {
-            return Err(PyRuntimeError::new_err(error));
-        }
-        Ok(())
-    })
-    .map_err(|e| format!("Credentials validation failed: {e}"))
-}
-
-pub fn get_token() -> Result<String, String> {
-    Python::attach(|py| {
-        let interop = py
-            .import("apx.interop")
-            .map_err(|e| format!("Failed to import apx.interop: {e}"))?;
-        let token: String = interop
-            .call_method0("get_token")
-            .map_err(|e| format!("Failed to call get_token: {e}"))?
-            .extract()
-            .map_err(|e| format!("Failed to extract token: {e}"))?;
-        Ok(token)
-    })
-}
-
-pub fn get_forwarded_user_header() -> Result<String, String> {
-    Python::attach(|py| {
-        let interop = py
-            .import("apx.interop")
-            .map_err(|e| format!("Failed to import apx.interop: {e}"))?;
-        let header_value: String = interop
-            .call_method0("get_forwarded_user_header")
-            .map_err(|e| format!("Failed to call get_forwarded_user_header: {e}"))?
-            .extract()
-            .map_err(|e| format!("Failed to extract forwarded user header: {e}"))?;
-        Ok(header_value)
     })
 }
 
