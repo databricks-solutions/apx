@@ -1,4 +1,7 @@
 
+set unstable
+
+set script-interpreter := ['uv', 'run', '--script']
 
 fmt:
     uv tool run ruff format .
@@ -40,10 +43,8 @@ pm message:
     git push
 
 
-gen folder profile *args: sync
-    rm -rf /tmp/{{folder}}
-    RUST_LOG=DEBUG cargo run --bin apx -- init /tmp/{{folder}} -p {{profile}} {{args}}
-    cd /tmp/{{folder}} && RUSTUP_TOOLCHAIN=1.92.0 RUST_LOG=DEBUG cargo run --bin apx --manifest-path {{justfile_directory()}}/Cargo.toml -- dev check
+gen folder profile *args:
+    uv run --script scripts/dev/gen.py /tmp/{{folder}} {{profile}} {{args}}
 
 [working-directory: "docs"]
 docs *args:
