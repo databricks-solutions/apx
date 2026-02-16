@@ -30,7 +30,6 @@ test *args: develop
     uv run --no-sync pytest tests/ -s -v -n 4 --html=.reports/report.html {{args}}
 
 # Run Rust tests
-# VIRTUAL_ENV is set in .cargo/config.toml for pyo3-build-config
 rust-test *args:
     cargo test --lib {{args}} 
 

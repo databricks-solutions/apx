@@ -21,9 +21,8 @@ const AGENT_FILENAME: &str = "apx-agent";
 ///
 /// Resolution order:
 /// 1. `APX_BUN_PATH` env var (explicit override)
-/// 2. Sibling of current exe: `<exe_dir>/apx_binaries/bun`
-/// 3. Co-located in Python package: walk up from exe to find `apx/binaries/bun`
-/// 4. `which bun` PATH lookup (standalone mode)
+/// 2. Embedded bun extracted to `~/.apx/bin/bun`
+/// 3. `which bun` PATH lookup (fallback)
 pub fn bun_binary_path() -> Result<PathBuf, String> {
     warn_if_system_bun_exists();
 
@@ -37,54 +36,18 @@ pub fn bun_binary_path() -> Result<PathBuf, String> {
         return Err(format!("APX_BUN_PATH={path} does not exist"));
     }
 
-    // 2. Exe-relative: <exe_dir>/apx_binaries/bun
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(exe_dir) = exe.parent()
-    {
-        let candidate = exe_dir.join("apx_binaries").join(BUN_FILENAME);
-        if candidate.is_file() {
-            debug!(
-                "bun_binary_path: found exe-relative at {}",
-                candidate.display()
-            );
-            return Ok(candidate);
+    // 2. Embedded bun extracted to ~/.apx/bin/bun
+    match resources::ensure_bun_extracted() {
+        Ok(p) => {
+            debug!("bun_binary_path: using embedded bun at {}", p.display());
+            return Ok(p);
         }
-
-        // 3. Python site-packages layout: walk up to find apx/binaries/
-        for ancestor in exe_dir.ancestors().skip(1) {
-            let candidate = ancestor.join("apx").join("binaries").join(BUN_FILENAME);
-            if candidate.is_file() {
-                debug!(
-                    "bun_binary_path: found in site-packages at {}",
-                    candidate.display()
-                );
-                return Ok(candidate);
-            }
-            // Also check lib/python*/site-packages/apx/binaries/
-            if let Ok(entries) = std::fs::read_dir(ancestor.join("lib")) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    if name.to_string_lossy().starts_with("python") {
-                        let candidate = entry
-                            .path()
-                            .join("site-packages")
-                            .join("apx")
-                            .join("binaries")
-                            .join(BUN_FILENAME);
-                        if candidate.is_file() {
-                            debug!(
-                                "bun_binary_path: found in lib/python site-packages at {}",
-                                candidate.display()
-                            );
-                            return Ok(candidate);
-                        }
-                    }
-                }
-            }
+        Err(e) => {
+            debug!("bun_binary_path: failed to extract embedded bun: {e}");
         }
     }
 
-    // 4. PATH lookup (standalone mode)
+    // 3. PATH lookup (fallback)
     if let Ok(path) = which::which(BUN_FILENAME) {
         debug!("bun_binary_path: found on PATH at {}", path.display());
         return Ok(path);
@@ -119,10 +82,8 @@ fn find_system_bun() -> Option<PathBuf> {
     for dir in std::env::split_paths(&path_env) {
         let candidate = dir.join(bun_name);
         if candidate.is_file() {
-            // Check if this is the apx bundled bun by looking at the path
-            // The bundled bun is inside the apx package (e.g., site-packages/apx/binaries/)
             let path_str = candidate.to_string_lossy();
-            if path_str.contains("apx") && path_str.contains("binaries") {
+            if path_str.contains("apx") && path_str.contains("bin") {
                 continue;
             }
             return Some(candidate);
@@ -137,7 +98,6 @@ fn find_system_bun() -> Option<PathBuf> {
 /// 1. `APX_AGENT_PATH` env var (explicit override)
 /// 2. `~/.apx/apx-agent` (standard install target)
 /// 3. Exe-relative: `<exe_dir>/apx_binaries/apx-agent`
-/// 4. Co-located in Python package: walk up from exe to find `apx/binaries/apx-agent`
 pub fn resolve_apx_agent_binary_path() -> Result<PathBuf, String> {
     // 1. Explicit env var override
     if let Ok(path) = std::env::var("APX_AGENT_PATH") {
@@ -176,18 +136,6 @@ pub fn resolve_apx_agent_binary_path() -> Result<PathBuf, String> {
             );
             return Ok(candidate);
         }
-
-        // 4. Python site-packages layout
-        for ancestor in exe_dir.ancestors().skip(1) {
-            let candidate = ancestor.join("apx").join("binaries").join(AGENT_FILENAME);
-            if candidate.is_file() {
-                debug!(
-                    "resolve_apx_agent_binary_path: found in site-packages at {}",
-                    candidate.display()
-                );
-                return Ok(candidate);
-            }
-        }
     }
 
     Err(format!(
@@ -197,16 +145,12 @@ pub fn resolve_apx_agent_binary_path() -> Result<PathBuf, String> {
 
 /// Get the path to the frontend entrypoint.ts asset (materialized from embedded resources)
 pub fn frontend_entrypoint_path() -> Result<PathBuf, String> {
-    resources::materialize_entrypoint_ts()
+    resources::entrypoint_ts_path()
 }
 
-/// Extract embedded templates to a temporary directory and return the path.
-/// The caller is responsible for managing the lifetime of the temp dir.
-pub fn extract_templates() -> Result<tempfile::TempDir, String> {
-    let tmp = tempfile::TempDir::new()
-        .map_err(|e| format!("Failed to create temp dir for templates: {e}"))?;
-    resources::extract_templates_to(tmp.path())?;
-    Ok(tmp)
+/// Extract embedded templates to the versioned cache directory and return the path.
+pub fn extract_templates() -> Result<PathBuf, String> {
+    resources::templates_dir()
 }
 
 pub fn generate_openapi_spec(

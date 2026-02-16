@@ -91,7 +91,6 @@ schemars = "1.2.0"
 tempfile = "3.15"
 
 # Embedded resources
-rust-embed = { version = "8", features = ["include-exclude"] }
 which = "7"
 
 [profile.release]

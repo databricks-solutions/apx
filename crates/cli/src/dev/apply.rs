@@ -154,8 +154,7 @@ async fn run_inner(args: ApplyArgs) -> Result<(), String> {
     let (app_name, app_slug) = read_project_context(&app_dir)?;
 
     // Extract embedded templates to a temporary directory
-    let templates_tmp = extract_templates()?;
-    let templates_dir = templates_tmp.path().to_path_buf();
+    let templates_dir = extract_templates()?;
 
     // Get addon source directory
     let addon_source = if args.addon.is_base() {

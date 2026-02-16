@@ -6,9 +6,6 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
 
 fn main() {
-    // protoc is expected to be available in PATH (installed via CI or locally)
-    // See: arduino/setup-protoc in CI workflows
-
     // Workspace root is two levels up from crates/apx/
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
     let workspace_root = manifest_dir
@@ -22,52 +19,31 @@ fn main() {
     let output_dir = workspace_root.join("src/apx/binaries");
     fs::create_dir_all(&output_dir).expect("Failed to create binaries output dir");
 
-    // Clear old binaries
+    // Clear old agent binaries
     for entry in fs::read_dir(&output_dir).expect("Failed to read binaries output dir") {
         let entry = entry.expect("Failed to read binaries output entry");
         let path = entry.path();
         if path.is_file() {
-            fs::remove_file(&path).expect("Failed to remove old binary");
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("apx-agent") {
+                fs::remove_file(&path).expect("Failed to remove old agent binary");
+            }
         }
     }
-
-    // Copy Bun binary
-    copy_bun_binary(workspace_root, &output_dir, &target_os, &target_arch);
 
     // Copy Agent binary
     copy_agent_binary(workspace_root, &output_dir, &target_os, &target_arch);
 
     // Watch for changes
-    let bun_dir = workspace_root.join(".bins/bun");
     let agent_dir = workspace_root.join(".bins/agent");
-    println!("cargo:rerun-if-changed={}", bun_dir.display());
     println!("cargo:rerun-if-changed={}", agent_dir.display());
-}
-
-fn copy_bun_binary(workspace_root: &Path, output_dir: &Path, target_os: &str, target_arch: &str) {
-    let bun_src_name = bun_binary_name(target_os, target_arch)
-        .unwrap_or_else(|| panic!("Unsupported target for bun: {target_os}-{target_arch}"));
-    let bun_source = workspace_root.join(".bins/bun").join(bun_src_name);
-    if !bun_source.exists() {
-        panic!("Missing Bun binary at {}", bun_source.display());
-    }
-    let bun_dest_name = if target_os == "windows" {
-        "bun.exe"
-    } else {
-        "bun"
-    };
-    let bun_dest = output_dir.join(bun_dest_name);
-    fs::copy(&bun_source, &bun_dest).expect("Failed to copy Bun binary");
-    set_executable_permissions(&bun_dest);
-    println!("cargo:rerun-if-changed={}", bun_source.display());
 }
 
 fn copy_agent_binary(workspace_root: &Path, output_dir: &Path, target_os: &str, target_arch: &str) {
     let agent_src_name = match agent_binary_name(target_os, target_arch) {
         Some(name) => name,
         None => {
-            // Agent binary not available for this platform - skip silently
-            // This allows development on platforms where agent binary hasn't been cross-compiled yet
             println!(
                 "cargo:warning=Agent binary not available for {target_os}-{target_arch}, skipping"
             );
@@ -77,7 +53,6 @@ fn copy_agent_binary(workspace_root: &Path, output_dir: &Path, target_os: &str, 
 
     let agent_source = workspace_root.join(".bins/agent").join(agent_src_name);
     if !agent_source.exists() {
-        // Agent binary not yet built - skip with warning
         println!(
             "cargo:warning=Agent binary not found at {}, skipping",
             agent_source.display()
@@ -108,17 +83,6 @@ fn set_executable_permissions(path: &Path) {
 #[cfg(not(unix))]
 fn set_executable_permissions(_path: &Path) {
     // No-op on Windows
-}
-
-fn bun_binary_name(target_os: &str, target_arch: &str) -> Option<&'static str> {
-    match (target_os, target_arch) {
-        ("macos", "aarch64") => Some("bun-darwin-aarch64"),
-        ("macos", "x86_64") => Some("bun-darwin-x64"),
-        ("linux", "aarch64") => Some("bun-linux-aarch64"),
-        ("linux", "x86_64") => Some("bun-linux-x64"),
-        ("windows", "x86_64") => Some("bun-windows-x64.exe"),
-        _ => None,
-    }
 }
 
 fn agent_binary_name(target_os: &str, target_arch: &str) -> Option<&'static str> {

@@ -80,8 +80,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
     let app_path = resolve_app_dir(args.app_path.take());
 
-    let templates_tmp = extract_templates()?;
-    let templates_dir = templates_tmp.path().to_path_buf();
+    let templates_dir = extract_templates()?;
 
     println!("Welcome to apx 🚀\n");
 
