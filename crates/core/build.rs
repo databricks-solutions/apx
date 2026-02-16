@@ -1,6 +1,9 @@
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use zip::write::SimpleFileOptions;
+use zip::CompressionMethod;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -10,7 +13,7 @@ fn main() {
         .expect("Could not find workspace root");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    pack_templates(workspace_root, &out_dir);
+    pack_assets(workspace_root, &out_dir);
     copy_bun_binary(workspace_root, &out_dir);
 
     println!(
@@ -27,18 +30,12 @@ fn main() {
     );
 }
 
-/// Walk `src/apx/templates/` and pack all files into a simple binary archive.
+/// Pack templates and entrypoint.ts into a single zip archive (`assets.zip`).
 ///
-/// Archive format:
-/// ```text
-/// [u32 LE: entry count]
-/// For each entry:
-///   [u32 LE: relative path length]
-///   [N bytes: UTF-8 path string]
-///   [u32 LE: content length]
-///   [N bytes: file content]
-/// ```
-fn pack_templates(workspace_root: &Path, out_dir: &Path) {
+/// Layout inside the zip:
+/// - `templates/<relative path>` — all template files
+/// - `entrypoint.ts` — the frontend entrypoint
+fn pack_assets(workspace_root: &Path, out_dir: &Path) {
     let templates_dir = workspace_root.join("src/apx/templates");
     assert!(
         templates_dir.is_dir(),
@@ -46,28 +43,43 @@ fn pack_templates(workspace_root: &Path, out_dir: &Path) {
         templates_dir.display()
     );
 
-    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    let entrypoint_path = workspace_root.join("src/apx/assets/entrypoint.ts");
+    assert!(
+        entrypoint_path.is_file(),
+        "entrypoint.ts not found: {}",
+        entrypoint_path.display()
+    );
 
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     collect_files(&templates_dir, &templates_dir, &mut entries);
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let mut archive = Vec::new();
-    // Entry count
-    archive.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    let dest = out_dir.join("assets.zip");
+    let file = fs::File::create(&dest).expect("Failed to create assets.zip");
+    let mut zip = zip::ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
+    // Add templates under templates/ prefix
     for (rel_path, content) in &entries {
-        let path_bytes = rel_path.as_bytes();
-        archive.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
-        archive.extend_from_slice(path_bytes);
-        archive.extend_from_slice(&(content.len() as u32).to_le_bytes());
-        archive.extend_from_slice(content);
+        let archive_path = format!("templates/{rel_path}");
+        zip.start_file(&archive_path, options)
+            .unwrap_or_else(|e| panic!("Failed to add {archive_path} to zip: {e}"));
+        zip.write_all(content)
+            .unwrap_or_else(|e| panic!("Failed to write {archive_path}: {e}"));
     }
 
-    let dest = out_dir.join("templates.pack");
-    fs::write(&dest, &archive).expect("Failed to write templates.pack");
+    // Add entrypoint.ts at the archive root
+    let entrypoint_content =
+        fs::read(&entrypoint_path).expect("Failed to read entrypoint.ts");
+    zip.start_file("entrypoint.ts", options)
+        .expect("Failed to add entrypoint.ts to zip");
+    zip.write_all(&entrypoint_content)
+        .expect("Failed to write entrypoint.ts");
+
+    zip.finish().expect("Failed to finalize assets.zip");
 
     println!(
-        "cargo:warning=Packed {} template files into templates.pack",
+        "cargo:warning=Packed {} template files + entrypoint.ts into assets.zip",
         entries.len()
     );
 }

@@ -1,12 +1,9 @@
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// Frontend entrypoint — known path, directly included.
-const ENTRYPOINT_TS: &str = include_str!("../../../src/apx/assets/entrypoint.ts");
-
-/// Archive of all templates — produced by build.rs.
-const TEMPLATES_ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/templates.pack"));
+/// Zip archive of all assets (templates + entrypoint.ts) — produced by build.rs.
+const ASSETS_ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/assets.zip"));
 
 /// Bun binary — copied to OUT_DIR by build.rs.
 const BUN_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bun"));
@@ -24,7 +21,7 @@ fn versioned_dir() -> Result<PathBuf, String> {
     Ok(apx_home()?.join("files").join(VERSION))
 }
 
-/// Ensure templates and entrypoint.ts are extracted to the versioned directory.
+/// Ensure assets are extracted to the versioned directory.
 /// Uses a `.extracted` sentinel file to skip if already done for this version.
 /// Returns the versioned directory path.
 pub fn ensure_extracted() -> Result<PathBuf, String> {
@@ -37,16 +34,7 @@ pub fn ensure_extracted() -> Result<PathBuf, String> {
 
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create dir {}: {e}", dir.display()))?;
 
-    // Extract templates
-    let templates_dest = dir.join("templates");
-    fs::create_dir_all(&templates_dest)
-        .map_err(|e| format!("Failed to create templates dir: {e}"))?;
-    unpack_archive(TEMPLATES_ARCHIVE, &templates_dest)?;
-
-    // Write entrypoint.ts
-    let entrypoint_dest = dir.join("entrypoint.ts");
-    fs::write(&entrypoint_dest, ENTRYPOINT_TS)
-        .map_err(|e| format!("Failed to write entrypoint.ts: {e}"))?;
+    extract_archive(ASSETS_ARCHIVE, &dir)?;
 
     // Write sentinel
     fs::write(&sentinel, VERSION).map_err(|e| format!("Failed to write sentinel: {e}"))?;
@@ -99,53 +87,39 @@ pub fn ensure_bun_extracted() -> Result<PathBuf, String> {
     Ok(bun_dest)
 }
 
-/// Parse the simple binary archive format and write files to `dest`.
-fn unpack_archive(data: &[u8], dest: &Path) -> Result<(), String> {
-    let mut cursor = std::io::Cursor::new(data);
+/// Extract a zip archive to `dest`, preserving internal directory structure.
+fn extract_archive(data: &[u8], dest: &std::path::Path) -> Result<(), String> {
+    let cursor = std::io::Cursor::new(data);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to open zip archive: {e}"))?;
 
-    let entry_count = read_u32_le(&mut cursor)?;
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to read zip entry {i}: {e}"))?;
 
-    for _ in 0..entry_count {
-        let path_len = read_u32_le(&mut cursor)? as usize;
-        let mut path_buf = vec![0u8; path_len];
-        cursor
-            .read_exact(&mut path_buf)
-            .map_err(|e| format!("Failed to read path from archive: {e}"))?;
-        let rel_path = String::from_utf8(path_buf)
-            .map_err(|e| format!("Invalid UTF-8 path in archive: {e}"))?;
+        let name = entry.name().to_string();
+        if name.ends_with('/') {
+            // Directory entry — just create it
+            let dir_path = dest.join(&name);
+            fs::create_dir_all(&dir_path)
+                .map_err(|e| format!("Failed to create dir {}: {e}", dir_path.display()))?;
+            continue;
+        }
 
-        let content_len = read_u32_le(&mut cursor)? as usize;
-        let mut content = vec![0u8; content_len];
-        cursor
-            .read_exact(&mut content)
-            .map_err(|e| format!("Failed to read content from archive: {e}"))?;
-
-        let target = dest.join(&rel_path);
+        let target = dest.join(&name);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create dir {}: {e}", parent.display()))?;
         }
+
+        let mut content = Vec::new();
+        entry
+            .read_to_end(&mut content)
+            .map_err(|e| format!("Failed to read zip entry {name}: {e}"))?;
         fs::write(&target, &content)
             .map_err(|e| format!("Failed to write {}: {e}", target.display()))?;
     }
 
     Ok(())
-}
-
-fn read_u32_le(cursor: &mut std::io::Cursor<&[u8]>) -> Result<u32, String> {
-    let mut buf = [0u8; 4];
-    cursor
-        .read_exact(&mut buf)
-        .map_err(|e| format!("Failed to read u32 from archive: {e}"))?;
-    Ok(u32::from_le_bytes(buf))
-}
-
-/// Extract all embedded templates to a destination directory (used by tests or direct callers).
-pub fn extract_templates_to(dest: &Path) -> Result<(), String> {
-    unpack_archive(TEMPLATES_ARCHIVE, dest)
-}
-
-/// Get the content of the frontend entrypoint.ts asset.
-pub fn entrypoint_ts_content() -> Result<Vec<u8>, String> {
-    Ok(ENTRYPOINT_TS.as_bytes().to_vec())
 }
