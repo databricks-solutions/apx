@@ -1271,6 +1271,7 @@ apx bundles together a set of tools and libraries to help you with the complete 
 "#;
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
