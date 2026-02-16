@@ -185,11 +185,167 @@ jobs:
           path: dist
 
   # ============================================
+  # Build standalone binaries for all platforms
+  # ============================================
+  build-standalone:
+    runs-on: ${{ matrix.os }}
+    env:
+      PROTOC_VERSION: "28.3"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64
+          - os: linux-ubuntu-latest
+            rust_target: x86_64-unknown-linux-gnu
+            asset_name: apx-x86_64-linux
+            platform: linux
+            cross: false
+
+          # Linux aarch64
+          - os: linux-ubuntu-latest
+            rust_target: aarch64-unknown-linux-gnu
+            asset_name: apx-aarch64-linux
+            platform: linux
+            cross: true
+
+          # macOS x86_64 (Intel)
+          - os: macos-15-intel
+            rust_target: x86_64-apple-darwin
+            asset_name: apx-x86_64-darwin
+            platform: macos
+            cross: false
+
+          # macOS aarch64 (Apple Silicon)
+          - os: macos-latest
+            rust_target: aarch64-apple-darwin
+            asset_name: apx-aarch64-darwin
+            platform: macos
+            cross: false
+
+          # Windows x64
+          - os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            asset_name: apx-x86_64-windows.exe
+            platform: windows
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92.0"
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-${{ matrix.rust_target }}-standalone-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.rust_target }}-standalone-cargo-
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: ".python-version"
+
+      # Protoc — cache key shared with build job, so often a cache hit
+      - name: Cache Protoc
+        id: cache-protoc
+        uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/.protoc
+          key: protoc-${{ runner.os }}-${{ runner.arch }}-${{ env.PROTOC_VERSION }}
+
+      - name: Download Protoc
+        if: steps.cache-protoc.outputs.cache-hit != 'true'
+        run: uv run --script scripts/download_protoc.py --version ${{ env.PROTOC_VERSION }} --output-dir ${{ github.workspace }}/.protoc
+
+      - name: Setup Protoc environment
+        shell: bash
+        run: |
+          echo "${{ github.workspace }}/.protoc/bin" >> $GITHUB_PATH
+          echo "PROTOC=${{ github.workspace }}/.protoc/bin/protoc" >> $GITHUB_ENV
+
+      # Bun binaries (needed for build.rs embedding)
+      - name: Cache Bun binaries
+        uses: actions/cache@v5
+        with:
+          path: .bins/bun
+          key: bun-binaries-${{ hashFiles('scripts/get_binaries.py') }}
+
+      - name: Download Bun binaries
+        run: uv run --script scripts/get_binaries.py
+
+      # Cross-compilation tool (used for both agent and apx builds)
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      # Agent binary (needed for build.rs embedding)
+      - name: Cache apx-agent binary
+        id: cache-agent
+        uses: actions/cache@v5
+        with:
+          path: .bins/agent
+          key: apx-agent-${{ runner.os }}-${{ matrix.rust_target }}-${{ hashFiles('crates/agent/**', 'crates/common/**', 'Cargo.lock') }}
+
+      - name: Build apx-agent (native)
+        if: steps.cache-agent.outputs.cache-hit != 'true' && !matrix.cross
+        run: uv run --script scripts/build_agent.py --target ${{ matrix.rust_target }}
+
+      - name: Build apx-agent (cross)
+        if: steps.cache-agent.outputs.cache-hit != 'true' && matrix.cross
+        run: uv run --script scripts/build_agent.py --target ${{ matrix.rust_target }}
+
+      # Build standalone binary (build.rs embeds agent + bun + assets)
+      - name: Build apx binary (native)
+        if: "!matrix.cross"
+        run: cargo build --release -p apx-bin --target ${{ matrix.rust_target }}
+
+      - name: Build apx binary (cross)
+        if: matrix.cross
+        run: cross build --release -p apx-bin --target ${{ matrix.rust_target }}
+
+      # Rename and upload
+      - name: Rename binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            cp target/${{ matrix.rust_target }}/release/apx.exe ${{ matrix.asset_name }}
+          else
+            cp target/${{ matrix.rust_target }}/release/apx ${{ matrix.asset_name }}
+          fi
+
+      - name: Smoke test
+        if: "!matrix.cross"
+        shell: bash
+        run: |
+          chmod +x ${{ matrix.asset_name }} 2>/dev/null || true
+          ./${{ matrix.asset_name }} --version
+
+      - name: Upload standalone binary
+        uses: actions/upload-artifact@v6
+        with:
+          name: standalone-${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  # ============================================
   # Create GitHub Release
   # ============================================
   create-release:
     name: Create GitHub Release
-    needs: build
+    needs: [build, build-standalone]
     runs-on: linux-ubuntu-latest
     permissions:
       contents: write
@@ -197,18 +353,27 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Download all artifacts
+      - name: Download wheel artifacts
         uses: actions/download-artifact@v6
         with:
-          path: dist
+          path: dist/wheels
           pattern: wheels-*
+          merge-multiple: true
+
+      - name: Download standalone artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: dist/standalone
+          pattern: standalone-*
           merge-multiple: true
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: dist/*
+          files: |
+            dist/wheels/*
+            dist/standalone/*
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

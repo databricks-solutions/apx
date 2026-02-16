@@ -112,19 +112,21 @@ pub fn resolve_apx_agent_binary_path() -> Result<PathBuf, String> {
         return Err(format!("APX_AGENT_PATH={path} does not exist"));
     }
 
-    // 2. ~/.apx/apx-agent (already the install target)
-    if let Some(home) = dirs::home_dir() {
-        let candidate = home.join(".apx").join(AGENT_FILENAME);
-        if candidate.is_file() {
+    // 2. Extract embedded agent to ~/.apx/apx-agent
+    match resources::ensure_agent_extracted() {
+        Ok(p) => {
             debug!(
-                "resolve_apx_agent_binary_path: found at ~/.apx/{}",
-                AGENT_FILENAME
+                "resolve_apx_agent_binary_path: using embedded agent at {}",
+                p.display()
             );
-            return Ok(candidate);
+            return Ok(p);
+        }
+        Err(e) => {
+            debug!("resolve_apx_agent_binary_path: failed to extract embedded agent: {e}");
         }
     }
 
-    // 3. Exe-relative: <exe_dir>/apx_binaries/apx-agent
+    // 3. Exe-relative: <exe_dir>/apx_binaries/apx-agent (fallback for compatibility)
     if let Ok(exe) = std::env::current_exe()
         && let Some(exe_dir) = exe.parent()
     {

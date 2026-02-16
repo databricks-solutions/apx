@@ -8,6 +8,9 @@ const ASSETS_ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/assets.z
 /// Bun binary — copied to OUT_DIR by build.rs.
 const BUN_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bun"));
 
+/// Agent binary — copied to OUT_DIR by build.rs.
+const AGENT_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apx-agent"));
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Root of the apx data directory: `~/.apx/`.
@@ -85,6 +88,37 @@ pub fn ensure_bun_extracted() -> Result<PathBuf, String> {
     }
 
     Ok(bun_dest)
+}
+
+/// Extract the embedded apx-agent binary to `~/.apx/apx-agent`.
+/// Overwrites if existing version differs. Sets executable permissions on Unix.
+pub fn ensure_agent_extracted() -> Result<PathBuf, String> {
+    let apx_dir = apx_home()?;
+    fs::create_dir_all(&apx_dir).map_err(|e| format!("Failed to create .apx dir: {e}"))?;
+
+    #[cfg(target_os = "windows")]
+    let agent_name = "apx-agent.exe";
+    #[cfg(not(target_os = "windows"))]
+    let agent_name = "apx-agent";
+
+    let agent_dest = apx_dir.join(agent_name);
+
+    // Always write to ensure version matches (the binary embeds its version)
+    fs::write(&agent_dest, AGENT_BINARY)
+        .map_err(|e| format!("Failed to write agent binary: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&agent_dest)
+            .map_err(|e| format!("Failed to read agent metadata: {e}"))?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&agent_dest, perms)
+            .map_err(|e| format!("Failed to set agent permissions: {e}"))?;
+    }
+
+    Ok(agent_dest)
 }
 
 /// Extract a zip archive to `dest`, preserving internal directory structure.

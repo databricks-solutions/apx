@@ -73,7 +73,9 @@ def run(cmd: list[str], **kwargs) -> None:
 
 
 def find_wheel(dist_dir: Path) -> Path:
-    wheels = sorted(dist_dir.glob("*.whl"), key=lambda p: os.path.getmtime(p), reverse=True)
+    wheels = sorted(
+        dist_dir.glob("*.whl"), key=lambda p: os.path.getmtime(p), reverse=True
+    )
     if not wheels:
         raise FileNotFoundError(f"No wheel found in {dist_dir}")
     return wheels[0]
