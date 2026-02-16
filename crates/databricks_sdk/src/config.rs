@@ -1,15 +1,7 @@
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
-
+use crate::config_parser::ConfigParser;
 use crate::error::{DatabricksError, Result};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DatabricksProfile {
-    pub name: String,
-    pub host: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct DatabricksConfig {
@@ -28,83 +20,6 @@ fn config_file_path() -> Result<PathBuf> {
     Ok(home.join(".databrickscfg"))
 }
 
-/// Parse all profile sections and their host values from a databrickscfg file.
-pub fn read_profiles(path: &Path) -> Result<Vec<DatabricksProfile>> {
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| DatabricksError::Config(format!("failed to read {}: {e}", path.display())))?;
-
-    let mut profiles = Vec::new();
-    let mut current_section: Option<String> = None;
-    let mut current_host: Option<String> = None;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            // Flush previous section
-            if let Some(name) = current_section.take()
-                && let Some(host) = current_host.take()
-            {
-                profiles.push(DatabricksProfile { name, host });
-            }
-            current_section = Some(trimmed[1..trimmed.len() - 1].to_string());
-            current_host = None;
-        } else if let Some((_key, value)) = trimmed.split_once('=') {
-            let key = _key.trim();
-            let value = value.trim();
-            if key == "host" {
-                current_host = Some(value.to_string());
-            }
-        }
-    }
-    // Flush last section
-    if let Some(name) = current_section
-        && let Some(host) = current_host
-    {
-        profiles.push(DatabricksProfile { name, host });
-    }
-
-    Ok(profiles)
-}
-
-/// List just the profile names (section headers) from `~/.databrickscfg`.
-pub fn list_profile_names() -> Result<Vec<String>> {
-    let path = config_file_path()?;
-    if !path.exists() {
-        return Ok(vec![]);
-    }
-
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| DatabricksError::Config(format!("failed to read {}: {e}", path.display())))?;
-
-    let mut seen = HashSet::new();
-    let mut profiles: Vec<String> = content
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                let name = trimmed[1..trimmed.len() - 1].to_string();
-                if seen.insert(name.clone()) {
-                    Some(name)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if seen.insert("DEFAULT".to_string()) {
-        profiles.push("DEFAULT".to_string());
-    }
-
-    Ok(profiles)
-}
-
 /// Normalize a Databricks host URL: ensure https:// prefix and no trailing slash.
 fn normalize_host(host: &str) -> String {
     let mut h = host.to_string();
@@ -112,6 +27,13 @@ fn normalize_host(host: &str) -> String {
         h = format!("https://{h}");
     }
     h.trim_end_matches('/').to_string()
+}
+
+/// List just the profile names (section headers) from `~/.databrickscfg`.
+pub fn list_profile_names() -> Result<Vec<String>> {
+    let path = config_file_path()?;
+    let config = ConfigParser::parse(&path)?;
+    Ok(config.list_profiles())
 }
 
 /// Resolve a full `DatabricksConfig` for the given profile name.
@@ -130,9 +52,9 @@ pub fn resolve_config(profile_name: &str) -> Result<DatabricksConfig> {
     };
 
     let path = config_file_path()?;
-    let profiles = read_profiles(&path)?;
+    let config = ConfigParser::parse(&path)?;
 
-    let found = profiles.iter().find(|p| p.name == profile).ok_or_else(|| {
+    let found = config.get_profile(&profile).ok_or_else(|| {
         DatabricksError::Config(format!(
             "profile '{}' not found in {}",
             profile,

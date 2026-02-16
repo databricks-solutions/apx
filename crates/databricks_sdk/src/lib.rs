@@ -2,11 +2,13 @@ pub mod api;
 pub mod auth;
 pub mod client;
 pub mod config;
+pub mod config_parser;
 pub mod error;
 
 pub use api::current_user::{User, UserEmail, UserName};
 pub use client::DatabricksClient;
-pub use config::{DatabricksConfig, DatabricksProfile, list_profile_names, resolve_config};
+pub use config::{DatabricksConfig, list_profile_names, resolve_config};
+pub use config_parser::ConfigParser;
 pub use error::{DatabricksError, Result};
 
 /// Validate that the given Databricks profile has working credentials
