@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+apx-common = { path = "../common" }
 apx-core = { path = "../core" }
 apx-mcp = { path = "../mcp" }
 clap.workspace = true

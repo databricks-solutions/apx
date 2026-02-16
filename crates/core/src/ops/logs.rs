@@ -1,19 +1,20 @@
 use chrono::{Local, TimeZone, Utc};
-use std::collections::HashMap;
+use serde::Serialize;
+use std::path::Path;
 use std::time::Duration;
 
-use apx_common::{LogRecord, Storage, db_path};
-
-/// Time window for aggregating similar messages (in milliseconds)
-const AGGREGATION_WINDOW_MS: i64 = 2000;
+use apx_common::{
+    AggregatedRecord, LogAggregator, LogRecord, Storage, db_path, should_skip_log, source_label,
+};
 
 pub const DEFAULT_LOG_DURATION: &str = "10m";
 
-/// Minimum severity level for apx internal logs (DEBUG = 5, skipping TRACE = 1-4)
-const APX_MIN_SEVERITY: i32 = 5;
+// ---------------------------------------------------------------------------
+// Shared query helper
+// ---------------------------------------------------------------------------
 
-/// Fetch dev server logs for the given duration without following.
-pub async fn fetch_logs(app_dir: &std::path::Path, duration: &str) -> Result<String, String> {
+/// Query and filter logs for the given app directory and duration string.
+fn query_filtered_logs(app_dir: &Path, duration: &str) -> Result<Vec<LogRecord>, String> {
     let app_path_canonical = app_dir
         .canonicalize()
         .unwrap_or_else(|_| app_dir.to_path_buf())
@@ -22,7 +23,7 @@ pub async fn fetch_logs(app_dir: &std::path::Path, duration: &str) -> Result<Str
 
     let db_path = db_path()?;
     if !db_path.exists() {
-        return Ok("No logs database found.".to_string());
+        return Ok(Vec::new());
     }
 
     let storage = Storage::open().map_err(|e| format!("Failed to open logs database: {e}"))?;
@@ -31,114 +32,147 @@ pub async fn fetch_logs(app_dir: &std::path::Path, duration: &str) -> Result<Str
     let since_ns = since_timestamp_nanos(duration);
 
     let records = storage.query_logs(Some(&app_path_canonical), since_ns, None)?;
-    let filtered: Vec<_> = records.iter().filter(|r| !should_skip_log(r)).collect();
+    Ok(records
+        .into_iter()
+        .filter(|r| !should_skip_log(r))
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Public fetch functions
+// ---------------------------------------------------------------------------
+
+/// Fetch dev server logs for the given duration without following.
+pub async fn fetch_logs(app_dir: &Path, duration: &str) -> Result<String, String> {
+    let filtered = query_filtered_logs(app_dir, duration)?;
+
+    if filtered.is_empty() {
+        let db_path = db_path()?;
+        if !db_path.exists() {
+            return Ok("No logs database found.".to_string());
+        }
+    }
 
     let mut aggregator = LogAggregator::new();
     let mut output = Vec::new();
 
     for record in &filtered {
-        let timestamp_ns = if record.timestamp_ns == 0 {
-            record.observed_timestamp_ns
-        } else {
-            record.timestamp_ns
-        };
-        let timestamp_ms = timestamp_ns / 1_000_000;
+        let timestamp_ms = record.effective_timestamp_ms();
 
-        output.extend(aggregator.flush_expired(timestamp_ms, false));
+        for agg in aggregator.flush_expired(timestamp_ms) {
+            output.push(format_aggregated_record(&agg, false));
+        }
 
         if !aggregator.add(record) {
             output.push(format_log_record(record, false));
         }
     }
 
-    output.extend(aggregator.flush_all(false));
+    for agg in aggregator.flush_all() {
+        output.push(format_aggregated_record(&agg, false));
+    }
 
     Ok(output.join("\n"))
 }
 
-/// Format a log record for terminal display
-pub fn format_log_record(record: &LogRecord, colorize: bool) -> String {
-    let effective_timestamp_ns = if record.timestamp_ns == 0 {
-        record.observed_timestamp_ns
-    } else {
-        record.timestamp_ns
-    };
-    let timestamp_ms = effective_timestamp_ns / 1_000_000;
-    let timestamp = format_timestamp(timestamp_ms);
+#[derive(Debug, Clone, Serialize)]
+pub struct LogEntry {
+    pub timestamp: String,
+    pub source: String,
+    pub severity: Option<String>,
+    pub message: String,
+}
 
-    let service_name = record.service_name.as_deref().unwrap_or("unknown");
-    let source = if service_name.ends_with("_app") {
-        "app"
-    } else if service_name.ends_with("_ui") {
-        " ui"
-    } else if service_name.ends_with("_db") {
-        " db"
-    } else {
-        "apx"
-    };
+/// Fetch dev server logs as structured entries (for MCP / programmatic use).
+pub async fn fetch_logs_structured(
+    app_dir: &Path,
+    duration: &str,
+) -> Result<Vec<LogEntry>, String> {
+    let filtered = query_filtered_logs(app_dir, duration)?;
 
-    let message = record.body.as_deref().unwrap_or("");
+    let mut aggregator = LogAggregator::new();
+    let mut entries = Vec::new();
 
-    if colorize {
-        let color_code = match source {
-            "app" => "\x1b[36m",
-            " ui" => "\x1b[35m",
-            " db" => "\x1b[32m",
-            _ => "\x1b[33m",
-        };
-        let reset = "\x1b[0m";
-        format!("{color_code}{timestamp} | {source} | {message}{reset}")
-    } else {
-        format!("{timestamp} | {source} | {message}")
+    for record in &filtered {
+        let timestamp_ms = record.effective_timestamp_ms();
+
+        for agg in aggregator.flush_expired(timestamp_ms) {
+            entries.push(aggregated_record_to_entry(&agg));
+        }
+
+        if !aggregator.add(record) {
+            entries.push(log_record_to_entry(record));
+        }
+    }
+
+    for agg in aggregator.flush_all() {
+        entries.push(aggregated_record_to_entry(&agg));
+    }
+
+    Ok(entries)
+}
+
+// ---------------------------------------------------------------------------
+// Formatting (presentation layer)
+// ---------------------------------------------------------------------------
+
+fn log_record_to_entry(record: &LogRecord) -> LogEntry {
+    LogEntry {
+        timestamp: format_timestamp(record.effective_timestamp_ms()),
+        source: record.source_label().to_string(),
+        severity: record.severity_text.clone(),
+        message: record.body.as_deref().unwrap_or("").to_string(),
     }
 }
 
-/// Check if a log record should be skipped (internal/noisy logs).
-pub fn should_skip_log(record: &LogRecord) -> bool {
+fn aggregated_record_to_entry(agg: &AggregatedRecord) -> LogEntry {
+    LogEntry {
+        timestamp: format_timestamp(agg.timestamp_ms),
+        source: source_label(&agg.service_name).to_string(),
+        severity: None,
+        message: format!("[{}] {}", agg.count, agg.template),
+    }
+}
+
+/// Format a log record for terminal display.
+pub fn format_log_record(record: &LogRecord, colorize: bool) -> String {
+    let timestamp = format_timestamp(record.effective_timestamp_ms());
+    let src = record.source_label();
+    let padded_src = format!("{src:>3}");
     let message = record.body.as_deref().unwrap_or("");
-    let service_name = record.service_name.as_deref().unwrap_or("");
-    let severity_number = record.severity_number.unwrap_or(9);
 
-    if service_name == "_core" && severity_number < APX_MIN_SEVERITY {
-        return true;
+    if colorize {
+        let color_code = source_color(src);
+        let reset = "\x1b[0m";
+        format!("{color_code}{timestamp} | {padded_src} | {message}{reset}")
+    } else {
+        format!("{timestamp} | {padded_src} | {message}")
     }
+}
 
-    if message.starts_with("BatchLogProcessor.")
-        || message.starts_with("ReqwestBlockingClient.")
-        || message.starts_with("HttpLogsClient.")
-        || message.starts_with("HttpClient.")
-        || message.starts_with("Http::connect")
-    {
-        return true;
+/// Format an aggregated record for terminal display.
+pub fn format_aggregated_record(agg: &AggregatedRecord, colorize: bool) -> String {
+    let timestamp = format_timestamp(agg.timestamp_ms);
+    let src = source_label(&agg.service_name);
+    let padded_src = format!("{src:>3}");
+    let message = format!("[{}] {}", agg.count, agg.template);
+
+    if colorize {
+        let color_code = source_color(src);
+        let reset = "\x1b[0m";
+        format!("{color_code}{timestamp} | {padded_src} | {message}{reset}")
+    } else {
+        format!("{timestamp} | {padded_src} | {message}")
     }
+}
 
-    if message.starts_with("starting new connection:")
-        || message.starts_with("connecting to ")
-        || message.starts_with("connected to ")
-        || message.starts_with("reuse idle connection")
-        || message.starts_with("pooling idle connection")
-    {
-        return true;
+fn source_color(src: &str) -> &'static str {
+    match src {
+        "app" => "\x1b[36m",
+        "ui" => "\x1b[35m",
+        "db" => "\x1b[32m",
+        _ => "\x1b[33m",
     }
-
-    if message.starts_with("preparing query ")
-        || message.starts_with("DEBUG: parse ")
-        || message.starts_with("DEBUG: bind ")
-        || message.starts_with("executing statement ")
-    {
-        return true;
-    }
-
-    if message.starts_with("take? (")
-        || message.starts_with("wait at most")
-        || message.starts_with("connection ")
-        || message.contains(".cargo/registry/src/")
-        || message.starts_with("event /")
-    {
-        return true;
-    }
-
-    false
 }
 
 /// Format a timestamp in milliseconds to `YYYY-MM-DD HH:MM:SS.mmm` format in local timezone.
@@ -192,113 +226,4 @@ pub fn since_timestamp_nanos(duration: Duration) -> i64 {
     let now_ns = now_ms * 1_000_000;
     let duration_ns = duration.as_nanos() as u64;
     now_ns.saturating_sub(duration_ns) as i64
-}
-
-/// Get aggregation key for a message if it should be aggregated.
-fn get_aggregation_key(record: &LogRecord) -> Option<(String, &'static str)> {
-    let message = record.body.as_deref().unwrap_or("");
-    let service = record.service_name.as_deref().unwrap_or("");
-
-    if service.ends_with("_db") && message.starts_with("Client connected from") {
-        return Some((
-            format!("{service}_client_connected"),
-            "db connections in last 2s",
-        ));
-    }
-
-    if service.ends_with("_db") && message.starts_with("Client disconnected") {
-        return Some((
-            format!("{service}_client_disconnected"),
-            "db disconnections in last 2s",
-        ));
-    }
-
-    None
-}
-
-/// Tracks aggregated messages within time windows
-#[derive(Debug, Default)]
-pub struct LogAggregator {
-    buckets: HashMap<String, (usize, i64, i64, &'static str)>,
-}
-
-impl LogAggregator {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn add(&mut self, record: &LogRecord) -> bool {
-        let Some((key, template)) = get_aggregation_key(record) else {
-            return false;
-        };
-
-        let timestamp_ns = if record.timestamp_ns == 0 {
-            record.observed_timestamp_ns
-        } else {
-            record.timestamp_ns
-        };
-        let timestamp_ms = timestamp_ns / 1_000_000;
-
-        let entry = self
-            .buckets
-            .entry(key)
-            .or_insert((0, timestamp_ms, timestamp_ms, template));
-        entry.0 += 1;
-        entry.2 = timestamp_ms;
-
-        true
-    }
-
-    pub fn flush_expired(&mut self, current_time_ms: i64, colorize: bool) -> Vec<String> {
-        let mut output = Vec::new();
-        let mut to_remove = Vec::new();
-
-        for (key, (count, first_ts, last_ts, template)) in &self.buckets {
-            if current_time_ms - last_ts > AGGREGATION_WINDOW_MS {
-                if *count > 1 {
-                    let formatted = format_aggregated(*count, *first_ts, template, colorize);
-                    output.push(formatted);
-                }
-                to_remove.push(key.clone());
-            }
-        }
-
-        for key in to_remove {
-            self.buckets.remove(&key);
-        }
-
-        output
-    }
-
-    pub fn flush_all(&mut self, colorize: bool) -> Vec<String> {
-        let mut output = Vec::new();
-
-        for (count, first_ts, _last_ts, template) in self.buckets.values() {
-            if *count > 1 {
-                let formatted = format_aggregated(*count, *first_ts, template, colorize);
-                output.push(formatted);
-            }
-        }
-
-        self.buckets.clear();
-        output
-    }
-}
-
-fn format_aggregated(count: usize, timestamp_ms: i64, template: &str, colorize: bool) -> String {
-    let timestamp = format_timestamp(timestamp_ms);
-    let source = if template.starts_with("db") {
-        " db"
-    } else {
-        "app"
-    };
-    let message = format!("[{count}] {template}");
-
-    if colorize {
-        let color_code = "\x1b[32m";
-        let reset = "\x1b[0m";
-        format!("{color_code}{timestamp} | {source} | {message}{reset}")
-    } else {
-        format!("{timestamp} | {source} | {message}")
-    }
 }

@@ -9,10 +9,10 @@ use tracing::debug;
 
 use crate::common::resolve_app_dir;
 use crate::run_cli_async_helper;
+use apx_common::{LogAggregator, Storage, db_path, should_skip_log};
 use apx_core::dev::common::{lock_path, read_lock};
-use apx_core::flux::{Storage, db_path};
 use apx_core::ops::logs::{
-    DEFAULT_LOG_DURATION, LogAggregator, format_log_record, parse_duration, should_skip_log,
+    DEFAULT_LOG_DURATION, format_aggregated_record, format_log_record, parse_duration,
     since_timestamp_nanos,
 };
 
@@ -95,16 +95,11 @@ fn read_logs(storage: &Storage, app_path: &str, since_ns: i64) -> Result<(), Str
     let mut aggregator = LogAggregator::new();
 
     for record in &filtered {
-        let timestamp_ns = if record.timestamp_ns == 0 {
-            record.observed_timestamp_ns
-        } else {
-            record.timestamp_ns
-        };
-        let timestamp_ms = timestamp_ns / 1_000_000;
+        let timestamp_ms = record.effective_timestamp_ms();
 
         // Flush expired aggregations before processing this record
-        for line in aggregator.flush_expired(timestamp_ms, true) {
-            println!("{line}");
+        for agg in aggregator.flush_expired(timestamp_ms) {
+            println!("{}", format_aggregated_record(&agg, true));
         }
 
         // Try to aggregate, if not aggregatable print directly
@@ -114,8 +109,8 @@ fn read_logs(storage: &Storage, app_path: &str, since_ns: i64) -> Result<(), Str
     }
 
     // Flush any remaining aggregations
-    for line in aggregator.flush_all(true) {
-        println!("{line}");
+    for agg in aggregator.flush_all() {
+        println!("{}", format_aggregated_record(&agg, true));
     }
 
     Ok(())
@@ -147,8 +142,8 @@ async fn follow_logs(
             _ = tokio::signal::ctrl_c() => {
                 debug!("Received Ctrl+C, stopping logs stream.");
                 // Flush remaining aggregations
-                for line in aggregator.flush_all(true) {
-                    println!("{line}");
+                for agg in aggregator.flush_all() {
+                    println!("{}", format_aggregated_record(&agg, true));
                 }
                 break;
             }
@@ -156,8 +151,8 @@ async fn follow_logs(
                 let current_time_ms = Utc::now().timestamp_millis();
 
                 // Flush expired aggregations
-                for line in aggregator.flush_expired(current_time_ms, true) {
-                    println!("{line}");
+                for agg in aggregator.flush_expired(current_time_ms) {
+                    println!("{}", format_aggregated_record(&agg, true));
                 }
 
                 // Poll for new logs
@@ -183,8 +178,8 @@ async fn follow_logs(
                 if server_was_running && !lock_path.exists() {
                     debug!("Dev server stopped (lockfile removed), exiting logs follow.");
                     // Flush remaining aggregations
-                    for line in aggregator.flush_all(true) {
-                        println!("{line}");
+                    for agg in aggregator.flush_all() {
+                        println!("{}", format_aggregated_record(&agg, true));
                     }
                     println!("\n📭 Dev server stopped.");
                     break;

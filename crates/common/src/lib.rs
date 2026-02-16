@@ -23,7 +23,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 // Re-export commonly used types
-pub use storage::{LogRecord, Storage, db_path, flux_dir};
+pub use storage::{
+    AggregatedRecord, LogAggregator, LogRecord, Storage, db_path, flux_dir, get_aggregation_key,
+    should_skip_log, source_label,
+};
 
 /// Flux port for OTLP HTTP receiver
 pub const FLUX_PORT: u16 = 11111;

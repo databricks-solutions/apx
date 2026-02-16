@@ -497,9 +497,6 @@ fn default_logs_duration() -> String {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RefreshOpenapiArgs {}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DatabricksAppsLogsArgs {
     #[serde(default)]
     pub app_name: Option<String>,
@@ -620,15 +617,30 @@ async fn restart_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
 }
 
 async fn logs_tool(ctx: Arc<AppContext>, args: LogsArgs) -> ToolResult {
-    use apx_core::ops::logs::fetch_logs;
+    use apx_core::ops::logs::fetch_logs_structured;
 
-    match fetch_logs(&ctx.app_dir, &args.duration).await {
-        Ok(logs) => ToolResult::success(logs),
+    match fetch_logs_structured(&ctx.app_dir, &args.duration).await {
+        Ok(entries) => {
+            #[derive(Serialize)]
+            struct LogsResponse {
+                duration: String,
+                count: usize,
+                entries: Vec<apx_core::ops::logs::LogEntry>,
+            }
+
+            let response = LogsResponse {
+                duration: args.duration,
+                count: entries.len(),
+                entries,
+            };
+
+            ToolResult::from_serializable(&response)
+        }
         Err(e) => ToolResult::error(e),
     }
 }
 
-async fn refresh_openapi_tool(ctx: Arc<AppContext>, _args: RefreshOpenapiArgs) -> ToolResult {
+async fn refresh_openapi_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
     use apx_core::api_generator::generate_openapi;
 
     match generate_openapi(&ctx.app_dir) {
@@ -641,9 +653,31 @@ async fn check_tool(ctx: Arc<AppContext>, _args: EmptyArgs) -> ToolResult {
     use apx_core::common::OutputMode;
     use apx_core::ops::check::run_check;
 
-    match run_check(&ctx.app_dir, OutputMode::Quiet).await {
-        Ok(()) => ToolResult::success("All checks passed".to_string()),
-        Err(e) => ToolResult::error(e),
+    #[derive(Serialize)]
+    struct CheckResponse {
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        errors: Option<String>,
+    }
+
+    let response = match run_check(&ctx.app_dir, OutputMode::Quiet).await {
+        Ok(()) => CheckResponse {
+            status: "passed".to_string(),
+            errors: None,
+        },
+        Err(e) => CheckResponse {
+            status: "failed".to_string(),
+            errors: Some(e),
+        },
+    };
+
+    if response.errors.is_some() {
+        match serde_json::to_value(&response) {
+            Ok(value) => ToolResult::structured_error(value),
+            Err(e) => ToolResult::error(format!("Failed to serialize response: {e}")),
+        }
+    } else {
+        ToolResult::from_serializable(&response)
     }
 }
 
@@ -810,10 +844,7 @@ async fn databricks_apps_logs_tool(
         duration_ms,
     };
 
-    match serde_json::to_string_pretty(&response) {
-        Ok(json) => ToolResult::success(json),
-        Err(e) => ToolResult::error(format!("Failed to serialize response: {e}")),
-    }
+    ToolResult::from_serializable(&response)
 }
 
 // Helper functions
@@ -975,10 +1006,7 @@ async fn search_registry_components_tool(
             .collect(),
     };
 
-    match serde_json::to_string_pretty(&response) {
-        Ok(json) => ToolResult::success(json),
-        Err(e) => ToolResult::error(format!("Failed to serialize results: {e}")),
-    }
+    ToolResult::from_serializable(&response)
 }
 
 async fn add_component_tool(ctx: Arc<AppContext>, args: AddComponentArgs) -> ToolResult {
@@ -1073,10 +1101,7 @@ async fn docs_tool(ctx: Arc<AppContext>, args: DocsArgs) -> ToolResult {
                     .collect(),
             };
 
-            match serde_json::to_string_pretty(&response) {
-                Ok(json) => ToolResult::success(json),
-                Err(e) => ToolResult::error(format!("Failed to serialize results: {e}")),
-            }
+            ToolResult::from_serializable(&response)
         }
         Err(e) => ToolResult::error(e),
     }
@@ -1153,10 +1178,7 @@ async fn get_route_info_tool(ctx: Arc<AppContext>, args: GetRouteInfoArgs) -> To
         example,
     };
 
-    match serde_json::to_string_pretty(&response) {
-        Ok(json) => ToolResult::success(json),
-        Err(e) => ToolResult::error(format!("Failed to serialize response: {e}")),
-    }
+    ToolResult::from_serializable(&response)
 }
 
 fn generate_query_example(operation_id: &str) -> String {
@@ -1237,7 +1259,7 @@ fn capitalize_first(s: &str) -> String {
 
 const APX_INFO_CONTENT: &str = r#"
 
-this project uses apx toolkit to build a Databricks app. 
+this project uses apx toolkit to build a Databricks app.
 apx bundles together a set of tools and libraries to help you with the complete app development lifecycle: develop, build and deploy.
 
 ## Technology Stack
@@ -1247,3 +1269,146 @@ apx bundles together a set of tools and libraries to help you with the complete 
 - **Build Tools**: uv (Python), bun (JavaScript/TypeScript)
 
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_empty_string() {
+        assert_eq!(truncate("", 100), "");
+    }
+
+    #[test]
+    fn truncate_short_string() {
+        assert_eq!(truncate("hello", 100), "hello");
+    }
+
+    #[test]
+    fn truncate_zero_max() {
+        assert_eq!(truncate("hello", 0), "");
+    }
+
+    #[test]
+    fn truncate_negative_max() {
+        assert_eq!(truncate("hello", -1), "");
+    }
+
+    #[test]
+    fn truncate_long_string() {
+        let long = "a".repeat(1000);
+        let result = truncate(&long, 200);
+        assert!(result.contains("truncated"));
+        assert!(result.len() < 1000);
+    }
+
+    #[test]
+    fn parse_openapi_operations_basic() {
+        let openapi = serde_json::json!({
+            "paths": {
+                "/items": {
+                    "get": {
+                        "operationId": "listItems",
+                        "summary": "List all items"
+                    },
+                    "post": {
+                        "operationId": "createItem",
+                        "description": "Create a new item"
+                    }
+                }
+            }
+        });
+
+        let routes = parse_openapi_operations(&openapi).unwrap();
+        assert_eq!(routes.len(), 2);
+
+        let get_route = routes.iter().find(|r| r.method == "GET").unwrap();
+        assert_eq!(get_route.id, "listItems");
+        assert_eq!(get_route.description, "List all items");
+
+        let post_route = routes.iter().find(|r| r.method == "POST").unwrap();
+        assert_eq!(post_route.id, "createItem");
+        assert_eq!(post_route.description, "Create a new item");
+    }
+
+    #[test]
+    fn parse_openapi_operations_skips_non_methods() {
+        let openapi = serde_json::json!({
+            "paths": {
+                "/items": {
+                    "parameters": [{"name": "id"}],
+                    "get": {
+                        "operationId": "listItems",
+                        "summary": "List items"
+                    }
+                }
+            }
+        });
+
+        let routes = parse_openapi_operations(&openapi).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].method, "GET");
+    }
+
+    #[test]
+    fn parse_openapi_operations_missing_paths() {
+        let openapi = serde_json::json!({});
+        assert!(parse_openapi_operations(&openapi).is_err());
+    }
+
+    #[test]
+    fn resolve_app_name_from_databricks_yml_basic() {
+        let dir = std::env::temp_dir().join("apx_test_resolve_app");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let yml_content = r#"
+resources:
+  apps:
+    my_app:
+      name: my-cool-app
+      source_code_path: ./src
+"#;
+        std::fs::write(dir.join("databricks.yml"), yml_content).unwrap();
+
+        let result = resolve_app_name_from_databricks_yml(&dir);
+        assert_eq!(result.unwrap(), "my-cool-app");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_app_name_multiple_apps_returns_error() {
+        let dir = std::env::temp_dir().join("apx_test_resolve_multi");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let yml_content = r#"
+resources:
+  apps:
+    app1:
+      name: first-app
+    app2:
+      name: second-app
+"#;
+        std::fs::write(dir.join("databricks.yml"), yml_content).unwrap();
+
+        let result = resolve_app_name_from_databricks_yml(&dir);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("multiple apps"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_app_name_no_file_returns_error() {
+        let dir = std::env::temp_dir().join("apx_test_resolve_nofile");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let result = resolve_app_name_from_databricks_yml(&dir);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

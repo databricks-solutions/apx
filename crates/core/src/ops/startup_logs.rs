@@ -5,9 +5,7 @@
 use chrono::{Local, TimeZone, Utc};
 use std::path::Path;
 
-use apx_common::{LogRecord, Storage};
-
-use super::logs::should_skip_log;
+use apx_common::{LogRecord, Storage, should_skip_log};
 
 /// Simple log streamer that prints logs line-by-line to stdout.
 pub struct StartupLogStreamer {

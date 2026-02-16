@@ -10,7 +10,7 @@ use tokio::sync::broadcast;
 
 // JSON-RPC constants
 pub const JSONRPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: &str = "2024-11-05";
+pub const PROTOCOL_VERSION: &str = "2025-11-25";
 pub const PARSE_ERROR: i32 = -32700;
 pub const METHOD_NOT_FOUND: i32 = -32601;
 pub const INVALID_PARAMS: i32 = -32602;
@@ -30,18 +30,6 @@ impl JsonRpcRequest {
             return Err("Invalid JSON-RPC version, expected 2.0");
         }
         Ok(())
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct JsonRpcNotification {
-    pub jsonrpc: String,
-    pub method: String,
-}
-
-impl JsonRpcNotification {
-    pub fn is_valid(&self) -> bool {
-        self.jsonrpc == JSONRPC_VERSION
     }
 }
 
@@ -159,6 +147,8 @@ pub struct ToolResult {
     pub content: Vec<ContentBlock>,
     #[serde(rename = "isError")]
     pub is_error: bool,
+    #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
 }
 
 impl ToolResult {
@@ -166,6 +156,7 @@ impl ToolResult {
         Self {
             content: vec![ContentBlock::text(text)],
             is_error: false,
+            structured_content: None,
         }
     }
 
@@ -173,23 +164,46 @@ impl ToolResult {
         Self {
             content: vec![ContentBlock::text(text)],
             is_error: true,
+            structured_content: None,
+        }
+    }
+
+    pub fn structured(value: Value) -> Self {
+        let text_fallback = serde_json::to_string_pretty(&value).unwrap_or_default();
+        Self {
+            content: vec![ContentBlock::text(text_fallback)],
+            is_error: false,
+            structured_content: Some(value),
+        }
+    }
+
+    pub fn structured_error(value: Value) -> Self {
+        let text_fallback = serde_json::to_string_pretty(&value).unwrap_or_default();
+        Self {
+            content: vec![ContentBlock::text(text_fallback)],
+            is_error: true,
+            structured_content: Some(value),
+        }
+    }
+
+    pub fn from_serializable(value: &impl serde::Serialize) -> Self {
+        match serde_json::to_value(value) {
+            Ok(v) => Self::structured(v),
+            Err(e) => Self::error(format!("Failed to serialize response: {e}")),
         }
     }
 }
 
-#[derive(Debug, Serialize)]
-pub struct ContentBlock {
-    #[serde(rename = "type")]
-    pub content_type: String,
-    pub text: String,
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "type")]
+pub enum ContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
 }
 
 impl ContentBlock {
     pub fn text(text: String) -> Self {
-        Self {
-            content_type: "text".to_string(),
-            text,
-        }
+        Self::Text { text }
     }
 }
 
@@ -431,13 +445,6 @@ impl<C: Send + Sync + 'static> McpServer<C> {
     }
 
     async fn handle_message(&self, msg: &str) -> Option<String> {
-        if let Ok(notification) = serde_json::from_str::<JsonRpcNotification>(msg)
-            && notification.is_valid()
-            && notification.method == "notifications/initialized"
-        {
-            return None;
-        }
-
         let request: JsonRpcRequest = match serde_json::from_str(msg) {
             Ok(req) => req,
             Err(_) => return Some(JsonRpcError::parse_error().to_json()),
@@ -447,7 +454,8 @@ impl<C: Send + Sync + 'static> McpServer<C> {
             return Some(JsonRpcError::parse_error().to_json());
         }
 
-        let id = request.id.unwrap_or(Value::Null);
+        // Notifications (no id) MUST NOT receive a response per JSON-RPC spec
+        let id = request.id?;
         let params = request.params.unwrap_or(Value::Null);
 
         let response = match request.method.as_str() {
@@ -456,6 +464,7 @@ impl<C: Send + Sync + 'static> McpServer<C> {
                 self.initialize_result(PROTOCOL_VERSION, "apx", env!("CARGO_PKG_VERSION")),
             )
             .to_json(),
+            "ping" => JsonRpcResponse::new(id, json!({})).to_json(),
             "resources/list" => {
                 JsonRpcResponse::new(id, json!({ "resources": self.list_resources() })).to_json()
             }
@@ -499,5 +508,125 @@ impl<C: Send + Sync + 'static> McpServer<C> {
             }
             Err(err) => JsonRpcError::invalid_params(id, err).to_json(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_block_text_serialization() {
+        let block = ContentBlock::text("hello".to_string());
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json, json!({"type": "text", "text": "hello"}));
+    }
+
+    #[test]
+    fn tool_result_success_serialization() {
+        let result = ToolResult::success("ok".to_string());
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["isError"], false);
+        assert_eq!(json["content"][0]["type"], "text");
+        assert_eq!(json["content"][0]["text"], "ok");
+        assert!(json.get("structuredContent").is_none());
+    }
+
+    #[test]
+    fn tool_result_error_serialization() {
+        let result = ToolResult::error("bad".to_string());
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["isError"], true);
+        assert_eq!(json["content"][0]["text"], "bad");
+        assert!(json.get("structuredContent").is_none());
+    }
+
+    #[test]
+    fn tool_result_structured_serialization() {
+        let data = json!({"count": 3, "items": [1, 2, 3]});
+        let result = ToolResult::structured(data.clone());
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["isError"], false);
+        assert_eq!(json["structuredContent"], data);
+        // text fallback should contain the JSON
+        let text = json["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"count\": 3"));
+    }
+
+    #[test]
+    fn tool_result_structured_error_serialization() {
+        let data = json!({"status": "failed", "errors": "something broke"});
+        let result = ToolResult::structured_error(data.clone());
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["isError"], true);
+        assert_eq!(json["structuredContent"], data);
+    }
+
+    #[test]
+    fn tool_result_from_serializable_success() {
+        #[derive(Serialize)]
+        struct Resp {
+            count: i32,
+        }
+        let result = ToolResult::from_serializable(&Resp { count: 42 });
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["isError"], false);
+        assert_eq!(json["structuredContent"]["count"], 42);
+    }
+
+    fn make_server() -> McpServer<()> {
+        McpServer::new(())
+    }
+
+    #[tokio::test]
+    async fn handle_ping() {
+        let server = make_server();
+        let msg = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let response = server.handle_message(msg).await.unwrap();
+        let parsed: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["result"], json!({}));
+        assert_eq!(parsed["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn handle_notification_returns_none() {
+        let server = make_server();
+        // No "id" field = notification
+        let msg = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        assert!(server.handle_message(msg).await.is_none());
+
+        let msg = r#"{"jsonrpc":"2.0","method":"notifications/cancelled"}"#;
+        assert!(server.handle_message(msg).await.is_none());
+
+        let msg = r#"{"jsonrpc":"2.0","method":"some/custom/notification"}"#;
+        assert!(server.handle_message(msg).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_unknown_method_returns_error() {
+        let server = make_server();
+        let msg = r#"{"jsonrpc":"2.0","id":42,"method":"nonexistent/method"}"#;
+        let response = server.handle_message(msg).await.unwrap();
+        let parsed: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["error"]["code"], METHOD_NOT_FOUND);
+        assert!(
+            parsed["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("nonexistent/method")
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_invalid_json_returns_parse_error() {
+        let server = make_server();
+        let response = server.handle_message("not json").await.unwrap();
+        let parsed: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["error"]["code"], PARSE_ERROR);
+    }
+
+    #[test]
+    fn protocol_version_is_updated() {
+        assert_eq!(PROTOCOL_VERSION, "2025-11-25");
     }
 }
