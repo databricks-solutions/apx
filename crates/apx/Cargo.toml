@@ -1,0 +1,13 @@
+[package]
+name = "apx-bin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "apx"
+path = "src/main.rs"
+
+[dependencies]
+apx-cli.workspace = true
+apx-core.workspace = true

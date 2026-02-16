@@ -21,6 +21,7 @@ pub mod flux;
 pub mod frontend;
 pub mod interop;
 pub mod ops;
+pub mod resources;
 pub mod search;
 pub mod tracing_init;
 

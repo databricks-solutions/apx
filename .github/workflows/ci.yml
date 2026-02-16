@@ -126,6 +126,15 @@ jobs:
       - name: Cargo test
         run: cargo test --workspace --exclude apx-studio
 
+      # Verify standalone binary builds and runs
+      - name: Build standalone binary
+        run: cargo build -p apx-bin --release
+
+      - name: Verify standalone binary
+        run: |
+          ./target/release/apx --version
+          ./target/release/apx --help
+
   docs:
     runs-on: linux-ubuntu-latest
     needs: detect-changes

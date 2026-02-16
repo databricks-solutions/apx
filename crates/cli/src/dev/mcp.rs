@@ -26,8 +26,7 @@ pub async fn run(_args: McpArgs) -> i32 {
         // Create cache state for background population
         let cache_state = new_cache_state();
 
-        // Pre-compute SDK version synchronously before spawning async task
-        // This avoids Python GIL issues when calling PyO3 from async context
+        // Get SDK version via subprocess before spawning async task
         let sdk_version = match get_databricks_sdk_version() {
             Ok(version) => {
                 if let Some(ref v) = version {

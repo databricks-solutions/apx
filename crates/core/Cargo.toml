@@ -8,7 +8,6 @@ rust-version.workspace = true
 apx-common.workspace = true
 apx-agent.workspace = true
 apx-databricks-sdk.workspace = true
-pyo3.workspace = true
 dirs.workspace = true
 indicatif.workspace = true
 toml.workspace = true
@@ -52,6 +51,8 @@ similar.workspace = true
 tempfile.workspace = true
 rand.workspace = true
 serde_with = { version = "3.16.1", default-features = false, features = ["macros"] }
+rust-embed.workspace = true
+which.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

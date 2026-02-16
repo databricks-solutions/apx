@@ -5,19 +5,21 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-const BUN_BIN_DIR: &str = ".bins/bun";
-const AGENT_BIN_DIR: &str = ".bins/agent";
-const OUTPUT_DIR: &str = "src/apx/binaries";
-
 fn main() {
     // protoc is expected to be available in PATH (installed via CI or locally)
     // See: arduino/setup-protoc in CI workflows
 
+    // Workspace root is two levels up from crates/apx/
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("Could not find workspace root");
+
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
 
-    let output_dir = manifest_dir.join(OUTPUT_DIR);
+    let output_dir = workspace_root.join("src/apx/binaries");
     fs::create_dir_all(&output_dir).expect("Failed to create binaries output dir");
 
     // Clear old binaries
@@ -30,24 +32,22 @@ fn main() {
     }
 
     // Copy Bun binary
-    copy_bun_binary(&manifest_dir, &output_dir, &target_os, &target_arch);
+    copy_bun_binary(workspace_root, &output_dir, &target_os, &target_arch);
 
     // Copy Agent binary
-    copy_agent_binary(&manifest_dir, &output_dir, &target_os, &target_arch);
+    copy_agent_binary(workspace_root, &output_dir, &target_os, &target_arch);
 
     // Watch for changes
-    println!("cargo:rerun-if-changed={BUN_BIN_DIR}/");
-    println!("cargo:rerun-if-changed={AGENT_BIN_DIR}/");
-
-    // Watch for changes in the plugin.ts asset file
-    let plugin_ts = manifest_dir.join("src/apx/assets/plugin.ts");
-    println!("cargo:rerun-if-changed={}", plugin_ts.display());
+    let bun_dir = workspace_root.join(".bins/bun");
+    let agent_dir = workspace_root.join(".bins/agent");
+    println!("cargo:rerun-if-changed={}", bun_dir.display());
+    println!("cargo:rerun-if-changed={}", agent_dir.display());
 }
 
-fn copy_bun_binary(manifest_dir: &Path, output_dir: &Path, target_os: &str, target_arch: &str) {
+fn copy_bun_binary(workspace_root: &Path, output_dir: &Path, target_os: &str, target_arch: &str) {
     let bun_src_name = bun_binary_name(target_os, target_arch)
         .unwrap_or_else(|| panic!("Unsupported target for bun: {target_os}-{target_arch}"));
-    let bun_source = manifest_dir.join(BUN_BIN_DIR).join(bun_src_name);
+    let bun_source = workspace_root.join(".bins/bun").join(bun_src_name);
     if !bun_source.exists() {
         panic!("Missing Bun binary at {}", bun_source.display());
     }
@@ -62,7 +62,7 @@ fn copy_bun_binary(manifest_dir: &Path, output_dir: &Path, target_os: &str, targ
     println!("cargo:rerun-if-changed={}", bun_source.display());
 }
 
-fn copy_agent_binary(manifest_dir: &Path, output_dir: &Path, target_os: &str, target_arch: &str) {
+fn copy_agent_binary(workspace_root: &Path, output_dir: &Path, target_os: &str, target_arch: &str) {
     let agent_src_name = match agent_binary_name(target_os, target_arch) {
         Some(name) => name,
         None => {
@@ -75,7 +75,7 @@ fn copy_agent_binary(manifest_dir: &Path, output_dir: &Path, target_os: &str, ta
         }
     };
 
-    let agent_source = manifest_dir.join(AGENT_BIN_DIR).join(agent_src_name);
+    let agent_source = workspace_root.join(".bins/agent").join(agent_src_name);
     if !agent_source.exists() {
         // Agent binary not yet built - skip with warning
         println!(

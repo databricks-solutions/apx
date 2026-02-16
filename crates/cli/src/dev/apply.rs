@@ -9,7 +9,7 @@ use walkdir::WalkDir;
 
 use crate::common::{Assistant, Layout, Template, resolve_app_dir};
 use crate::run_cli_async_helper;
-use apx_core::interop::templates_dir;
+use apx_core::interop::extract_templates;
 
 /// Available addons that can be applied
 #[derive(ValueEnum, Clone, Debug, Copy)]
@@ -153,8 +153,9 @@ async fn run_inner(args: ApplyArgs) -> Result<(), String> {
     // Read project context
     let (app_name, app_slug) = read_project_context(&app_dir)?;
 
-    // Get templates directory
-    let templates_dir = templates_dir()?;
+    // Extract embedded templates to a temporary directory
+    let templates_tmp = extract_templates()?;
+    let templates_dir = templates_tmp.path().to_path_buf();
 
     // Get addon source directory
     let addon_source = if args.addon.is_base() {

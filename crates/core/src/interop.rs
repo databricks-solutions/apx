@@ -1,11 +1,11 @@
-use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Once;
 use std::time::Duration;
-use tracing::{debug, trace};
+use tracing::debug;
 
 use crate::dev::common::{CLIENT_HOST, lock_path, read_lock};
+use crate::resources;
 
 #[cfg(target_os = "windows")]
 const BUN_FILENAME: &str = "bun.exe";
@@ -17,20 +17,80 @@ const AGENT_FILENAME: &str = "apx-agent.exe";
 #[cfg(not(target_os = "windows"))]
 const AGENT_FILENAME: &str = "apx-agent";
 
-pub fn get_bun_binary_path(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let bun_path = resolve_bun_binary_path(py)?;
-    let pathlib = py.import("pathlib")?;
-    let path_cls = pathlib.getattr("Path")?;
-    let path_obj = path_cls.call1((bun_path.to_string_lossy().as_ref(),))?;
-    Ok(path_obj.unbind())
-}
-
+/// Resolve the bun binary path.
+///
+/// Resolution order:
+/// 1. `APX_BUN_PATH` env var (explicit override)
+/// 2. Sibling of current exe: `<exe_dir>/apx_binaries/bun`
+/// 3. Co-located in Python package: walk up from exe to find `apx/binaries/bun`
+/// 4. `which bun` PATH lookup (standalone mode)
 pub fn bun_binary_path() -> Result<PathBuf, String> {
     warn_if_system_bun_exists();
-    Python::attach(|py| {
-        resolve_bun_binary_path(py)
-            .map_err(|err| format!("Failed to resolve bun binary path: {err}"))
-    })
+
+    // 1. Explicit env var override
+    if let Ok(path) = std::env::var("APX_BUN_PATH") {
+        let p = PathBuf::from(&path);
+        if p.is_file() {
+            debug!("bun_binary_path: using APX_BUN_PATH={}", p.display());
+            return Ok(p);
+        }
+        return Err(format!("APX_BUN_PATH={path} does not exist"));
+    }
+
+    // 2. Exe-relative: <exe_dir>/apx_binaries/bun
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        let candidate = exe_dir.join("apx_binaries").join(BUN_FILENAME);
+        if candidate.is_file() {
+            debug!(
+                "bun_binary_path: found exe-relative at {}",
+                candidate.display()
+            );
+            return Ok(candidate);
+        }
+
+        // 3. Python site-packages layout: walk up to find apx/binaries/
+        for ancestor in exe_dir.ancestors().skip(1) {
+            let candidate = ancestor.join("apx").join("binaries").join(BUN_FILENAME);
+            if candidate.is_file() {
+                debug!(
+                    "bun_binary_path: found in site-packages at {}",
+                    candidate.display()
+                );
+                return Ok(candidate);
+            }
+            // Also check lib/python*/site-packages/apx/binaries/
+            if let Ok(entries) = std::fs::read_dir(ancestor.join("lib")) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if name.to_string_lossy().starts_with("python") {
+                        let candidate = entry
+                            .path()
+                            .join("site-packages")
+                            .join("apx")
+                            .join("binaries")
+                            .join(BUN_FILENAME);
+                        if candidate.is_file() {
+                            debug!(
+                                "bun_binary_path: found in lib/python site-packages at {}",
+                                candidate.display()
+                            );
+                            return Ok(candidate);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. PATH lookup (standalone mode)
+    if let Ok(path) = which::which(BUN_FILENAME) {
+        debug!("bun_binary_path: found on PATH at {}", path.display());
+        return Ok(path);
+    }
+
+    Err("Could not find bun binary. Set APX_BUN_PATH or ensure bun is on PATH.".to_string())
 }
 
 static SYSTEM_BUN_WARNING: Once = Once::new();
@@ -71,74 +131,82 @@ fn find_system_bun() -> Option<PathBuf> {
     None
 }
 
-fn resolve_bun_binary_path(py: Python<'_>) -> PyResult<PathBuf> {
-    let importlib = py.import("importlib.resources")?;
-    let files = importlib.getattr("files")?;
-    let apx_resources = files.call1(("apx",))?;
-    let binaries_dir = apx_resources.getattr("joinpath")?.call1(("binaries",))?;
-    let bun_path = binaries_dir.getattr("joinpath")?.call1((BUN_FILENAME,))?;
-    let fspath = bun_path.getattr("__fspath__")?.call0()?;
-    let bun_path_str: String = fspath.extract()?;
-    Ok(PathBuf::from(bun_path_str))
+/// Resolve the path to the bundled apx-agent binary.
+///
+/// Resolution order:
+/// 1. `APX_AGENT_PATH` env var (explicit override)
+/// 2. `~/.apx/apx-agent` (standard install target)
+/// 3. Exe-relative: `<exe_dir>/apx_binaries/apx-agent`
+/// 4. Co-located in Python package: walk up from exe to find `apx/binaries/apx-agent`
+pub fn resolve_apx_agent_binary_path() -> Result<PathBuf, String> {
+    // 1. Explicit env var override
+    if let Ok(path) = std::env::var("APX_AGENT_PATH") {
+        let p = PathBuf::from(&path);
+        if p.is_file() {
+            debug!(
+                "resolve_apx_agent_binary_path: using APX_AGENT_PATH={}",
+                p.display()
+            );
+            return Ok(p);
+        }
+        return Err(format!("APX_AGENT_PATH={path} does not exist"));
+    }
+
+    // 2. ~/.apx/apx-agent (already the install target)
+    if let Some(home) = dirs::home_dir() {
+        let candidate = home.join(".apx").join(AGENT_FILENAME);
+        if candidate.is_file() {
+            debug!(
+                "resolve_apx_agent_binary_path: found at ~/.apx/{}",
+                AGENT_FILENAME
+            );
+            return Ok(candidate);
+        }
+    }
+
+    // 3. Exe-relative: <exe_dir>/apx_binaries/apx-agent
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        let candidate = exe_dir.join("apx_binaries").join(AGENT_FILENAME);
+        if candidate.is_file() {
+            debug!(
+                "resolve_apx_agent_binary_path: found exe-relative at {}",
+                candidate.display()
+            );
+            return Ok(candidate);
+        }
+
+        // 4. Python site-packages layout
+        for ancestor in exe_dir.ancestors().skip(1) {
+            let candidate = ancestor.join("apx").join("binaries").join(AGENT_FILENAME);
+            if candidate.is_file() {
+                debug!(
+                    "resolve_apx_agent_binary_path: found in site-packages at {}",
+                    candidate.display()
+                );
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(format!(
+        "Could not find apx-agent binary. Set APX_AGENT_PATH or install it to ~/.apx/{AGENT_FILENAME}."
+    ))
 }
 
-/// Resolve the path to the bundled apx-agent binary via importlib.resources
-pub fn resolve_apx_agent_binary_path(py: Python<'_>) -> PyResult<PathBuf> {
-    let importlib = py.import("importlib.resources")?;
-    let files = importlib.getattr("files")?;
-    let apx_resources = files.call1(("apx",))?;
-    let binaries_dir = apx_resources.getattr("joinpath")?.call1(("binaries",))?;
-    let agent_path = binaries_dir.getattr("joinpath")?.call1((AGENT_FILENAME,))?;
-    let fspath = agent_path.getattr("__fspath__")?.call0()?;
-    let agent_path_str: String = fspath.extract()?;
-    Ok(PathBuf::from(agent_path_str))
-}
-
-/// Get the path to the frontend entrypoint.ts asset
+/// Get the path to the frontend entrypoint.ts asset (materialized from embedded resources)
 pub fn frontend_entrypoint_path() -> Result<PathBuf, String> {
-    Python::attach(|py| {
-        resolve_frontend_entrypoint_path(py)
-            .map_err(|err| format!("Failed to resolve frontend entrypoint path: {err}"))
-    })
+    resources::materialize_entrypoint_ts()
 }
 
-fn resolve_frontend_entrypoint_path(py: Python<'_>) -> PyResult<PathBuf> {
-    let importlib = py.import("importlib.resources")?;
-    let files = importlib.getattr("files")?;
-    let apx_resources = files.call1(("apx",))?;
-    let assets_dir = apx_resources.getattr("joinpath")?.call1(("assets",))?;
-    let entrypoint_path = assets_dir.getattr("joinpath")?.call1(("entrypoint.ts",))?;
-    let fspath = entrypoint_path.getattr("__fspath__")?.call0()?;
-    let entrypoint_path_str: String = fspath.extract()?;
-    Ok(PathBuf::from(entrypoint_path_str))
-}
-
-pub fn templates_dir() -> Result<PathBuf, String> {
-    Python::attach(|py| {
-        let importlib = py
-            .import("importlib.resources")
-            .map_err(|err| format!("Failed to import importlib.resources: {err}"))?;
-        let files = importlib
-            .getattr("files")
-            .map_err(|err| format!("Failed to access importlib.resources.files: {err}"))?;
-        let apx_resources = files
-            .call1(("apx",))
-            .map_err(|err| format!("Failed to access apx package resources: {err}"))?;
-        let templates_dir = apx_resources
-            .getattr("joinpath")
-            .map_err(|err| format!("Failed to access joinpath: {err}"))?
-            .call1(("templates",))
-            .map_err(|err| format!("Failed to resolve templates path: {err}"))?;
-        let fspath = templates_dir
-            .getattr("__fspath__")
-            .map_err(|err| format!("Failed to access __fspath__: {err}"))?
-            .call0()
-            .map_err(|err| format!("Failed to resolve templates path: {err}"))?;
-        let templates_path: String = fspath
-            .extract()
-            .map_err(|err| format!("Failed to parse templates path: {err}"))?;
-        Ok(PathBuf::from(templates_path))
-    })
+/// Extract embedded templates to a temporary directory and return the path.
+/// The caller is responsible for managing the lifetime of the temp dir.
+pub fn extract_templates() -> Result<tempfile::TempDir, String> {
+    let tmp = tempfile::TempDir::new()
+        .map_err(|e| format!("Failed to create temp dir for templates: {e}"))?;
+    resources::extract_templates_to(tmp.path())?;
+    Ok(tmp)
 }
 
 pub fn generate_openapi_spec(
@@ -152,7 +220,7 @@ pub fn generate_openapi_spec(
         return Ok((spec_json, app_slug.to_string()));
     }
 
-    // Fall back to Python module method
+    // Fall back to subprocess method
     generate_openapi_spec_from_module(project_root, app_entrypoint, app_slug)
 }
 
@@ -179,130 +247,89 @@ fn try_fetch_openapi_from_server(project_root: &Path) -> Option<String> {
     response.text().ok()
 }
 
+/// Generate OpenAPI spec by running a Python subprocess via `uv run`.
 fn generate_openapi_spec_from_module(
     project_root: &Path,
     app_entrypoint: &str,
     app_slug: &str,
 ) -> Result<(String, String), String> {
-    let project_root_str = project_root.to_string_lossy().to_string();
-    let src_root = project_root.join("src");
-    let src_root_str = src_root.to_string_lossy().to_string();
-
     debug!("generate_openapi_spec_from_module called:");
-    debug!("  project_root: {}", project_root_str);
-    debug!("  src_root: {}", src_root_str);
+    debug!("  project_root: {}", project_root.display());
     debug!("  app_entrypoint: {}", app_entrypoint);
     debug!("  app_slug: {}", app_slug);
-    debug!("  src_root exists: {}", src_root.exists());
 
-    Python::attach(|py| -> PyResult<(String, String)> {
-        let sys = py.import("sys")?;
-        let path_any = sys.getattr("path")?;
-        let path = path_any.cast::<PyList>()?;
+    let (module_path, attr_name) = app_entrypoint
+        .split_once(':')
+        .ok_or_else(|| "Invalid app-entrypoint format (expected 'module:attr')".to_string())?;
 
-        trace!(
-            "sys.path before modifications: {:?}",
-            path.extract::<Vec<String>>()
-        );
+    let script = format!(
+        r#"
+import sys, json, importlib, os
+project_root = sys.argv[1]
+src = os.path.join(project_root, "src")
+if os.path.isdir(src) and src not in sys.path:
+    sys.path.insert(0, src)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+mod = importlib.import_module("{module_path}")
+app = getattr(mod, "{attr_name}")
+print(json.dumps(app.openapi(), indent=2))
+"#
+    );
 
-        if src_root.exists() && !path.contains(src_root_str.as_str())? {
-            path.insert(0, src_root_str.as_str())?;
-            debug!("Added src_root to sys.path: {}", src_root_str);
-        } else {
-            debug!(
-                "src_root NOT added (exists: {}, already in path: {})",
-                src_root.exists(),
-                path.contains(src_root_str.as_str()).unwrap_or(false)
-            );
-        }
+    let output = Command::new("uv")
+        .args(["run", "--no-sync", "python", "-c", &script])
+        .arg(project_root.to_string_lossy().as_ref())
+        .current_dir(project_root)
+        .output()
+        .map_err(|e| format!("Failed to run uv for OpenAPI generation: {e}"))?;
 
-        if !path.contains(project_root_str.as_str())? {
-            path.insert(0, project_root_str.as_str())?;
-            debug!("Added project_root to sys.path: {}", project_root_str);
-        } else {
-            debug!("project_root already in sys.path");
-        }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to generate OpenAPI schema: {stderr}"));
+    }
 
-        trace!(
-            "sys.path after modifications: {:?}",
-            path.extract::<Vec<String>>()
-        );
+    let spec_json = String::from_utf8(output.stdout)
+        .map_err(|e| format!("OpenAPI output is not valid UTF-8: {e}"))?
+        .trim()
+        .to_string();
 
-        let (module_path, attr_name) = app_entrypoint.split_once(':').ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err("Invalid app-entrypoint format")
-        })?;
-
-        debug!(
-            "Attempting to import module: {} (attr: {})",
-            module_path, attr_name
-        );
-
-        let importlib = py.import("importlib")?;
-        let module = importlib.call_method1("import_module", (module_path,))?;
-        debug!("Successfully imported module: {}", module_path);
-
-        let app = module.getattr(attr_name)?;
-        debug!("Successfully got attribute: {}", attr_name);
-
-        let spec = app.call_method0("openapi")?;
-        debug!("Successfully generated OpenAPI spec");
-
-        let json = py.import("json")?;
-        let dumps_kwargs = PyDict::new(py);
-        dumps_kwargs.set_item("indent", 2)?;
-        let spec_json: String = json
-            .call_method("dumps", (spec,), Some(&dumps_kwargs))?
-            .extract()?;
-
-        Ok((spec_json, app_slug.to_string()))
-    })
-    .map_err(|err| format!("Failed to generate OpenAPI schema: {err}"))
+    Ok((spec_json, app_slug.to_string()))
 }
 
-/// Get the installed Databricks SDK version
+/// Get the installed Databricks SDK version via subprocess
 pub fn get_databricks_sdk_version() -> Result<Option<String>, String> {
-    debug!("get_databricks_sdk_version: Starting Python interop call");
-    Python::attach(|py| {
-        debug!("get_databricks_sdk_version: Inside Python::attach");
-        // Try to import databricks.sdk and get its version
-        let importlib = py.import("importlib.metadata");
+    debug!("get_databricks_sdk_version: Starting subprocess call");
 
-        match importlib {
-            Ok(module) => {
-                debug!("get_databricks_sdk_version: importlib.metadata imported successfully");
-                let version_fn = module
-                    .getattr("version")
-                    .map_err(|e| format!("Failed to get version function: {e}"))?;
+    let output = Command::new("uv")
+        .args([
+            "run",
+            "--no-sync",
+            "python",
+            "-c",
+            "import importlib.metadata; print(importlib.metadata.version('databricks-sdk'))",
+        ])
+        .output();
 
-                debug!("get_databricks_sdk_version: Calling version('databricks-sdk')");
-                let version = version_fn.call1(("databricks-sdk",));
-
-                match version {
-                    Ok(v) => {
-                        let version_str: String = v
-                            .extract()
-                            .map_err(|e| format!("Failed to extract version string: {e}"))?;
-                        debug!("get_databricks_sdk_version: Found version {}", version_str);
-                        Ok(Some(version_str))
-                    }
-                    Err(e) => {
-                        // databricks-sdk not installed
-                        debug!(
-                            "get_databricks_sdk_version: databricks-sdk not installed: {}",
-                            e
-                        );
-                        Ok(None)
-                    }
-                }
-            }
-            Err(e) => {
-                // importlib.metadata not available
-                debug!(
-                    "get_databricks_sdk_version: importlib.metadata not available: {}",
-                    e
-                );
+    match output {
+        Ok(o) if o.status.success() => {
+            let version = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if version.is_empty() {
+                debug!("get_databricks_sdk_version: empty output");
                 Ok(None)
+            } else {
+                debug!("get_databricks_sdk_version: found version {}", version);
+                Ok(Some(version))
             }
         }
-    })
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            debug!("get_databricks_sdk_version: subprocess failed: {}", stderr);
+            Ok(None)
+        }
+        Err(e) => {
+            debug!("get_databricks_sdk_version: failed to run uv: {}", e);
+            Ok(None)
+        }
+    }
 }

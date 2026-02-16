@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/common", "crates/agent", "crates/studio", "crates/core", "crates/mcp", "crates/cli", "crates/databricks_sdk"]
+members = ["crates/common", "crates/agent", "crates/studio", "crates/core", "crates/mcp", "crates/cli", "crates/databricks_sdk", "crates/apx"]
 resolver = "2"
 
 [workspace.package]
@@ -66,9 +66,6 @@ zip = "2.2"
 rayon = "1.11.0"
 similar = "2.7"
 
-# Python interop
-pyo3 = { version = "0.27.2", features = ["extension-module", "abi3-py39"] }
-
 # System
 sysinfo = "0.33.1"
 notify = "8.2.0"
@@ -93,17 +90,9 @@ schemars = "1.2.0"
 # Temporary files
 tempfile = "3.15"
 
-[package]
-name = "apx"
-version = "0.2.7"
-edition.workspace = true
-rust-version.workspace = true
-build = "build.rs"
-
-[lib]
-name = "_core"
-# "cdylib" is necessary to produce a shared library for Python to import from.
-crate-type = ["cdylib"]
+# Embedded resources
+rust-embed = { version = "8", features = ["include-exclude"] }
+which = "7"
 
 [profile.release]
 lto = "thin"
@@ -112,11 +101,3 @@ strip = true
 opt-level = "z"
 panic = "abort"
 
-[dependencies]
-apx-core.workspace = true
-apx-cli.workspace = true
-pyo3.workspace = true
-tracing.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

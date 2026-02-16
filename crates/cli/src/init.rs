@@ -17,7 +17,7 @@ use apx_core::common::{
     BunCommand, format_elapsed_ms, run_with_spinner, run_with_spinner_async, spinner,
 };
 use apx_core::dotenv::DotenvFile;
-use apx_core::interop::templates_dir;
+use apx_core::interop::extract_templates;
 use std::time::Instant;
 
 const APX_INDEX_URL: &str = "https://databricks-solutions.github.io/apx/simple";
@@ -80,7 +80,8 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
     let app_path = resolve_app_dir(args.app_path.take());
 
-    let templates_dir = templates_dir()?;
+    let templates_tmp = extract_templates()?;
+    let templates_dir = templates_tmp.path().to_path_buf();
 
     println!("Welcome to apx 🚀\n");
 

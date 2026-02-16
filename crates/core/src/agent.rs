@@ -20,12 +20,9 @@ pub fn installed_agent_path() -> Result<PathBuf, String> {
     Ok(home.join(".apx").join(AGENT_FILENAME))
 }
 
-/// Get path to bundled agent binary (via importlib.resources)
+/// Get path to bundled agent binary
 pub fn bundled_agent_path() -> Result<PathBuf, String> {
-    pyo3::Python::attach(|py| {
-        crate::interop::resolve_apx_agent_binary_path(py)
-            .map_err(|e| format!("Failed to resolve bundled agent: {e}"))
-    })
+    crate::interop::resolve_apx_agent_binary_path()
 }
 
 /// Get version of installed agent by running `apx-agent --version`

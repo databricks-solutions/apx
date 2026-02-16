@@ -280,8 +280,7 @@ impl SDKDocsIndex {
 
     /// Bootstrap with a pre-computed SDK version
     ///
-    /// Use this method when the SDK version has been computed outside of an async context
-    /// to avoid Python GIL issues with PyO3.
+    /// Use this method when the SDK version has already been resolved.
     pub async fn bootstrap_with_version(
         &mut self,
         source: &SDKSource,

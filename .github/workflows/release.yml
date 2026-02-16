@@ -155,13 +155,14 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --compression-level 9
+          args: --release --out dist --compression-level 9 --manifest-path crates/apx/Cargo.toml
           manylinux: ${{ matrix.manylinux }}
           rust-toolchain: "1.92.0"
           sccache: true
           docker-options: >-
             -v ${{ github.workspace }}/.protoc:/protoc
             -v ${{ github.workspace }}/.bins/agent:/project/.bins/agent
+            -v ${{ github.workspace }}/.bins/bun:/project/.bins/bun
             -e PROTOC=/protoc/bin/protoc
 
       - name: Build wheels (macOS/Windows)
@@ -169,7 +170,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --compression-level 9
+          args: --release --out dist --compression-level 9 --manifest-path crates/apx/Cargo.toml
           rust-toolchain: "1.92.0"
           sccache: true
           # Protoc already in PATH from setup step, PROTOC env var set
