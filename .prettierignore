@@ -4,3 +4,4 @@ docs/.next
 docs/node_modules
 docs/.source
 docs/out
+crates/studio/gen/

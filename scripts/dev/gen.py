@@ -11,7 +11,7 @@ Usage:
 Steps:
     1. maturin build -j 6 -o dist
     2. rm -rf <folder>
-    3. cargo run --bin apx -- init <folder> -p <profile> [extra-args...]
+    3. uvx --from <wheel> apx init <folder> -p <profile> [extra-args...]
     4. Patch pyproject.toml to use the local wheel from dist/
     5. uv sync
     6. uv run apx dev check
@@ -52,9 +52,11 @@ def stage(name: str, step: int, total: int):
     t0 = time.monotonic()
     try:
         yield
-    except Exception as exc:
+    except Exception:
         elapsed = time.monotonic() - t0
-        print(f"{prefix} {RED}{BOLD}FAILED{RESET} {DIM}({fmt_duration(elapsed)}){RESET}")
+        print(
+            f"{prefix} {RED}{BOLD}FAILED{RESET} {DIM}({fmt_duration(elapsed)}){RESET}"
+        )
         raise
     else:
         elapsed = time.monotonic() - t0
@@ -71,7 +73,7 @@ def run(cmd: list[str], **kwargs) -> None:
 
 
 def find_wheel(dist_dir: Path) -> Path:
-    wheels = sorted(dist_dir.glob("*.whl"), key=os.path.getmtime, reverse=True)
+    wheels = sorted(dist_dir.glob("*.whl"), key=lambda p: os.path.getmtime(p), reverse=True)
     if not wheels:
         raise FileNotFoundError(f"No wheel found in {dist_dir}")
     return wheels[0]
@@ -85,9 +87,7 @@ def patch_pyproject(pyproject_path: Path, wheel_path: Path) -> None:
     tool_uv = doc.get("tool", {}).get("uv", {})
     if "index" in tool_uv:
         indexes = tool_uv["index"]
-        tool_uv["index"] = [
-            idx for idx in indexes if idx.get("name") != "apx-index"
-        ]
+        tool_uv["index"] = [idx for idx in indexes if idx.get("name") != "apx-index"]
         if not tool_uv["index"]:
             del tool_uv["index"]
 
@@ -98,10 +98,6 @@ def patch_pyproject(pyproject_path: Path, wheel_path: Path) -> None:
     if not sources and "sources" in tool_uv:
         del tool_uv["sources"]
 
-    # Clean up empty [tool.uv] if needed
-    if not tool_uv:
-        del doc["tool"]["uv"]
-
     # Replace apx dependency in [dependency-groups].dev with local wheel path
     dev_deps = doc.get("dependency-groups", {}).get("dev", [])
     new_deps = []
@@ -110,7 +106,14 @@ def patch_pyproject(pyproject_path: Path, wheel_path: Path) -> None:
             new_deps.append(f"apx @ {wheel_path.as_uri()}")
         else:
             new_deps.append(dep)
-    doc["dependency-groups"]["dev"] = new_deps
+
+    dep_groups = doc.get("dependency-groups", {})
+    dev_deps = dep_groups.get("dev", [])
+    if isinstance(dev_deps, list):
+        dev_deps.extend(new_deps)
+    else:
+        dev_deps = new_deps
+    dep_groups["dev"] = dev_deps
 
     pyproject_path.write_text(tomlkit.dumps(doc))
     print(f"  Patched {pyproject_path} -> {YELLOW}{wheel_path.name}{RESET}")
@@ -132,7 +135,10 @@ def main() -> None:
     dist_dir = project_root / "dist"
     total = 6
 
-    print(f"{BOLD}apx gen{RESET} — folder={YELLOW}{folder}{RESET} profile={YELLOW}{profile}{RESET}", end="")
+    print(
+        f"{BOLD}apx gen{RESET} — folder={YELLOW}{folder}{RESET} profile={YELLOW}{profile}{RESET}",
+        end="",
+    )
     if extra_args:
         print(f" args={YELLOW}{' '.join(extra_args)}{RESET}")
     else:
@@ -144,6 +150,9 @@ def main() -> None:
         with stage("Building wheel", 1, total):
             run(["maturin", "build", "-j", "6", "-o", "dist"], cwd=project_root)
 
+        wheel = find_wheel(dist_dir)
+        print(f"  Wheel: {YELLOW}{wheel.name}{RESET}")
+
         with stage("Cleaning target folder", 2, total):
             if folder.exists():
                 shutil.rmtree(folder)
@@ -153,14 +162,12 @@ def main() -> None:
 
         with stage("Initializing project", 3, total):
             run(
-                ["cargo", "run", "--bin", "apx", "--", "init", str(folder), "-p", profile]
+                ["uvx", "--from", str(wheel), "apx", "init", str(folder), "-p", profile]
                 + extra_args,
-                cwd=project_root,
                 env={**os.environ, "RUST_LOG": "DEBUG"},
             )
 
         with stage("Patching pyproject.toml", 4, total):
-            wheel = find_wheel(dist_dir)
             patch_pyproject(folder / "pyproject.toml", wheel)
 
         with stage("Syncing dependencies", 5, total):
@@ -181,7 +188,9 @@ def main() -> None:
         sys.exit(130)
 
     elapsed = time.monotonic() - t_total
-    print(f"\n{GREEN}{BOLD}All done!{RESET} {DIM}(total: {fmt_duration(elapsed)}){RESET}")
+    print(
+        f"\n{GREEN}{BOLD}All done!{RESET} {DIM}(total: {fmt_duration(elapsed)}){RESET}"
+    )
 
 
 if __name__ == "__main__":

@@ -157,8 +157,15 @@ async fn generate_route_tree(app_dir: &Path, mode: OutputMode) -> Result<(), Str
     let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "generate")?;
 
     let bun = BunCommand::new()?;
+    debug!(
+        bun_path = %bun.path().display(),
+        entrypoint = %entrypoint.display(),
+        ?args,
+        app_dir = %app_dir.display(),
+        "Running route tree generation"
+    );
     let output = bun
-        .tokio_command()
+        .tokio_command_with_node_path(app_dir)
         .arg("run")
         .arg(&entrypoint)
         .args(&args)
@@ -174,7 +181,22 @@ async fn generate_route_tree(app_dir: &Path, mode: OutputMode) -> Result<(), Str
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Route tree generation failed:\n{stdout}\n{stderr}"));
+        let exit_code = output
+            .status
+            .code()
+            .map_or("signal".into(), |c| c.to_string());
+        return Err(format!(
+            "Route tree generation failed (exit {exit_code}):\n\
+             bun: {bun_path}\n\
+             entrypoint: {entrypoint}\n\
+             args: {args:?}\n\
+             app_dir: {app_dir}\n\
+             stdout:\n{stdout}\n\
+             stderr:\n{stderr}",
+            bun_path = bun.path().display(),
+            entrypoint = entrypoint.display(),
+            app_dir = app_dir.display(),
+        ));
     }
 
     if let Some(sp) = route_spinner {

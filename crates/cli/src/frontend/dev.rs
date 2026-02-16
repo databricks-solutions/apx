@@ -84,7 +84,7 @@ pub async fn run_dev(app_dir: &Path) -> Result<Child, String> {
     let bun = BunCommand::new()?;
 
     let child = bun
-        .tokio_command()
+        .tokio_command_with_node_path(app_dir)
         .arg("run")
         .arg(&entrypoint)
         .args(&args)
