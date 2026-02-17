@@ -617,11 +617,18 @@ fn normalize_param(p: &Parameter) -> ParamIR {
         _ => ParamLocation::Query,
     };
 
+    // OpenAPI 3.0 spec: path parameters are always required
+    let required = if location == ParamLocation::Path {
+        true
+    } else {
+        p.required
+    };
+
     ParamIR {
         name: p.name.clone(),
         original_name: p.name.clone(),
         ty,
-        required: p.required,
+        required,
         location,
     }
 }

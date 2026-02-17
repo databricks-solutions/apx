@@ -4011,4 +4011,51 @@ export function useGetCatBuggy<TData = { data: { meow: string } }>(
         // Should generate functions without any types section
         assert!(ts_code.contains("ping"), "Should generate ping function");
     }
+
+    #[test]
+    fn test_path_params_required_even_when_omitted() {
+        // Path parameters omit `required` (common in FastAPI-generated specs).
+        // Per OpenAPI 3.0 spec, path params are always required.
+        let openapi_json = r##"{
+  "openapi": "3.1.0",
+  "info": { "title": "Test API", "version": "1.0.0" },
+  "paths": {
+    "/scans/{scan_id}": {
+      "get": {
+        "operationId": "getScan",
+        "parameters": [
+          { "name": "scan_id", "in": "path", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "id": { "type": "string" } } } } }
+          }
+        }
+      }
+    }
+  }
+}"##;
+
+        let ts_code = generate_and_verify(openapi_json);
+        println!("=== PATH PARAMS REQUIRED ===\n{ts_code}\n=== END ===");
+
+        // Fetch function: params must be non-optional
+        assert!(
+            ts_code.contains("params: GetScanParams, options?"),
+            "Fetch function params should be required (non-optional)"
+        );
+
+        // Hook: options object must be required (contains required params)
+        assert!(
+            ts_code.contains("(options: { params: GetScanParams"),
+            "Hook options should be required with required params field"
+        );
+
+        // Hook should use options.params, not options?.params
+        assert!(
+            ts_code.contains("options.params"),
+            "Should use options.params (non-optional access)"
+        );
+    }
 }
