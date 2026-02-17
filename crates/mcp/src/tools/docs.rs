@@ -22,10 +22,7 @@ fn default_docs_limit() -> usize {
 }
 
 impl ApxServer {
-    pub async fn handle_docs(
-        &self,
-        args: DocsArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    pub async fn handle_docs(&self, args: DocsArgs) -> Result<CallToolResult, rmcp::ErrorData> {
         let ctx = &self.ctx;
 
         // Wait for SDK index to be ready (15 second timeout)
@@ -46,7 +43,7 @@ impl ApxServer {
             Some(idx) => idx,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "SDK documentation is not available. The Databricks SDK may not be installed or the index failed to bootstrap."
+                    "SDK documentation is not available. The Databricks SDK may not be installed or the index failed to bootstrap.",
                 )]));
             }
         };

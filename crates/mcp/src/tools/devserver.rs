@@ -19,10 +19,7 @@ fn default_logs_duration() -> String {
 }
 
 impl ApxServer {
-    pub async fn handle_start(
-        &self,
-        args: AppPathArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    pub async fn handle_start(&self, args: AppPathArgs) -> Result<CallToolResult, rmcp::ErrorData> {
         let path = validate_app_path(&args.app_path)
             .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
 
@@ -37,10 +34,7 @@ impl ApxServer {
         }
     }
 
-    pub async fn handle_stop(
-        &self,
-        args: AppPathArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    pub async fn handle_stop(&self, args: AppPathArgs) -> Result<CallToolResult, rmcp::ErrorData> {
         let path = validate_app_path(&args.app_path)
             .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
 
@@ -74,10 +68,7 @@ impl ApxServer {
         }
     }
 
-    pub async fn handle_logs(
-        &self,
-        args: LogsToolArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    pub async fn handle_logs(&self, args: LogsToolArgs) -> Result<CallToolResult, rmcp::ErrorData> {
         let path = validate_app_path(&args.app_path)
             .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
 

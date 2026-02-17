@@ -32,9 +32,7 @@ pub(crate) fn truncate(s: &str, max_chars: i32) -> String {
     format!("{head}\n\n...[truncated {truncated} chars]...\n\n{tail}")
 }
 
-pub(crate) fn resolve_app_name_from_databricks_yml(
-    project_dir: &Path,
-) -> Result<String, String> {
+pub(crate) fn resolve_app_name_from_databricks_yml(project_dir: &Path) -> Result<String, String> {
     let yml_path = project_dir.join("databricks.yml");
     if !yml_path.exists() {
         return Err(format!(
@@ -226,11 +224,8 @@ impl ApxServer {
 
         // Run command with timeout
         let start = Instant::now();
-        let result = tokio::time::timeout(
-            Duration::from_secs_f64(args.timeout_seconds),
-            cmd.output(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs_f64(args.timeout_seconds), cmd.output()).await;
 
         let (returncode, stdout, stderr, duration_ms) = match result {
             Ok(Ok(cmd_output)) => {

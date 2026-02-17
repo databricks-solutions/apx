@@ -218,7 +218,9 @@ impl ServerHandler for ApxServer {
                 title: Some("apx - the toolkit for building Databricks Apps".into()),
                 description: None,
                 icons: None,
-                website_url: Some("https://databricks-solutions.github.io/apx/docs/reference/mcp".into()),
+                website_url: Some(
+                    "https://databricks-solutions.github.io/apx/docs/reference/mcp".into(),
+                ),
             },
             instructions: Some(APX_INFO_CONTENT.to_string()),
         }
@@ -250,10 +252,7 @@ impl ServerHandler for ApxServer {
     }
 }
 
-pub async fn run_server(
-    ctx: AppContext,
-    sdk_params: Option<SdkIndexParams>,
-) -> Result<(), String> {
+pub async fn run_server(ctx: AppContext, sdk_params: Option<SdkIndexParams>) -> Result<(), String> {
     use rmcp::ServiceExt;
 
     let shutdown_tx = ctx.shutdown_tx.clone();

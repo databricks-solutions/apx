@@ -81,12 +81,12 @@ impl ApxServer {
             Ok(Err(e)) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Search failed: {e}"
-                ))]))
+                ))]));
             }
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Search task panicked: {e}"
-                ))]))
+                ))]));
             }
         };
 

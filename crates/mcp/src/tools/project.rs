@@ -44,9 +44,9 @@ fn parse_openapi_operations(openapi: &Value) -> Result<Vec<RouteInfo>, String> {
                 continue;
             }
 
-            let operation_obj = operation.as_object().ok_or_else(|| {
-                format!("Operation '{method}' at path '{path}' is not an object")
-            })?;
+            let operation_obj = operation
+                .as_object()
+                .ok_or_else(|| format!("Operation '{method}' at path '{path}' is not an object"))?;
 
             let operation_id = operation_obj
                 .get("operationId")
@@ -148,10 +148,7 @@ const Component = () => {{
 }
 
 impl ApxServer {
-    pub async fn handle_check(
-        &self,
-        args: AppPathArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    pub async fn handle_check(&self, args: AppPathArgs) -> Result<CallToolResult, rmcp::ErrorData> {
         let path = validate_app_path(&args.app_path)
             .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
 
@@ -226,7 +223,7 @@ impl ApxServer {
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "Failed to generate OpenAPI spec: {e}"
-                    ))]))
+                    ))]));
                 }
             };
 
@@ -235,7 +232,7 @@ impl ApxServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Failed to parse OpenAPI schema: {e}"
-                ))]))
+                ))]));
             }
         };
 
@@ -244,7 +241,7 @@ impl ApxServer {
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(
                     "OpenAPI schema missing 'paths' object",
-                )]))
+                )]));
             }
         };
 
@@ -273,7 +270,7 @@ impl ApxServer {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Operation ID '{}' not found in OpenAPI schema",
                     args.operation_id
-                ))]))
+                ))]));
             }
         };
 
@@ -320,7 +317,7 @@ impl ApxServer {
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "Failed to generate OpenAPI spec: {e}"
-                    ))]))
+                    ))]));
                 }
             };
 
@@ -329,7 +326,7 @@ impl ApxServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Failed to parse OpenAPI schema: {e}"
-                ))]))
+                ))]));
             }
         };
 
