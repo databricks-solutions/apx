@@ -191,9 +191,8 @@ impl ComponentIndex {
             .map_err(|e| format!("Query error: {e}"))?;
 
         let mut results = Vec::new();
-        let mut rank = 0;
 
-        for row_result in rows {
+        for (rank, row_result) in rows.enumerate() {
             let (id, name, registry, _fts_rank) =
                 row_result.map_err(|e| format!("Row error: {e}"))?;
 
@@ -225,7 +224,6 @@ impl ComponentIndex {
                 registry,
                 score,
             });
-            rank += 1;
         }
 
         // Re-sort by score after applying boosts
@@ -286,7 +284,12 @@ mod tests {
                 &format!(
                     "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
                 ),
-                rusqlite::params!["button", "button", "", "button A styled button component shadcn"],
+                rusqlite::params![
+                    "button",
+                    "button",
+                    "",
+                    "button A styled button component shadcn"
+                ],
             )
             .unwrap();
 

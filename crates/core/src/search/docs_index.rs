@@ -213,11 +213,7 @@ impl SDKDocsIndex {
     }
 
     /// Build index from a docs path (sync)
-    fn build_index(
-        &self,
-        table_name: &str,
-        docs_path: &std::path::Path,
-    ) -> Result<(), String> {
+    fn build_index(&self, table_name: &str, docs_path: &std::path::Path) -> Result<(), String> {
         let overall_timer = Timer::start("build_index");
 
         // Load documentation files
@@ -254,16 +250,18 @@ impl SDKDocsIndex {
                     &doc.symbols,
                 )
                 .into_iter()
-                .map(|(id, chunk_text, chunk_index, svc, ent, op, syms)| DocChunk {
-                    id,
-                    text: chunk_text,
-                    source_file: doc.relative_path.clone(),
-                    chunk_index,
-                    service: svc,
-                    entity: ent,
-                    operation: op,
-                    symbols: syms,
-                })
+                .map(
+                    |(id, chunk_text, chunk_index, svc, ent, op, syms)| DocChunk {
+                        id,
+                        text: chunk_text,
+                        source_file: doc.relative_path.clone(),
+                        chunk_index,
+                        service: svc,
+                        entity: ent,
+                        operation: op,
+                        symbols: syms,
+                    },
+                )
                 .collect::<Vec<_>>()
             })
             .collect();
@@ -387,9 +385,8 @@ impl SDKDocsIndex {
                     .map_err(|e| format!("Query error: {e}"))?;
 
                 let mut results = Vec::new();
-                let mut rank = 0;
 
-                for row_result in rows {
+                for (rank, row_result) in rows.enumerate() {
                     let (text, source_file, _fts_rank) =
                         row_result.map_err(|e| format!("Row error: {e}"))?;
 
@@ -399,7 +396,6 @@ impl SDKDocsIndex {
                         source_file,
                         score,
                     });
-                    rank += 1;
                 }
 
                 tracing::info!("FTS5 search for '{}': {} results", query, results.len());

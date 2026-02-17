@@ -113,7 +113,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_fts5_query_special_chars() {
-        assert_eq!(sanitize_fts5_query("hello* OR world"), "\"hello\" \"OR\" \"world\"");
+        assert_eq!(
+            sanitize_fts5_query("hello* OR world"),
+            "\"hello\" \"OR\" \"world\""
+        );
     }
 
     #[test]
@@ -125,7 +128,8 @@ mod tests {
     #[test]
     fn test_table_exists() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE test_table (id INTEGER)").unwrap();
+        conn.execute_batch("CREATE TABLE test_table (id INTEGER)")
+            .unwrap();
 
         assert!(table_exists(&conn, "test_table").unwrap());
         assert!(!table_exists(&conn, "nonexistent").unwrap());
@@ -139,6 +143,8 @@ mod tests {
 
         // Verify connection works
         let guard = conn.lock().unwrap();
-        guard.execute_batch("CREATE TABLE test (id INTEGER)").unwrap();
+        guard
+            .execute_batch("CREATE TABLE test (id INTEGER)")
+            .unwrap();
     }
 }
