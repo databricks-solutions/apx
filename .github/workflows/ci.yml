@@ -89,18 +89,6 @@ jobs:
         with:
           bun-version: 1.3.8
 
-      # Download Binaries (Bun)
-      - name: Cache Bun binaries
-        id: cache-bun-binaries
-        uses: actions/cache@v5
-        with:
-          path: .bins/bun
-          key: bun-binaries-${{ hashFiles('scripts/get_binaries.py') }}
-
-      - name: Download binaries
-        if: steps.cache-bun-binaries.outputs.cache-hit != 'true'
-        run: uv run --script scripts/get_binaries.py
-
       # Build apx-agent binary (cached based on crate source files)
       - name: Cache apx-agent binary
         id: cache-agent
