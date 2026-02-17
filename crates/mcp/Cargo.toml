@@ -1,11 +1,11 @@
 [package]
 name = "apx-mcp"
-version.workspace = true
+version = "0.3.0-rc1"
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-apx-core = { path = "../core" }
+apx-core = { path = "../core" , version = "0.3.0-rc1" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

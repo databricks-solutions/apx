@@ -1,6 +1,6 @@
 [package]
 name = "apx-databricks-sdk"
-version.workspace = true
+version = "0.3.0-rc1"
 edition.workspace = true
 rust-version.workspace = true
 
