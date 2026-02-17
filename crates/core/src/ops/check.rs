@@ -3,8 +3,8 @@ use std::path::Path;
 use crate::common::{
     BunCommand, OutputMode, ensure_entrypoint_deps, run_preflight_checks, spinner,
 };
+use crate::download::resolve_uv;
 use crate::frontend::prepare_frontend_args;
-use tokio::process::Command as TokioCommand;
 use tracing::debug;
 
 /// Run type checking (tsc + ty) in parallel for the given app directory.
@@ -25,7 +25,7 @@ pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
     };
 
     // Run tsc -b --incremental in one tokio thread
-    let bun = BunCommand::new()?;
+    let bun = BunCommand::new().await?;
     let app_dir_clone = app_dir.to_path_buf();
     let tsc_task = tokio::spawn(async move {
         debug!(bun_path = %bun.path().display(), "Running tsc -b --incremental.");
@@ -49,9 +49,10 @@ pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
 
     // Run ty check in another thread
     let app_dir_clone = app_dir.to_path_buf();
+    let uv_path = resolve_uv().await?.path;
     let ty_task = tokio::spawn(async move {
         debug!("Running ty check.");
-        let output = TokioCommand::new("uv")
+        let output = tokio::process::Command::new(&uv_path)
             .arg("run")
             .arg("ty")
             .arg("check")
@@ -156,7 +157,7 @@ async fn generate_route_tree(app_dir: &Path, mode: OutputMode) -> Result<(), Str
 
     let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "generate")?;
 
-    let bun = BunCommand::new()?;
+    let bun = BunCommand::new().await?;
     debug!(
         bun_path = %bun.path().display(),
         entrypoint = %entrypoint.display(),

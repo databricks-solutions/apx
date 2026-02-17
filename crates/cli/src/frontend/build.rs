@@ -77,7 +77,7 @@ pub async fn run_build_with_spinner(
     ensure_entrypoint_deps(app_dir).await?;
 
     let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "build")?;
-    let bun = BunCommand::new()?;
+    let bun = BunCommand::new().await?;
 
     let mut cmd = bun.tokio_command_with_node_path(app_dir);
     cmd.arg("run")

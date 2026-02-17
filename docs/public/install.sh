@@ -263,8 +263,7 @@ modify_path() {
 # ---------------------------------------------------------------------------
 check_dependencies() {
     if ! command -v uv >/dev/null 2>&1; then
-        warn "uv is not installed. apx requires uv for Python package management."
-        warn "Install it from: https://docs.astral.sh/uv/getting-started/installation/"
+        info "uv not found on PATH. apx will download it automatically on first use."
     fi
 
     if ! command -v databricks >/dev/null 2>&1; then

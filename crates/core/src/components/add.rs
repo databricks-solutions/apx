@@ -192,7 +192,7 @@ pub async fn bun_add(app_dir: &Path, deps: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let bun = BunCommand::new()?;
+    let bun = BunCommand::new().await?;
     let output = bun
         .tokio_command()
         .arg("add")

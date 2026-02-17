@@ -161,7 +161,7 @@ impl ProcessManager {
         tokio::spawn(async move {
             // 1. DB (non-critical) - warn on failure but continue
             debug!("Starting PGlite database process...");
-            match Self::ensure_bun() {
+            match Self::ensure_bun().await {
                 Ok(bun) => {
                     if let Err(e) = pm.spawn_pglite(&bun).await {
                         warn!(
@@ -291,7 +291,7 @@ impl ProcessManager {
         // ============================================================================
 
         // Use ApxCommand to invoke `apx frontend dev` via uv
-        let mut cmd = ApxCommand::new().tokio_command();
+        let mut cmd = ApxCommand::new().await?.tokio_command();
         cmd.args(["frontend", "dev"])
             .current_dir(app_dir)
             .stdin(Stdio::null())
@@ -341,7 +341,7 @@ impl ProcessManager {
         let sitecustomize_dir = setup_sitecustomize();
 
         // Run uvicorn via uv to ensure correct Python environment
-        let mut cmd = UvCommand::new("uvicorn").tokio_command();
+        let mut cmd = UvCommand::new("uvicorn").await?.tokio_command();
         cmd.args([
             &app_entrypoint,
             "--host",
@@ -808,7 +808,7 @@ impl ProcessManager {
                     config_path.display()
                 );
 
-                let mut validation_cmd = UvCommand::new("python").tokio_command();
+                let mut validation_cmd = UvCommand::new("python").await?.tokio_command();
                 validation_cmd
                     .args(["-c", &validation_script])
                     .current_dir(app_dir)
@@ -846,7 +846,7 @@ impl ProcessManager {
         };
 
         // Run uvicorn via uv to ensure correct Python environment
-        let mut cmd = UvCommand::new("uvicorn").tokio_command();
+        let mut cmd = UvCommand::new("uvicorn").await?.tokio_command();
         cmd.args([
             app_entrypoint,
             "--host",
@@ -935,12 +935,8 @@ impl ProcessManager {
         }
     }
 
-    fn ensure_bun() -> Result<BunCommand, String> {
-        let bun = BunCommand::new()?;
-        if !bun.exists() {
-            return Err("bun is not installed. Please install bun to continue.".to_string());
-        }
-        Ok(bun)
+    async fn ensure_bun() -> Result<BunCommand, String> {
+        BunCommand::new().await
     }
 
     /// Send SIGTERM to a child process tree (polite shutdown request).

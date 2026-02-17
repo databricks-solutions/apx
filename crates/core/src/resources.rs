@@ -5,9 +5,6 @@ use std::path::PathBuf;
 /// Zip archive of all assets (templates + entrypoint.ts) — produced by build.rs.
 const ASSETS_ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/assets.zip"));
 
-/// Bun binary — copied to OUT_DIR by build.rs.
-const BUN_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bun"));
-
 /// Agent binary — copied to OUT_DIR by build.rs.
 const AGENT_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/apx-agent"));
 
@@ -55,39 +52,6 @@ pub fn templates_dir() -> Result<PathBuf, String> {
 pub fn entrypoint_ts_path() -> Result<PathBuf, String> {
     let dir = ensure_extracted()?;
     Ok(dir.join("entrypoint.ts"))
-}
-
-/// Extract the embedded bun binary to `~/.apx/bin/bun`.
-/// Skips if it already exists. Sets executable permissions on Unix.
-pub fn ensure_bun_extracted() -> Result<PathBuf, String> {
-    let bin_dir = apx_home()?.join("bin");
-    fs::create_dir_all(&bin_dir).map_err(|e| format!("Failed to create bin dir: {e}"))?;
-
-    #[cfg(target_os = "windows")]
-    let bun_name = "bun.exe";
-    #[cfg(not(target_os = "windows"))]
-    let bun_name = "bun";
-
-    let bun_dest = bin_dir.join(bun_name);
-
-    if bun_dest.exists() {
-        return Ok(bun_dest);
-    }
-
-    fs::write(&bun_dest, BUN_BINARY).map_err(|e| format!("Failed to write bun binary: {e}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&bun_dest)
-            .map_err(|e| format!("Failed to read bun metadata: {e}"))?
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&bun_dest, perms)
-            .map_err(|e| format!("Failed to set bun permissions: {e}"))?;
-    }
-
-    Ok(bun_dest)
 }
 
 /// Extract the embedded apx-agent binary to `~/.apx/apx-agent`.

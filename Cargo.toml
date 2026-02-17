@@ -63,6 +63,8 @@ rand = "0.8.5"
 walkdir = "2.5.0"
 url = "2.5.8"
 zip = "2.2"
+flate2 = "1.1"
+tar = "0.4"
 rayon = "1.11.0"
 similar = "2.7"
 

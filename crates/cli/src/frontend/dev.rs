@@ -81,7 +81,7 @@ pub async fn run_dev(app_dir: &Path) -> Result<Child, String> {
     ensure_entrypoint_deps(app_dir).await?;
 
     let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "dev")?;
-    let bun = BunCommand::new()?;
+    let bun = BunCommand::new().await?;
 
     let child = bun
         .tokio_command_with_node_path(app_dir)

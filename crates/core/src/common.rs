@@ -8,7 +8,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::api_generator::generate_openapi;
-use crate::interop::bun_binary_path;
+use crate::download::{resolve_bun, resolve_uv};
 use crate::python_logging::{DevConfig, parse_dev_config};
 
 /// Controls how progress output is displayed.
@@ -46,17 +46,28 @@ pub fn list_profiles() -> Result<Vec<String>, String> {
 #[derive(Debug, Clone)]
 pub struct UvCommand {
     tool: &'static str,
+    uv_path: PathBuf,
 }
 
 impl UvCommand {
     /// Create a new UvCommand for the specified tool.
-    pub fn new(tool: &'static str) -> Self {
-        Self { tool }
+    /// Resolves uv binary (downloads if needed).
+    pub async fn new(tool: &'static str) -> Result<Self, String> {
+        let resolved = resolve_uv().await?;
+        tracing::debug!(
+            "using {} uv: {}",
+            resolved.source_label(),
+            resolved.path.display()
+        );
+        Ok(Self {
+            tool,
+            uv_path: resolved.path,
+        })
     }
 
     /// Create a new tokio::process::Command for spawning the tool via uv.
     pub fn tokio_command(&self) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new("uv");
+        let mut cmd = tokio::process::Command::new(&self.uv_path);
         cmd.args(["run", self.tool]);
         cmd
     }
@@ -76,18 +87,12 @@ pub struct ApxCommand {
     inner: UvCommand,
 }
 
-impl Default for ApxCommand {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ApxCommand {
     /// Create a new ApxCommand instance.
-    pub fn new() -> Self {
-        Self {
-            inner: UvCommand::new("apx"),
-        }
+    pub async fn new() -> Result<Self, String> {
+        Ok(Self {
+            inner: UvCommand::new("apx").await?,
+        })
     }
 
     /// Create a new tokio::process::Command for spawning apx.
@@ -101,10 +106,9 @@ impl ApxCommand {
     }
 }
 
-/// Command to spawn bun using the apx-bundled binary.
+/// Command to spawn bun using a resolved bun binary.
 ///
-/// This ensures bun is ALWAYS run from the apx package's bundled binary,
-/// ignoring any system bun that might be on PATH.
+/// Resolution order: env override → system PATH → auto-download.
 #[derive(Debug, Clone)]
 pub struct BunCommand {
     bun_path: PathBuf,
@@ -112,21 +116,22 @@ pub struct BunCommand {
 
 impl BunCommand {
     /// Create a new BunCommand instance.
-    /// Returns an error if the bundled bun binary cannot be resolved.
-    pub fn new() -> Result<Self, String> {
-        let bun_path = bun_binary_path()?;
-        tracing::debug!(bun_path = %bun_path.display(), "BunCommand resolved bun binary");
-        Ok(Self { bun_path })
+    /// Resolves bun binary (downloads if needed).
+    pub async fn new() -> Result<Self, String> {
+        let resolved = resolve_bun().await?;
+        tracing::debug!(
+            "using {} bun: {}",
+            resolved.source_label(),
+            resolved.path.display()
+        );
+        Ok(Self {
+            bun_path: resolved.path,
+        })
     }
 
-    /// Get the path to the bundled bun binary.
+    /// Get the path to the resolved bun binary.
     pub fn path(&self) -> &Path {
         &self.bun_path
-    }
-
-    /// Check if the bundled bun binary exists.
-    pub fn exists(&self) -> bool {
-        self.bun_path.exists()
     }
 
     /// Build a PATH with the apx bin directory prepended.
@@ -338,7 +343,7 @@ pub fn ensure_dir(path: &Path) -> Result<(), String> {
 }
 
 pub async fn bun_install(app_dir: &Path) -> Result<(), String> {
-    let bun = BunCommand::new()?;
+    let bun = BunCommand::new().await?;
     tracing::debug!(
         bun_path = %bun.path().display(),
         app_dir = %app_dir.display(),
@@ -377,7 +382,7 @@ pub async fn ensure_entrypoint_deps(app_dir: &Path) -> Result<(), String> {
     );
 
     // Run bun add --dev for all dependencies (idempotent operation)
-    let bun = BunCommand::new()?;
+    let bun = BunCommand::new().await?;
     tracing::debug!(bun_path = %bun.path().display(), "Running bun add --dev");
     let mut cmd = bun.tokio_command();
     cmd.arg("add").arg("--dev");
@@ -415,7 +420,8 @@ pub async fn ensure_entrypoint_deps(app_dir: &Path) -> Result<(), String> {
 pub async fn uv_sync(app_dir: &Path) -> Result<(), String> {
     tracing::debug!("Running uv sync in {}", app_dir.display());
 
-    let output = Command::new("uv")
+    let uv_path = resolve_uv().await?.path;
+    let output = Command::new(&uv_path)
         .arg("sync")
         .current_dir(app_dir)
         .output()
@@ -452,7 +458,8 @@ pub async fn generate_version_file(
         .ok_or("Failed to determine version file path")?;
 
     // Try running uv-dynamic-versioning (outputs version string to stdout)
-    let output = Command::new("uv")
+    let uv_path = resolve_uv().await?.path;
+    let output = Command::new(&uv_path)
         .args(["tool", "run", "uv-dynamic-versioning"])
         .current_dir(app_dir)
         .output()

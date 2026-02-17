@@ -1,96 +1,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Once;
 use std::time::Duration;
 use tracing::debug;
 
 use crate::dev::common::{CLIENT_HOST, lock_path, read_lock};
+use crate::download::try_resolve_uv;
 use crate::resources;
-
-#[cfg(target_os = "windows")]
-const BUN_FILENAME: &str = "bun.exe";
-#[cfg(not(target_os = "windows"))]
-const BUN_FILENAME: &str = "bun";
 
 #[cfg(target_os = "windows")]
 const AGENT_FILENAME: &str = "apx-agent.exe";
 #[cfg(not(target_os = "windows"))]
 const AGENT_FILENAME: &str = "apx-agent";
-
-/// Resolve the bun binary path.
-///
-/// Resolution order:
-/// 1. `APX_BUN_PATH` env var (explicit override)
-/// 2. Embedded bun extracted to `~/.apx/bin/bun`
-/// 3. `which bun` PATH lookup (fallback)
-pub fn bun_binary_path() -> Result<PathBuf, String> {
-    warn_if_system_bun_exists();
-
-    // 1. Explicit env var override
-    if let Ok(path) = std::env::var("APX_BUN_PATH") {
-        let p = PathBuf::from(&path);
-        if p.is_file() {
-            debug!("bun_binary_path: using APX_BUN_PATH={}", p.display());
-            return Ok(p);
-        }
-        return Err(format!("APX_BUN_PATH={path} does not exist"));
-    }
-
-    // 2. Embedded bun extracted to ~/.apx/bin/bun
-    match resources::ensure_bun_extracted() {
-        Ok(p) => {
-            debug!("bun_binary_path: using embedded bun at {}", p.display());
-            return Ok(p);
-        }
-        Err(e) => {
-            debug!("bun_binary_path: failed to extract embedded bun: {e}");
-        }
-    }
-
-    // 3. PATH lookup (fallback)
-    if let Ok(path) = which::which(BUN_FILENAME) {
-        debug!("bun_binary_path: found on PATH at {}", path.display());
-        return Ok(path);
-    }
-
-    Err("Could not find bun binary. Set APX_BUN_PATH or ensure bun is on PATH.".to_string())
-}
-
-static SYSTEM_BUN_WARNING: Once = Once::new();
-
-/// Check if there's a bun binary on the system PATH and warn the user once.
-/// apx always uses its bundled bun, but we inform users about any system bun.
-fn warn_if_system_bun_exists() {
-    SYSTEM_BUN_WARNING.call_once(|| {
-        if let Some(system_bun) = find_system_bun() {
-            debug!(
-                "System bun found at '{}'. apx will use its bundled bun instead.",
-                system_bun.display()
-            );
-        }
-    });
-}
-
-/// Find bun on the system PATH (ignoring apx bundled bun).
-fn find_system_bun() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    let bun_name = "bun.exe";
-    #[cfg(not(target_os = "windows"))]
-    let bun_name = "bun";
-
-    let path_env = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_env) {
-        let candidate = dir.join(bun_name);
-        if candidate.is_file() {
-            let path_str = candidate.to_string_lossy();
-            if path_str.contains("apx") && path_str.contains("bin") {
-                continue;
-            }
-            return Some(candidate);
-        }
-    }
-    None
-}
 
 /// Resolve the path to the bundled apx-agent binary.
 ///
@@ -223,7 +143,8 @@ print(json.dumps(app.openapi(), indent=2))
 "#
     );
 
-    let output = Command::new("uv")
+    let uv_path = try_resolve_uv()?.path;
+    let output = Command::new(&uv_path)
         .args(["run", "--no-sync", "python", "-c", &script])
         .arg(project_root.to_string_lossy().as_ref())
         .current_dir(project_root)
@@ -247,7 +168,14 @@ print(json.dumps(app.openapi(), indent=2))
 pub fn get_databricks_sdk_version() -> Result<Option<String>, String> {
     debug!("get_databricks_sdk_version: Starting subprocess call");
 
-    let output = Command::new("uv")
+    let uv_path = match try_resolve_uv() {
+        Ok(resolved) => resolved.path,
+        Err(e) => {
+            debug!("get_databricks_sdk_version: failed to resolve uv: {e}");
+            return Ok(None);
+        }
+    };
+    let output = Command::new(&uv_path)
         .args([
             "run",
             "--no-sync",

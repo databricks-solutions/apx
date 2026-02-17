@@ -107,18 +107,6 @@ jobs:
           ${{ github.workspace }}/.protoc/bin/protoc --version || true
 
       # ============================================
-      # Download Binaries (Bun)
-      # ============================================
-      - name: Cache Bun binaries
-        uses: actions/cache@v5
-        with:
-          path: .bins/bun
-          key: bun-binaries-${{ hashFiles('scripts/get_binaries.py') }}
-
-      - name: Download binaries
-        run: uv run --script scripts/get_binaries.py
-
-      # ============================================
       # Build apx-agent binary
       # ============================================
       - name: Cache apx-agent binary
@@ -162,7 +150,6 @@ jobs:
           docker-options: >-
             -v ${{ github.workspace }}/.protoc:/protoc
             -v ${{ github.workspace }}/.bins/agent:/project/.bins/agent
-            -v ${{ github.workspace }}/.bins/bun:/project/.bins/bun
             -e PROTOC=/protoc/bin/protoc
 
       - name: Build wheels (macOS/Windows)
@@ -277,16 +264,6 @@ jobs:
           echo "${{ github.workspace }}/.protoc/bin" >> $GITHUB_PATH
           echo "PROTOC=${{ github.workspace }}/.protoc/bin/protoc" >> $GITHUB_ENV
 
-      # Bun binaries (needed for build.rs embedding)
-      - name: Cache Bun binaries
-        uses: actions/cache@v5
-        with:
-          path: .bins/bun
-          key: bun-binaries-${{ hashFiles('scripts/get_binaries.py') }}
-
-      - name: Download Bun binaries
-        run: uv run --script scripts/get_binaries.py
-
       # Cross-compilation tool (used for both agent and apx builds)
       - name: Install cross
         if: matrix.cross
@@ -308,7 +285,7 @@ jobs:
         if: steps.cache-agent.outputs.cache-hit != 'true' && matrix.cross
         run: uv run --script scripts/build_agent.py --target ${{ matrix.rust_target }}
 
-      # Build standalone binary (build.rs embeds agent + bun + assets)
+      # Build standalone binary (build.rs embeds agent + assets)
       - name: Build apx binary (native)
         if: "!matrix.cross"
         run: cargo build --release -p apx-bin --target ${{ matrix.rust_target }}

@@ -52,6 +52,8 @@ tempfile.workspace = true
 rand.workspace = true
 serde_with = { version = "3.16.1", default-features = false, features = ["macros"] }
 which.workspace = true
+flate2.workspace = true
+tar.workspace = true
 
 [build-dependencies]
 zip.workspace = true

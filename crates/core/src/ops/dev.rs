@@ -263,7 +263,7 @@ pub async fn spawn_server(
 
     wait_for_port_available(port).await?;
 
-    let apx_cmd = ApxCommand::new();
+    let apx_cmd = ApxCommand::new().await?;
 
     let command = format!(
         "{} dev __internal__run_server --app-dir {} --host {} --port {}{}",

@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::time::SystemTime;
-use tokio::process::Command as TokioCommand;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Sleep};
@@ -12,6 +11,7 @@ use walkdir::WalkDir;
 
 use crate::common::{read_project_metadata, write_metadata_file};
 use crate::dev::common::Shutdown;
+use crate::download::resolve_uv;
 use crate::interop::generate_openapi_spec;
 use crate::openapi;
 
@@ -83,6 +83,16 @@ pub fn start_openapi_watcher(
 
     tokio::spawn(async move {
         let _watcher = watcher;
+
+        // Resolve uv path once for the lifetime of this watcher task
+        let uv_path = match resolve_uv().await {
+            Ok(resolved) => resolved.path,
+            Err(e) => {
+                warn!("Failed to resolve uv for OpenAPI watcher: {e}");
+                return;
+            }
+        };
+
         // Always run initial generation on startup
         let mut pending = true;
         let mut is_initial_generation = true;
@@ -172,7 +182,7 @@ pub fn start_openapi_watcher(
                             info!("Running OpenAPI regeneration...");
                         }
 
-                        let output = TokioCommand::new("uv")
+                        let output = tokio::process::Command::new(&uv_path)
                             .arg("run")
                             .arg("apx")
                             .arg("__generate_openapi")

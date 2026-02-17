@@ -129,8 +129,7 @@ if (-not $NoModifyPath) {
 # Dependency checks
 # ---------------------------------------------------------------------------
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-    Write-Warn "uv is not installed. apx requires uv for Python package management."
-    Write-Warn "Install it from: https://docs.astral.sh/uv/getting-started/installation/"
+    Write-Info "uv not found on PATH. apx will download it automatically on first use."
 }
 
 if (-not (Get-Command databricks -ErrorAction SilentlyContinue)) {

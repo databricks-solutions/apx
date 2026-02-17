@@ -17,7 +17,7 @@ pub async fn run(args: BunArgs) -> i32 {
 }
 
 pub async fn run_inner(args: BunArgs) -> Result<(), String> {
-    let bun = BunCommand::new()?;
+    let bun = BunCommand::new().await?;
 
     debug!(
         bun_path = %bun.path().display(),

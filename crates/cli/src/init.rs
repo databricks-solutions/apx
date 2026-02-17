@@ -69,14 +69,9 @@ pub async fn run(args: InitArgs) -> i32 {
 }
 
 async fn run_inner(mut args: InitArgs) -> Result<(), String> {
-    if !is_command_available("uv").await {
-        return Err("uv is not installed. Please install uv to continue.".to_string());
-    }
-
-    let bun = BunCommand::new()?;
-    if !bun.exists() {
-        return Err("bun is not installed. Please install bun to continue.".to_string());
-    }
+    // Eagerly resolve both tools to surface errors early
+    let _uv = apx_core::download::resolve_uv().await?;
+    let _bun = BunCommand::new().await?;
 
     let app_path = resolve_app_dir(args.app_path.take());
 

@@ -14,7 +14,6 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     pack_assets(workspace_root, &out_dir);
-    copy_bun_binary(workspace_root, &out_dir);
     copy_agent_binary(workspace_root, &out_dir);
 
     println!(
@@ -24,10 +23,6 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         workspace_root.join("src/apx/assets").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        workspace_root.join(".bins/bun").display()
     );
     println!(
         "cargo:rerun-if-changed={}",
@@ -145,19 +140,6 @@ fn copy_platform_binary(
     let dest = out_dir.join(dest_name);
     fs::copy(&source, &dest).unwrap_or_else(|e| panic!("Failed to copy {dest_name} binary: {e}"));
     println!("cargo:rerun-if-changed={}", source.display());
-}
-
-fn copy_bun_binary(workspace_root: &Path, out_dir: &Path) {
-    copy_platform_binary(workspace_root, out_dir, "bun", "bun", |os, arch| {
-        match (os, arch) {
-            ("macos", "aarch64") => Some("bun-darwin-aarch64"),
-            ("macos", "x86_64") => Some("bun-darwin-x64"),
-            ("linux", "aarch64") => Some("bun-linux-aarch64"),
-            ("linux", "x86_64") => Some("bun-linux-x64"),
-            ("windows", "x86_64") => Some("bun-windows-x64.exe"),
-            _ => None,
-        }
-    });
 }
 
 fn copy_agent_binary(workspace_root: &Path, out_dir: &Path) {
