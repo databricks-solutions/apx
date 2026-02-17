@@ -12,5 +12,4 @@ serde_yaml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 schemars.workspace = true
-futures-util.workspace = true
-reqwest.workspace = true
+rmcp.workspace = true

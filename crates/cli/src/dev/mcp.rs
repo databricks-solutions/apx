@@ -1,8 +1,8 @@
 use crate::run_cli_async_helper;
-use apx_core::common::run_preflight_checks;
 use apx_core::components::new_cache_state;
 use apx_core::interop::get_databricks_sdk_version;
-use apx_mcp::server::{AppContext, IndexState, SdkIndexParams, build_server};
+use apx_mcp::context::{AppContext, IndexState, SdkIndexParams};
+use apx_mcp::server::run_server;
 use clap::Args;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
@@ -12,11 +12,6 @@ pub struct McpArgs {}
 
 pub async fn run(_args: McpArgs) -> i32 {
     run_cli_async_helper(|| async {
-        let app_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-        // Run preflight checks (installs deps if needed)
-        run_preflight_checks(&app_dir).await?;
-
         // Create shutdown channel
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
 
@@ -49,22 +44,14 @@ pub async fn run(_args: McpArgs) -> i32 {
             sdk_doc_index: Arc::clone(&sdk_doc_index),
         };
 
-        // Build server with SDK params - all indexing happens sequentially in one task
-        let server = build_server(
-            AppContext {
-                app_dir,
-                sdk_doc_index,
-                cache_state,
-                index_state,
-                shutdown_tx: shutdown_tx.clone(),
-            },
-            Some(sdk_params),
-        );
+        let ctx = AppContext {
+            sdk_doc_index,
+            cache_state,
+            index_state,
+            shutdown_tx: shutdown_tx.clone(),
+        };
 
-        server
-            .run_stdio(shutdown_tx)
-            .await
-            .map_err(|e| format!("MCP server error: {e}"))
+        run_server(ctx, Some(sdk_params)).await
     })
     .await
 }

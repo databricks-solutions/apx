@@ -31,6 +31,7 @@ tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "sync", "pr
 tokio-stream = "0.1.17"
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3.31"
+rmcp = { version = "0.15", features = ["server", "transport-io", "schemars"] }
 
 # Web server
 axum = { version = "0.8.8", features = ["ws"] }
