@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, Notify, broadcast};
 /// Parameters for SDK indexing, pre-computed synchronously to avoid Python GIL issues
 #[derive(Debug)]
 pub struct SdkIndexParams {
-    pub sdk_version: Option<String>,
+    pub sdk_version: String,
     pub sdk_doc_index: Arc<Mutex<Option<SDKDocsIndex>>>,
 }
 

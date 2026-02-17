@@ -59,24 +59,8 @@ pub fn init_all_indexes(
         if let Some(params) = sdk_params {
             tracing::info!("Initializing Databricks SDK documentation index");
 
-            let version = match params.sdk_version {
-                Some(v) => {
-                    tracing::debug!("Using pre-computed SDK version: {}", v);
-                    v
-                }
-                None => {
-                    tracing::warn!(
-                        "Databricks SDK not installed. The docs tool will not be available."
-                    );
-                    index_state.sdk_indexed.store(true, Ordering::SeqCst);
-                    index_state.sdk_ready.notify_waiters();
-
-                    // Mark as done
-                    let mut guard = cache_state.lock().await;
-                    guard.is_running = false;
-                    return;
-                }
-            };
+            let version = params.sdk_version;
+            tracing::debug!("Using SDK version: {}", version);
 
             // Create SDK docs index (sync, but cheap)
             let mut index = match apx_core::search::docs_index::SDKDocsIndex::new() {

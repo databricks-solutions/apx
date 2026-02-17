@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 
 use crate::common::Timer;
 use crate::databricks_sdk_doc::{SDKSource, download_and_extract_sdk, load_doc_files};
-use crate::interop::get_databricks_sdk_version;
 use crate::search::common;
 
 const CHUNK_SIZE: usize = 2000; // characters (no tokenizer needed for FTS)
@@ -170,18 +169,6 @@ impl SDKDocsIndex {
         common::table_exists(&conn, table_name)
     }
 
-    /// Bootstrap: download docs and build index
-    #[allow(dead_code)]
-    pub async fn bootstrap(&mut self, source: &SDKSource) -> Result<bool, String> {
-        match source {
-            SDKSource::DatabricksSdkPython => {
-                let version = get_databricks_sdk_version()?
-                    .ok_or_else(|| "databricks-sdk is not installed".to_string())?;
-                self.bootstrap_with_version(source, &version).await
-            }
-        }
-    }
-
     /// Bootstrap with a pre-computed SDK version
     pub async fn bootstrap_with_version(
         &mut self,
@@ -334,6 +321,22 @@ impl SDKDocsIndex {
         Ok(())
     }
 
+    /// Switch to a different SDK version, bootstrapping it if needed.
+    ///
+    /// This is cheap when the version is already indexed (just a `table_exists` check),
+    /// and lazy-downloads otherwise.
+    pub async fn ensure_version(
+        &mut self,
+        source: &SDKSource,
+        version: &str,
+    ) -> Result<(), String> {
+        if self.version.as_deref() == Some(version) {
+            return Ok(()); // Already on this version
+        }
+        self.bootstrap_with_version(source, version).await?;
+        Ok(())
+    }
+
     /// Search for relevant documentation chunks using FTS5 (sync)
     pub fn search_sync(
         &self,
@@ -343,12 +346,11 @@ impl SDKDocsIndex {
     ) -> Result<Vec<DocSearchResult>, String> {
         match source {
             SDKSource::DatabricksSdkPython => {
-                let version = get_databricks_sdk_version()?
-                    .ok_or_else(|| {
-                        "databricks-sdk is not installed. Please install databricks-sdk to use this feature.".to_string()
-                    })?;
+                let version = self.version.as_ref().ok_or_else(|| {
+                    "SDK docs index not initialized. No version has been bootstrapped.".to_string()
+                })?;
 
-                let table_name = Self::table_name(&version);
+                let table_name = Self::table_name(version);
 
                 let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
 

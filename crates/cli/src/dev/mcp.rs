@@ -22,18 +22,26 @@ pub async fn run(_args: McpArgs) -> i32 {
         let cache_state = new_cache_state();
 
         // Get SDK version via subprocess before spawning async task
+        const DEFAULT_SDK_VERSION: &str = "0.89.0";
         let sdk_version = match get_databricks_sdk_version() {
-            Ok(version) => {
-                if let Some(ref v) = version {
-                    tracing::info!("Found Databricks SDK version: {}", v);
-                } else {
-                    tracing::debug!("Databricks SDK not installed");
-                }
-                version
+            Ok(Some(v)) => {
+                tracing::info!("Found Databricks SDK version: {}", v);
+                v
+            }
+            Ok(None) => {
+                tracing::info!(
+                    "Databricks SDK not installed, using default version {}",
+                    DEFAULT_SDK_VERSION
+                );
+                DEFAULT_SDK_VERSION.to_string()
             }
             Err(e) => {
-                tracing::warn!("Failed to get Databricks SDK version: {}", e);
-                None
+                tracing::warn!(
+                    "Failed to detect SDK version: {}, using default {}",
+                    e,
+                    DEFAULT_SDK_VERSION
+                );
+                DEFAULT_SDK_VERSION.to_string()
             }
         };
 

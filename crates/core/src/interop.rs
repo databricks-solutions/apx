@@ -164,6 +164,70 @@ print(json.dumps(app.openapi(), indent=2))
     Ok((spec_json, app_slug.to_string()))
 }
 
+/// Get the Databricks SDK version for a specific project directory via subprocess.
+///
+/// Uses `uv run --directory <project_dir>` to run in the project's venv context.
+pub fn get_databricks_sdk_version_for_project(
+    project_dir: &Path,
+) -> Result<Option<String>, String> {
+    debug!(
+        "get_databricks_sdk_version_for_project: checking project at {}",
+        project_dir.display()
+    );
+
+    let uv_path = match try_resolve_uv() {
+        Ok(resolved) => resolved.path,
+        Err(e) => {
+            debug!("get_databricks_sdk_version_for_project: failed to resolve uv: {e}");
+            return Ok(None);
+        }
+    };
+
+    let dir_str = project_dir.to_str().unwrap_or(".");
+    let output = Command::new(&uv_path)
+        .args([
+            "run",
+            "--directory",
+            dir_str,
+            "--no-sync",
+            "python",
+            "-c",
+            "import importlib.metadata; print(importlib.metadata.version('databricks-sdk'))",
+        ])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let version = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if version.is_empty() {
+                debug!("get_databricks_sdk_version_for_project: empty output");
+                Ok(None)
+            } else {
+                debug!(
+                    "get_databricks_sdk_version_for_project: found version {}",
+                    version
+                );
+                Ok(Some(version))
+            }
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            debug!(
+                "get_databricks_sdk_version_for_project: subprocess failed: {}",
+                stderr
+            );
+            Ok(None)
+        }
+        Err(e) => {
+            debug!(
+                "get_databricks_sdk_version_for_project: failed to run uv: {}",
+                e
+            );
+            Ok(None)
+        }
+    }
+}
+
 /// Get the installed Databricks SDK version via subprocess
 pub fn get_databricks_sdk_version() -> Result<Option<String>, String> {
     debug!("get_databricks_sdk_version: Starting subprocess call");

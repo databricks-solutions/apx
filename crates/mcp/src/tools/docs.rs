@@ -2,6 +2,7 @@ use crate::indexing::wait_for_index_ready;
 use crate::server::ApxServer;
 use crate::tools::ToolResultExt;
 use apx_core::databricks_sdk_doc::SDKSource;
+use apx_core::interop::get_databricks_sdk_version_for_project;
 use rmcp::model::*;
 use rmcp::schemars;
 use serde::Serialize;
@@ -15,6 +16,9 @@ pub struct DocsArgs {
     /// Maximum number of results to return (default: 5)
     #[serde(default = "default_docs_limit")]
     pub num_results: usize,
+    /// Optional project path. When provided, detects and uses the project's SDK version.
+    #[serde(default)]
+    pub app_path: Option<String>,
 }
 
 fn default_docs_limit() -> usize {
@@ -37,16 +41,45 @@ impl ApxServer {
         }
 
         // Get the SDK doc index
-        let index_guard = ctx.sdk_doc_index.lock().await;
+        let mut index_guard = ctx.sdk_doc_index.lock().await;
 
-        let index = match index_guard.as_ref() {
+        let index = match index_guard.as_mut() {
             Some(idx) => idx,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "SDK documentation is not available. The Databricks SDK may not be installed or the index failed to bootstrap.",
+                    "SDK documentation is not available. The index failed to bootstrap.",
                 )]));
             }
         };
+
+        // If app_path is provided, detect that project's SDK version and switch if different
+        if let Some(ref app_path) = args.app_path {
+            let project_dir = std::path::Path::new(app_path);
+            match get_databricks_sdk_version_for_project(project_dir) {
+                Ok(Some(project_version)) => {
+                    if let Err(e) = index.ensure_version(&args.source, &project_version).await {
+                        tracing::warn!(
+                            "Failed to switch to project SDK version {}: {}. Using current version.",
+                            project_version,
+                            e
+                        );
+                    }
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        "No SDK version detected for project at {}, using default",
+                        app_path
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Failed to detect SDK version for project at {}: {}",
+                        app_path,
+                        e
+                    );
+                }
+            }
+        }
 
         match index.search_sync(&args.source, &args.query, args.num_results) {
             Ok(results) => {
