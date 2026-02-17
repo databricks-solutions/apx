@@ -9,6 +9,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
 use tokio::sync::OnceCell;
 use tracing::debug;
 
@@ -63,18 +64,12 @@ static UV_CELL: OnceCell<ResolvedBinary> = OnceCell::const_new();
 
 /// Resolve bun binary. Downloads if not found on PATH or in `~/.apx/bin/`.
 pub async fn resolve_bun() -> Result<ResolvedBinary, String> {
-    BUN_CELL
-        .get_or_try_init(resolve_bun_inner)
-        .await
-        .cloned()
+    BUN_CELL.get_or_try_init(resolve_bun_inner).await.cloned()
 }
 
 /// Resolve uv binary. Downloads if not found on PATH or in `~/.apx/bin/`.
 pub async fn resolve_uv() -> Result<ResolvedBinary, String> {
-    UV_CELL
-        .get_or_try_init(resolve_uv_inner)
-        .await
-        .cloned()
+    UV_CELL.get_or_try_init(resolve_uv_inner).await.cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +221,16 @@ async fn download_bun() -> Result<PathBuf, String> {
     debug!("downloading bun v{BUN_VERSION} from {url}");
     let bytes = http_get(&url).await?;
 
+    // Verify SHA-256 checksum
+    let archive_name = format!("bun-{platform}.zip");
+    let checksums_url = format!(
+        "https://github.com/oven-sh/bun/releases/download/bun-v{BUN_VERSION}/SHASUMS256.txt"
+    );
+    let checksums = String::from_utf8(http_get(&checksums_url).await?)
+        .map_err(|e| format!("Invalid UTF-8 in bun checksums: {e}"))?;
+    let expected = parse_sha256_for_file(&checksums, &archive_name)?;
+    verify_sha256(&bytes, &expected, "bun archive")?;
+
     // Extract bun from the zip (archives have a subdirectory)
     let cursor = std::io::Cursor::new(&bytes);
     let mut archive =
@@ -246,8 +251,7 @@ async fn download_bun() -> Result<PathBuf, String> {
             entry
                 .read_to_end(&mut buf)
                 .map_err(|e| format!("Failed to read bun from zip: {e}"))?;
-            std::fs::write(&dest, &buf)
-                .map_err(|e| format!("Failed to write bun binary: {e}"))?;
+            std::fs::write(&dest, &buf).map_err(|e| format!("Failed to write bun binary: {e}"))?;
             found = true;
             break;
         }
@@ -302,6 +306,17 @@ async fn download_uv() -> Result<PathBuf, String> {
 
     debug!("downloading uv v{UV_VERSION} from {url}");
     let bytes = http_get(&url).await?;
+
+    // Verify SHA-256 checksum
+    let checksums_url = format!("{url}.sha256");
+    let archive_name = url
+        .rsplit('/')
+        .next()
+        .ok_or("Failed to extract archive filename from URL")?;
+    let checksums = String::from_utf8(http_get(&checksums_url).await?)
+        .map_err(|e| format!("Invalid UTF-8 in uv checksums: {e}"))?;
+    let expected = parse_sha256_for_file(&checksums, archive_name)?;
+    verify_sha256(&bytes, &expected, "uv archive")?;
 
     if is_zip {
         extract_uv_from_zip(&bytes, &dest)?;
@@ -375,14 +390,39 @@ fn extract_uv_from_tar_gz(data: &[u8], dest: &Path) -> Result<(), String> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn verify_sha256(data: &[u8], expected_hex: &str, label: &str) -> Result<(), String> {
+    let actual = hex::encode(Sha256::digest(data));
+    if actual != expected_hex {
+        return Err(format!(
+            "{label}: SHA-256 mismatch — expected {expected_hex}, got {actual}"
+        ));
+    }
+    debug!("{label}: SHA-256 verified");
+    Ok(())
+}
+
+fn parse_sha256_for_file(checksums_text: &str, target_filename: &str) -> Result<String, String> {
+    for line in checksums_text.lines() {
+        // Format: "<64-char hex>  <filename>"
+        let Some((hash, filename)) = line.split_once("  ") else {
+            continue;
+        };
+        if filename.trim() == target_filename {
+            return Ok(hash.to_string());
+        }
+    }
+    Err(format!(
+        "SHA-256 checksum not found for '{target_filename}' in checksums file"
+    ))
+}
+
 fn apx_bin_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".apx").join("bin"))
 }
 
 fn ensure_apx_bin_dir() -> Result<PathBuf, String> {
     let dir = apx_bin_dir().ok_or("Could not determine home directory")?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create ~/.apx/bin/: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create ~/.apx/bin/: {e}"))?;
     Ok(dir)
 }
 

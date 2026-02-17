@@ -54,6 +54,7 @@ serde_with = { version = "3.16.1", default-features = false, features = ["macros
 which.workspace = true
 flate2.workspace = true
 tar.workspace = true
+sha2.workspace = true
 
 [build-dependencies]
 zip.workspace = true
