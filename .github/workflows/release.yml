@@ -315,6 +315,10 @@ jobs:
 
       - name: Build apx binary (cross)
         if: matrix.cross
+        env:
+          CROSS_CONTAINER_OPTS: >-
+            -v ${{ github.workspace }}/.protoc:/protoc
+            -e PROTOC=/protoc/bin/protoc
         run: cross build --release -p apx-bin --target ${{ matrix.rust_target }}
 
       # Rename and upload
