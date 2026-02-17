@@ -3,7 +3,8 @@
 //! This module implements an Axum HTTP server that receives OpenTelemetry logs
 //! via OTLP HTTP protocol, supporting both JSON and Protobuf content types.
 
-use apx_common::{FLUX_PORT, LogRecord, Storage};
+use apx_common::{FLUX_PORT, LogRecord};
+use apx_db::LogsDb;
 use axum::{
     Router,
     body::Bytes,
@@ -21,7 +22,7 @@ use tracing::{debug, error, info};
 /// Application state shared across handlers.
 #[derive(Clone, Debug)]
 struct AppState {
-    storage: Storage,
+    storage: LogsDb,
 }
 
 /// Run the flux server (entry point for `apx-agent`).
@@ -34,7 +35,9 @@ pub async fn run_server() -> Result<(), String> {
     eprintln!("[{now}] Flux daemon starting...");
 
     // Open storage
-    let storage = Storage::open()?;
+    let storage = LogsDb::open()
+        .await
+        .map_err(|e| format!("Storage error: {e}"))?;
     eprintln!("[{now}] Storage initialized");
 
     // Start cleanup scheduler as a background task
@@ -49,14 +52,14 @@ pub async fn run_server() -> Result<(), String> {
 
 /// Periodic cleanup loop that runs within the daemon process.
 /// Deletes logs older than 7 days every hour.
-async fn run_cleanup_loop(storage: Storage) {
+async fn run_cleanup_loop(storage: LogsDb) {
     // Cleanup interval: 1 hour
     let interval = Duration::from_secs(60 * 60);
 
     info!("Cleanup scheduler started (interval: 1 hour, retention: 7 days)");
 
     // Run initial cleanup
-    match storage.cleanup_old_logs() {
+    match storage.cleanup_old_logs().await {
         Ok(deleted) if deleted > 0 => info!("Initial cleanup: removed {} old log records", deleted),
         Ok(_) => debug!("Initial cleanup: no old records to remove"),
         Err(e) => error!("Initial cleanup failed: {}", e),
@@ -65,7 +68,7 @@ async fn run_cleanup_loop(storage: Storage) {
     loop {
         tokio::time::sleep(interval).await;
 
-        match storage.cleanup_old_logs() {
+        match storage.cleanup_old_logs().await {
             Ok(deleted) if deleted > 0 => {
                 info!("Cleanup: removed {} old log records", deleted);
             }
@@ -80,7 +83,7 @@ async fn run_cleanup_loop(storage: Storage) {
 }
 
 /// Start the flux HTTP server with the given storage.
-async fn run_http_server(storage: Storage) -> Result<(), String> {
+async fn run_http_server(storage: LogsDb) -> Result<(), String> {
     let state = AppState { storage };
 
     let app = Router::new()
@@ -143,7 +146,7 @@ async fn handle_logs(
 
     debug!("Received {} log records", records.len());
 
-    match state.storage.insert_logs(&records) {
+    match state.storage.insert_logs(&records).await {
         Ok(count) => {
             debug!("Stored {} log records", count);
             StatusCode::OK

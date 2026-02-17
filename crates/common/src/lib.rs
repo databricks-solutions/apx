@@ -24,8 +24,8 @@ use std::time::Duration;
 
 // Re-export commonly used types
 pub use storage::{
-    AggregatedRecord, LogAggregator, LogRecord, Storage, db_path, flux_dir, get_aggregation_key,
-    should_skip_log, source_label,
+    AggregatedRecord, LogAggregator, LogRecord, flux_dir, get_aggregation_key, should_skip_log,
+    source_label,
 };
 
 /// Flux port for OTLP HTTP receiver

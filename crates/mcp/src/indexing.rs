@@ -1,6 +1,7 @@
 use crate::context::{AppContext, SdkIndexParams};
 use apx_core::databricks_sdk_doc::SDKSource;
 use apx_core::search::ComponentIndex;
+use apx_db::SqlitePool;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -18,9 +19,10 @@ pub fn init_all_indexes(
 ) {
     let cache_state = ctx.cache_state.clone();
     let index_state = ctx.index_state.clone();
+    let pool = ctx.dev_db.pool().clone();
 
     // Check for legacy LanceDB directory
-    apx_core::search::common::check_legacy_lancedb();
+    apx_core::search::common::check_legacy_paths();
 
     tokio::spawn(async move {
         // Mark as running
@@ -35,8 +37,8 @@ pub fn init_all_indexes(
         tracing::info!("Ensuring component search index exists on MCP start");
 
         let ensure_result = tokio::select! {
-            result = tokio::task::spawn_blocking(ensure_search_index) => {
-                Some(result.unwrap_or_else(|e| Err(format!("spawn_blocking panicked: {e}"))))
+            result = ensure_search_index(pool.clone()) => {
+                Some(result)
             },
             _ = shutdown_rx.recv() => {
                 tracing::info!("Shutdown signal received during search index check, stopping");
@@ -62,25 +64,9 @@ pub fn init_all_indexes(
             let version = params.sdk_version;
             tracing::debug!("Using SDK version: {}", version);
 
-            // Create SDK docs index (sync, but cheap)
-            let mut index = match apx_core::search::docs_index::SDKDocsIndex::new() {
-                Ok(idx) => {
-                    tracing::debug!("SDKDocsIndex created successfully");
-                    idx
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to initialize SDK doc index: {}. The docs tool will not be available.",
-                        e
-                    );
-                    index_state.sdk_indexed.store(true, Ordering::SeqCst);
-                    index_state.sdk_ready.notify_waiters();
-
-                    let mut guard = cache_state.lock().await;
-                    guard.is_running = false;
-                    return;
-                }
-            };
+            // Create SDK docs index (async)
+            let mut index = apx_core::search::docs_index::SDKDocsIndex::new(pool.clone());
+            tracing::debug!("SDKDocsIndex created successfully");
 
             // Bootstrap the index (async: download + sync: build)
             tracing::info!("Bootstrapping SDK docs (this may download SDK if not cached)");
@@ -132,28 +118,28 @@ pub fn init_all_indexes(
     });
 }
 
-/// Rebuild the search index from registry.json files (sync)
-pub fn rebuild_search_index() -> Result<(), String> {
-    let index = ComponentIndex::new()?;
-    index.build_index_from_registries()
+/// Rebuild the search index from registry.json files (async)
+pub async fn rebuild_search_index(pool: SqlitePool) -> Result<(), String> {
+    let index = ComponentIndex::new(pool);
+    index.build_index_from_registries().await
 }
 
-/// Ensure search index exists and is valid, build/rebuild if needed (sync)
-fn ensure_search_index() -> Result<(), String> {
-    let index = ComponentIndex::new()?;
+/// Ensure search index exists and is valid, build/rebuild if needed (async)
+async fn ensure_search_index(pool: SqlitePool) -> Result<(), String> {
+    let index = ComponentIndex::new(pool);
 
-    match index.validate_index() {
+    match index.validate_index().await {
         Ok(true) => {
             tracing::debug!("Search index validated successfully");
             Ok(())
         }
         Ok(false) => {
             tracing::info!("Search index not found, building from registry indexes");
-            index.build_index_from_registries()
+            index.build_index_from_registries().await
         }
         Err(e) => {
             tracing::warn!("Search index corrupted ({}), rebuilding...", e);
-            index.build_index_from_registries()
+            index.build_index_from_registries().await
         }
     }
 }

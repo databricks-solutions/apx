@@ -1,13 +1,13 @@
 //! SDK documentation indexing and search using SQLite FTS5.
 
 use rayon::prelude::*;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use sqlx::Row;
+use sqlx::sqlite::SqlitePool;
 
 use crate::common::Timer;
 use crate::databricks_sdk_doc::{SDKSource, download_and_extract_sdk, load_doc_files};
-use crate::search::common;
+use apx_db::dev::{sanitize_fts5_query, table_exists};
 
 const CHUNK_SIZE: usize = 2000; // characters (no tokenizer needed for FTS)
 const CHUNK_OVERLAP: usize = 200; // characters overlap
@@ -129,27 +129,26 @@ fn chunk_text(
 }
 
 /// SDK documentation index using SQLite FTS5
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SDKDocsIndex {
-    conn: Arc<Mutex<Connection>>,
+    pool: SqlitePool,
     version: Option<String>,
 }
 
 impl SDKDocsIndex {
-    /// Create a new SDK docs index using the global search database
-    pub fn new() -> Result<Self, String> {
-        let conn = common::get_connection()?;
-        Ok(Self {
-            conn,
+    /// Create a new SDK docs index using the provided pool
+    pub fn new(pool: SqlitePool) -> Self {
+        Self {
+            pool,
             version: None,
-        })
+        }
     }
 
-    /// Create with custom connection (for testing)
+    /// Create with a specific pool (for testing or custom setups)
     #[allow(dead_code)]
-    pub fn with_connection(conn: Arc<Mutex<Connection>>) -> Self {
+    pub fn with_pool(pool: SqlitePool) -> Self {
         Self {
-            conn,
+            pool,
             version: None,
         }
     }
@@ -164,9 +163,8 @@ impl SDKDocsIndex {
     }
 
     /// Check if the index table exists
-    fn table_exists_sync(&self, table_name: &str) -> Result<bool, String> {
-        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
-        common::table_exists(&conn, table_name)
+    async fn table_exists_check(&self, table_name: &str) -> Result<bool, String> {
+        table_exists(&self.pool, table_name).await
     }
 
     /// Bootstrap with a pre-computed SDK version
@@ -182,8 +180,8 @@ impl SDKDocsIndex {
 
                 let table_name = Self::table_name(version);
 
-                // Check if already indexed (sync, but cheap)
-                if self.table_exists_sync(&table_name)? {
+                // Check if already indexed
+                if self.table_exists_check(&table_name).await? {
                     tracing::info!("SDK docs already indexed for version {}", version);
                     return Ok(false);
                 }
@@ -191,16 +189,20 @@ impl SDKDocsIndex {
                 // Download and extract (async)
                 let docs_path = download_and_extract_sdk(version).await?;
 
-                // Build index (sync, wrapped in spawn_blocking by caller)
-                self.build_index(&table_name, &docs_path)?;
+                // Build index (async)
+                self.build_index(&table_name, &docs_path).await?;
 
                 Ok(true)
             }
         }
     }
 
-    /// Build index from a docs path (sync)
-    fn build_index(&self, table_name: &str, docs_path: &std::path::Path) -> Result<(), String> {
+    /// Build index from a docs path
+    async fn build_index(
+        &self,
+        table_name: &str,
+        docs_path: &std::path::Path,
+    ) -> Result<(), String> {
         let overall_timer = Timer::start("build_index");
 
         // Load documentation files
@@ -211,7 +213,7 @@ impl SDKDocsIndex {
         let files = load_doc_files(docs_path)?;
         load_timer.lap(&format!("Loaded {} documentation files", files.len()));
 
-        // Chunk all files in parallel
+        // Chunk all files in parallel (CPU-bound, uses rayon)
         let chunk_timer = Timer::start("chunk_text_parallel");
 
         if let Some(doc) = files.first() {
@@ -255,23 +257,25 @@ impl SDKDocsIndex {
 
         chunk_timer.lap(&format!("Created {} text chunks", doc_chunks.len()));
 
-        // Database operations
+        // Database operations (async)
         let db_timer = Timer::start("database_operations");
 
-        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
-
         // Drop existing table if it exists
-        conn.execute_batch(&format!("DROP TABLE IF EXISTS {table_name}"))
+        sqlx::query(&format!("DROP TABLE IF EXISTS \"{table_name}\""))
+            .execute(&self.pool)
+            .await
             .map_err(|e| format!("Failed to drop existing table: {e}"))?;
 
         // Create FTS5 virtual table
-        conn.execute_batch(&format!(
+        sqlx::query(&format!(
             "CREATE VIRTUAL TABLE \"{table_name}\" USING fts5(\
                 id UNINDEXED, text, source_file UNINDEXED, \
                 chunk_index UNINDEXED, service, entity, operation, symbols, \
                 tokenize='porter unicode61'\
             )"
         ))
+        .execute(&self.pool)
+        .await
         .map_err(|e| format!("Failed to create FTS5 table: {e}"))?;
 
         db_timer.lap("Created FTS5 table");
@@ -279,35 +283,34 @@ impl SDKDocsIndex {
         // Insert all chunks in a transaction
         let insert_timer = Timer::start("insert_chunks");
 
-        let tx = conn
-            .unchecked_transaction()
+        let mut tx = self
+            .pool
+            .begin()
+            .await
             .map_err(|e| format!("Transaction error: {e}"))?;
 
-        {
-            let mut stmt = tx
-                .prepare(&format!(
-                    "INSERT INTO \"{table_name}\" \
-                     (id, text, source_file, chunk_index, service, entity, operation, symbols) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
-                ))
-                .map_err(|e| format!("Prepare error: {e}"))?;
-
-            for chunk in &doc_chunks {
-                stmt.execute(rusqlite::params![
-                    chunk.id,
-                    chunk.text,
-                    chunk.source_file,
-                    chunk.chunk_index as i64,
-                    chunk.service,
-                    chunk.entity,
-                    chunk.operation,
-                    chunk.symbols,
-                ])
-                .map_err(|e| format!("Insert error: {e}"))?;
-            }
+        for chunk in &doc_chunks {
+            sqlx::query(&format!(
+                "INSERT INTO \"{table_name}\" \
+                 (id, text, source_file, chunk_index, service, entity, operation, symbols) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+            ))
+            .bind(&chunk.id)
+            .bind(&chunk.text)
+            .bind(&chunk.source_file)
+            .bind(chunk.chunk_index as i64)
+            .bind(&chunk.service)
+            .bind(&chunk.entity)
+            .bind(&chunk.operation)
+            .bind(&chunk.symbols)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Insert error: {e}"))?;
         }
 
-        tx.commit().map_err(|e| format!("Commit error: {e}"))?;
+        tx.commit()
+            .await
+            .map_err(|e| format!("Commit error: {e}"))?;
         insert_timer.finish();
 
         db_timer.finish();
@@ -337,8 +340,8 @@ impl SDKDocsIndex {
         Ok(())
     }
 
-    /// Search for relevant documentation chunks using FTS5 (sync)
-    pub fn search_sync(
+    /// Search for relevant documentation chunks using FTS5
+    pub async fn search(
         &self,
         source: &SDKSource,
         query: &str,
@@ -352,45 +355,36 @@ impl SDKDocsIndex {
 
                 let table_name = Self::table_name(version);
 
-                let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
-
-                if !common::table_exists(&conn, &table_name)? {
+                if !table_exists(&self.pool, &table_name).await? {
                     return Err(format!(
                         "SDK docs not indexed for version {version}. Index will be built on next server start."
                     ));
                 }
 
-                let sanitized = common::sanitize_fts5_query(query);
+                let sanitized = sanitize_fts5_query(query);
                 if sanitized.is_empty() {
                     return Ok(Vec::new());
                 }
 
                 tracing::debug!("search: Executing FTS5 query for '{}'", query);
 
-                let mut stmt = conn
-                    .prepare(&format!(
-                        "SELECT text, source_file, rank FROM \"{table_name}\" \
-                         WHERE \"{table_name}\" MATCH ?1 \
-                         ORDER BY rank \
-                         LIMIT ?2"
-                    ))
-                    .map_err(|e| format!("Prepare error: {e}"))?;
-
-                let rows = stmt
-                    .query_map(rusqlite::params![sanitized, limit as i64], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, f64>(2)?,
-                        ))
-                    })
-                    .map_err(|e| format!("Query error: {e}"))?;
+                let rows = sqlx::query(&format!(
+                    "SELECT text, source_file, rank FROM \"{table_name}\" \
+                     WHERE \"{table_name}\" MATCH ?1 \
+                     ORDER BY rank \
+                     LIMIT ?2"
+                ))
+                .bind(&sanitized)
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| format!("Query error: {e}"))?;
 
                 let mut results = Vec::new();
 
-                for (rank, row_result) in rows.enumerate() {
-                    let (text, source_file, _fts_rank) =
-                        row_result.map_err(|e| format!("Row error: {e}"))?;
+                for (rank, row) in rows.iter().enumerate() {
+                    let text: String = row.get("text");
+                    let source_file: String = row.get("source_file");
 
                     let score = 1.0 / (1.0 + rank as f32);
                     results.push(DocSearchResult {
@@ -460,62 +454,57 @@ mod tests {
         assert!(chunks.is_empty(), "Empty text should produce no chunks");
     }
 
-    #[test]
-    fn test_sdk_docs_index_creation() {
-        let conn = Connection::open_in_memory().unwrap();
-        let conn = Arc::new(Mutex::new(conn));
-        let index = SDKDocsIndex::with_connection(conn);
+    #[tokio::test]
+    async fn test_sdk_docs_index_creation() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let index = SDKDocsIndex::with_pool(pool);
         assert!(index.version.is_none());
     }
 
-    #[test]
-    fn test_fts5_search_with_data() {
-        let conn = Connection::open_in_memory().unwrap();
+    #[tokio::test]
+    async fn test_fts5_search_with_data() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let table_name = "sdk_docs_fts_test_v1";
 
-        conn.execute_batch(&format!(
+        sqlx::query(&format!(
             "CREATE VIRTUAL TABLE \"{table_name}\" USING fts5(\
                 id UNINDEXED, text, source_file UNINDEXED, \
                 chunk_index UNINDEXED, service, entity, operation, symbols, \
                 tokenize='porter unicode61'\
             )"
         ))
+        .execute(&pool)
+        .await
         .unwrap();
 
-        conn.execute(
-            &format!(
-                "INSERT INTO \"{table_name}\" \
-                 (id, text, source_file, chunk_index, service, entity, operation, symbols) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
-            ),
-            rusqlite::params![
-                "test.rst:0",
-                "ClustersAPI clusters create This is about creating clusters",
-                "test.rst",
-                0,
-                "clusters",
-                "ClustersAPI",
-                "create",
-                "clusters create ClustersAPI"
-            ],
-        )
+        sqlx::query(&format!(
+            "INSERT INTO \"{table_name}\" \
+             (id, text, source_file, chunk_index, service, entity, operation, symbols) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        ))
+        .bind("test.rst:0")
+        .bind("ClustersAPI clusters create This is about creating clusters")
+        .bind("test.rst")
+        .bind(0i64)
+        .bind("clusters")
+        .bind("ClustersAPI")
+        .bind("create")
+        .bind("clusters create ClustersAPI")
+        .execute(&pool)
+        .await
         .unwrap();
 
         // Verify the data is searchable
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT text, source_file FROM \"{table_name}\" \
-                 WHERE \"{table_name}\" MATCH '\"clusters\"' LIMIT 5"
-            ))
-            .unwrap();
-
-        let results: Vec<(String, String)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect();
+        let results = sqlx::query(&format!(
+            "SELECT text, source_file FROM \"{table_name}\" \
+             WHERE \"{table_name}\" MATCH '\"clusters\"' LIMIT 5"
+        ))
+        .fetch_all(&pool)
+        .await
+        .unwrap();
 
         assert_eq!(results.len(), 1);
-        assert!(results[0].0.contains("clusters"));
+        let text: String = results[0].get("text");
+        assert!(text.contains("clusters"));
     }
 }

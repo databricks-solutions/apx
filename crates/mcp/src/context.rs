@@ -1,5 +1,6 @@
 use apx_core::components::SharedCacheState;
 use apx_core::search::docs_index::SDKDocsIndex;
+use apx_db::DevDb;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{Mutex, Notify, broadcast};
@@ -43,6 +44,7 @@ impl IndexState {
 
 #[derive(Debug)]
 pub struct AppContext {
+    pub dev_db: DevDb,
     pub sdk_doc_index: Arc<Mutex<Option<SDKDocsIndex>>>,
     pub cache_state: SharedCacheState,
     pub index_state: IndexState,

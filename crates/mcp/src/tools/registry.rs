@@ -60,32 +60,22 @@ impl ApxServer {
             if needs_registry_refresh(&cfg.registries) {
                 tracing::info!("Registry indexes stale, refreshing...");
                 if let Ok(true) = sync_registry_indexes(&path, false).await {
-                    let rebuild_result = tokio::task::spawn_blocking(rebuild_search_index).await;
-                    if let Ok(Err(e)) = rebuild_result {
+                    let pool = self.ctx.dev_db.pool().clone();
+                    if let Err(e) = rebuild_search_index(pool.clone()).await {
                         tracing::warn!("Failed to rebuild search index after refresh: {}", e);
                     }
                 }
             }
         }
 
-        // Search in spawn_blocking (sync SQLite operations)
-        let search_query = args.query.clone();
-        let limit = args.limit;
-        let search_results = match tokio::task::spawn_blocking(move || {
-            let index = ComponentIndex::new()?;
-            index.search(&search_query, limit)
-        })
-        .await
-        {
-            Ok(Ok(results)) => results,
-            Ok(Err(e)) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Search failed: {e}"
-                ))]));
-            }
+        // Search using async DB layer
+        let pool = self.ctx.dev_db.pool().clone();
+        let index = ComponentIndex::new(pool);
+        let search_results = match index.search(&args.query, args.limit).await {
+            Ok(results) => results,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Search task panicked: {e}"
+                    "Search failed: {e}"
                 ))]));
             }
         };

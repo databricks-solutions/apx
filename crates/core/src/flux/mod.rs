@@ -28,8 +28,8 @@ use tracing::{debug, info, warn};
 
 // Re-export from apx-common crate
 pub use apx_common::{
-    FLUX_PORT, FluxLock, Storage, db_path, flux_dir, is_flux_listening, is_running, log_path,
-    read_lock, remove_lock, write_lock,
+    FLUX_PORT, FluxLock, flux_dir, is_flux_listening, is_running, log_path, read_lock, remove_lock,
+    write_lock,
 };
 
 // ============================================================================

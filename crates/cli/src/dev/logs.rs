@@ -9,12 +9,13 @@ use tracing::debug;
 
 use crate::common::resolve_app_dir;
 use crate::run_cli_async_helper;
-use apx_common::{LogAggregator, Storage, db_path, should_skip_log};
+use apx_common::{LogAggregator, should_skip_log};
 use apx_core::dev::common::{lock_path, read_lock};
 use apx_core::ops::logs::{
     DEFAULT_LOG_DURATION, format_aggregated_record, format_log_record, parse_duration,
     since_timestamp_nanos,
 };
+use apx_db::LogsDb;
 
 #[derive(Args, Debug, Clone)]
 pub struct LogsArgs {
@@ -59,7 +60,7 @@ async fn run_async(args: LogsArgs) -> Result<(), String> {
     }
 
     // Check if database exists
-    let db_path = db_path()?;
+    let db_path = apx_db::logs_db_path()?;
     if !db_path.exists() {
         println!("⚠️  No logs database found at {}\n", db_path.display());
         println!("Logs will appear here once the dev server is started and produces output.");
@@ -67,7 +68,9 @@ async fn run_async(args: LogsArgs) -> Result<(), String> {
     }
 
     // Open storage
-    let storage = Storage::open().map_err(|e| format!("Failed to open logs database: {e}"))?;
+    let storage = LogsDb::open()
+        .await
+        .map_err(|e| format!("Failed to open logs database: {e}"))?;
 
     let duration = parse_duration(&args.duration)?;
     let since_ns = since_timestamp_nanos(duration);
@@ -76,13 +79,13 @@ async fn run_async(args: LogsArgs) -> Result<(), String> {
         println!("📜 Streaming logs... (Ctrl+C to stop)\n");
         follow_logs(&storage, &app_path_canonical, since_ns, &lock_path).await
     } else {
-        read_logs(&storage, &app_path_canonical, since_ns)
+        read_logs(&storage, &app_path_canonical, since_ns).await
     }
 }
 
 /// Read logs from database, filtered by app path and timestamp
-fn read_logs(storage: &Storage, app_path: &str, since_ns: i64) -> Result<(), String> {
-    let records = storage.query_logs(Some(app_path), since_ns, None)?;
+async fn read_logs(storage: &LogsDb, app_path: &str, since_ns: i64) -> Result<(), String> {
+    let records = storage.query_logs(Some(app_path), since_ns, None).await?;
 
     let filtered: Vec<_> = records.iter().filter(|r| !should_skip_log(r)).collect();
 
@@ -118,7 +121,7 @@ fn read_logs(storage: &Storage, app_path: &str, since_ns: i64) -> Result<(), Str
 
 /// Follow logs for new entries
 async fn follow_logs(
-    storage: &Storage,
+    storage: &LogsDb,
     app_path: &str,
     since_ns: i64,
     lock_path: &std::path::Path,
@@ -126,10 +129,10 @@ async fn follow_logs(
     use chrono::Utc;
 
     // First, read existing logs
-    read_logs(storage, app_path, since_ns)?;
+    read_logs(storage, app_path, since_ns).await?;
 
     // Track last seen ID for incremental queries
-    let mut last_id = storage.get_latest_id()?;
+    let mut last_id = storage.get_latest_id().await?;
 
     // Track if server was initially running
     let server_was_running = lock_path.exists();
@@ -156,7 +159,7 @@ async fn follow_logs(
                 }
 
                 // Poll for new logs
-                let new_records = storage.query_logs_after_id(Some(app_path), last_id)?;
+                let new_records = storage.query_logs_after_id(Some(app_path), last_id).await?;
 
                 for record in &new_records {
                     if !should_skip_log(record) {
@@ -168,7 +171,7 @@ async fn follow_logs(
                 }
 
                 // Update last_id
-                if let Ok(new_id) = storage.get_latest_id()
+                if let Ok(new_id) = storage.get_latest_id().await
                     && new_id > last_id
                 {
                     last_id = new_id;

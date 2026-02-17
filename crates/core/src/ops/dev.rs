@@ -126,7 +126,7 @@ async fn wait_for_healthy_with_logs(
 
     let start_time = Instant::now();
     let deadline = start_time + Duration::from_secs(config.timeout_secs);
-    let mut log_streamer = StartupLogStreamer::new(app_dir);
+    let mut log_streamer = StartupLogStreamer::new(app_dir).await;
     let mut attempt_count = 0u32;
     let mut last_overall_status: Option<String> = None;
     let mut first_response_logged = false;
@@ -139,7 +139,7 @@ async fn wait_for_healthy_with_logs(
                 return Err("Startup interrupted by user".to_string());
             }
             _ = tokio::time::sleep(Duration::from_millis(config.retry_delay_ms)) => {
-                log_streamer.print_new_logs();
+                log_streamer.print_new_logs().await;
                 attempt_count += 1;
                 let elapsed_ms = start_time.elapsed().as_millis();
 

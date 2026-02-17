@@ -3,9 +3,8 @@ use serde::Serialize;
 use std::path::Path;
 use std::time::Duration;
 
-use apx_common::{
-    AggregatedRecord, LogAggregator, LogRecord, Storage, db_path, should_skip_log, source_label,
-};
+use apx_common::{AggregatedRecord, LogAggregator, LogRecord, should_skip_log, source_label};
+use apx_db::LogsDb;
 
 pub const DEFAULT_LOG_DURATION: &str = "10m";
 
@@ -14,24 +13,28 @@ pub const DEFAULT_LOG_DURATION: &str = "10m";
 // ---------------------------------------------------------------------------
 
 /// Query and filter logs for the given app directory and duration string.
-fn query_filtered_logs(app_dir: &Path, duration: &str) -> Result<Vec<LogRecord>, String> {
+async fn query_filtered_logs(app_dir: &Path, duration: &str) -> Result<Vec<LogRecord>, String> {
     let app_path_canonical = app_dir
         .canonicalize()
         .unwrap_or_else(|_| app_dir.to_path_buf())
         .display()
         .to_string();
 
-    let db_path = db_path()?;
+    let db_path = apx_db::logs_db_path()?;
     if !db_path.exists() {
         return Ok(Vec::new());
     }
 
-    let storage = Storage::open().map_err(|e| format!("Failed to open logs database: {e}"))?;
+    let storage = LogsDb::open()
+        .await
+        .map_err(|e| format!("Failed to open logs database: {e}"))?;
 
     let duration = parse_duration(duration)?;
     let since_ns = since_timestamp_nanos(duration);
 
-    let records = storage.query_logs(Some(&app_path_canonical), since_ns, None)?;
+    let records = storage
+        .query_logs(Some(&app_path_canonical), since_ns, None)
+        .await?;
     Ok(records
         .into_iter()
         .filter(|r| !should_skip_log(r))
@@ -44,10 +47,10 @@ fn query_filtered_logs(app_dir: &Path, duration: &str) -> Result<Vec<LogRecord>,
 
 /// Fetch dev server logs for the given duration without following.
 pub async fn fetch_logs(app_dir: &Path, duration: &str) -> Result<String, String> {
-    let filtered = query_filtered_logs(app_dir, duration)?;
+    let filtered = query_filtered_logs(app_dir, duration).await?;
 
     if filtered.is_empty() {
-        let db_path = db_path()?;
+        let db_path = apx_db::logs_db_path()?;
         if !db_path.exists() {
             return Ok("No logs database found.".to_string());
         }
@@ -88,7 +91,7 @@ pub async fn fetch_logs_structured(
     app_dir: &Path,
     duration: &str,
 ) -> Result<Vec<LogEntry>, String> {
-    let filtered = query_filtered_logs(app_dir, duration)?;
+    let filtered = query_filtered_logs(app_dir, duration).await?;
 
     let mut aggregator = LogAggregator::new();
     let mut entries = Vec::new();

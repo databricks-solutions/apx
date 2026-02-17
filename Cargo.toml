@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/common", "crates/agent", "crates/studio", "crates/core", "crates/mcp", "crates/cli", "crates/databricks_sdk", "crates/apx"]
+members = ["crates/common", "crates/agent", "crates/studio", "crates/core", "crates/mcp", "crates/cli", "crates/databricks_sdk", "crates/apx", "crates/db"]
 resolver = "2"
 
 [workspace.package]
@@ -15,6 +15,7 @@ apx-core = { path = "crates/core" }
 apx-mcp = { path = "crates/mcp" }
 apx-cli = { path = "crates/cli" }
 apx-databricks-sdk = { path = "crates/databricks_sdk" }
+apx-db = { path = "crates/db" }
 
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
@@ -24,7 +25,7 @@ toml = "0.8.20"
 toml_edit = "0.24.0"
 
 # Database
-rusqlite = { version = "0.38.0", features = ["bundled"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 
 # Async runtime
 tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "signal", "io-std", "net"] }

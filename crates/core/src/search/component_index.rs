@@ -1,10 +1,10 @@
 //! Component registry indexing and search using SQLite FTS5.
 
-use rusqlite::Connection;
-use std::sync::{Arc, Mutex};
+use sqlx::Row;
+use sqlx::sqlite::SqlitePool;
 
-use super::common;
 use crate::components::cache::get_all_registry_indexes;
+use apx_db::dev::{sanitize_fts5_query, table_exists};
 
 const TABLE_NAME: &str = "components_fts_v1";
 
@@ -31,22 +31,21 @@ pub struct SearchResult {
 }
 
 /// Component search index using SQLite FTS5
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ComponentIndex {
-    conn: Arc<Mutex<Connection>>,
+    pool: SqlitePool,
 }
 
 impl ComponentIndex {
-    /// Create a new component index using the global search database
-    pub fn new() -> Result<Self, String> {
-        let conn = common::get_connection()?;
-        Ok(Self { conn })
+    /// Create a new component index using the provided pool
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
     }
 
-    /// Create with a custom connection (for testing)
+    /// Create with a specific pool (for testing or custom setups)
     #[allow(dead_code)]
-    pub fn with_connection(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+    pub fn with_pool(pool: SqlitePool) -> Self {
+        Self { pool }
     }
 
     /// Get the FTS table name
@@ -55,13 +54,12 @@ impl ComponentIndex {
     }
 
     /// Validate that the index exists
-    pub fn validate_index(&self) -> Result<bool, String> {
-        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
-        common::table_exists(&conn, TABLE_NAME)
+    pub async fn validate_index(&self) -> Result<bool, String> {
+        table_exists(&self.pool, TABLE_NAME).await
     }
 
     /// Build index from registry.json files
-    pub fn build_index_from_registries(&self) -> Result<(), String> {
+    pub async fn build_index_from_registries(&self) -> Result<(), String> {
         tracing::info!("Building component FTS5 index from registry indexes");
 
         let all_indexes = get_all_registry_indexes()
@@ -105,61 +103,60 @@ impl ComponentIndex {
 
         tracing::info!("Indexing {} components", records.len());
 
-        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
-
         // Drop existing table if it exists
-        conn.execute_batch(&format!("DROP TABLE IF EXISTS {TABLE_NAME}"))
+        sqlx::query(&format!("DROP TABLE IF EXISTS {TABLE_NAME}"))
+            .execute(&self.pool)
+            .await
             .map_err(|e| format!("Failed to drop existing table: {e}"))?;
 
         // Create FTS5 virtual table
-        conn.execute_batch(&format!(
+        sqlx::query(&format!(
             "CREATE VIRTUAL TABLE {TABLE_NAME} USING fts5(\
                 id UNINDEXED, name, registry UNINDEXED, text, \
                 tokenize='porter unicode61'\
             )"
         ))
+        .execute(&self.pool)
+        .await
         .map_err(|e| format!("Failed to create FTS5 table: {e}"))?;
 
         // Insert all records in a transaction
-        let tx = conn
-            .unchecked_transaction()
+        let mut tx = self
+            .pool
+            .begin()
+            .await
             .map_err(|e| format!("Transaction error: {e}"))?;
 
-        {
-            let mut stmt = tx
-                .prepare(&format!(
-                    "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
-                ))
-                .map_err(|e| format!("Prepare error: {e}"))?;
-
-            for record in &records {
-                stmt.execute(rusqlite::params![
-                    record.id,
-                    record.name,
-                    record.registry,
-                    record.text,
-                ])
-                .map_err(|e| format!("Insert error: {e}"))?;
-            }
+        for record in &records {
+            sqlx::query(&format!(
+                "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
+            ))
+            .bind(&record.id)
+            .bind(&record.name)
+            .bind(&record.registry)
+            .bind(&record.text)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Insert error: {e}"))?;
         }
 
-        tx.commit().map_err(|e| format!("Commit error: {e}"))?;
+        tx.commit()
+            .await
+            .map_err(|e| format!("Commit error: {e}"))?;
 
         tracing::info!("Component FTS5 index built successfully");
         Ok(())
     }
 
     /// Search for components using FTS5
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, String> {
+    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, String> {
         tracing::debug!("search: Starting search for query '{}'", query);
 
-        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
-
-        if !common::table_exists(&conn, TABLE_NAME)? {
+        if !table_exists(&self.pool, TABLE_NAME).await? {
             return Err("Index not built. Please ensure components are indexed.".to_string());
         }
 
-        let sanitized = common::sanitize_fts5_query(query);
+        let sanitized = sanitize_fts5_query(query);
         if sanitized.is_empty() {
             return Ok(Vec::new());
         }
@@ -170,31 +167,24 @@ impl ComponentIndex {
         // Fetch more results for reranking
         let fts_limit = (limit * 3).max(30);
 
-        let mut stmt = conn
-            .prepare(&format!(
-                "SELECT id, name, registry, rank FROM {TABLE_NAME} \
-                 WHERE {TABLE_NAME} MATCH ?1 \
-                 ORDER BY rank \
-                 LIMIT ?2"
-            ))
-            .map_err(|e| format!("Prepare error: {e}"))?;
-
-        let rows = stmt
-            .query_map(rusqlite::params![sanitized, fts_limit as i64], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, f64>(3)?,
-                ))
-            })
-            .map_err(|e| format!("Query error: {e}"))?;
+        let rows = sqlx::query(&format!(
+            "SELECT id, name, registry, rank FROM {TABLE_NAME} \
+             WHERE {TABLE_NAME} MATCH ?1 \
+             ORDER BY rank \
+             LIMIT ?2"
+        ))
+        .bind(&sanitized)
+        .bind(fts_limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| format!("Query error: {e}"))?;
 
         let mut results = Vec::new();
 
-        for (rank, row_result) in rows.enumerate() {
-            let (id, name, registry, _fts_rank) =
-                row_result.map_err(|e| format!("Row error: {e}"))?;
+        for (rank, row) in rows.iter().enumerate() {
+            let id: String = row.get("id");
+            let name: String = row.get("name");
+            let registry: String = row.get("registry");
 
             let name_lower = name.to_lowercase();
 
@@ -246,76 +236,73 @@ impl ComponentIndex {
 mod tests {
     use super::*;
 
-    fn test_index() -> ComponentIndex {
-        let conn = Connection::open_in_memory().unwrap();
-        let conn = Arc::new(Mutex::new(conn));
-        ComponentIndex::with_connection(conn)
+    async fn test_index() -> ComponentIndex {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        ComponentIndex::with_pool(pool)
     }
 
-    #[test]
-    fn test_validate_index_empty() {
-        let index = test_index();
-        assert!(!index.validate_index().unwrap());
+    #[tokio::test]
+    async fn test_validate_index_empty() {
+        let index = test_index().await;
+        assert!(!index.validate_index().await.unwrap());
     }
 
-    #[test]
-    fn test_search_no_index() {
-        let index = test_index();
-        let result = index.search("button", 10);
+    #[tokio::test]
+    async fn test_search_no_index() {
+        let index = test_index().await;
+        let result = index.search("button", 10).await;
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_build_and_search() {
-        let index = test_index();
+    #[tokio::test]
+    async fn test_build_and_search() {
+        let index = test_index().await;
 
         // Create the FTS table manually and insert test data
-        {
-            let conn = index.conn.lock().unwrap();
-            conn.execute_batch(&format!(
-                "CREATE VIRTUAL TABLE {TABLE_NAME} USING fts5(\
-                    id UNINDEXED, name, registry UNINDEXED, text, \
-                    tokenize='porter unicode61'\
-                )"
-            ))
-            .unwrap();
+        sqlx::query(&format!(
+            "CREATE VIRTUAL TABLE {TABLE_NAME} USING fts5(\
+                id UNINDEXED, name, registry UNINDEXED, text, \
+                tokenize='porter unicode61'\
+            )"
+        ))
+        .execute(&index.pool)
+        .await
+        .unwrap();
 
-            conn.execute(
-                &format!(
-                    "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
-                ),
-                rusqlite::params![
-                    "button",
-                    "button",
-                    "",
-                    "button A styled button component shadcn"
-                ],
-            )
-            .unwrap();
+        sqlx::query(&format!(
+            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
+        ))
+        .bind("button")
+        .bind("button")
+        .bind("")
+        .bind("button A styled button component shadcn")
+        .execute(&index.pool)
+        .await
+        .unwrap();
 
-            conn.execute(
-                &format!(
-                    "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
-                ),
-                rusqlite::params!["card", "card", "", "card A card container component shadcn"],
-            )
-            .unwrap();
+        sqlx::query(&format!(
+            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
+        ))
+        .bind("card")
+        .bind("card")
+        .bind("")
+        .bind("card A card container component shadcn")
+        .execute(&index.pool)
+        .await
+        .unwrap();
 
-            conn.execute(
-                &format!(
-                    "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
-                ),
-                rusqlite::params![
-                    "@custom/button",
-                    "button",
-                    "custom",
-                    "button A custom button component"
-                ],
-            )
-            .unwrap();
-        }
+        sqlx::query(&format!(
+            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
+        ))
+        .bind("@custom/button")
+        .bind("button")
+        .bind("custom")
+        .bind("button A custom button component")
+        .execute(&index.pool)
+        .await
+        .unwrap();
 
-        let results = index.search("button", 10).unwrap();
+        let results = index.search("button", 10).await.unwrap();
         assert!(!results.is_empty());
 
         // Both buttons should be in results, card should not

@@ -81,7 +81,10 @@ impl ApxServer {
             }
         }
 
-        match index.search_sync(&args.source, &args.query, args.num_results) {
+        match index
+            .search(&args.source, &args.query, args.num_results)
+            .await
+        {
             Ok(results) => {
                 drop(index_guard);
 

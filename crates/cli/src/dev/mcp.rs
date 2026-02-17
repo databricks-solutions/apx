@@ -1,6 +1,7 @@
 use crate::run_cli_async_helper;
 use apx_core::components::new_cache_state;
 use apx_core::interop::get_databricks_sdk_version;
+use apx_db::DevDb;
 use apx_mcp::context::{AppContext, IndexState, SdkIndexParams};
 use apx_mcp::server::run_server;
 use clap::Args;
@@ -52,7 +53,12 @@ pub async fn run(_args: McpArgs) -> i32 {
             sdk_doc_index: Arc::clone(&sdk_doc_index),
         };
 
+        let dev_db = DevDb::open()
+            .await
+            .map_err(|e| format!("Failed to open dev database: {e}"))?;
+
         let ctx = AppContext {
+            dev_db,
             sdk_doc_index,
             cache_state,
             index_state,
