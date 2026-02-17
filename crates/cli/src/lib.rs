@@ -18,6 +18,7 @@ pub(crate) mod dev;
 pub(crate) mod flux;
 pub(crate) mod frontend;
 pub(crate) mod init;
+pub(crate) mod upgrade;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
@@ -54,6 +55,8 @@ enum Commands {
     /// 📊 Flux OTEL collector commands
     #[command(subcommand)]
     Flux(FluxCommands),
+    /// ⬆️  Upgrade apx to the latest version
+    Upgrade,
     /// Internal: generate OpenAPI schema and client
     #[command(name = "__generate_openapi", hide = true)]
     GenerateOpenapi(__generate_openapi::GenerateOpenapiArgs),
@@ -145,6 +148,7 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
                 FluxCommands::Start(args) => flux::start::run(args).await,
                 FluxCommands::Stop(args) => flux::stop::run(args).await,
             },
+            Some(Commands::Upgrade) => upgrade::run().await,
             Some(Commands::GenerateOpenapi(args)) => __generate_openapi::run(args),
             None => {
                 let mut cmd = Cli::command();
