@@ -1,184 +1,144 @@
-//! Common utilities for working with LanceDB indices
+//! Common utilities for the SQLite FTS5 search index.
 //!
-//! This module provides thread-safe access to LanceDB with a global shared connection
-//! and a RwLock for write operations. Reads can happen in parallel, but writes
-//! (index building) require exclusive access to avoid Lance's internal task conflicts.
+//! Provides a global SQLite connection singleton at `~/.apx/search.db` with WAL mode.
+//! All search operations (component index, SDK docs index) share this single connection.
 
-use lancedb::{Connection, Table, connect};
-use std::collections::HashMap;
-use std::fs;
+use rusqlite::Connection;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::time::Duration;
-use tokio::sync::{Mutex, RwLock, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, OnceLock};
 
-/// Timeout for acquiring the write lock (in seconds)
-const DB_WRITE_LOCK_TIMEOUT_SECS: u64 = 10;
+/// Global SQLite connection singleton
+static SEARCH_DB: OnceLock<Arc<Mutex<Connection>>> = OnceLock::new();
 
-/// Global state holding the RwLock and shared connections
-struct DbState {
-    /// RwLock for database operations - reads can be parallel, writes are exclusive
-    rw_lock: RwLock<()>,
-    /// Shared connections per database path
-    connections: Mutex<HashMap<PathBuf, Connection>>,
+/// Get the default search database path (~/.apx/search.db)
+fn default_db_path() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "Could not determine home directory".to_string())?;
+    Ok(home.join(".apx").join("search.db"))
 }
 
-static DB_STATE: OnceLock<DbState> = OnceLock::new();
-
-fn get_db_state() -> &'static DbState {
-    DB_STATE.get_or_init(|| DbState {
-        rw_lock: RwLock::new(()),
-        connections: Mutex::new(HashMap::new()),
-    })
-}
-
-/// RAII guard that holds the database write lock (for index building operations)
-#[derive(Debug)]
-pub struct DbWriteLockGuard<'a> {
-    _guard: RwLockWriteGuard<'a, ()>,
-}
-
-/// Acquire an exclusive write lock on the database with a timeout.
-/// Use this for operations that modify the database (create/drop tables, build indexes).
-/// Returns a guard that releases the lock when dropped.
-pub async fn acquire_write_lock() -> Result<DbWriteLockGuard<'static>, String> {
-    tracing::debug!(
-        "db_lock: Attempting to acquire WRITE lock (timeout: {}s)",
-        DB_WRITE_LOCK_TIMEOUT_SECS
-    );
-    let start = std::time::Instant::now();
-
-    let state = get_db_state();
-
-    match tokio::time::timeout(
-        Duration::from_secs(DB_WRITE_LOCK_TIMEOUT_SECS),
-        state.rw_lock.write(),
-    )
-    .await
-    {
-        Ok(guard) => {
-            let elapsed = start.elapsed();
-            tracing::debug!("db_lock: WRITE lock acquired in {:?}", elapsed);
-            Ok(DbWriteLockGuard { _guard: guard })
-        }
-        Err(_) => {
-            tracing::warn!(
-                "db_lock: Failed to acquire WRITE lock after {}s timeout",
-                DB_WRITE_LOCK_TIMEOUT_SECS
-            );
-            Err(format!(
-                "Database is busy with write operations, failed to acquire lock after {DB_WRITE_LOCK_TIMEOUT_SECS}s. Please retry."
-            ))
-        }
-    }
-}
-
-/// Get or create a shared LanceDB connection for a given database path.
-/// This reuses connections to avoid Lance's internal task conflicts.
-async fn get_or_create_connection(db_path: &Path) -> Result<Connection, String> {
-    let state = get_db_state();
-    let canonical_path = db_path.to_path_buf();
-
-    // Check if we already have a connection
-    {
-        let connections = state.connections.lock().await;
-        if let Some(conn) = connections.get(&canonical_path) {
-            tracing::debug!(
-                "get_or_create_connection: Reusing existing connection for {:?}",
-                db_path
-            );
-            return Ok(conn.clone());
-        }
+/// Open a SQLite connection with WAL mode and recommended pragmas.
+fn open_connection(path: &Path) -> Result<Connection, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create database directory: {e}"))?;
     }
 
-    // Create new connection
-    tracing::debug!(
-        "get_or_create_connection: Creating new connection for {:?}",
-        db_path
-    );
-    fs::create_dir_all(db_path).map_err(|e| format!("Failed to create db directory: {e}"))?;
+    let conn =
+        Connection::open(path).map_err(|e| format!("Failed to open search database: {e}"))?;
 
-    let db_uri = db_path.to_string_lossy().to_string();
-    let conn = connect(&db_uri)
-        .execute()
-        .await
-        .map_err(|e| format!("Failed to connect to LanceDB: {e}"))?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+        .map_err(|e| format!("Failed to set pragmas: {e}"))?;
 
-    // Store the connection
-    {
-        let mut connections = state.connections.lock().await;
-        connections.insert(canonical_path, conn.clone());
-    }
-
-    tracing::debug!("get_or_create_connection: New connection created and cached");
     Ok(conn)
 }
 
-/// Get a LanceDB connection for a given database path.
-/// Uses a shared connection pool. No lock is acquired - use for read operations.
-pub async fn get_connection(db_path: &Path) -> Result<Connection, String> {
-    get_or_create_connection(db_path).await
+/// Get or initialize the global search database connection at `~/.apx/search.db`.
+pub fn get_connection() -> Result<Arc<Mutex<Connection>>, String> {
+    if let Some(conn) = SEARCH_DB.get() {
+        return Ok(Arc::clone(conn));
+    }
+
+    let path = default_db_path()?;
+    let conn = open_connection(&path)?;
+    let arc = Arc::new(Mutex::new(conn));
+
+    // Another thread may have initialized it; that's fine, we just use theirs
+    Ok(Arc::clone(SEARCH_DB.get_or_init(|| arc)))
 }
 
-/// Get a LanceDB connection with an exclusive write lock held.
-/// Use this for operations that modify the database (create tables, build indexes).
-/// Returns both the connection and the lock guard - the lock is released when the guard is dropped.
-pub async fn get_connection_for_write(
-    db_path: &Path,
-) -> Result<(Connection, DbWriteLockGuard<'static>), String> {
-    let lock_guard = acquire_write_lock().await?;
-    let conn = get_connection(db_path).await?;
-    Ok((conn, lock_guard))
+/// Get a search database connection at a specific path (for testing).
+pub fn get_connection_at(path: &Path) -> Result<Arc<Mutex<Connection>>, String> {
+    let conn = open_connection(path)?;
+    Ok(Arc::new(Mutex::new(conn)))
 }
 
 /// Check if a table exists in the database.
-/// This is a read operation - no exclusive lock is acquired.
-pub async fn table_exists(db_path: &Path, table_name: &str) -> Result<bool, String> {
-    tracing::debug!(
-        "common::table_exists: Checking for table '{}' at {:?}",
-        table_name,
-        db_path
-    );
-
-    let conn = get_connection(db_path).await?;
-    tracing::debug!("common::table_exists: Got connection, listing tables");
-    let table_names = conn
-        .table_names()
-        .execute()
-        .await
-        .map_err(|e| format!("Failed to list tables: {e}"))?;
-
-    let exists = table_names.contains(&table_name.to_string());
-    tracing::debug!(
-        "common::table_exists: Found {} tables, '{}' exists={}",
-        table_names.len(),
-        table_name,
-        exists
-    );
-
+pub fn table_exists(conn: &Connection, table_name: &str) -> Result<bool, String> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table_name],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to check table existence: {e}"))?;
     Ok(exists)
 }
 
-/// Open a table in the database for reading.
-/// This is a read operation - no exclusive lock is acquired.
-#[allow(dead_code)]
-pub async fn get_table(db_path: &Path, table_name: &str) -> Result<Table, String> {
-    tracing::debug!(
-        "common::get_table: Opening table '{}' for reading",
-        table_name
-    );
+/// Check if the legacy LanceDB directory exists and log a warning.
+pub fn check_legacy_lancedb() {
+    if let Some(home) = dirs::home_dir() {
+        let legacy_path = home.join(".apx").join("db");
+        if legacy_path.is_dir() {
+            tracing::warn!(
+                "Legacy LanceDB directory found at {}. It is no longer used. \
+                 Remove it with: rm -rf {}",
+                legacy_path.display(),
+                legacy_path.display()
+            );
+        }
+    }
+}
 
-    let conn = get_connection(db_path).await?;
+/// Sanitize a query string for FTS5 MATCH syntax.
+/// Wraps each whitespace-separated term in double quotes for safe literal matching.
+pub fn sanitize_fts5_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|term| {
+            // Strip any existing quotes and special FTS5 operators
+            let clean: String = term
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '.')
+                .collect();
+            if clean.is_empty() {
+                String::new()
+            } else {
+                format!("\"{clean}\"")
+            }
+        })
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
-    let table = conn
-        .open_table(table_name)
-        .execute()
-        .await
-        .map_err(|e| format!("Failed to open table: {e}"))?;
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
 
-    tracing::debug!(
-        "common::get_table: Table '{}' opened successfully",
-        table_name
-    );
-    Ok(table)
+    #[test]
+    fn test_sanitize_fts5_query_basic() {
+        assert_eq!(sanitize_fts5_query("hello world"), "\"hello\" \"world\"");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_query_special_chars() {
+        assert_eq!(sanitize_fts5_query("hello* OR world"), "\"hello\" \"OR\" \"world\"");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_query_empty() {
+        assert_eq!(sanitize_fts5_query(""), "");
+        assert_eq!(sanitize_fts5_query("   "), "");
+    }
+
+    #[test]
+    fn test_table_exists() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE test_table (id INTEGER)").unwrap();
+
+        assert!(table_exists(&conn, "test_table").unwrap());
+        assert!(!table_exists(&conn, "nonexistent").unwrap());
+    }
+
+    #[test]
+    fn test_get_connection_at() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test_search.db");
+        let conn = get_connection_at(&path).unwrap();
+
+        // Verify connection works
+        let guard = conn.lock().unwrap();
+        guard.execute_batch("CREATE TABLE test (id INTEGER)").unwrap();
+    }
 }

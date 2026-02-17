@@ -65,8 +65,7 @@ pub struct AppContext {
 
 /// Initialize all indexes in background (component index, then SDK docs index)
 ///
-/// All database operations are done sequentially in a single task to avoid
-/// Lance's internal task conflicts when multiple connections access the database.
+/// All database operations use synchronous SQLite calls wrapped in spawn_blocking.
 ///
 /// This is called when the MCP server starts.
 pub fn init_all_indexes(
@@ -77,6 +76,9 @@ pub fn init_all_indexes(
     let app_dir = ctx.app_dir.clone();
     let cache_state = ctx.cache_state.clone();
     let index_state = ctx.index_state.clone();
+
+    // Check for legacy LanceDB directory
+    apx_core::search::common::check_legacy_lancedb();
 
     tokio::spawn(async move {
         // Mark as running
@@ -104,9 +106,10 @@ pub fn init_all_indexes(
                 if refreshed {
                     tracing::info!("Registry indexes refreshed, rebuilding search index");
 
-                    // Check for shutdown during rebuild
                     let rebuild_result = tokio::select! {
-                        result = rebuild_search_index() => Some(result),
+                        result = tokio::task::spawn_blocking(rebuild_search_index) => {
+                            Some(result.unwrap_or_else(|e| Err(format!("spawn_blocking panicked: {e}"))))
+                        },
                         _ = shutdown_rx.recv() => {
                             tracing::info!("Shutdown signal received during search index rebuild, stopping");
                             None
@@ -119,7 +122,9 @@ pub fn init_all_indexes(
                 } else {
                     // Check if search index exists, build if not
                     let ensure_result = tokio::select! {
-                        result = ensure_search_index() => Some(result),
+                        result = tokio::task::spawn_blocking(ensure_search_index) => {
+                            Some(result.unwrap_or_else(|e| Err(format!("spawn_blocking panicked: {e}"))))
+                        },
                         _ = shutdown_rx.recv() => {
                             tracing::info!("Shutdown signal received during search index check, stopping");
                             None
@@ -167,21 +172,13 @@ pub fn init_all_indexes(
                 }
             };
 
-            // Create SDK docs index
-            let index_result = tokio::select! {
-                result = async { SDKDocsIndex::new() } => Some(result),
-                _ = shutdown_rx.recv() => {
-                    tracing::info!("Shutdown signal received during SDK doc index initialization");
-                    None
-                }
-            };
-
-            let mut index = match index_result {
-                Some(Ok(idx)) => {
+            // Create SDK docs index (sync, but cheap)
+            let mut index = match SDKDocsIndex::new() {
+                Ok(idx) => {
                     tracing::debug!("SDKDocsIndex created successfully");
                     idx
                 }
-                Some(Err(e)) => {
+                Err(e) => {
                     tracing::warn!(
                         "Failed to initialize SDK doc index: {}. The docs tool will not be available.",
                         e
@@ -193,17 +190,9 @@ pub fn init_all_indexes(
                     guard.is_running = false;
                     return;
                 }
-                None => {
-                    index_state.sdk_indexed.store(true, Ordering::SeqCst);
-                    index_state.sdk_ready.notify_waiters();
-
-                    let mut guard = cache_state.lock().await;
-                    guard.is_running = false;
-                    return;
-                }
             };
 
-            // Bootstrap the index
+            // Bootstrap the index (async: download + sync: build)
             tracing::info!("Bootstrapping SDK docs (this may download SDK if not cached)");
             let bootstrap_start = std::time::Instant::now();
             let bootstrap_result = tokio::select! {
@@ -253,36 +242,28 @@ pub fn init_all_indexes(
     });
 }
 
-/// Rebuild the search index from registry.json files
-async fn rebuild_search_index() -> Result<(), String> {
-    let db_path = ComponentIndex::default_path()?;
-    let index = ComponentIndex::new(db_path)?;
-    let table_name = ComponentIndex::table_name("components");
-
-    index.build_index_from_registries(&table_name).await
+/// Rebuild the search index from registry.json files (sync)
+fn rebuild_search_index() -> Result<(), String> {
+    let index = ComponentIndex::new()?;
+    index.build_index_from_registries()
 }
 
-/// Ensure search index exists and is valid, build/rebuild if needed
-async fn ensure_search_index() -> Result<(), String> {
-    let db_path = ComponentIndex::default_path()?;
-    let index = ComponentIndex::new(db_path)?;
-    let table_name = ComponentIndex::table_name("components");
+/// Ensure search index exists and is valid, build/rebuild if needed (sync)
+fn ensure_search_index() -> Result<(), String> {
+    let index = ComponentIndex::new()?;
 
-    // Validate the index - this checks both existence and data integrity
-    match index.validate_index(&table_name).await {
+    match index.validate_index() {
         Ok(true) => {
             tracing::debug!("Search index validated successfully");
             Ok(())
         }
         Ok(false) => {
-            // Index doesn't exist, build it
             tracing::info!("Search index not found, building from registry indexes");
-            index.build_index_from_registries(&table_name).await
+            index.build_index_from_registries()
         }
         Err(e) => {
-            // Index is corrupted, rebuild it
             tracing::warn!("Search index corrupted ({}), rebuilding...", e);
-            index.build_index_from_registries(&table_name).await
+            index.build_index_from_registries()
         }
     }
 }
@@ -952,31 +933,27 @@ async fn search_registry_components_tool(
         if needs_registry_refresh(&cfg.registries) {
             tracing::info!("Registry indexes stale, refreshing...");
             if let Ok(true) = sync_registry_indexes(&ctx.app_dir, false).await {
-                // Rebuild search index
-                if let Err(e) = rebuild_search_index().await {
+                // Rebuild search index (sync, in spawn_blocking)
+                let rebuild_result = tokio::task::spawn_blocking(rebuild_search_index).await;
+                if let Ok(Err(e)) = rebuild_result {
                     tracing::warn!("Failed to rebuild search index after refresh: {}", e);
                 }
             }
         }
     }
 
-    // Get or create index
-    let db_path = match ComponentIndex::default_path() {
-        Ok(path) => path,
-        Err(e) => return ToolResult::error(format!("Failed to get database path: {e}")),
-    };
-
-    let index = match ComponentIndex::new(db_path) {
-        Ok(idx) => idx,
-        Err(e) => return ToolResult::error(format!("Failed to initialize index: {e}")),
-    };
-
-    let table_name = ComponentIndex::table_name("components");
-
-    // Search - index should be ready at this point
-    let search_results = match index.search(&table_name, &args.query, args.limit).await {
-        Ok(results) => results,
-        Err(e) => return ToolResult::error(format!("Search failed: {e}")),
+    // Search in spawn_blocking (sync SQLite operations)
+    let query = args.query.clone();
+    let limit = args.limit;
+    let search_results = match tokio::task::spawn_blocking(move || {
+        let index = ComponentIndex::new()?;
+        index.search(&query, limit)
+    })
+    .await
+    {
+        Ok(Ok(results)) => results,
+        Ok(Err(e)) => return ToolResult::error(format!("Search failed: {e}")),
+        Err(e) => return ToolResult::error(format!("Search task panicked: {e}")),
     };
 
     #[derive(serde::Serialize)]
@@ -1066,12 +1043,20 @@ async fn docs_tool(ctx: Arc<AppContext>, args: DocsArgs) -> ToolResult {
         }
     };
 
-    // Search
-    match index
-        .search(&args.source, &args.query, args.num_results)
-        .await
-    {
+    // Search (sync, in spawn_blocking)
+    let source = args.source.clone();
+    let query = args.query.clone();
+    let num_results = args.num_results;
+
+    // We need to clone the connection from the index to use in spawn_blocking
+    // Since SDKDocsIndex is not Send (Mutex<Connection>), we search directly here.
+    // The search is fast enough that blocking briefly is acceptable, but we still
+    // use search_sync to avoid async across the Mutex.
+    match index.search_sync(&source, &query, num_results) {
         Ok(results) => {
+            // Drop index_guard before building response
+            drop(index_guard);
+
             #[derive(Serialize)]
             struct DocsResponse {
                 source: String,

@@ -1,6 +1,6 @@
 //! Search functionality for SDK docs and components.
 //!
-//! Uses LanceDB with Full-Text Search (FTS) for all search operations.
+//! Uses SQLite FTS5 for all search operations.
 
 pub mod common;
 pub mod component_index;

@@ -79,11 +79,6 @@ tera = "1.20.0"
 # Database clients
 tokio-postgres = { version = "0.7.16", features = ["runtime"] }
 
-# Data processing
-lancedb = { version = "0.23.1", default-features = false }
-arrow = "56.2.0"
-lance-index = "1.0.1"
-
 # Code parsing
 biome_css_parser = "0.5.8"
 biome_css_syntax = "0.5.8"

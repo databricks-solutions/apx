@@ -1,14 +1,9 @@
-//! SDK documentation indexing and search using LanceDB with Full-Text Search.
+//! SDK documentation indexing and search using SQLite FTS5.
 
-use arrow::array::{ArrayRef, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::{RecordBatch, RecordBatchIterator};
-use futures_util::StreamExt;
-use lancedb::index::scalar::FullTextSearchQuery;
-use lancedb::query::{ExecutableQuery, QueryBase};
 use rayon::prelude::*;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::common::Timer;
 use crate::databricks_sdk_doc::{SDKSource, download_and_extract_sdk, load_doc_files};
@@ -19,7 +14,7 @@ const CHUNK_SIZE: usize = 2000; // characters (no tokenizer needed for FTS)
 const CHUNK_OVERLAP: usize = 200; // characters overlap
 const SCHEMA_VERSION: u32 = 1; // v1: Pure FTS (no embeddings)
 
-/// Documentation chunk record for LanceDB storage
+/// Documentation chunk record for storage
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DocChunk {
     /// Unique ID for the chunk (file_path:chunk_index)
@@ -134,153 +129,60 @@ fn chunk_text(
     chunks
 }
 
-/// Helper function to convert DocChunk vector to Arrow RecordBatch
-fn chunks_to_batch(chunks: Vec<DocChunk>) -> Result<RecordBatch, String> {
-    let schema = Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("text", DataType::Utf8, false),
-        Field::new("source_file", DataType::Utf8, false),
-        Field::new("chunk_index", DataType::UInt64, false),
-        Field::new("service", DataType::Utf8, false),
-        Field::new("entity", DataType::Utf8, false),
-        Field::new("operation", DataType::Utf8, false),
-        Field::new("symbols", DataType::Utf8, false),
-    ]);
-
-    // Create arrays
-    let id_array = StringArray::from(chunks.iter().map(|c| c.id.as_str()).collect::<Vec<_>>());
-
-    let text_array = StringArray::from(chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>());
-
-    let source_file_array = StringArray::from(
-        chunks
-            .iter()
-            .map(|c| c.source_file.as_str())
-            .collect::<Vec<_>>(),
-    );
-
-    let chunk_index_array = arrow::array::UInt64Array::from(
-        chunks
-            .iter()
-            .map(|c| c.chunk_index as u64)
-            .collect::<Vec<_>>(),
-    );
-
-    let service_array = StringArray::from(
-        chunks
-            .iter()
-            .map(|c| c.service.as_str())
-            .collect::<Vec<_>>(),
-    );
-
-    let entity_array =
-        StringArray::from(chunks.iter().map(|c| c.entity.as_str()).collect::<Vec<_>>());
-
-    let operation_array = StringArray::from(
-        chunks
-            .iter()
-            .map(|c| c.operation.as_str())
-            .collect::<Vec<_>>(),
-    );
-
-    let symbols_array = StringArray::from(
-        chunks
-            .iter()
-            .map(|c| c.symbols.as_str())
-            .collect::<Vec<_>>(),
-    );
-
-    // Create record batch
-    RecordBatch::try_new(
-        std::sync::Arc::new(schema),
-        vec![
-            std::sync::Arc::new(id_array) as ArrayRef,
-            std::sync::Arc::new(text_array) as ArrayRef,
-            std::sync::Arc::new(source_file_array) as ArrayRef,
-            std::sync::Arc::new(chunk_index_array) as ArrayRef,
-            std::sync::Arc::new(service_array) as ArrayRef,
-            std::sync::Arc::new(entity_array) as ArrayRef,
-            std::sync::Arc::new(operation_array) as ArrayRef,
-            std::sync::Arc::new(symbols_array) as ArrayRef,
-        ],
-    )
-    .map_err(|e| format!("Failed to create record batch: {e}"))
-}
-
-/// SDK documentation index using LanceDB with Full-Text Search
+/// SDK documentation index using SQLite FTS5
 #[derive(Debug)]
 pub struct SDKDocsIndex {
-    db_path: PathBuf,
+    conn: Arc<Mutex<Connection>>,
     version: Option<String>,
 }
 
 impl SDKDocsIndex {
-    /// Create a new SDK docs index
+    /// Create a new SDK docs index using the global search database
     pub fn new() -> Result<Self, String> {
-        let db_path = dirs::home_dir()
-            .ok_or_else(|| "Could not determine home directory".to_string())?
-            .join(".apx")
-            .join("db");
-
+        let conn = common::get_connection()?;
         Ok(Self {
-            db_path,
+            conn,
             version: None,
         })
     }
 
-    /// Create with custom db path (for testing)
+    /// Create with custom connection (for testing)
     #[allow(dead_code)]
-    pub fn with_db_path(db_path: PathBuf) -> Result<Self, String> {
-        Ok(Self {
-            db_path,
+    pub fn with_connection(conn: Arc<Mutex<Connection>>) -> Self {
+        Self {
+            conn,
             version: None,
-        })
+        }
     }
 
     /// Get table name for a version
     pub fn table_name(version: &str) -> String {
         format!(
-            "sdk_docs_python_{}_schema_v{}",
+            "sdk_docs_python_{}_v{}",
             version.replace('.', "_"),
             SCHEMA_VERSION
         )
     }
 
     /// Check if the index table exists
-    async fn table_exists(&self, table_name: &str) -> Result<bool, String> {
-        tracing::debug!(
-            "table_exists: Checking for table '{}' in db at {:?}",
-            table_name,
-            self.db_path
-        );
-        let result = common::table_exists(&self.db_path, table_name).await;
-        tracing::debug!("table_exists: Result for '{}': {:?}", table_name, result);
-        result
+    fn table_exists_sync(&self, table_name: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
+        common::table_exists(&conn, table_name)
     }
 
     /// Bootstrap: download docs and build index
-    ///
-    /// This method gets the SDK version via Python interop. If calling from an async
-    /// context where Python GIL might cause issues, use `bootstrap_with_version` instead.
     #[allow(dead_code)]
     pub async fn bootstrap(&mut self, source: &SDKSource) -> Result<bool, String> {
         match source {
             SDKSource::DatabricksSdkPython => {
-                tracing::debug!("bootstrap: Starting SDK docs bootstrap for DatabricksSdkPython");
-
-                // Get SDK version
-                tracing::debug!("bootstrap: Getting Databricks SDK version via Python interop");
                 let version = get_databricks_sdk_version()?
                     .ok_or_else(|| "databricks-sdk is not installed".to_string())?;
-
                 self.bootstrap_with_version(source, &version).await
             }
         }
     }
 
     /// Bootstrap with a pre-computed SDK version
-    ///
-    /// Use this method when the SDK version has already been resolved.
     pub async fn bootstrap_with_version(
         &mut self,
         source: &SDKSource,
@@ -288,61 +190,35 @@ impl SDKDocsIndex {
     ) -> Result<bool, String> {
         match source {
             SDKSource::DatabricksSdkPython => {
-                tracing::debug!(
-                    "bootstrap_with_version: Starting SDK docs bootstrap for DatabricksSdkPython"
-                );
                 tracing::info!("Using Databricks SDK version: {}", version);
                 self.version = Some(version.to_string());
 
                 let table_name = Self::table_name(version);
-                tracing::debug!("bootstrap_with_version: Table name will be: {}", table_name);
 
-                // Check if already indexed
-                tracing::debug!("bootstrap_with_version: Checking if table already exists");
-                if self.table_exists(&table_name).await? {
+                // Check if already indexed (sync, but cheap)
+                if self.table_exists_sync(&table_name)? {
                     tracing::info!("SDK docs already indexed for version {}", version);
                     return Ok(false);
                 }
-                tracing::debug!(
-                    "bootstrap_with_version: Table does not exist, need to build index"
-                );
 
-                // Download and extract
-                tracing::debug!(
-                    "bootstrap_with_version: Starting download_and_extract_sdk for version {}",
-                    version
-                );
+                // Download and extract (async)
                 let docs_path = download_and_extract_sdk(version).await?;
-                tracing::debug!(
-                    "bootstrap_with_version: SDK docs extracted to {:?}",
-                    docs_path
-                );
 
-                // Build index
-                tracing::debug!(
-                    "bootstrap_with_version: Starting build_index for table {}",
-                    table_name
-                );
-                self.build_index(&table_name, &docs_path).await?;
-                tracing::debug!("bootstrap_with_version: build_index completed successfully");
+                // Build index (sync, wrapped in spawn_blocking by caller)
+                self.build_index(&table_name, &docs_path)?;
 
                 Ok(true)
             }
         }
     }
 
-    /// Build index from a docs path
-    async fn build_index(
+    /// Build index from a docs path (sync)
+    fn build_index(
         &self,
         table_name: &str,
         docs_path: &std::path::Path,
     ) -> Result<(), String> {
         let overall_timer = Timer::start("build_index");
-        tracing::debug!(
-            "build_index: Starting index build for table '{}' from path {:?}",
-            table_name,
-            docs_path
-        );
 
         // Load documentation files
         let load_timer = Timer::start("load_doc_files");
@@ -355,7 +231,6 @@ impl SDKDocsIndex {
         // Chunk all files in parallel
         let chunk_timer = Timer::start("chunk_text_parallel");
 
-        // Log first file to verify metadata extraction
         if let Some(doc) = files.first() {
             tracing::info!(
                 "Sample metadata: file='{}', service='{}', entity='{}', operation='{}', symbols='{}'",
@@ -367,17 +242,7 @@ impl SDKDocsIndex {
             );
         }
 
-        #[allow(clippy::type_complexity)]
-        let all_chunks: Vec<(
-            String,
-            String,
-            String,
-            usize,
-            String,
-            String,
-            String,
-            String,
-        )> = files
+        let doc_chunks: Vec<DocChunk> = files
             .par_iter()
             .flat_map(|doc| {
                 chunk_text(
@@ -389,101 +254,90 @@ impl SDKDocsIndex {
                     &doc.symbols,
                 )
                 .into_iter()
-                .map(|(id, chunk_text, chunk_index, svc, ent, op, syms)| {
-                    (
-                        id,
-                        chunk_text,
-                        doc.relative_path.clone(),
-                        chunk_index,
-                        svc,
-                        ent,
-                        op,
-                        syms,
-                    )
+                .map(|(id, chunk_text, chunk_index, svc, ent, op, syms)| DocChunk {
+                    id,
+                    text: chunk_text,
+                    source_file: doc.relative_path.clone(),
+                    chunk_index,
+                    service: svc,
+                    entity: ent,
+                    operation: op,
+                    symbols: syms,
                 })
                 .collect::<Vec<_>>()
             })
             .collect();
 
-        chunk_timer.lap(&format!("Created {} text chunks", all_chunks.len()));
+        chunk_timer.lap(&format!("Created {} text chunks", doc_chunks.len()));
 
-        // Create doc chunks (no embeddings needed)
-        let doc_chunks: Vec<DocChunk> = all_chunks
-            .into_iter()
-            .map(
-                |(id, text, source_file, chunk_index, service, entity, operation, symbols)| {
-                    DocChunk {
-                        id,
-                        text,
-                        source_file,
-                        chunk_index,
-                        service,
-                        entity,
-                        operation,
-                        symbols,
-                    }
-                },
-            )
-            .collect();
-
-        // Acquire WRITE lock for all DB write operations
+        // Database operations
         let db_timer = Timer::start("database_operations");
-        tracing::debug!("build_index: Acquiring WRITE lock for table creation");
-        let (conn, _lock) = common::get_connection_for_write(&self.db_path).await?;
-        db_timer.lap("Connected to LanceDB with WRITE lock");
 
-        // Drop existing table if it exists (check without separate lock since we hold it)
-        let table_names = conn
-            .table_names()
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to list tables: {e}"))?;
+        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
 
-        if table_names.contains(&table_name.to_string()) {
-            tracing::debug!("Dropping existing table: {}", table_name);
-            conn.drop_table(table_name, &[])
-                .await
-                .map_err(|e| format!("Failed to drop existing table: {e}"))?;
-            db_timer.lap("Dropped existing table");
+        // Drop existing table if it exists
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS {table_name}"))
+            .map_err(|e| format!("Failed to drop existing table: {e}"))?;
+
+        // Create FTS5 virtual table
+        conn.execute_batch(&format!(
+            "CREATE VIRTUAL TABLE \"{table_name}\" USING fts5(\
+                id UNINDEXED, text, source_file UNINDEXED, \
+                chunk_index UNINDEXED, service, entity, operation, symbols, \
+                tokenize='porter unicode61'\
+            )"
+        ))
+        .map_err(|e| format!("Failed to create FTS5 table: {e}"))?;
+
+        db_timer.lap("Created FTS5 table");
+
+        // Insert all chunks in a transaction
+        let insert_timer = Timer::start("insert_chunks");
+
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Transaction error: {e}"))?;
+
+        {
+            let mut stmt = tx
+                .prepare(&format!(
+                    "INSERT INTO \"{table_name}\" \
+                     (id, text, source_file, chunk_index, service, entity, operation, symbols) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                ))
+                .map_err(|e| format!("Prepare error: {e}"))?;
+
+            for chunk in &doc_chunks {
+                stmt.execute(rusqlite::params![
+                    chunk.id,
+                    chunk.text,
+                    chunk.source_file,
+                    chunk.chunk_index as i64,
+                    chunk.service,
+                    chunk.entity,
+                    chunk.operation,
+                    chunk.symbols,
+                ])
+                .map_err(|e| format!("Insert error: {e}"))?;
+            }
         }
 
-        // Convert to Arrow format
-        let arrow_timer = Timer::start("arrow_conversion");
-        let batch = chunks_to_batch(doc_chunks)?;
-        let schema = batch.schema();
-        let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
-        arrow_timer.finish();
-
-        let create_timer = Timer::start("create_table");
-        let table = conn
-            .create_table(table_name, Box::new(batches))
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to create table: {e}"))?;
-        create_timer.finish();
-
-        // Create FTS index on text column
-        let fts_timer = Timer::start("create_fts_index");
-        table
-            .create_index(
-                &["text"],
-                lancedb::index::Index::FTS(lancedb::index::scalar::FtsIndexBuilder::default()),
-            )
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to create FTS index: {e}"))?;
-        fts_timer.finish();
+        tx.commit().map_err(|e| format!("Commit error: {e}"))?;
+        insert_timer.finish();
 
         db_timer.finish();
         overall_timer.finish();
-        tracing::debug!("build_index: Releasing WRITE lock");
 
+        tracing::info!(
+            "SDK docs FTS5 index built: {} chunks in table '{}'",
+            doc_chunks.len(),
+            table_name
+        );
         Ok(())
     }
 
-    /// Search for relevant documentation chunks using Full-Text Search
-    /// This is a READ operation - no write lock needed, can run in parallel with other reads.
-    pub async fn search(
+    /// Search for relevant documentation chunks using FTS5 (sync)
+    pub fn search_sync(
         &self,
         source: &SDKSource,
         query: &str,
@@ -492,99 +346,63 @@ impl SDKDocsIndex {
         match source {
             SDKSource::DatabricksSdkPython => {
                 let version = get_databricks_sdk_version()?
-                    .ok_or_else(|| "databricks-sdk is not installed. Please install databricks-sdk to use this feature.".to_string())?;
+                    .ok_or_else(|| {
+                        "databricks-sdk is not installed. Please install databricks-sdk to use this feature.".to_string()
+                    })?;
 
                 let table_name = Self::table_name(&version);
 
-                // Get connection for read (no write lock needed)
-                tracing::debug!("search: Starting search for query '{}'", query);
-                let conn = common::get_connection(&self.db_path).await?;
+                let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
 
-                // Check table exists
-                let table_names = conn
-                    .table_names()
-                    .execute()
-                    .await
-                    .map_err(|e| format!("Failed to list tables: {e}"))?;
-
-                if !table_names.contains(&table_name.to_string()) {
+                if !common::table_exists(&conn, &table_name)? {
                     return Err(format!(
                         "SDK docs not indexed for version {version}. Index will be built on next server start."
                     ));
                 }
 
-                // Open table
-                let table = conn
-                    .open_table(&table_name)
-                    .execute()
-                    .await
-                    .map_err(|e| format!("Failed to open table: {e}"))?;
+                let sanitized = common::sanitize_fts5_query(query);
+                if sanitized.is_empty() {
+                    return Ok(Vec::new());
+                }
 
-                // Execute FTS search
-                tracing::debug!("search: Executing FTS query");
-                let fts_query = FullTextSearchQuery::new(query.to_string());
-                let mut fts_results = match table
-                    .query()
-                    .full_text_search(fts_query)
-                    .limit(limit)
-                    .execute()
-                    .await
-                {
-                    Ok(results) => {
-                        tracing::debug!("search: FTS query executed successfully, reading results");
-                        results
-                    }
-                    Err(e) => {
-                        tracing::error!("search: FTS query execution failed: {}", e);
-                        return Err(format!("Failed to execute FTS search: {e}"));
-                    }
-                };
+                tracing::debug!("search: Executing FTS5 query for '{}'", query);
+
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT text, source_file, rank FROM \"{table_name}\" \
+                         WHERE \"{table_name}\" MATCH ?1 \
+                         ORDER BY rank \
+                         LIMIT ?2"
+                    ))
+                    .map_err(|e| format!("Prepare error: {e}"))?;
+
+                let rows = stmt
+                    .query_map(rusqlite::params![sanitized, limit as i64], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, f64>(2)?,
+                        ))
+                    })
+                    .map_err(|e| format!("Query error: {e}"))?;
 
                 let mut results = Vec::new();
                 let mut rank = 0;
 
-                tracing::debug!("search: Reading result batches");
-                while let Some(batch_result) = fts_results.next().await {
-                    let batch = match batch_result {
-                        Ok(b) => {
-                            tracing::debug!("search: Got batch with {} rows", b.num_rows());
-                            b
-                        }
-                        Err(e) => {
-                            tracing::error!("search: Failed to read FTS batch: {}", e);
-                            return Err(format!("Failed to read FTS batch: {e}"));
-                        }
-                    };
+                for row_result in rows {
+                    let (text, source_file, _fts_rank) =
+                        row_result.map_err(|e| format!("Row error: {e}"))?;
 
-                    let text_array = batch
-                        .column_by_name("text")
-                        .ok_or("Missing text column")?
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or("Failed to downcast text column")?;
-
-                    let source_file_array = batch
-                        .column_by_name("source_file")
-                        .ok_or("Missing source_file column")?
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or("Failed to downcast source_file column")?;
-
-                    for i in 0..batch.num_rows() {
-                        // Simple rank-based scoring (higher rank = lower score)
-                        let score = 1.0 / (1.0 + rank as f32);
-
-                        results.push(DocSearchResult {
-                            text: text_array.value(i).to_string(),
-                            source_file: source_file_array.value(i).to_string(),
-                            score,
-                        });
-                        rank += 1;
-                    }
+                    let score = 1.0 / (1.0 + rank as f32);
+                    results.push(DocSearchResult {
+                        text,
+                        source_file,
+                        score,
+                    });
+                    rank += 1;
                 }
 
-                tracing::info!("FTS search for '{}': {} results", query, results.len());
-
+                tracing::info!("FTS5 search for '{}': {} results", query, results.len());
                 Ok(results)
             }
         }
@@ -644,14 +462,62 @@ mod tests {
         assert!(chunks.is_empty(), "Empty text should produce no chunks");
     }
 
-    #[tokio::test]
-    async fn test_sdk_docs_index_creation() {
-        use tempfile::TempDir;
-
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let db_path = temp_dir.path().join("test_db");
-
-        let index = SDKDocsIndex::with_db_path(db_path).expect("Failed to create index");
+    #[test]
+    fn test_sdk_docs_index_creation() {
+        let conn = Connection::open_in_memory().unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+        let index = SDKDocsIndex::with_connection(conn);
         assert!(index.version.is_none());
+    }
+
+    #[test]
+    fn test_fts5_search_with_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        let table_name = "sdk_docs_fts_test_v1";
+
+        conn.execute_batch(&format!(
+            "CREATE VIRTUAL TABLE \"{table_name}\" USING fts5(\
+                id UNINDEXED, text, source_file UNINDEXED, \
+                chunk_index UNINDEXED, service, entity, operation, symbols, \
+                tokenize='porter unicode61'\
+            )"
+        ))
+        .unwrap();
+
+        conn.execute(
+            &format!(
+                "INSERT INTO \"{table_name}\" \
+                 (id, text, source_file, chunk_index, service, entity, operation, symbols) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+            ),
+            rusqlite::params![
+                "test.rst:0",
+                "ClustersAPI clusters create This is about creating clusters",
+                "test.rst",
+                0,
+                "clusters",
+                "ClustersAPI",
+                "create",
+                "clusters create ClustersAPI"
+            ],
+        )
+        .unwrap();
+
+        // Verify the data is searchable
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT text, source_file FROM \"{table_name}\" \
+                 WHERE \"{table_name}\" MATCH '\"clusters\"' LIMIT 5"
+            ))
+            .unwrap();
+
+        let results: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].0.contains("clusters"));
     }
 }

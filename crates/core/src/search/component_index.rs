@@ -1,19 +1,14 @@
-//! Component registry indexing and search using LanceDB with Full-Text Search.
+//! Component registry indexing and search using SQLite FTS5.
 
-use arrow::array::{ArrayRef, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::{RecordBatch, RecordBatchIterator};
-use futures_util::StreamExt;
-use lancedb::index::scalar::FullTextSearchQuery;
-use lancedb::query::{ExecutableQuery, QueryBase};
-use std::path::PathBuf;
+use rusqlite::Connection;
+use std::sync::{Arc, Mutex};
 
 use super::common;
 use crate::components::cache::get_all_registry_indexes;
 
-const SCHEMA_VERSION: u32 = 1; // v1: Pure FTS (no embeddings)
+const TABLE_NAME: &str = "components_fts_v1";
 
-/// Component record for LanceDB storage (FTS only)
+/// Component record for FTS storage
 #[derive(Debug, Clone)]
 pub struct ComponentRecord {
     /// Component ID: either "component-name" or "@registry-name/component-name"
@@ -35,123 +30,40 @@ pub struct SearchResult {
     pub score: f32,
 }
 
-/// Component search index using LanceDB FTS
+/// Component search index using SQLite FTS5
 #[derive(Debug)]
 pub struct ComponentIndex {
-    db_path: PathBuf,
-}
-
-/// Helper function to convert records to Arrow RecordBatch
-fn records_to_batch(records: Vec<ComponentRecord>) -> Result<RecordBatch, String> {
-    let schema = Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("name", DataType::Utf8, false),
-        Field::new("registry", DataType::Utf8, false),
-        Field::new("text", DataType::Utf8, false),
-    ]);
-
-    let id_array = StringArray::from(records.iter().map(|r| r.id.as_str()).collect::<Vec<_>>());
-    let name_array = StringArray::from(records.iter().map(|r| r.name.as_str()).collect::<Vec<_>>());
-    let registry_array = StringArray::from(
-        records
-            .iter()
-            .map(|r| r.registry.as_str())
-            .collect::<Vec<_>>(),
-    );
-    let text_array = StringArray::from(records.iter().map(|r| r.text.as_str()).collect::<Vec<_>>());
-
-    RecordBatch::try_new(
-        std::sync::Arc::new(schema),
-        vec![
-            std::sync::Arc::new(id_array) as ArrayRef,
-            std::sync::Arc::new(name_array) as ArrayRef,
-            std::sync::Arc::new(registry_array) as ArrayRef,
-            std::sync::Arc::new(text_array) as ArrayRef,
-        ],
-    )
-    .map_err(|e| format!("Failed to create record batch: {e}"))
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl ComponentIndex {
-    /// Create a new component index
-    pub fn new(db_path: PathBuf) -> Result<Self, String> {
-        Ok(Self { db_path })
+    /// Create a new component index using the global search database
+    pub fn new() -> Result<Self, String> {
+        let conn = common::get_connection()?;
+        Ok(Self { conn })
     }
 
-    /// Get the default index path (~/.apx/db/)
-    pub fn default_path() -> Result<PathBuf, String> {
-        let home =
-            dirs::home_dir().ok_or_else(|| "Could not determine home directory".to_string())?;
-        Ok(home.join(".apx").join("db"))
-    }
-
-    /// Get table name with schema version
-    pub fn table_name(base_name: &str) -> String {
-        format!("{base_name}_fts_v{SCHEMA_VERSION}")
-    }
-
-    /// Check if the index table exists (internal)
+    /// Create with a custom connection (for testing)
     #[allow(dead_code)]
-    async fn table_exists(&self, table_name: &str) -> Result<bool, String> {
-        common::table_exists(&self.db_path, table_name).await
+    pub fn with_connection(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
     }
 
-    /// Validate that the index is usable by attempting a count query
-    /// Returns Ok(true) if valid, Ok(false) if table doesn't exist, Err if corrupted
-    /// This is a read operation - no write lock needed.
-    pub async fn validate_index(&self, table_name: &str) -> Result<bool, String> {
-        tracing::debug!("validate_index: Checking table '{}'", table_name);
-        let conn = common::get_connection(&self.db_path).await?;
-
-        // Check table exists
-        let table_names = conn
-            .table_names()
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to list tables: {e}"))?;
-
-        if !table_names.contains(&table_name.to_string()) {
-            tracing::debug!("validate_index: Table '{}' does not exist", table_name);
-            return Ok(false);
-        }
-
-        // Try to open the table and do a simple query to verify data files exist
-        let table = match conn.open_table(table_name).execute().await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!("Failed to open table {}: {}", table_name, e);
-                return Err(format!("Index corrupted: {e}"));
-            }
-        };
-
-        // Try to count rows - this will fail if data files are missing
-        let mut stream = table
-            .query()
-            .limit(1)
-            .execute()
-            .await
-            .map_err(|e| format!("Index validation failed: {e}"))?;
-
-        // Try to read at least one batch to verify data accessibility
-        match stream.next().await {
-            Some(Ok(_)) => {
-                tracing::debug!("validate_index: Table '{}' is valid", table_name);
-                Ok(true)
-            }
-            Some(Err(e)) => Err(format!("Index data corrupted: {e}")),
-            None => {
-                tracing::debug!("validate_index: Table '{}' is valid (empty)", table_name);
-                Ok(true) // Empty table is valid
-            }
-        }
+    /// Get the FTS table name
+    pub fn table_name() -> &'static str {
+        TABLE_NAME
     }
 
-    /// Build index from registry.json files using Full-Text Search
-    /// This is a WRITE operation - requires exclusive write lock.
-    pub async fn build_index_from_registries(&self, table_name: &str) -> Result<(), String> {
-        tracing::info!("Building component FTS index from registry indexes");
+    /// Validate that the index exists
+    pub fn validate_index(&self) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
+        common::table_exists(&conn, TABLE_NAME)
+    }
 
-        // Load all registry indexes
+    /// Build index from registry.json files
+    pub fn build_index_from_registries(&self) -> Result<(), String> {
+        tracing::info!("Building component FTS5 index from registry indexes");
+
         let all_indexes = get_all_registry_indexes()
             .map_err(|e| format!("Failed to load registry indexes: {e}"))?;
 
@@ -160,7 +72,6 @@ impl ComponentIndex {
             return Ok(());
         }
 
-        // Convert to records with enriched text
         let mut records: Vec<ComponentRecord> = Vec::new();
 
         for (registry_name, items) in all_indexes {
@@ -176,7 +87,6 @@ impl ComponentIndex {
                     )
                 };
 
-                // Enrich text for better FTS
                 let text = match &item.description {
                     Some(desc) if !desc.is_empty() => {
                         format!("{} {} ui component shadcn", item.name, desc)
@@ -195,159 +105,127 @@ impl ComponentIndex {
 
         tracing::info!("Indexing {} components", records.len());
 
-        // Acquire WRITE lock for all DB write operations
-        tracing::debug!("build_index_from_registries: Acquiring WRITE lock");
-        let (conn, _lock) = common::get_connection_for_write(&self.db_path).await?;
-        tracing::debug!("build_index_from_registries: WRITE lock acquired");
+        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
 
-        // Check and drop existing table while holding lock
-        let table_names = conn
-            .table_names()
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to list tables: {e}"))?;
+        // Drop existing table if it exists
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS {TABLE_NAME}"))
+            .map_err(|e| format!("Failed to drop existing table: {e}"))?;
 
-        if table_names.contains(&table_name.to_string()) {
-            tracing::debug!("Dropping existing table: {}", table_name);
-            conn.drop_table(table_name, &[])
-                .await
-                .map_err(|e| format!("Failed to drop existing table: {e}"))?;
+        // Create FTS5 virtual table
+        conn.execute_batch(&format!(
+            "CREATE VIRTUAL TABLE {TABLE_NAME} USING fts5(\
+                id UNINDEXED, name, registry UNINDEXED, text, \
+                tokenize='porter unicode61'\
+            )"
+        ))
+        .map_err(|e| format!("Failed to create FTS5 table: {e}"))?;
+
+        // Insert all records in a transaction
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Transaction error: {e}"))?;
+
+        {
+            let mut stmt = tx
+                .prepare(&format!(
+                    "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
+                ))
+                .map_err(|e| format!("Prepare error: {e}"))?;
+
+            for record in &records {
+                stmt.execute(rusqlite::params![
+                    record.id,
+                    record.name,
+                    record.registry,
+                    record.text,
+                ])
+                .map_err(|e| format!("Insert error: {e}"))?;
+            }
         }
 
-        let batch = records_to_batch(records)?;
-        let schema = batch.schema();
-        let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+        tx.commit().map_err(|e| format!("Commit error: {e}"))?;
 
-        let table = conn
-            .create_table(table_name, Box::new(batches))
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to create table: {e}"))?;
-
-        // Create FTS index on text column
-        tracing::info!("Creating FTS index on text column");
-        table
-            .create_index(
-                &["text"],
-                lancedb::index::Index::FTS(lancedb::index::scalar::FtsIndexBuilder::default()),
-            )
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to create FTS index: {e}"))?;
-
-        tracing::debug!("build_index_from_registries: Releasing WRITE lock");
-        tracing::info!("Component FTS index built successfully");
+        tracing::info!("Component FTS5 index built successfully");
         Ok(())
     }
 
-    /// Search for components using Full-Text Search
-    /// This is a READ operation - no write lock needed, can run in parallel with other reads.
-    pub async fn search(
-        &self,
-        table_name: &str,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<SearchResult>, String> {
+    /// Search for components using FTS5
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, String> {
         tracing::debug!("search: Starting search for query '{}'", query);
-        let conn = common::get_connection(&self.db_path).await?;
 
-        // Check table exists
-        let table_names = conn
-            .table_names()
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to list tables: {e}"))?;
+        let conn = self.conn.lock().map_err(|e| format!("Lock error: {e}"))?;
 
-        if !table_names.contains(&table_name.to_string()) {
+        if !common::table_exists(&conn, TABLE_NAME)? {
             return Err("Index not built. Please ensure components are indexed.".to_string());
         }
 
-        // Open table
-        let table = conn
-            .open_table(table_name)
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to open table: {e}"))?;
+        let sanitized = common::sanitize_fts5_query(query);
+        if sanitized.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        // Extract query terms for name matching (lowercase, split on whitespace)
         let query_lower = query.to_lowercase();
         let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
 
-        // Execute FTS search - fetch more results for better reranking
-        tracing::debug!("search: Executing FTS query");
+        // Fetch more results for reranking
         let fts_limit = (limit * 3).max(30);
-        let fts_query = FullTextSearchQuery::new(query.to_string());
-        let mut fts_results = table
-            .query()
-            .full_text_search(fts_query)
-            .limit(fts_limit)
-            .execute()
-            .await
-            .map_err(|e| format!("Failed to execute FTS search: {e}"))?;
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT id, name, registry, rank FROM {TABLE_NAME} \
+                 WHERE {TABLE_NAME} MATCH ?1 \
+                 ORDER BY rank \
+                 LIMIT ?2"
+            ))
+            .map_err(|e| format!("Prepare error: {e}"))?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![sanitized, fts_limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
+            })
+            .map_err(|e| format!("Query error: {e}"))?;
 
         let mut results = Vec::new();
         let mut rank = 0;
 
-        while let Some(batch_result) = fts_results.next().await {
-            let batch = batch_result.map_err(|e| format!("Failed to read FTS batch: {e}"))?;
+        for row_result in rows {
+            let (id, name, registry, _fts_rank) =
+                row_result.map_err(|e| format!("Row error: {e}"))?;
 
-            let id_array = batch
-                .column_by_name("id")
-                .ok_or("Missing id column")?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or("Failed to downcast id column")?;
+            let name_lower = name.to_lowercase();
 
-            let name_array = batch
-                .column_by_name("name")
-                .ok_or("Missing name column")?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or("Failed to downcast name column")?;
+            // Base score from result position (higher rank = lower base score)
+            let base_score = 1.0 / (1.0 + rank as f32);
 
-            let registry_array = batch
-                .column_by_name("registry")
-                .ok_or("Missing registry column")?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or("Failed to downcast registry column")?;
+            // Registry boost: strongly prefer default (shadcn) components
+            let registry_boost = if registry.is_empty() { 0.5 } else { 0.0 };
 
-            for i in 0..batch.num_rows() {
-                let name = name_array.value(i).to_string();
-                let registry = registry_array.value(i).to_string();
-                let name_lower = name.to_lowercase();
+            // Name match boost
+            let name_match_boost = if query_terms.iter().any(|term| *term == name_lower) {
+                2.0
+            } else if query_terms
+                .iter()
+                .any(|term| name_lower.contains(term) || term.contains(&name_lower))
+            {
+                0.3
+            } else {
+                0.0
+            };
 
-                // Base score from FTS rank (higher rank = lower base score)
-                let base_score = 1.0 / (1.0 + rank as f32);
+            let score = base_score + registry_boost + name_match_boost;
 
-                // Registry boost: strongly prefer default (shadcn) components
-                // Empty registry = default shadcn/ui registry
-                let registry_boost = if registry.is_empty() { 0.5 } else { 0.0 };
-
-                // Name match boost: significant boost if component name matches a query term
-                let name_match_boost = if query_terms.iter().any(|term| *term == name_lower) {
-                    // Exact name match (e.g., query contains "button" and name is "button")
-                    2.0
-                } else if query_terms
-                    .iter()
-                    .any(|term| name_lower.contains(term) || term.contains(&name_lower))
-                {
-                    // Partial name match
-                    0.3
-                } else {
-                    0.0
-                };
-
-                let score = base_score + registry_boost + name_match_boost;
-
-                results.push(SearchResult {
-                    id: id_array.value(i).to_string(),
-                    name,
-                    registry,
-                    score,
-                });
-                rank += 1;
-            }
+            results.push(SearchResult {
+                id,
+                name,
+                registry,
+                score,
+            });
+            rank += 1;
         }
 
         // Re-sort by score after applying boosts
@@ -357,11 +235,98 @@ impl ComponentIndex {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Truncate to requested limit
         results.truncate(limit);
 
-        tracing::info!("FTS search for '{}': {} results", query, results.len());
+        tracing::info!("FTS5 search for '{}': {} results", query, results.len());
 
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn test_index() -> ComponentIndex {
+        let conn = Connection::open_in_memory().unwrap();
+        let conn = Arc::new(Mutex::new(conn));
+        ComponentIndex::with_connection(conn)
+    }
+
+    #[test]
+    fn test_validate_index_empty() {
+        let index = test_index();
+        assert!(!index.validate_index().unwrap());
+    }
+
+    #[test]
+    fn test_search_no_index() {
+        let index = test_index();
+        let result = index.search("button", 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_and_search() {
+        let index = test_index();
+
+        // Create the FTS table manually and insert test data
+        {
+            let conn = index.conn.lock().unwrap();
+            conn.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE {TABLE_NAME} USING fts5(\
+                    id UNINDEXED, name, registry UNINDEXED, text, \
+                    tokenize='porter unicode61'\
+                )"
+            ))
+            .unwrap();
+
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
+                ),
+                rusqlite::params!["button", "button", "", "button A styled button component shadcn"],
+            )
+            .unwrap();
+
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
+                ),
+                rusqlite::params!["card", "card", "", "card A card container component shadcn"],
+            )
+            .unwrap();
+
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
+                ),
+                rusqlite::params![
+                    "@custom/button",
+                    "button",
+                    "custom",
+                    "button A custom button component"
+                ],
+            )
+            .unwrap();
+        }
+
+        let results = index.search("button", 10).unwrap();
+        assert!(!results.is_empty());
+
+        // Both buttons should be in results, card should not
+        let button_results: Vec<_> = results.iter().filter(|r| r.name == "button").collect();
+        assert_eq!(button_results.len(), 2);
+
+        // Default registry button should have higher score than custom
+        let default_btn = results.iter().find(|r| r.id == "button").unwrap();
+        let custom_btn = results.iter().find(|r| r.id == "@custom/button").unwrap();
+        assert!(
+            default_btn.score >= custom_btn.score,
+            "Default registry button (score={}) should rank >= custom (score={})",
+            default_btn.score,
+            custom_btn.score
+        );
     }
 }
