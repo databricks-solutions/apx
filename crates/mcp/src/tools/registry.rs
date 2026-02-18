@@ -2,7 +2,9 @@ use crate::indexing::{rebuild_search_index, wait_for_index_ready};
 use crate::server::ApxServer;
 use crate::tools::ToolResultExt;
 use crate::validation::validate_app_path;
-use apx_core::components::{get_all_registry_indexes, needs_registry_refresh, sync_registry_indexes};
+use apx_core::components::{
+    get_all_registry_indexes, needs_registry_refresh, sync_registry_indexes,
+};
 use apx_core::search::ComponentIndex;
 use rmcp::model::*;
 use rmcp::schemars;

@@ -6,7 +6,9 @@ use crate::tools::databricks::DatabricksAppsLogsArgs;
 use crate::tools::devserver::LogsToolArgs;
 use crate::tools::docs::DocsArgs;
 use crate::tools::project::GetRouteInfoArgs;
-use crate::tools::registry::{AddComponentArgs, ListRegistryComponentsArgs, SearchRegistryComponentsArgs};
+use crate::tools::registry::{
+    AddComponentArgs, ListRegistryComponentsArgs, SearchRegistryComponentsArgs,
+};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
