@@ -6,7 +6,9 @@ pub mod tw_transform;
 pub mod utils;
 
 // Re-export models for easier access
-pub use models::{CssRules, RegistryCatalogEntry, RegistryConfig, RegistryItem, UiConfig};
+pub use models::{
+    CssRules, RegistryCatalogEntry, RegistryConfig, RegistryFile, RegistryItem, UiConfig,
+};
 
 // Re-export cache functions
 pub use cache::{
@@ -536,6 +538,8 @@ pub async fn plan_add(
 
     let components = resolve_component_closure(client, &merged_cfg, registry, component).await?;
 
+    let path_map = build_path_map(&components);
+
     let mut files_to_write = Vec::new();
     let mut component_deps: BTreeSet<String> = BTreeSet::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -546,19 +550,8 @@ pub async fn plan_add(
             component_deps.insert(dep.to_string());
         }
 
-        enum OutputRoot {
-            Components,
-            Lib,
-            Hooks,
-        }
-
         for file in &resolved.spec.files {
-            let root = match file.file_type.as_deref() {
-                Some("registry:ui") => OutputRoot::Components,
-                Some("registry:hook") => OutputRoot::Hooks,
-                Some("registry:lib") | Some("registry:file") => OutputRoot::Lib,
-                _ => OutputRoot::Components,
-            };
+            let root = determine_output_root(file.file_type.as_deref());
 
             let file_name = match root {
                 OutputRoot::Components => format!("{}.tsx", resolved.name),
@@ -595,7 +588,10 @@ pub async fn plan_add(
             files_to_write.push(PlannedFile {
                 relative_path,
                 absolute_path,
-                content: rewrite_registry_imports(&file.content),
+                content: rewrite_flattened_paths(
+                    &rewrite_registry_imports(&file.content),
+                    &path_map,
+                ),
                 source_component: resolved.name.clone(),
             });
         }
@@ -607,6 +603,92 @@ pub async fn plan_add(
         component_deps,
         warnings,
     })
+}
+
+/// Where a file ends up: components dir, lib dir, or hooks dir.
+enum OutputRoot {
+    Components,
+    Lib,
+    Hooks,
+}
+
+fn determine_output_root(file_type: Option<&str>) -> OutputRoot {
+    match file_type {
+        Some("registry:ui") => OutputRoot::Components,
+        Some("registry:hook") => OutputRoot::Hooks,
+        Some("registry:lib") | Some("registry:file") => OutputRoot::Lib,
+        _ => OutputRoot::Components,
+    }
+}
+
+/// Returns the `@/...` TypeScript import path where `file` will actually be saved.
+///
+/// This reflects the *flattened* output name derived from `resolved.name`, not `file.path`.
+fn compute_saved_import_path(resolved: &ResolvedComponent, file: &RegistryFile) -> String {
+    match determine_output_root(file.file_type.as_deref()) {
+        OutputRoot::Components => {
+            let registry = resolved
+                .registry
+                .as_deref()
+                .map(|r| r.trim_start_matches('@'));
+            let subdir = registry.unwrap_or("ui");
+            format!("@/components/{}/{}", subdir, resolved.name)
+        }
+        OutputRoot::Hooks => format!("@/hooks/{}", resolved.name),
+        OutputRoot::Lib => format!("@/lib/{}", resolved.name),
+    }
+}
+
+/// Converts a registry `file.path` (e.g. `"components/animate-ui/icons/icon.tsx"`)
+/// to the TypeScript import path that the *original* nested layout would use
+/// (e.g. `"@/components/animate-ui/icons/icon"`).
+fn original_registry_import_path(file_path: &str) -> String {
+    let without_ext = file_path
+        .strip_suffix(".tsx")
+        .or_else(|| file_path.strip_suffix(".ts"))
+        .or_else(|| file_path.strip_suffix(".jsx"))
+        .or_else(|| file_path.strip_suffix(".js"))
+        .unwrap_or(file_path);
+    format!("@/{without_ext}")
+}
+
+/// Build a map from original nested import paths to the flattened saved paths.
+///
+/// Only entries where the two paths differ are inserted.
+fn build_path_map(components: &[ResolvedComponent]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for resolved in components {
+        for file in &resolved.spec.files {
+            let original = original_registry_import_path(&file.path);
+            let saved = compute_saved_import_path(resolved, file);
+            if original != saved {
+                map.insert(original, saved);
+            }
+        }
+    }
+    map
+}
+
+/// Rewrite import paths in `content` according to `path_map`.
+///
+/// Replacements are anchored to a following quote character (`"`, `'`, `` ` ``) to avoid
+/// partial-prefix false positives (e.g. `@/hooks/icon` should not match `@/hooks/icon-button`).
+/// Entries are applied longest-first so that more-specific paths win.
+fn rewrite_flattened_paths(content: &str, path_map: &HashMap<String, String>) -> String {
+    if path_map.is_empty() {
+        return content.to_string();
+    }
+    let mut sorted: Vec<(&String, &String)> = path_map.iter().collect();
+    sorted.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    let mut result = content.to_string();
+    for (from, to) in sorted {
+        for quote in ['"', '\'', '`'] {
+            let pat = format!("{from}{quote}");
+            let rep = format!("{to}{quote}");
+            result = result.replace(&pat, &rep);
+        }
+    }
+    result
 }
 
 /// Rewrite imports from shadcn default registry structure to project structure.
@@ -1051,4 +1133,195 @@ pub fn collect_css_mutations(components: &[ResolvedComponent]) -> Vec<CssMutatio
     }
 
     mutations
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::models::{RegistryFile, RegistryItem, RegistryItemType};
+
+    fn make_registry_file(path: &str, file_type: &str) -> RegistryFile {
+        RegistryFile {
+            path: path.to_string(),
+            content: String::new(),
+            target: None,
+            file_type: Some(file_type.to_string()),
+        }
+    }
+
+    fn make_resolved(
+        name: &str,
+        registry: Option<&str>,
+        files: Vec<RegistryFile>,
+    ) -> ResolvedComponent {
+        ResolvedComponent {
+            name: name.to_string(),
+            spec: RegistryItem {
+                name: name.to_string(),
+                title: None,
+                description: None,
+                item_type: RegistryItemType::Ui,
+                files,
+                dependencies: vec![],
+                registry_dependencies: vec![],
+                css_vars: None,
+                css: None,
+                tailwind: None,
+                docs: None,
+                categories: vec![],
+                meta: None,
+            },
+            registry: registry.map(|s| s.to_string()),
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn test_rewrite_flattened_paths_component() {
+        let mut map = HashMap::new();
+        map.insert(
+            "@/components/animate-ui/icons/icon".to_string(),
+            "@/components/animate-ui/icons-icon".to_string(),
+        );
+        let content = r#"import { Icon } from "@/components/animate-ui/icons/icon""#;
+        let result = rewrite_flattened_paths(content, &map);
+        assert_eq!(
+            result,
+            r#"import { Icon } from "@/components/animate-ui/icons-icon""#
+        );
+    }
+
+    #[test]
+    fn test_rewrite_flattened_paths_hook() {
+        let mut map = HashMap::new();
+        map.insert(
+            "@/hooks/use-is-in-view".to_string(),
+            "@/hooks/hooks-use-is-in-view".to_string(),
+        );
+        let content = r#"import { useIsInView } from "@/hooks/use-is-in-view""#;
+        let result = rewrite_flattened_paths(content, &map);
+        assert_eq!(
+            result,
+            r#"import { useIsInView } from "@/hooks/hooks-use-is-in-view""#
+        );
+    }
+
+    #[test]
+    fn test_rewrite_flattened_paths_nested() {
+        let mut map = HashMap::new();
+        map.insert(
+            "@/components/animate-ui/primitives/animate/slot".to_string(),
+            "@/components/animate-ui/primitives-animate-slot".to_string(),
+        );
+        let content = r#"import { Slot } from "@/components/animate-ui/primitives/animate/slot""#;
+        let result = rewrite_flattened_paths(content, &map);
+        assert_eq!(
+            result,
+            r#"import { Slot } from "@/components/animate-ui/primitives-animate-slot""#
+        );
+    }
+
+    #[test]
+    fn test_rewrite_flattened_paths_no_partial_match() {
+        let mut map = HashMap::new();
+        map.insert(
+            "@/hooks/icon-button".to_string(),
+            "@/hooks/hooks-icon-button".to_string(),
+        );
+        // "@/hooks/icon" must NOT be rewritten — only icon-button is in the map
+        let content = r#"import { Icon } from "@/hooks/icon""#;
+        let result = rewrite_flattened_paths(content, &map);
+        assert_eq!(result, r#"import { Icon } from "@/hooks/icon""#);
+    }
+
+    #[test]
+    fn test_rewrite_flattened_paths_empty_map() {
+        let map = HashMap::new();
+        let content = r#"import { Foo } from "@/components/ui/foo""#;
+        let result = rewrite_flattened_paths(content, &map);
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_original_registry_import_path_tsx() {
+        assert_eq!(
+            original_registry_import_path("components/animate-ui/icons/icon.tsx"),
+            "@/components/animate-ui/icons/icon"
+        );
+    }
+
+    #[test]
+    fn test_original_registry_import_path_ts() {
+        assert_eq!(
+            original_registry_import_path("hooks/use-is-in-view.ts"),
+            "@/hooks/use-is-in-view"
+        );
+    }
+
+    #[test]
+    fn test_build_path_map() {
+        let components = vec![
+            make_resolved(
+                "icons-icon",
+                Some("@animate-ui"),
+                vec![make_registry_file(
+                    "components/animate-ui/icons/icon.tsx",
+                    "registry:ui",
+                )],
+            ),
+            make_resolved(
+                "hooks-use-is-in-view",
+                Some("@animate-ui"),
+                vec![make_registry_file(
+                    "hooks/use-is-in-view.ts",
+                    "registry:hook",
+                )],
+            ),
+        ];
+        let map = build_path_map(&components);
+        assert_eq!(
+            map.get("@/components/animate-ui/icons/icon"),
+            Some(&"@/components/animate-ui/icons-icon".to_string())
+        );
+        assert_eq!(
+            map.get("@/hooks/use-is-in-view"),
+            Some(&"@/hooks/hooks-use-is-in-view".to_string())
+        );
+    }
+
+    #[test]
+    fn test_integration_issue_88() {
+        // Simulate icons-icon.tsx importing from icons-arrow-right using the original nested path
+        let components = vec![
+            make_resolved(
+                "icons-arrow-right",
+                Some("@animate-ui"),
+                vec![make_registry_file(
+                    "components/animate-ui/icons/arrow-right.tsx",
+                    "registry:ui",
+                )],
+            ),
+            make_resolved(
+                "icons-icon",
+                Some("@animate-ui"),
+                vec![make_registry_file(
+                    "components/animate-ui/icons/icon.tsx",
+                    "registry:ui",
+                )],
+            ),
+        ];
+        let map = build_path_map(&components);
+
+        let content = concat!(
+            r#"import { ArrowRight } from "@/components/animate-ui/icons/arrow-right""#,
+            "\n",
+            r#"import { Icon } from "@/components/animate-ui/icons/icon""#,
+        );
+        let result = rewrite_flattened_paths(content, &map);
+
+        assert!(result.contains("@/components/animate-ui/icons-arrow-right"));
+        assert!(!result.contains("@/components/animate-ui/icons/arrow-right"));
+        assert!(result.contains("@/components/animate-ui/icons-icon"));
+        assert!(!result.contains("@/components/animate-ui/icons/icon\""));
+    }
 }
