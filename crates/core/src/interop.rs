@@ -65,14 +65,25 @@ pub fn resolve_apx_agent_binary_path() -> Result<PathBuf, String> {
     ))
 }
 
-/// Get the path to the frontend entrypoint.ts asset (materialized from embedded resources)
-pub fn frontend_entrypoint_path() -> Result<PathBuf, String> {
-    resources::entrypoint_ts_path()
+/// Write entrypoint.ts into the project's `node_modules/.apx/` and return its path.
+pub fn ensure_frontend_entrypoint(project_root: &Path) -> Result<PathBuf, String> {
+    resources::ensure_entrypoint(project_root)
 }
 
-/// Extract embedded templates to the versioned cache directory and return the path.
-pub fn extract_templates() -> Result<PathBuf, String> {
-    resources::templates_dir()
+/// Get the content of an embedded template file as a string.
+///
+/// The path is relative to `src/apx/templates/`, e.g. `"base/pyproject.toml.jinja2"`.
+pub fn get_template_content(path: &str) -> Result<String, String> {
+    resources::get_template_str(path)
+        .map(|c| c.into_owned())
+        .ok_or_else(|| format!("Template not found: {path}"))
+}
+
+/// List embedded template files matching a prefix.
+///
+/// Returns paths relative to the templates root, e.g. `["base/pyproject.toml.jinja2", ...]`.
+pub fn list_template_files(prefix: &str) -> Vec<String> {
+    resources::list_templates(Some(prefix))
 }
 
 pub async fn generate_openapi_spec(

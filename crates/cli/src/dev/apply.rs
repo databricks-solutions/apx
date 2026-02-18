@@ -1,15 +1,13 @@
 use clap::{Args, ValueEnum};
 use dialoguer::Confirm;
 use similar::{ChangeTag, TextDiff};
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tera::Context;
-use walkdir::WalkDir;
 
 use crate::common::{Assistant, Layout, find_app_dir};
 use crate::run_cli_async_helper;
-use apx_core::interop::extract_templates;
+use apx_core::interop::{get_template_content, list_template_files};
 
 /// Available addons that can be applied
 #[derive(ValueEnum, Clone, Debug, Copy)]
@@ -297,23 +295,18 @@ async fn run_inner(args: ApplyArgs) -> Result<(), String> {
     // Read project context
     let (app_name, app_slug) = read_project_context(&app_dir)?;
 
-    // Extract embedded templates to a temporary directory
-    let templates_dir = extract_templates()?;
-
     if addon.is_backend() {
-        return apply_backend_addon(addon, yes, &app_dir, &app_slug, &templates_dir);
+        return apply_backend_addon(addon, yes, &app_dir, &app_slug);
     }
 
-    // Get addon source directory (file-overlay based addons)
-    let addon_source = templates_dir
-        .join("addons")
-        .join(addon.directory_name());
+    let addon_prefix = format!("addons/{}/", addon.directory_name());
+    let addon_files = list_template_files(&addon_prefix);
 
-    if !addon_source.exists() {
+    if addon_files.is_empty() {
         return Err(format!(
-            "Addon '{}' not found at {}",
+            "Addon '{}' not found (no embedded templates with prefix '{}')",
             addon.directory_name(),
-            addon_source.display()
+            addon_prefix,
         ));
     }
 
@@ -327,7 +320,7 @@ async fn run_inner(args: ApplyArgs) -> Result<(), String> {
     );
 
     // Collect all file changes
-    let changes = collect_file_changes(&addon_source, &app_dir, &app_name, &app_slug)?;
+    let changes = collect_file_changes(&addon_prefix, &addon_files, &app_dir, &app_name, &app_slug)?;
 
     if changes.is_empty() {
         println!("No changes to apply.");
@@ -435,7 +428,6 @@ fn apply_backend_addon(
     _yes: bool,
     app_dir: &Path,
     app_slug: &str,
-    templates_dir: &Path,
 ) -> Result<(), String> {
     let spec = addon
         .backend_spec()
@@ -452,58 +444,52 @@ fn apply_backend_addon(
 
     let src_prefix = PathBuf::from("src").join(app_slug);
 
-    // 1. Copy template files from addon
-    let addon_source = templates_dir.join("addons").join(spec.template_dir);
+    // 1. Copy template files from addon (embedded)
+    let addon_prefix = format!("addons/{}/", spec.template_dir);
+    let addon_files = list_template_files(&addon_prefix);
     let mut copied_files = Vec::new();
-    if addon_source.exists() {
-        for entry in WalkDir::new(&addon_source) {
-            let entry = entry.map_err(|e| format!("Failed to read addon directory: {e}"))?;
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let rel = entry
-                .path()
-                .strip_prefix(&addon_source)
-                .map_err(|e| format!("Path error: {e}"))?;
-            let mut path_str = rel.to_string_lossy().replace('\\', "/");
-            if path_str.contains("/base/") || path_str.starts_with("base/") {
-                path_str = path_str
-                    .replace("/base/", &format!("/{app_slug}/"))
-                    .replace("base/", &format!("{app_slug}/"));
-            }
-            // Skip jinja2 config templates (databricks.yml, pyproject.toml, .env) — those need special handling
-            let is_template = entry.path().extension() == Some(OsStr::new("jinja2"));
-            if is_template && !path_str.contains("/backend/") {
-                // Render config templates
-                let final_path = path_str.trim_end_matches(".jinja2");
-                let target = app_dir.join(final_path);
-                let content = fs::read_to_string(entry.path())
-                    .map_err(|e| format!("Failed to read template: {e}"))?;
-                let app_name_from_slug = app_slug.replace('_', "-");
-                let mut ctx = Context::new();
-                ctx.insert("app_name", &app_name_from_slug);
-                ctx.insert("app_slug", app_slug);
-                let rendered = tera::Tera::one_off(&content, &ctx, false)
-                    .map_err(|e| format!("Template render error: {e}"))?;
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent).map_err(|e| format!("mkdir error: {e}"))?;
-                }
-                fs::write(&target, rendered).map_err(|e| format!("write error: {e}"))?;
-                copied_files.push(final_path.to_string());
-                continue;
-            }
-            let final_path = if is_template {
-                path_str.trim_end_matches(".jinja2").to_string()
-            } else {
-                path_str.clone()
-            };
-            let target = app_dir.join(&final_path);
+    for file_path in &addon_files {
+        let rel = file_path
+            .strip_prefix(&addon_prefix)
+            .unwrap_or(file_path.as_str());
+        let mut path_str = rel.to_string();
+        if path_str.contains("/base/") || path_str.starts_with("base/") {
+            path_str = path_str
+                .replace("/base/", &format!("/{app_slug}/"))
+                .replace("base/", &format!("{app_slug}/"));
+        }
+        let is_template = path_str.ends_with(".jinja2");
+        // Skip jinja2 config templates (databricks.yml, pyproject.toml, .env) — those need special handling
+        if is_template && !path_str.contains("/backend/") {
+            // Render config templates
+            let final_path = path_str.trim_end_matches(".jinja2");
+            let target = app_dir.join(final_path);
+            let content = get_template_content(file_path)?;
+            let app_name_from_slug = app_slug.replace('_', "-");
+            let mut ctx = Context::new();
+            ctx.insert("app_name", &app_name_from_slug);
+            ctx.insert("app_slug", app_slug);
+            let rendered = tera::Tera::one_off(&content, &ctx, false)
+                .map_err(|e| format!("Template render error: {e}"))?;
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|e| format!("mkdir error: {e}"))?;
             }
-            fs::copy(entry.path(), &target).map_err(|e| format!("copy error: {e}"))?;
-            copied_files.push(final_path);
+            fs::write(&target, rendered).map_err(|e| format!("write error: {e}"))?;
+            copied_files.push(final_path.to_string());
+            continue;
         }
+        let final_path = if is_template {
+            path_str.trim_end_matches(".jinja2").to_string()
+        } else {
+            path_str.clone()
+        };
+        let target = app_dir.join(&final_path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("mkdir error: {e}"))?;
+        }
+        let content = get_template_content(file_path)?;
+        fs::write(&target, content.as_bytes()).map_err(|e| format!("write error: {e}"))?;
+        copied_files.push(final_path);
     }
 
     // 2. Apply Python AST edits
@@ -652,27 +638,22 @@ fn read_project_context(app_dir: &Path) -> Result<(String, String), String> {
     Ok((app_name, app_slug))
 }
 
-/// Collect all file changes from the addon source directory
+/// Collect all file changes from embedded templates matching a prefix
 fn collect_file_changes(
-    source_dir: &Path,
+    prefix: &str,
+    files: &[String],
     target_dir: &Path,
     app_name: &str,
     app_slug: &str,
 ) -> Result<Vec<FileChange>, String> {
     let mut changes = Vec::new();
 
-    for entry in WalkDir::new(source_dir) {
-        let entry = entry.map_err(|err| format!("Failed to read template directory: {err}"))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
+    for file_path in files {
+        let rel = file_path
+            .strip_prefix(prefix)
+            .unwrap_or(file_path.as_str());
 
-        let rel_path = entry
-            .path()
-            .strip_prefix(source_dir)
-            .map_err(|err| format!("Failed to build relative path: {err}"))?;
-
-        let mut path_str = rel_path.to_string_lossy().replace('\\', "/");
+        let mut path_str = rel.to_string();
 
         // Replace "base" with app_slug in paths
         if path_str.contains("/base/") || path_str.starts_with("base/") {
@@ -681,7 +662,7 @@ fn collect_file_changes(
                 .replace("base/", &format!("{app_slug}/"));
         }
 
-        let is_template = entry.path().extension() == Some(OsStr::new("jinja2"));
+        let is_template = path_str.ends_with(".jinja2");
         let final_rel_path = if is_template {
             path_str.trim_end_matches(".jinja2").to_string()
         } else {
@@ -690,11 +671,10 @@ fn collect_file_changes(
 
         let target_path = target_dir.join(&final_rel_path);
 
+        let template_content = get_template_content(file_path)?;
+
         // Generate new content
         let new_content = if is_template {
-            let template_content = fs::read_to_string(entry.path())
-                .map_err(|err| format!("Failed to read template: {err}"))?;
-
             let mut context = Context::new();
             context.insert("app_name", app_name);
             context.insert("app_slug", app_slug);
@@ -704,14 +684,10 @@ fn collect_file_changes(
             );
 
             tera::Tera::one_off(&template_content, &context, false).map_err(|err| {
-                format!(
-                    "Failed to render template {}: {err}",
-                    entry.path().display()
-                )
+                format!("Failed to render template {file_path}: {err}")
             })?
         } else {
-            fs::read_to_string(entry.path())
-                .map_err(|err| format!("Failed to read file {}: {err}", entry.path().display()))?
+            template_content
         };
 
         // Read existing content if file exists

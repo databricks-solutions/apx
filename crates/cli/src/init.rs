@@ -1,13 +1,11 @@
 use clap::Args;
 use dialoguer::{Confirm, Input, Select};
 use rand::seq::SliceRandom;
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tera::Context;
 use tokio::process::Command;
 use tracing::debug;
-use walkdir::WalkDir;
 
 use crate::common::{
     Assistant, Layout, Template, has_apx_config, modify_pyproject, resolve_app_dir,
@@ -19,7 +17,7 @@ use apx_core::common::{
     BunCommand, format_elapsed_ms, run_with_spinner, run_with_spinner_async, spinner,
 };
 use apx_core::dotenv::DotenvFile;
-use apx_core::interop::extract_templates;
+use apx_core::interop::{get_template_content, list_template_files};
 use std::time::Instant;
 
 const APX_INDEX_URL: &str = "https://databricks-solutions.github.io/apx/simple";
@@ -108,8 +106,6 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     } else {
         workspace_root.clone()
     };
-
-    let templates_dir = extract_templates()?;
 
     println!("Welcome to apx 🚀\n");
 
@@ -240,8 +236,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
         "✅ Project layout prepared",
         || {
             ensure_dir(&app_path)?;
-            let base_template_dir = templates_dir.join("base");
-            process_template_directory(&base_template_dir, &app_path, &app_name, &app_slug)?;
+            render_embedded_templates("base/", &app_path, &app_name, &app_slug)?;
 
             let dist_dir = app_path.join("src").join(&app_slug).join("__dist__");
             ensure_dir(&dist_dir)?;
@@ -290,8 +285,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
             }
 
             if matches!(layout, Layout::Sidebar) {
-                let sidebar_addon = templates_dir.join("addons").join("sidebar");
-                process_template_directory(&sidebar_addon, &app_path, &app_name, &app_slug)?;
+                render_embedded_templates("addons/sidebar/", &app_path, &app_name, &app_slug)?;
             }
             Ok(())
         },
@@ -346,33 +340,32 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     debug!("Configured apx {} from index", apx_version);
 
     if let Some(assistant) = args.assistant.take() {
-        let rules_dir = templates_dir.join("addons");
         run_with_spinner(
             "🤖 Setting up assistant rules...",
             "✅ Assistant rules configured",
             || {
                 match assistant {
-                    Assistant::Vscode => process_template_directory(
-                        &rules_dir.join("vscode"),
+                    Assistant::Vscode => render_embedded_templates(
+                        "addons/vscode/",
                         &app_path,
                         &app_name,
                         &app_slug,
                     )?,
-                    Assistant::Cursor => process_template_directory(
-                        &rules_dir.join("cursor"),
+                    Assistant::Cursor => render_embedded_templates(
+                        "addons/cursor/",
                         &app_path,
                         &app_name,
                         &app_slug,
                     )?,
-                    Assistant::Claude => process_template_directory(
-                        &rules_dir.join("claude"),
+                    Assistant::Claude => render_embedded_templates(
+                        "addons/claude/",
                         &app_path,
                         &app_name,
                         &app_slug,
                     )?,
                     Assistant::Codex => {
-                        process_template_directory(
-                            &rules_dir.join("codex"),
+                        render_embedded_templates(
+                            "addons/codex/",
                             &app_path,
                             &app_name,
                             &app_slug,
@@ -483,29 +476,36 @@ fn ensure_dir(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|err| format!("Failed to create directory: {err}"))
 }
 
-fn process_template_directory(
-    source_dir: &Path,
+/// Render embedded templates matching `prefix` into `target_dir`.
+///
+/// The prefix is stripped from the embedded path to form the relative output path.
+/// Paths containing `/base/` or starting with `base/` have `base` replaced with `app_slug`.
+/// Files ending in `.jinja2` are rendered through Tera; others are copied verbatim.
+fn render_embedded_templates(
+    prefix: &str,
     target_dir: &Path,
     app_name: &str,
     app_slug: &str,
 ) -> Result<(), String> {
-    for entry in WalkDir::new(source_dir) {
-        let entry = entry.map_err(|err| format!("Failed to read template directory: {err}"))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let rel_path = entry
-            .path()
-            .strip_prefix(source_dir)
-            .map_err(|err| format!("Failed to build relative path: {err}"))?;
-        let mut path_str = rel_path.to_string_lossy().replace('\\', "/");
+    let files = list_template_files(prefix);
+    if files.is_empty() {
+        return Err(format!("No template files found for prefix: {prefix}"));
+    }
+
+    for file_path in &files {
+        // Strip the prefix to get the relative path for the output
+        let rel = file_path
+            .strip_prefix(prefix)
+            .unwrap_or(file_path.as_str());
+
+        let mut path_str = rel.to_string();
         if path_str.contains("/base/") || path_str.starts_with("base/") {
             path_str = path_str
                 .replace("/base/", &format!("/{app_slug}/"))
                 .replace("base/", &format!("{app_slug}/"));
         }
 
-        let is_template = entry.path().extension() == Some(OsStr::new("jinja2"));
+        let is_template = path_str.ends_with(".jinja2");
         let target_path = if is_template {
             let trimmed = path_str.trim_end_matches(".jinja2");
             target_dir.join(trimmed)
@@ -518,9 +518,9 @@ fn process_template_directory(
                 .map_err(|err| format!("Failed to create directory: {err}"))?;
         }
 
+        let content = get_template_content(file_path)?;
+
         if is_template {
-            let content = fs::read_to_string(entry.path())
-                .map_err(|err| format!("Failed to read template: {err}"))?;
             let mut context = Context::new();
             context.insert("app_name", app_name);
             context.insert("app_slug", app_slug);
@@ -530,15 +530,14 @@ fn process_template_directory(
             );
             let rendered = tera::Tera::one_off(&content, &context, false).map_err(|err| {
                 format!(
-                    "File {} in template is not tera compatible. File content: {content}\nError: {err}",
-                    entry.path().display()
+                    "Template {file_path} is not tera compatible. Content: {content}\nError: {err}",
                 )
             })?;
             fs::write(&target_path, rendered)
                 .map_err(|err| format!("Failed to write template output: {err}"))?;
         } else {
-            fs::copy(entry.path(), &target_path)
-                .map_err(|err| format!("Failed to copy template file: {err}"))?;
+            fs::write(&target_path, content.as_bytes())
+                .map_err(|err| format!("Failed to write template file: {err}"))?;
         }
     }
     Ok(())

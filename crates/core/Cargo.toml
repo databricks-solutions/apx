@@ -40,6 +40,7 @@ biome_css_parser.workspace = true
 biome_css_syntax.workspace = true
 biome_rowan.workspace = true
 url.workspace = true
+rust-embed.workspace = true
 zip.workspace = true
 rayon.workspace = true
 hex.workspace = true
@@ -57,9 +58,6 @@ which.workspace = true
 flate2.workspace = true
 tar.workspace = true
 sha2.workspace = true
-
-[build-dependencies]
-zip.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

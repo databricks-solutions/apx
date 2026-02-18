@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::common::read_project_metadata;
-use crate::interop::frontend_entrypoint_path;
+use crate::interop::ensure_frontend_entrypoint;
 
 /// Prepare arguments for running the frontend entrypoint
 /// Returns (entrypoint_path, args, app_name) where args are [mode, ui_root, out_dir, public_dir]
@@ -23,8 +23,8 @@ pub fn prepare_frontend_args(
 
     // Note: __dist__ directory is created by write_metadata_file()
 
-    // 3. Get entrypoint.ts path from Python package (same as bun binary)
-    let entrypoint = frontend_entrypoint_path()?;
+    // 3. Write entrypoint.ts into project's node_modules/.apx/
+    let entrypoint = ensure_frontend_entrypoint(app_dir)?;
 
     // 4. Prepare arguments
     let args = vec![
