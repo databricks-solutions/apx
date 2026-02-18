@@ -149,7 +149,7 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
                 FluxCommands::Stop(args) => flux::stop::run(args).await,
             },
             Some(Commands::Upgrade) => upgrade::run().await,
-            Some(Commands::GenerateOpenapi(args)) => __generate_openapi::run(args),
+            Some(Commands::GenerateOpenapi(args)) => __generate_openapi::run(args).await,
             None => {
                 let mut cmd = Cli::command();
                 let _ = cmd.print_help();

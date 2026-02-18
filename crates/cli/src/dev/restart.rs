@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use crate::common::resolve_app_dir;
 use crate::run_cli_async_helper;
+use apx_core::common::OutputMode;
 use apx_core::ops::dev::restart_dev_server;
 
 #[derive(Args, Debug, Clone)]
@@ -21,6 +22,6 @@ pub async fn run(args: RestartArgs) -> i32 {
 async fn run_inner(args: RestartArgs) -> Result<(), String> {
     let app_dir = resolve_app_dir(args.app_path);
 
-    restart_dev_server(&app_dir).await?;
+    restart_dev_server(&app_dir, OutputMode::Interactive).await?;
     Ok(())
 }

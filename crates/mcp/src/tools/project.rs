@@ -192,9 +192,7 @@ impl ApxServer {
         let path = validate_app_path(&args.app_path)
             .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
 
-        use apx_core::api_generator::generate_openapi;
-
-        match generate_openapi(&path) {
+        match apx_core::api_generator::generate_openapi(&path).await {
             Ok(()) => Ok(CallToolResult::success(vec![Content::text(
                 "OpenAPI regenerated",
             )])),
@@ -217,15 +215,20 @@ impl ApxServer {
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
-        let openapi_content =
-            match generate_openapi_spec(&path, &metadata.app_entrypoint, &metadata.app_slug) {
-                Ok((content, _)) => content,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Failed to generate OpenAPI spec: {e}"
-                    ))]));
-                }
-            };
+        let openapi_content = match generate_openapi_spec(
+            &path,
+            &metadata.app_entrypoint,
+            &metadata.app_slug,
+        )
+        .await
+        {
+            Ok((content, _)) => content,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to generate OpenAPI spec: {e}"
+                ))]));
+            }
+        };
 
         let openapi: Value = match serde_json::from_str(&openapi_content) {
             Ok(spec) => spec,
@@ -311,15 +314,20 @@ impl ApxServer {
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
-        let (openapi_content, _) =
-            match generate_openapi_spec(&path, &metadata.app_entrypoint, &metadata.app_slug) {
-                Ok(result) => result,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Failed to generate OpenAPI spec: {e}"
-                    ))]));
-                }
-            };
+        let (openapi_content, _) = match generate_openapi_spec(
+            &path,
+            &metadata.app_entrypoint,
+            &metadata.app_slug,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to generate OpenAPI spec: {e}"
+                ))]));
+            }
+        };
 
         let openapi: Value = match serde_json::from_str(&openapi_content) {
             Ok(spec) => spec,

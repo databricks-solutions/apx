@@ -8,11 +8,14 @@ use std::path::Path;
 use apx_common::{LogRecord, should_skip_log};
 use apx_db::LogsDb;
 
+use crate::common::{OutputMode, emit};
+
 /// Simple log streamer that prints logs line-by-line to stdout.
 pub struct StartupLogStreamer {
     last_log_id: i64,
     storage: Option<LogsDb>,
     app_path: String,
+    mode: OutputMode,
 }
 
 impl std::fmt::Debug for StartupLogStreamer {
@@ -27,7 +30,7 @@ impl std::fmt::Debug for StartupLogStreamer {
 
 impl StartupLogStreamer {
     /// Create a new log streamer for the given app directory.
-    pub async fn new(app_dir: &Path) -> Self {
+    pub async fn new(app_dir: &Path, mode: OutputMode) -> Self {
         let app_path = app_dir
             .canonicalize()
             .unwrap_or_else(|_| app_dir.to_path_buf())
@@ -44,6 +47,7 @@ impl StartupLogStreamer {
             last_log_id,
             storage,
             app_path,
+            mode,
         }
     }
 
@@ -67,7 +71,7 @@ impl StartupLogStreamer {
         let mut count = 0;
         for record in &records {
             if !should_skip_log(record) {
-                println!("{}", format_startup_log(record));
+                emit(self.mode, &format_startup_log(record));
                 count += 1;
             }
         }

@@ -144,17 +144,27 @@ async fn ensure_search_index(pool: SqlitePool) -> Result<(), String> {
     }
 }
 
-/// Wait for an index to be ready with timeout (15 seconds)
+/// Wait for an index to be ready with timeout (15 seconds).
+///
+/// Returns `true` if the index was already ready, `false` if we had to wait.
+/// Returns `Err` if the timeout expired before the index became ready.
 pub async fn wait_for_index_ready(
     ready_notify: &Notify,
     is_ready: &AtomicBool,
     index_name: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     const TIMEOUT_SECS: u64 = 15;
 
-    // Check if already ready
+    // Register as a waiter BEFORE checking the flag to avoid a race where
+    // notify_waiters() fires between our is_ready check and the notified() call.
+    // (notify_waiters does not store a permit, so late registrations miss it.)
+    let notified = ready_notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+
+    // Fast path: already ready
     if is_ready.load(Ordering::SeqCst) {
-        return Ok(());
+        return Ok(true);
     }
 
     tracing::debug!(
@@ -164,10 +174,10 @@ pub async fn wait_for_index_ready(
     );
 
     // Wait with timeout
-    match tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), ready_notify.notified()).await {
+    match tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), notified).await {
         Ok(_) => {
             tracing::debug!("{} index is now ready", index_name);
-            Ok(())
+            Ok(false)
         }
         Err(_) => {
             tracing::warn!(

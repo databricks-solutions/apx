@@ -30,15 +30,16 @@ impl ApxServer {
         let ctx = &self.ctx;
 
         // Wait for SDK index to be ready (15 second timeout)
-        if let Err(e) = wait_for_index_ready(
+        let was_already_ready = match wait_for_index_ready(
             &ctx.index_state.sdk_ready,
             &ctx.index_state.sdk_indexed,
             "SDK documentation",
         )
         .await
         {
-            return Ok(CallToolResult::error(vec![Content::text(e)]));
-        }
+            Ok(ready) => ready,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
 
         // Get the SDK doc index
         let mut index_guard = ctx.sdk_doc_index.lock().await;
@@ -93,6 +94,8 @@ impl ApxServer {
                     source: String,
                     query: String,
                     results: Vec<DocsResult>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    note: Option<String>,
                 }
 
                 #[derive(Serialize)]
@@ -101,6 +104,16 @@ impl ApxServer {
                     source_file: String,
                     score: f32,
                 }
+
+                let note = if results.is_empty() && !was_already_ready {
+                    Some(
+                        "Index was still initializing when this query arrived. \
+                         Results may be incomplete — retry in a few seconds."
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
 
                 let response = DocsResponse {
                     source: match args.source {
@@ -115,6 +128,7 @@ impl ApxServer {
                             score: r.score,
                         })
                         .collect(),
+                    note,
                 };
 
                 Ok(CallToolResult::from_serializable(&response))

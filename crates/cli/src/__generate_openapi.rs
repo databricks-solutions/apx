@@ -9,8 +9,8 @@ pub struct GenerateOpenapiArgs {
     pub app_dir: PathBuf,
 }
 
-pub fn run(args: GenerateOpenapiArgs) -> i32 {
-    match generate_openapi(&args.app_dir) {
+pub async fn run(args: GenerateOpenapiArgs) -> i32 {
+    match generate_openapi(&args.app_dir).await {
         Ok(()) => {
             println!("regenerated");
             0

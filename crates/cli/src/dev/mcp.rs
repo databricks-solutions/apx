@@ -1,5 +1,6 @@
 use crate::run_cli_async_helper;
 use apx_core::components::new_cache_state;
+use apx_core::databricks_sdk_doc::fetch_latest_sdk_version;
 use apx_core::interop::get_databricks_sdk_version;
 use apx_db::DevDb;
 use apx_mcp::context::{AppContext, IndexState, SdkIndexParams};
@@ -29,20 +30,22 @@ pub async fn run(_args: McpArgs) -> i32 {
                 tracing::info!("Found Databricks SDK version: {}", v);
                 v
             }
-            Ok(None) => {
-                tracing::info!(
-                    "Databricks SDK not installed, using default version {}",
-                    DEFAULT_SDK_VERSION
-                );
-                DEFAULT_SDK_VERSION.to_string()
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to detect SDK version: {}, using default {}",
-                    e,
-                    DEFAULT_SDK_VERSION
-                );
-                DEFAULT_SDK_VERSION.to_string()
+            Ok(None) | Err(_) => {
+                tracing::info!("SDK not detected locally, fetching latest version from GitHub");
+                match fetch_latest_sdk_version().await {
+                    Ok(v) => {
+                        tracing::info!("Latest SDK version from GitHub: {}", v);
+                        v
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to fetch latest SDK version: {}. Using default {}",
+                            e,
+                            DEFAULT_SDK_VERSION
+                        );
+                        DEFAULT_SDK_VERSION.to_string()
+                    }
+                }
             }
         };
 

@@ -2,6 +2,9 @@
 //!
 //! Manages frontend (Vite/Bun), backend (uvicorn), and database (PGlite) processes.
 //! Subprocess stdout/stderr are captured and forwarded to flux for centralized logging.
+// Runs inside the dev server child process (spawned with Stdio::null()),
+// never in the MCP server process — stdout output here is safe.
+#![allow(clippy::print_stdout)]
 
 use std::collections::HashMap;
 use std::fmt;

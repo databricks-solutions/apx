@@ -4,7 +4,8 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::common::{
-    ApxCommand, ensure_dir, format_elapsed_ms, handle_spawn_error, run_preflight_checks, spinner,
+    ApxCommand, OutputMode, emit, ensure_dir, format_elapsed_ms, handle_spawn_error,
+    run_preflight_checks, spinner_for_mode,
 };
 use crate::dev::client::{HealthCheckConfig, health, status, stop as stop_server};
 use crate::dev::common::{
@@ -21,7 +22,10 @@ fn prepare_app_dir(app_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn resolve_existing_server(app_dir: &Path) -> Result<Option<u16>, String> {
+pub async fn resolve_existing_server(
+    app_dir: &Path,
+    mode: OutputMode,
+) -> Result<Option<u16>, String> {
     let lock_path = lock_path(app_dir);
     if !lock_path.exists() {
         return Ok(None);
@@ -30,7 +34,7 @@ pub async fn resolve_existing_server(app_dir: &Path) -> Result<Option<u16>, Stri
     let lock = read_lock(&lock_path)?;
 
     if !is_process_running(lock.pid) {
-        println!("🧹 Cleaning up stale lock file...");
+        emit(mode, "🧹 Cleaning up stale lock file...");
         remove_lock(&lock_path)?;
         return Ok(None);
     }
@@ -38,7 +42,7 @@ pub async fn resolve_existing_server(app_dir: &Path) -> Result<Option<u16>, Stri
     match health(lock.port).await {
         Ok(true) => Ok(Some(lock.port)),
         Ok(false) | Err(_) => {
-            println!("🧹 Cleaning up stale lock file...");
+            emit(mode, "🧹 Cleaning up stale lock file...");
             remove_lock(&lock_path)?;
             Ok(None)
         }
@@ -48,41 +52,50 @@ pub async fn resolve_existing_server(app_dir: &Path) -> Result<Option<u16>, Stri
 /// Start a dev server for the given app directory.
 /// If a server is already running and healthy, returns its port.
 /// Otherwise spawns a new server subprocess.
-pub async fn start_dev_server(app_dir: &Path) -> Result<u16, String> {
-    if let Some(port) = resolve_existing_server(app_dir).await? {
+pub async fn start_dev_server(app_dir: &Path, mode: OutputMode) -> Result<u16, String> {
+    if let Some(port) = resolve_existing_server(app_dir, mode).await? {
         return Ok(port);
     }
-    spawn_server(app_dir, None, false, 60).await
+    spawn_server(app_dir, None, false, 60, mode).await
 }
 
 /// Run preflight checks and display progress.
-async fn run_preflight(app_dir: &Path) -> Result<(), String> {
-    println!("🛫 Preflight check started...");
+async fn run_preflight(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
+    emit(mode, "🛫 Preflight check started...");
     let preflight_start = Instant::now();
 
-    let preflight_spinner = spinner("  Running preflight checks...");
+    let preflight_spinner = spinner_for_mode("  Running preflight checks...", mode);
 
     let result = run_preflight_checks(app_dir).await;
     preflight_spinner.finish_and_clear();
 
     match result {
         Ok(preflight) => {
-            println!("  ✓ verified project layout ({}ms)", preflight.layout_ms);
-            println!("  ✓ uv sync ({}ms)", preflight.uv_sync_ms);
-            println!("  ✓ version file ({}ms)", preflight.version_ms);
+            emit(
+                mode,
+                &format!("  ✓ verified project layout ({}ms)", preflight.layout_ms),
+            );
+            emit(mode, &format!("  ✓ uv sync ({}ms)", preflight.uv_sync_ms));
+            emit(
+                mode,
+                &format!("  ✓ version file ({}ms)", preflight.version_ms),
+            );
             if let Some(bun_ms) = preflight.bun_install_ms {
-                println!("  ✓ bun install ({bun_ms}ms)");
+                emit(mode, &format!("  ✓ bun install ({bun_ms}ms)"));
             } else {
-                println!("  ✓ node_modules (cached)");
+                emit(mode, "  ✓ node_modules (cached)");
             }
-            println!(
-                "✅ Ready for takeoff! ({})\n",
-                format_elapsed_ms(preflight_start)
+            emit(
+                mode,
+                &format!(
+                    "✅ Ready for takeoff! ({})\n",
+                    format_elapsed_ms(preflight_start)
+                ),
             );
             Ok(())
         }
         Err(e) => {
-            println!("❌ Preflight check failed\n");
+            emit(mode, "❌ Preflight check failed\n");
             Err(e)
         }
     }
@@ -94,14 +107,17 @@ const PORT_WAIT_TIMEOUT_MS: u64 = 2000;
 const PORT_WAIT_INTERVAL_MS: u64 = 100;
 
 /// Wait for a port to become available, with timeout.
-async fn wait_for_port_available(port: u16) -> Result<(), String> {
+async fn wait_for_port_available(port: u16, mode: OutputMode) -> Result<(), String> {
     let max_attempts = PORT_WAIT_TIMEOUT_MS / PORT_WAIT_INTERVAL_MS;
     for attempt in 0..max_attempts {
         if TcpListener::bind((BIND_HOST, port)).is_ok() {
             return Ok(());
         }
         if attempt == 0 {
-            println!("⏳ Waiting for port {port} to become available...");
+            emit(
+                mode,
+                &format!("⏳ Waiting for port {port} to become available..."),
+            );
         }
         tokio::time::sleep(Duration::from_millis(PORT_WAIT_INTERVAL_MS)).await;
     }
@@ -115,6 +131,7 @@ async fn wait_for_healthy_with_logs(
     port: u16,
     config: &HealthCheckConfig,
     app_dir: &Path,
+    mode: OutputMode,
 ) -> Result<(), String> {
     use crate::ops::startup_logs::StartupLogStreamer;
 
@@ -126,7 +143,7 @@ async fn wait_for_healthy_with_logs(
 
     let start_time = Instant::now();
     let deadline = start_time + Duration::from_secs(config.timeout_secs);
-    let mut log_streamer = StartupLogStreamer::new(app_dir).await;
+    let mut log_streamer = StartupLogStreamer::new(app_dir, mode).await;
     let mut attempt_count = 0u32;
     let mut last_overall_status: Option<String> = None;
     let mut first_response_logged = false;
@@ -178,7 +195,7 @@ async fn wait_for_healthy_with_logs(
                             );
 
                             if status_response.db_status != "healthy" {
-                                println!("⚠️  Database not available: local development will work but DB features disabled");
+                                emit(mode, "⚠️  Database not available: local development will work but DB features disabled");
                             }
 
                             return Ok(());
@@ -238,15 +255,16 @@ pub async fn spawn_server(
     preferred_port: Option<u16>,
     skip_credentials_validation: bool,
     timeout_secs: u64,
+    mode: OutputMode,
 ) -> Result<u16, String> {
     let start_time = Instant::now();
     prepare_app_dir(app_dir)?;
 
-    run_preflight(app_dir).await?;
+    run_preflight(app_dir, mode).await?;
 
     let lock_path = lock_path(app_dir);
 
-    println!("🚀 Starting dev server...");
+    emit(mode, "🚀 Starting dev server...");
 
     if let Err(e) = flux::ensure_running() {
         debug!("Failed to start flux: {e}. Logs may not be collected.");
@@ -261,7 +279,7 @@ pub async fn spawn_server(
     let port = registry.get_or_allocate_port(app_dir, preferred_port)?;
     registry.save()?;
 
-    wait_for_port_available(port).await?;
+    wait_for_port_available(port, mode).await?;
 
     let apx_cmd = ApxCommand::new().await?;
 
@@ -307,13 +325,13 @@ pub async fn spawn_server(
         .spawn()
         .map_err(|err| handle_spawn_error("apx", err))?;
 
-    println!("⏳ Waiting for dev server to become healthy...\n");
+    emit(mode, "⏳ Waiting for dev server to become healthy...\n");
     let config = HealthCheckConfig {
         timeout_secs,
         ..HealthCheckConfig::default()
     };
 
-    let health_result = wait_for_healthy_with_logs(port, &config, app_dir).await;
+    let health_result = wait_for_healthy_with_logs(port, &config, app_dir, mode).await;
 
     if let Err(e) = health_result {
         debug!("Health checks failed, attempting graceful shutdown.");
@@ -346,21 +364,24 @@ pub async fn spawn_server(
     let lock = DevLock::new(pid, port, command, app_dir);
     write_lock(&lock_path, &lock)?;
 
-    println!(
-        "✅ Dev server started at http://localhost:{port} in {}\n",
-        format_elapsed_ms(start_time)
+    emit(
+        mode,
+        &format!(
+            "✅ Dev server started at http://localhost:{port} in {}\n",
+            format_elapsed_ms(start_time)
+        ),
     );
     Ok(port)
 }
 
 /// Stop the dev server for the given app directory.
 /// Returns true if a server was found and stopped, false if no server was running.
-pub async fn stop_dev_server(app_dir: &Path) -> Result<bool, String> {
+pub async fn stop_dev_server(app_dir: &Path, mode: OutputMode) -> Result<bool, String> {
     let lock_path = lock_path(app_dir);
     debug!(path = %lock_path.display(), "Checking for dev server lockfile.");
     if !lock_path.exists() {
         debug!("No dev server lockfile found.");
-        println!("⚠️  No dev server running\n");
+        emit(mode, "⚠️  No dev server running\n");
         return Ok(false);
     }
 
@@ -372,15 +393,18 @@ pub async fn stop_dev_server(app_dir: &Path) -> Result<bool, String> {
     );
 
     let start_time = Instant::now();
-    let stop_spinner = spinner("Stopping dev server...");
+    let stop_spinner = spinner_for_mode("Stopping dev server...", mode);
 
     match stop_server(lock.port).await {
         Ok(()) => {
             debug!("Dev server stopped gracefully via HTTP.");
             stop_spinner.finish_and_clear();
-            println!(
-                "✅ Dev server stopped in {}\n",
-                format_elapsed_ms(start_time)
+            emit(
+                mode,
+                &format!(
+                    "✅ Dev server stopped in {}\n",
+                    format_elapsed_ms(start_time)
+                ),
             );
             return Ok(true);
         }
@@ -395,16 +419,19 @@ pub async fn stop_dev_server(app_dir: &Path) -> Result<bool, String> {
         Ok(()) => {
             debug!("Dev server process tree killed; removing lockfile.");
             remove_lock(&lock_path)?;
-            println!(
-                "✅ Dev server stopped in {}\n",
-                format_elapsed_ms(start_time)
+            emit(
+                mode,
+                &format!(
+                    "✅ Dev server stopped in {}\n",
+                    format_elapsed_ms(start_time)
+                ),
             );
             Ok(true)
         }
         Err(err) => {
             warn!(error = %err, pid = lock.pid, "Failed to kill dev server process tree.");
             remove_lock(&lock_path)?;
-            println!("✅ Dev server already stopped\n");
+            emit(mode, "✅ Dev server already stopped\n");
             Ok(true)
         }
     }
@@ -412,21 +439,27 @@ pub async fn stop_dev_server(app_dir: &Path) -> Result<bool, String> {
 
 /// Restart the dev server for the given app directory.
 /// Preserves the port if an existing server is found.
-pub async fn restart_dev_server(app_dir: &Path) -> Result<u16, String> {
+pub async fn restart_dev_server(app_dir: &Path, mode: OutputMode) -> Result<u16, String> {
     let lock_path = lock_path(app_dir);
     let preferred_port = if lock_path.exists() {
         let lock = read_lock(&lock_path)?;
-        println!(
-            "Found existing dev server at http://localhost:{port}",
-            port = lock.port
+        emit(
+            mode,
+            &format!(
+                "Found existing dev server at http://localhost:{port}",
+                port = lock.port
+            ),
         );
-        stop_dev_server(app_dir).await?;
+        stop_dev_server(app_dir, mode).await?;
         Some(lock.port)
     } else {
         None
     };
 
-    let port = spawn_server(app_dir, preferred_port, false, 60).await?;
-    println!("✅ Dev server restarted at http://localhost:{port}\n");
+    let port = spawn_server(app_dir, preferred_port, false, 60, mode).await?;
+    emit(
+        mode,
+        &format!("✅ Dev server restarted at http://localhost:{port}\n"),
+    );
     Ok(port)
 }

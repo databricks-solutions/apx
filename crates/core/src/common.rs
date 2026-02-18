@@ -535,7 +535,7 @@ pub async fn run_preflight_checks(app_dir: &Path) -> Result<PreflightResult, Str
 
     // Step 3: Generate OpenAPI client (requires Python deps from step 2)
     let openapi_start = Instant::now();
-    generate_openapi(app_dir)?;
+    generate_openapi(app_dir).await?;
     let openapi_ms = openapi_start.elapsed().as_millis();
 
     // Step 4: Generate version file
@@ -571,7 +571,30 @@ fn get_metadata_string(metadata: &toml::Value, key: &str) -> Result<String, Stri
         .ok_or_else(|| format!("Missing {key} in pyproject.toml metadata"))
 }
 
+/// Print a message to stdout (Interactive) or stderr (Quiet).
+#[allow(clippy::print_stdout)]
+pub fn emit(mode: OutputMode, msg: &str) {
+    match mode {
+        OutputMode::Interactive => println!("{msg}"),
+        OutputMode::Quiet => eprintln!("{msg}"),
+    }
+}
+
+/// Create a spinner appropriate for the given output mode.
+/// Interactive: visible spinner on stdout. Quiet: hidden (no output).
+pub fn spinner_for_mode(message: &str, mode: OutputMode) -> ProgressBar {
+    match mode {
+        OutputMode::Interactive => spinner(message),
+        OutputMode::Quiet => {
+            let pb = ProgressBar::hidden();
+            pb.set_message(message.to_string());
+            pb
+        }
+    }
+}
+
 // Spinner utilities for CLI operations
+#[allow(clippy::print_stdout)]
 pub fn spinner(message: &str) -> ProgressBar {
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
@@ -684,6 +707,7 @@ pub fn format_elapsed_ms(start: Instant) -> String {
     format!("{seconds}s {remaining_ms}ms")
 }
 
+#[allow(clippy::print_stdout)]
 pub fn run_with_spinner<F>(description: &str, success_message: &str, f: F) -> Result<(), String>
 where
     F: FnOnce() -> Result<(), String>,
@@ -698,6 +722,7 @@ where
     result
 }
 
+#[allow(clippy::print_stdout)]
 pub async fn run_with_spinner_async<F, Fut>(
     description: &str,
     success_message: &str,

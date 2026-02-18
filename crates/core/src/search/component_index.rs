@@ -319,4 +319,70 @@ mod tests {
             custom_btn.score
         );
     }
+
+    /// Regression test: multi-term queries should return partial matches instead
+    /// of empty results when not all terms appear in a single document.
+    /// See: "@animate-ui number counter ticker" returning [] while "animate-ui" alone works.
+    #[tokio::test]
+    async fn test_multiterm_query_returns_partial_matches() {
+        let index = test_index().await;
+
+        sqlx::query(&format!(
+            "CREATE VIRTUAL TABLE {TABLE_NAME} USING fts5(\
+                id UNINDEXED, name, registry UNINDEXED, text, \
+                tokenize='porter unicode61'\
+            )"
+        ))
+        .execute(&index.pool)
+        .await
+        .unwrap();
+
+        // "animate" in name + "ui component" in text → phrase "animate-ui" matches
+        // via FTS5 cross-column phrase matching (animate in name, ui in text).
+        // Also has "number", "counter" but NOT "ticker".
+        sqlx::query(&format!(
+            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
+        ))
+        .bind("@animate-ui/number-ticker")
+        .bind("animate")
+        .bind("animate-ui")
+        .bind("animate number counter ui component")
+        .execute(&index.pool)
+        .await
+        .unwrap();
+
+        // Unrelated component
+        sqlx::query(&format!(
+            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
+        ))
+        .bind("button")
+        .bind("button")
+        .bind("")
+        .bind("button A styled button component shadcn")
+        .execute(&index.pool)
+        .await
+        .unwrap();
+
+        // Single-term query should find the component
+        let results = index.search("animate", 10).await.unwrap();
+        assert!(
+            results.iter().any(|r| r.id == "@animate-ui/number-ticker"),
+            "Single-term 'animate' should match. Got: {results:?}"
+        );
+
+        // Multi-term query with a term NOT in the document ("ticker") should
+        // still return partial matches, not empty.
+        let results = index
+            .search("@animate-ui number counter ticker", 10)
+            .await
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "Multi-term query '@animate-ui number counter ticker' should return partial matches, not empty"
+        );
+        assert!(
+            results.iter().any(|r| r.id == "@animate-ui/number-ticker"),
+            "Should find number-ticker component. Got: {results:?}"
+        );
+    }
 }

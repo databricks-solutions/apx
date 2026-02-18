@@ -165,6 +165,35 @@ pub async fn download_and_extract_sdk(version: &str) -> Result<PathBuf, String> 
     Ok(docs_path)
 }
 
+/// Fetch the latest SDK version from GitHub releases.
+/// Returns the version string (e.g. "0.47.0") without the "v" prefix.
+pub async fn fetch_latest_sdk_version() -> Result<String, String> {
+    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header("User-Agent", "apx-cli")
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch latest SDK version: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("GitHub API returned HTTP {}", response.status()));
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse GitHub response: {e}"))?;
+
+    let tag = body["tag_name"]
+        .as_str()
+        .ok_or("Missing tag_name in GitHub response")?;
+
+    Ok(tag.strip_prefix('v').unwrap_or(tag).to_string())
+}
+
 /// Extract method name from signature like "create(spark_version: str, ...)" -> "create"
 fn extract_method_name(signature: &str) -> Option<&str> {
     let name_part = signature.split('(').next()?;
@@ -562,4 +591,21 @@ pub fn load_doc_files(docs_path: &Path) -> Result<Vec<ParsedDocFile>, String> {
 
     load_timer.finish();
     Ok(files)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_fetch_latest_sdk_version() {
+        let version = fetch_latest_sdk_version().await.unwrap();
+        assert!(!version.is_empty());
+        assert!(!version.starts_with('v'));
+        assert!(
+            version.contains('.'),
+            "Expected semver format, got: {version}"
+        );
+    }
 }

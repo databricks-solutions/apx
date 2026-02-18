@@ -23,10 +23,11 @@ impl ApxServer {
         let path = validate_app_path(&args.app_path)
             .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
 
+        use apx_core::common::OutputMode;
         use apx_core::dev::common::CLIENT_HOST;
         use apx_core::ops::dev::start_dev_server;
 
-        match start_dev_server(&path).await {
+        match start_dev_server(&path, OutputMode::Quiet).await {
             Ok(port) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "Dev server started at http://{CLIENT_HOST}:{port}"
             ))])),
@@ -38,9 +39,10 @@ impl ApxServer {
         let path = validate_app_path(&args.app_path)
             .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
 
+        use apx_core::common::OutputMode;
         use apx_core::ops::dev::stop_dev_server;
 
-        match stop_dev_server(&path).await {
+        match stop_dev_server(&path, OutputMode::Quiet).await {
             Ok(true) => Ok(CallToolResult::success(vec![Content::text(
                 "Dev server stopped",
             )])),
@@ -58,9 +60,10 @@ impl ApxServer {
         let path = validate_app_path(&args.app_path)
             .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
 
+        use apx_core::common::OutputMode;
         use apx_core::ops::dev::restart_dev_server;
 
-        match restart_dev_server(&path).await {
+        match restart_dev_server(&path, OutputMode::Quiet).await {
             Ok(port) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "Dev server restarted at http://localhost:{port}"
             ))])),

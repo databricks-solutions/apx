@@ -62,6 +62,8 @@ pub async fn table_exists(pool: &SqlitePool, table_name: &str) -> Result<bool, S
 
 /// Sanitize a query string for FTS5 MATCH syntax.
 /// Wraps each whitespace-separated term in double quotes for safe literal matching.
+/// Terms are joined with OR so that partial matches are returned — FTS5 ranking
+/// naturally scores documents with more matching terms higher.
 pub fn sanitize_fts5_query(query: &str) -> String {
     query
         .split_whitespace()
@@ -78,7 +80,7 @@ pub fn sanitize_fts5_query(query: &str) -> String {
         })
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" OR ")
 }
 
 #[cfg(test)]
@@ -88,14 +90,14 @@ mod tests {
 
     #[test]
     fn test_sanitize_fts5_query_basic() {
-        assert_eq!(sanitize_fts5_query("hello world"), "\"hello\" \"world\"");
+        assert_eq!(sanitize_fts5_query("hello world"), "\"hello\" OR \"world\"");
     }
 
     #[test]
     fn test_sanitize_fts5_query_special_chars() {
         assert_eq!(
             sanitize_fts5_query("hello* OR world"),
-            "\"hello\" \"OR\" \"world\""
+            "\"hello\" OR \"OR\" OR \"world\""
         );
     }
 

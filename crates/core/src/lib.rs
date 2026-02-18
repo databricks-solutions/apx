@@ -6,7 +6,8 @@
     clippy::panic,
     clippy::todo,
     clippy::unimplemented,
-    clippy::dbg_macro
+    clippy::dbg_macro,
+    clippy::print_stdout
 )]
 
 pub mod agent;

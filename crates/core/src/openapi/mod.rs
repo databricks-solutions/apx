@@ -12,7 +12,7 @@ mod spec;
 pub use emitter::generate;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)]
 mod tests {
     use super::*;
 

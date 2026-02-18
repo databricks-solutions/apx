@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::common::{
-    BunCommand, OutputMode, ensure_entrypoint_deps, run_preflight_checks, spinner,
+    BunCommand, OutputMode, emit, ensure_entrypoint_deps, run_preflight_checks, spinner,
 };
 use crate::download::resolve_uv;
 use crate::frontend::prepare_frontend_args;
@@ -206,12 +206,4 @@ async fn generate_route_tree(app_dir: &Path, mode: OutputMode) -> Result<(), Str
         eprintln!("Route tree generated");
     }
     Ok(())
-}
-
-/// Print a message to stdout (Interactive) or stderr (Quiet).
-fn emit(mode: OutputMode, msg: &str) {
-    match mode {
-        OutputMode::Interactive => println!("{msg}"),
-        OutputMode::Quiet => eprintln!("{msg}"),
-    }
 }

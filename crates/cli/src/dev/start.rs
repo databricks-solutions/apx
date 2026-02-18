@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use crate::common::resolve_app_dir;
 use crate::run_cli_async_helper;
+use apx_core::common::OutputMode;
 use apx_core::ops::dev::stop_dev_server;
 use apx_core::ops::dev::{spawn_server, start_dev_server};
 
@@ -46,7 +47,7 @@ pub async fn run(args: StartArgs) -> i32 {
 
 async fn run_detached(args: StartArgs) -> Result<(), String> {
     let app_dir = resolve_app_dir(args.app_path);
-    let _ = start_dev_server(&app_dir).await?;
+    let _ = start_dev_server(&app_dir, OutputMode::Interactive).await?;
     Ok(())
 }
 
@@ -58,6 +59,7 @@ async fn run_attached(args: StartArgs) -> Result<(), String> {
         None,
         args.skip_credentials_validation,
         args.timeout,
+        OutputMode::Interactive,
     )
     .await?;
 
@@ -71,6 +73,6 @@ async fn run_attached(args: StartArgs) -> Result<(), String> {
     // Run logs command (will return on Ctrl+C)
     let _ = super::logs::run(logs_args).await;
 
-    stop_dev_server(&app_dir).await?;
+    stop_dev_server(&app_dir, OutputMode::Interactive).await?;
     Ok(())
 }

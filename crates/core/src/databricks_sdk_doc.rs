@@ -2,4 +2,6 @@
 //!
 //! This module re-exports from `sources::databricks_sdk` for backward compatibility.
 
-pub use crate::sources::databricks_sdk::{SDKSource, download_and_extract_sdk, load_doc_files};
+pub use crate::sources::databricks_sdk::{
+    SDKSource, download_and_extract_sdk, fetch_latest_sdk_version, load_doc_files,
+};
