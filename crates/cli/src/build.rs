@@ -5,7 +5,7 @@ use std::time::Instant;
 use tokio::process::Command;
 use tracing::debug;
 
-use crate::common::resolve_app_dir;
+use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
 use apx_core::api_generator::generate_openapi;
 use apx_core::common::{
@@ -39,7 +39,7 @@ pub async fn run(args: BuildArgs) -> i32 {
 }
 
 async fn run_inner(args: BuildArgs) -> Result<(), String> {
-    let app_path = resolve_app_dir(args.app_path);
+    let app_path = find_app_dir(args.app_path)?;
     let build_dir = app_path.join(&args.build_path);
 
     println!("Building project in {}", app_path.display());

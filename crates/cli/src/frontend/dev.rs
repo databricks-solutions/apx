@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use tokio::process::Child;
 use tracing::debug;
 
-use crate::common::resolve_app_dir;
+use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
 use apx_core::common::{
     BunCommand, ensure_entrypoint_deps, read_project_metadata, write_metadata_file,
@@ -49,7 +49,7 @@ async fn run_inner(args: DevArgs) -> Result<(), String> {
         ));
     }
 
-    let app_path = resolve_app_dir(args.app_path);
+    let app_path = find_app_dir(args.app_path)?;
 
     let mut child = run_dev(&app_path).await?;
 

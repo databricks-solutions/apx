@@ -1,7 +1,7 @@
 use clap::Args;
 use std::path::PathBuf;
 
-use crate::common::resolve_app_dir;
+use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
 use apx_core::dev::client::status as get_status;
 use apx_core::dev::common::{lock_path, read_lock};
@@ -21,7 +21,7 @@ pub async fn run(args: StatusArgs) -> i32 {
 }
 
 async fn run_inner(args: StatusArgs) -> Result<(), String> {
-    let app_dir = resolve_app_dir(args.app_path);
+    let app_dir = find_app_dir(args.app_path)?;
 
     let lock_path = lock_path(&app_dir);
     debug!(path = %lock_path.display(), "Checking for dev server lockfile.");

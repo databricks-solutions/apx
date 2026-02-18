@@ -3,7 +3,7 @@ use indicatif::ProgressBar;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::common::resolve_app_dir;
+use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
 use apx_core::common::{
     BunCommand, ensure_entrypoint_deps, format_elapsed_ms, run_command_streaming_with_output,
@@ -26,7 +26,7 @@ pub async fn run(args: BuildArgs) -> i32 {
 }
 
 async fn run_inner(args: BuildArgs) -> Result<(), String> {
-    let app_path = resolve_app_dir(args.app_path);
+    let app_path = find_app_dir(args.app_path)?;
 
     // Run preflight checks (installs deps if needed)
     run_preflight_checks(&app_path).await?;

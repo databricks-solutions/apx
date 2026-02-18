@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tera::Context;
 use walkdir::WalkDir;
 
-use crate::common::{Assistant, Layout, Template, resolve_app_dir};
+use crate::common::{Assistant, Layout, Template, find_app_dir};
 use crate::run_cli_async_helper;
 use apx_core::interop::extract_templates;
 
@@ -148,7 +148,7 @@ impl FileChange {
 }
 
 async fn run_inner(args: ApplyArgs) -> Result<(), String> {
-    let app_dir = resolve_app_dir(args.app_path);
+    let app_dir = find_app_dir(args.app_path)?;
 
     // Read project context
     let (app_name, app_slug) = read_project_context(&app_dir)?;

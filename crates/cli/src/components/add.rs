@@ -2,7 +2,7 @@ use clap::Args;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::common::resolve_app_dir;
+use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
 use apx_core::common::{format_elapsed_ms, read_project_metadata, spinner};
 
@@ -76,7 +76,7 @@ pub async fn run(args: ComponentsAddArgs) -> i32 {
 /// CLI handler for the `add` command. Uses the API and handles console output.
 pub async fn run_inner(args: ComponentsAddArgs) -> Result<(), String> {
     let start_time = Instant::now();
-    let app_dir = resolve_app_dir(args.app_path.clone());
+    let app_dir = find_app_dir(args.app_path.clone())?;
 
     // Handle dry-run separately since API doesn't support it
     if args.dry_run {

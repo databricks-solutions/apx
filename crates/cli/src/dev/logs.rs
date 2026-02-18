@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tracing::debug;
 
-use crate::common::resolve_app_dir;
+use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
 use apx_common::{LogAggregator, should_skip_log};
 use apx_core::dev::common::{lock_path, read_lock};
@@ -41,7 +41,7 @@ pub async fn run(args: LogsArgs) -> i32 {
 }
 
 async fn run_async(args: LogsArgs) -> Result<(), String> {
-    let app_dir = resolve_app_dir(args.app_path.clone());
+    let app_dir = find_app_dir(args.app_path.clone())?;
 
     // Canonicalize path for matching
     let app_path_canonical = app_dir

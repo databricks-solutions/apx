@@ -9,7 +9,9 @@ use tokio::process::Command;
 use tracing::debug;
 use walkdir::WalkDir;
 
-use crate::common::{Assistant, Layout, Template, resolve_app_dir};
+use crate::common::{
+    Assistant, Layout, Template, has_apx_config, modify_pyproject, resolve_app_dir,
+};
 use crate::components::add::{ComponentInput, add_components};
 use crate::run_cli_async_helper;
 use apx_core::common::list_profiles;
@@ -62,6 +64,14 @@ pub struct InitArgs {
         help = "The layout to use. Will prompt if not provided"
     )]
     pub layout: Option<Layout>,
+    #[arg(
+        long = "as-member",
+        value_name = "MEMBER_PATH",
+        num_args = 0..=1,
+        default_missing_value = "packages/app",
+        help = "Initialize as a uv workspace member. Defaults to packages/app"
+    )]
+    pub as_member: Option<PathBuf>,
 }
 
 pub async fn run(args: InitArgs) -> i32 {
@@ -73,7 +83,32 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     let _uv = apx_core::download::resolve_uv().await?;
     let _bun = BunCommand::new().await?;
 
-    let app_path = resolve_app_dir(args.app_path.take());
+    let workspace_root = resolve_app_dir(args.app_path.take());
+
+    // Auto-detect member mode: if CWD has pyproject.toml without [tool.apx],
+    // the user is inside an existing project and we should init as a member.
+    let pyproject_at_root = workspace_root.join("pyproject.toml");
+    if args.as_member.is_none() && pyproject_at_root.exists() && !has_apx_config(&pyproject_at_root)
+    {
+        debug!("Existing pyproject.toml without [tool.apx] detected, switching to member mode");
+        args.as_member = Some(PathBuf::from("packages/app"));
+    }
+
+    let is_member = args.as_member.is_some();
+
+    // Resolve final app_path: for member mode, it's workspace_root/member_path
+    let app_path = if let Some(ref member_path) = args.as_member {
+        let full = workspace_root.join(member_path);
+        debug!(
+            "Member mode: workspace_root={}, app_path={}",
+            workspace_root.display(),
+            full.display()
+        );
+        ensure_workspace_config(&pyproject_at_root, member_path)?;
+        full
+    } else {
+        workspace_root.clone()
+    };
 
     let templates_dir = extract_templates()?;
 
@@ -249,23 +284,27 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
         },
     )?;
 
-    // Git initialization logic
+    // Git initialization logic (always operates at the workspace root)
+    let git_dir = if is_member {
+        &workspace_root
+    } else {
+        &app_path
+    };
     if !is_command_available("git").await {
         println!("⚠️  Git is not available - skipping git initialization");
-    } else if is_in_git_repo(&app_path).await? {
+    } else if is_in_git_repo(git_dir).await? {
         println!("✓ Already in a git repository - skipping git initialization");
     } else {
-        // Try to initialize git repository
         let git_result = run_with_spinner_async(
             "🔧 Initializing git repository...",
             "✅ Git repository initialized",
             || async {
                 let mut init_cmd = Command::new("git");
-                init_cmd.arg("init").current_dir(&app_path);
+                init_cmd.arg("init").current_dir(git_dir);
                 run_command(&mut init_cmd, "Failed to initialize git repository").await?;
 
                 let mut add_cmd = Command::new("git");
-                add_cmd.arg("add").arg(".").current_dir(&app_path);
+                add_cmd.arg("add").arg(".").current_dir(git_dir);
                 run_command(&mut add_cmd, "Failed to add files to git repository").await?;
 
                 let mut commit_cmd = Command::new("git");
@@ -273,14 +312,13 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
                     .arg("commit")
                     .arg("-m")
                     .arg("init")
-                    .current_dir(&app_path);
+                    .current_dir(git_dir);
                 run_command(&mut commit_cmd, "Failed to commit files to git repository").await?;
                 Ok(())
             },
         )
         .await;
 
-        // If git initialization failed, warn but continue
         if let Err(err) = git_result {
             println!("⚠️  Git initialization failed: {err}");
             println!("   Continuing with project setup...");
@@ -372,10 +410,16 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
     println!();
     println!("✨ Project {app_name} initialized successfully!");
-    let canonical_path = app_path.canonicalize().unwrap_or_else(|_| app_path.clone());
+    let run_from = if is_member {
+        workspace_root
+            .canonicalize()
+            .unwrap_or_else(|_| workspace_root.clone())
+    } else {
+        app_path.canonicalize().unwrap_or_else(|_| app_path.clone())
+    };
     println!(
         "🚀 Run `cd {} && apx dev start` to get started!",
-        canonical_path.display()
+        run_from.display()
     );
     println!("   (Dependencies will be installed automatically on first run)");
     Ok(())
@@ -533,75 +577,115 @@ async fn run_command(cmd: &mut Command, error_msg: &str) -> Result<(), String> {
     Err(message)
 }
 
-use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
+use toml_edit::{Array, ArrayOfTables, Item, Table, Value};
 
 /// Configure pyproject.toml for standard apx installation from index.
 /// Adds [[tool.uv.index]] for apx-index, [tool.uv.sources].apx pointing to that index,
 /// and "apx=={version}" to [dependency-groups].dev.
 pub fn ensure_apx_uv_config(pyproject: &Path, version: &str) -> Result<(), String> {
-    let contents =
-        fs::read_to_string(pyproject).map_err(|e| format!("Failed to read pyproject.toml: {e}"))?;
+    modify_pyproject(pyproject, |doc| {
+        let tool = doc["tool"].or_insert(Item::Table(Table::new()));
+        let uv = tool["uv"].or_insert(Item::Table(Table::new()));
 
-    let mut doc = contents
-        .parse::<DocumentMut>()
-        .map_err(|e| format!("Invalid TOML: {e}"))?;
+        // --- [[tool.uv.index]] ---
+        let indexes = uv["index"].or_insert(Item::ArrayOfTables(ArrayOfTables::new()));
+        let indexes = indexes
+            .as_array_of_tables_mut()
+            .ok_or("tool.uv.index is not an array")?;
 
-    // --- [[tool.uv.index]] ---
-    let tool = doc["tool"].or_insert(Item::Table(Table::new()));
-    let uv = tool["uv"].or_insert(Item::Table(Table::new()));
+        let exists = indexes
+            .iter()
+            .any(|tbl| tbl.get("name").and_then(|v| v.as_str()) == Some("apx-index"));
 
-    let indexes = uv["index"].or_insert(Item::ArrayOfTables(ArrayOfTables::new()));
-    let indexes = indexes
-        .as_array_of_tables_mut()
-        .ok_or("tool.uv.index is not an array")?;
+        if !exists {
+            let mut tbl = Table::new();
+            tbl["name"] = "apx-index".into();
+            tbl["url"] = APX_INDEX_URL.into();
+            indexes.push(tbl);
+        }
 
-    let exists = indexes
-        .iter()
-        .any(|tbl| tbl.get("name").and_then(|v| v.as_str()) == Some("apx-index"));
+        // --- [tool.uv.sources] ---
+        let sources = uv["sources"].or_insert(Item::Table(Table::new()));
+        let sources = sources
+            .as_table_mut()
+            .ok_or("tool.uv.sources is not a table")?;
 
-    if !exists {
-        let mut tbl = Table::new();
-        tbl["name"] = "apx-index".into();
-        tbl["url"] = APX_INDEX_URL.into();
-        indexes.push(tbl);
+        if !sources.contains_key("apx") {
+            let mut apx_src = Table::new();
+            apx_src["index"] = "apx-index".into();
+            sources["apx"] = Item::Table(apx_src);
+        }
+
+        // --- [dependency-groups].dev ---
+        let dep_groups = doc["dependency-groups"].or_insert(Item::Table(Table::new()));
+        let dep_groups = dep_groups
+            .as_table_mut()
+            .ok_or("dependency-groups is not a table")?;
+
+        let dev_deps = dep_groups["dev"].or_insert(Item::Value(Value::Array(Array::new())));
+        let dev_array = dev_deps
+            .as_array_mut()
+            .ok_or("dependency-groups.dev is not an array")?;
+
+        let apx_exists = dev_array
+            .iter()
+            .any(|v| v.as_str().map(|s| s.starts_with("apx")).unwrap_or(false));
+        if !apx_exists {
+            let apx_spec = format!("apx=={version}");
+            dev_array.push(apx_spec.as_str());
+        }
+
+        Ok(())
+    })
+}
+
+/// Add or update `[tool.uv.workspace]` in a root `pyproject.toml`.
+///
+/// Derives a glob pattern from the member path (e.g. `packages/app` -> `packages/*`)
+/// and ensures it's present in the `members` array. Creates the root `pyproject.toml`
+/// if it doesn't exist.
+fn ensure_workspace_config(root_pyproject: &Path, member_path: &Path) -> Result<(), String> {
+    let member_str = member_path.to_string_lossy().replace('\\', "/");
+    let member_glob = match member_str.rsplit_once('/') {
+        Some((parent, _)) => format!("{parent}/*"),
+        None => member_str.to_string(),
+    };
+
+    if !root_pyproject.exists() {
+        let minimal = format!(
+            "[project]\nname = \"workspace\"\nversion = \"0.0.0\"\n\n\
+             [tool.uv.workspace]\nmembers = [\"{member_glob}\"]\n"
+        );
+        fs::write(root_pyproject, minimal)
+            .map_err(|e| format!("Failed to create root pyproject.toml: {e}"))?;
+        debug!("Created root pyproject.toml with workspace config");
+        return Ok(());
     }
 
-    // --- [tool.uv.sources] ---
-    let sources = uv["sources"].or_insert(Item::Table(Table::new()));
-    let sources = sources
-        .as_table_mut()
-        .ok_or("tool.uv.sources is not a table")?;
+    modify_pyproject(root_pyproject, |doc| {
+        let tool = doc["tool"].or_insert(Item::Table(Table::new()));
+        let uv = tool["uv"].or_insert(Item::Table(Table::new()));
+        let workspace = uv["workspace"].or_insert(Item::Table(Table::new()));
+        let workspace = workspace
+            .as_table_mut()
+            .ok_or("tool.uv.workspace is not a table")?;
 
-    if !sources.contains_key("apx") {
-        let mut apx = Table::new();
-        apx["index"] = "apx-index".into();
-        sources["apx"] = Item::Table(apx);
-    }
+        let members = workspace["members"].or_insert(Item::Value(Value::Array(Array::new())));
+        let members = members
+            .as_array_mut()
+            .ok_or("tool.uv.workspace.members is not an array")?;
 
-    // --- [dependency-groups].dev ---
-    let dep_groups = doc["dependency-groups"].or_insert(Item::Table(Table::new()));
-    let dep_groups = dep_groups
-        .as_table_mut()
-        .ok_or("dependency-groups is not a table")?;
+        let already_present = members
+            .iter()
+            .any(|v| v.as_str() == Some(member_glob.as_str()));
 
-    let dev_deps = dep_groups["dev"].or_insert(Item::Value(Value::Array(Array::new())));
-    let dev_array = dev_deps
-        .as_array_mut()
-        .ok_or("dependency-groups.dev is not an array")?;
+        if !already_present {
+            members.push(member_glob.as_str());
+            debug!("Added workspace member glob: {member_glob}");
+        }
 
-    // Add "apx=={version}" if not present (check for any apx entry)
-    let apx_exists = dev_array
-        .iter()
-        .any(|v| v.as_str().map(|s| s.starts_with("apx")).unwrap_or(false));
-    if !apx_exists {
-        let apx_spec = format!("apx=={version}");
-        dev_array.push(apx_spec.as_str());
-    }
-
-    fs::write(pyproject, doc.to_string())
-        .map_err(|e| format!("Failed to write pyproject.toml: {e}"))?;
-
-    Ok(())
+        Ok(())
+    })
 }
 
 async fn is_command_available(cmd: &str) -> bool {
@@ -693,5 +777,72 @@ dev = [
         assert!(normalize_app_name("my@app").is_err());
         assert!(normalize_app_name("my/app").is_err());
         assert!(normalize_app_name("my.app").is_err());
+    }
+
+    #[test]
+    fn test_ensure_workspace_config_creates_new_file() {
+        let dir = TempDir::new().unwrap();
+        let pyproject = dir.path().join("pyproject.toml");
+
+        ensure_workspace_config(&pyproject, Path::new("packages/app")).unwrap();
+
+        let content = fs::read_to_string(&pyproject).unwrap();
+        assert!(content.contains("[tool.uv.workspace]"));
+        assert!(content.contains("packages/*"));
+    }
+
+    #[test]
+    fn test_ensure_workspace_config_adds_to_existing() {
+        let dir = TempDir::new().unwrap();
+        let pyproject = create_test_pyproject(dir.path());
+
+        ensure_workspace_config(&pyproject, Path::new("packages/app")).unwrap();
+
+        let content = fs::read_to_string(&pyproject).unwrap();
+        assert!(content.contains("[project]"));
+        assert!(content.contains("name = \"test-app\""));
+        assert!(content.contains("packages/*"));
+    }
+
+    #[test]
+    fn test_ensure_workspace_config_appends_member() {
+        let dir = TempDir::new().unwrap();
+        let pyproject = dir.path().join("pyproject.toml");
+        let initial = r#"[project]
+name = "workspace"
+
+[tool.uv.workspace]
+members = ["libs/*"]
+"#;
+        fs::write(&pyproject, initial).unwrap();
+
+        ensure_workspace_config(&pyproject, Path::new("packages/app")).unwrap();
+
+        let content = fs::read_to_string(&pyproject).unwrap();
+        assert!(content.contains("libs/*"));
+        assert!(content.contains("packages/*"));
+    }
+
+    #[test]
+    fn test_ensure_workspace_config_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let pyproject = create_test_pyproject(dir.path());
+
+        ensure_workspace_config(&pyproject, Path::new("packages/app")).unwrap();
+        ensure_workspace_config(&pyproject, Path::new("packages/app")).unwrap();
+
+        let content = fs::read_to_string(&pyproject).unwrap();
+        assert_eq!(content.matches("packages/*").count(), 1);
+    }
+
+    #[test]
+    fn test_ensure_workspace_config_derives_glob() {
+        let dir = TempDir::new().unwrap();
+        let pyproject = dir.path().join("pyproject.toml");
+
+        ensure_workspace_config(&pyproject, Path::new("src/apps/my-app")).unwrap();
+
+        let content = fs::read_to_string(&pyproject).unwrap();
+        assert!(content.contains("src/apps/*"), "content: {content}");
     }
 }
