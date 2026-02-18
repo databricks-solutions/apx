@@ -210,12 +210,17 @@ pub struct ProjectMetadata {
     pub app_entrypoint: String,
     pub api_prefix: String,
     pub metadata_path: PathBuf,
-    pub ui_root: PathBuf,
-    pub ui_registries: HashMap<String, String>,
+    pub ui_root: Option<PathBuf>,
+    pub ui_registries: Option<HashMap<String, String>>,
     pub dev_config: DevConfig,
 }
 
 impl ProjectMetadata {
+    /// Returns true if this project has a frontend (UI).
+    pub fn has_ui(&self) -> bool {
+        self.ui_root.is_some()
+    }
+
     /// Returns the dist directory path (always __dist__ in the same folder as _metadata.py)
     pub fn dist_dir(&self, project_root: &Path) -> PathBuf {
         let metadata_abs = project_root.join(&self.metadata_path);
@@ -253,25 +258,28 @@ pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, Str
         .to_string();
     let metadata_path = get_metadata_string(metadata, "metadata-path")?;
 
-    // Parse UI configuration
+    // Parse UI configuration — None when [tool.apx.ui] section is absent
     let ui = apx.get("ui");
 
-    let ui_root = ui
-        .and_then(|u| u.get("root"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("src/ui")
-        .to_string();
+    let ui_root = ui.map(|u| {
+        let root = u
+            .get("root")
+            .and_then(|v| v.as_str())
+            .unwrap_or("src/ui");
+        PathBuf::from(root)
+    });
 
-    let ui_registries: HashMap<String, String> = ui
-        .and_then(|u| u.get("registries"))
-        .and_then(|r| r.as_table())
-        .map(|table| {
-            table
-                .iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
+    let ui_registries = ui.map(|u| {
+        u.get("registries")
+            .and_then(|r| r.as_table())
+            .map(|table| {
+                table
+                    .iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
 
     // Parse dev configuration
     let dev_config = parse_dev_config(&pyproject_value, project_root)?;
@@ -282,7 +290,7 @@ pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, Str
         app_entrypoint,
         api_prefix,
         metadata_path: PathBuf::from(metadata_path),
-        ui_root: PathBuf::from(ui_root),
+        ui_root,
         ui_registries,
         dev_config,
     })
@@ -508,6 +516,7 @@ pub struct PreflightResult {
     pub openapi_ms: u128,
     pub version_ms: u128,
     pub bun_install_ms: Option<u128>,
+    pub has_ui: bool,
 }
 
 /// Run preflight checks to ensure the project is ready.
@@ -533,26 +542,35 @@ pub async fn run_preflight_checks(app_dir: &Path) -> Result<PreflightResult, Str
     uv_sync(app_dir).await?;
     let uv_sync_ms = uv_start.elapsed().as_millis();
 
-    // Step 3: Generate OpenAPI client (requires Python deps from step 2)
-    let openapi_start = Instant::now();
-    generate_openapi(app_dir).await?;
-    let openapi_ms = openapi_start.elapsed().as_millis();
+    // Step 3: Generate OpenAPI client (requires Python deps from step 2, only for projects with UI)
+    let openapi_ms = if metadata.has_ui() {
+        let openapi_start = Instant::now();
+        generate_openapi(app_dir).await?;
+        openapi_start.elapsed().as_millis()
+    } else {
+        0
+    };
 
     // Step 4: Generate version file
     let version_start = Instant::now();
     generate_version_file(app_dir, &metadata).await?;
     let version_ms = version_start.elapsed().as_millis();
 
-    // Step 5: Run bun install if node_modules is missing
-    let node_modules_dir = app_dir.join("node_modules");
-    let bun_install_ms = if !node_modules_dir.exists() {
-        let bun_start = Instant::now();
-        bun_install(app_dir).await?;
-        Some(bun_start.elapsed().as_millis())
+    // Step 5: Run bun install if node_modules is missing (only for projects with UI)
+    let bun_install_ms = if metadata.has_ui() {
+        let node_modules_dir = app_dir.join("node_modules");
+        if !node_modules_dir.exists() {
+            let bun_start = Instant::now();
+            bun_install(app_dir).await?;
+            Some(bun_start.elapsed().as_millis())
+        } else {
+            None
+        }
     } else {
         None
     };
 
+    let has_ui = metadata.has_ui();
     Ok(PreflightResult {
         metadata,
         layout_ms,
@@ -560,6 +578,7 @@ pub async fn run_preflight_checks(app_dir: &Path) -> Result<PreflightResult, Str
         openapi_ms,
         version_ms,
         bun_install_ms,
+        has_ui,
     })
 }
 

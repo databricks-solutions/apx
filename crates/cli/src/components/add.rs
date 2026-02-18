@@ -144,7 +144,7 @@ async fn run_dry_run(
     registry: Option<&str>,
 ) -> Result<(), String> {
     let metadata = read_project_metadata(app_dir)?;
-    let cfg = UiConfig::from_metadata(&metadata, app_dir);
+    let cfg = UiConfig::from_metadata(&metadata, app_dir)?;
     let client = reqwest::Client::new();
 
     // Parse component name to extract registry prefix

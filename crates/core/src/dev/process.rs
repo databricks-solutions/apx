@@ -91,7 +91,7 @@ pub struct ProcessManager {
     backend_child: Arc<Mutex<Option<Child>>>,
     db_child: Arc<Mutex<Option<Child>>>,
     backend_port: u16,
-    frontend_port: u16,
+    frontend_port: Option<u16>,
     db_port: u16,
     dev_server_port: u16,
     host: String,
@@ -102,6 +102,7 @@ pub struct ProcessManager {
     app_entrypoint: String,
     dotenv_vars: Arc<Mutex<HashMap<String, String>>>,
     dev_config: DevConfig,
+    has_ui: bool,
 }
 
 impl ProcessManager {
@@ -112,11 +113,12 @@ impl ProcessManager {
         host: &str,
         dev_server_port: u16,
         backend_port: u16,
-        frontend_port: u16,
+        frontend_port: Option<u16>,
         db_port: u16,
     ) -> Result<Self, String> {
         // Note: Preflight checks (metadata, uv sync, bun install) are done client-side in start.rs
         let metadata = read_project_metadata(app_dir)?;
+        let has_ui = metadata.has_ui();
 
         let dotenv = DotenvFile::read(&app_dir.join(".env"))?;
         let dotenv_vars = Arc::new(Mutex::new(dotenv.get_vars()));
@@ -132,8 +134,9 @@ impl ProcessManager {
             host = %host,
             dev_server_port,
             backend_port,
-            frontend_port,
+            ?frontend_port,
             db_port,
+            has_ui,
             "Creating ProcessManager"
         );
 
@@ -153,6 +156,7 @@ impl ProcessManager {
             app_entrypoint,
             dotenv_vars,
             dev_config,
+            has_ui,
         })
     }
 
@@ -184,13 +188,17 @@ impl ProcessManager {
                 }
             }
 
-            // 2. Vite (critical)
-            debug!("Starting Vite frontend process...");
-            if let Err(e) = pm.spawn_bun_dev(&pm.app_dir).await {
-                warn!("Failed to start frontend: {}", e);
-                return; // Critical failure
+            // 2. Vite (critical, but only if project has UI)
+            if pm.has_ui {
+                debug!("Starting Vite frontend process...");
+                if let Err(e) = pm.spawn_bun_dev(&pm.app_dir).await {
+                    warn!("Failed to start frontend: {}", e);
+                    return; // Critical failure
+                }
+                debug!("Vite frontend started successfully");
+            } else {
+                debug!("Skipping Vite frontend (backend-only project)");
             }
-            debug!("Vite frontend started successfully");
 
             // 3. Uvicorn (critical)
             debug!("Starting uvicorn backend process...");
@@ -224,7 +232,7 @@ impl ProcessManager {
     pub async fn stop(&self) {
         debug!(
             host = %self.host,
-            frontend_port = self.frontend_port,
+            frontend_port = ?self.frontend_port,
             backend_port = self.backend_port,
             db_port = self.db_port,
             dev_server_port = self.dev_server_port,
@@ -259,16 +267,27 @@ impl ProcessManager {
     /// Get the status of all managed processes.
     /// Runs all three checks in parallel using tokio::join! to avoid blocking.
     pub async fn status(&self) -> (String, String, String) {
-        // Run all three checks in parallel - no mutex held during HTTP probes
+        // Run all checks in parallel - no mutex held during HTTP probes
+        let frontend_http_check = self
+            .frontend_port
+            .map(|p| ("localhost", p));
         let (frontend_status, backend_status, db_status) = tokio::join!(
-            self.status_for_process(
-                &self.frontend_child,
-                Some(("localhost", self.frontend_port))
-            ),
+            self.status_for_process(&self.frontend_child, frontend_http_check),
             self.status_for_process(&self.backend_child, Some((&self.host, self.backend_port))),
             self.status_for_process(&self.db_child, None), // DB: no HTTP check, just process status
         );
+        // For backend-only projects, report frontend as "n/a" instead of "stopped"
+        let frontend_status = if !self.has_ui && frontend_status == "stopped" {
+            "n/a".to_string()
+        } else {
+            frontend_status
+        };
         (frontend_status, backend_status, db_status)
+    }
+
+    /// Returns true if this project has a frontend (UI).
+    pub fn has_ui(&self) -> bool {
+        self.has_ui
     }
 
     pub async fn restart_uvicorn_with_env(
@@ -303,7 +322,9 @@ impl ProcessManager {
             .stderr(Stdio::inherit());
 
         // Set APX environment variables
-        cmd.env("APX_FRONTEND_PORT", self.frontend_port.to_string());
+        if let Some(fp) = self.frontend_port {
+            cmd.env("APX_FRONTEND_PORT", fp.to_string());
+        }
         cmd.env("APX_BACKEND_PORT", self.backend_port.to_string());
         cmd.env("APX_DEV_DB_PORT", self.db_port.to_string());
         cmd.env("APX_DEV_DB_PWD", &self.db_password);
@@ -362,7 +383,9 @@ impl ProcessManager {
         .stderr(Stdio::piped());
 
         // Set APX environment variables
-        cmd.env("APX_FRONTEND_PORT", self.frontend_port.to_string());
+        if let Some(fp) = self.frontend_port {
+            cmd.env("APX_FRONTEND_PORT", fp.to_string());
+        }
         cmd.env("APX_BACKEND_PORT", self.backend_port.to_string());
         cmd.env("APX_DEV_DB_PORT", self.db_port.to_string());
         cmd.env("APX_DEV_DB_PWD", &self.db_password);
@@ -783,7 +806,7 @@ impl ProcessManager {
         app_entrypoint: &str,
         host: &str,
         backend_port: u16,
-        frontend_port: u16,
+        frontend_port: Option<u16>,
         db_port: u16,
         dev_server_port: u16,
         dev_token: &str,
@@ -867,7 +890,9 @@ impl ProcessManager {
         .stderr(Stdio::piped());
 
         // Set APX environment variables
-        cmd.env("APX_FRONTEND_PORT", frontend_port.to_string());
+        if let Some(fp) = frontend_port {
+            cmd.env("APX_FRONTEND_PORT", fp.to_string());
+        }
         cmd.env("APX_BACKEND_PORT", backend_port.to_string());
         cmd.env("APX_DEV_DB_PORT", db_port.to_string());
         cmd.env("APX_DEV_DB_PWD", db_password);
@@ -922,7 +947,9 @@ impl ProcessManager {
     }
 
     async fn apply_env(&self, cmd: &mut Command, include_dotenv: bool) {
-        cmd.env("APX_FRONTEND_PORT", self.frontend_port.to_string());
+        if let Some(fp) = self.frontend_port {
+            cmd.env("APX_FRONTEND_PORT", fp.to_string());
+        }
         cmd.env("APX_BACKEND_PORT", self.backend_port.to_string());
         cmd.env("APX_DEV_DB_PORT", self.db_port.to_string());
         cmd.env("APX_DEV_DB_PWD", self.db_password.clone());

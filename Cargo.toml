@@ -85,6 +85,9 @@ tokio-postgres = { version = "0.7.16", features = ["runtime"] }
 biome_css_parser = "0.5.8"
 biome_css_syntax = "0.5.8"
 biome_rowan = "0.5.8"
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.14.5" }
+ruff_python_ast = { git = "https://github.com/astral-sh/ruff", tag = "0.14.5" }
+ruff_text_size = { git = "https://github.com/astral-sh/ruff", tag = "0.14.5" }
 schemars = "1.2.0"
 
 # Temporary files

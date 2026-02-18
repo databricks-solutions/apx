@@ -102,7 +102,7 @@ pub async fn add_components(
 
     // Load metadata and config
     let metadata = read_project_metadata(app_dir)?;
-    let cfg = UiConfig::from_metadata(&metadata, app_dir);
+    let cfg = UiConfig::from_metadata(&metadata, app_dir)?;
     let client = reqwest::Client::new();
 
     // Collect all plans for all components

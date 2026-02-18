@@ -51,7 +51,7 @@ pub async fn run_server(
     app_dir: PathBuf,
     listener: tokio::net::TcpListener,
     backend_port: u16,
-    frontend_port: u16,
+    frontend_port: Option<u16>,
     db_port: u16,
 ) -> Result<(), String> {
     // Ensure flux is running for log collection
@@ -74,7 +74,7 @@ pub async fn run_server(
         host = %host,
         port,
         backend_port,
-        frontend_port,
+        frontend_port = ?frontend_port,
         db_port,
         "Starting dev server."
     );
@@ -139,9 +139,11 @@ pub async fn run_server(
         app_dir.join(".env"),
     );
 
-    // Start OpenAPI watcher with shutdown receiver
-    if let Err(err) = start_openapi_watcher(app_dir.clone(), shutdown_tx.subscribe()) {
-        warn!("Failed to start OpenAPI watcher: {err}");
+    // Start OpenAPI watcher with shutdown receiver (only for projects with UI)
+    if process_manager.has_ui() {
+        if let Err(err) = start_openapi_watcher(app_dir.clone(), shutdown_tx.subscribe()) {
+            warn!("Failed to start OpenAPI watcher: {err}");
+        }
     }
 
     // Start filesystem watcher to stop server if project folder or lock file is removed
@@ -182,14 +184,18 @@ pub async fn run_server(
         .route("/stop", get(stop))
         .with_state(state);
 
-    // UI router - proxied to frontend (handles / and /*path)
-    let ui_router = proxy::ui_router(frontend_port, process_manager.dev_token())?;
-
-    let app = Router::new()
+    let base_router = Router::new()
         .nest("/api", api_router)
         .nest("/_apx", apx_router)
-        .merge(api_utils_router)
-        .merge(ui_router);
+        .merge(api_utils_router);
+
+    // UI router - proxied to frontend (handles / and /*path), only for projects with UI
+    let app = if let Some(fp) = frontend_port {
+        let ui_router = proxy::ui_router(fp, process_manager.dev_token())?;
+        base_router.merge(ui_router)
+    } else {
+        base_router
+    };
 
     // Clone what we need for the shutdown handler
     let mut shutdown_rx = shutdown_tx.subscribe();
@@ -302,12 +308,22 @@ fn start_filesystem_watcher(
 
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
     let (frontend_status, backend_status, db_status) = state.process_manager.status().await;
+    let has_ui = state.process_manager.has_ui();
 
     // Check if any critical process has permanently failed (crashed/exited)
-    let failed = frontend_status == "failed" || backend_status == "failed";
+    let failed = if has_ui {
+        frontend_status == "failed" || backend_status == "failed"
+    } else {
+        backend_status == "failed"
+    };
 
-    // DB is non-critical - only frontend and backend must be healthy for "ok" status
-    let all_healthy = frontend_status == "healthy" && backend_status == "healthy";
+    // DB is non-critical - only critical services must be healthy for "ok" status
+    let all_healthy = if has_ui {
+        frontend_status == "healthy" && backend_status == "healthy"
+    } else {
+        // Backend-only: only backend needs to be healthy
+        backend_status == "healthy"
+    };
     let status = if all_healthy { "ok" } else { "starting" };
 
     (

@@ -13,7 +13,11 @@ pub fn prepare_frontend_args(
     let metadata = read_project_metadata(app_dir)?;
 
     // 2. Resolve all paths to absolute
-    let ui_root_abs = app_dir.join(&metadata.ui_root);
+    let ui_root = metadata
+        .ui_root
+        .as_ref()
+        .ok_or("Project has no UI configured (missing [tool.apx.ui] in pyproject.toml)")?;
+    let ui_root_abs = app_dir.join(ui_root);
     let out_dir_abs = metadata.dist_dir(app_dir);
     let public_dir_abs = ui_root_abs.join("public");
 

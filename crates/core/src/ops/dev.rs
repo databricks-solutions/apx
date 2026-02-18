@@ -80,10 +80,12 @@ async fn run_preflight(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
                 mode,
                 &format!("  ✓ version file ({}ms)", preflight.version_ms),
             );
-            if let Some(bun_ms) = preflight.bun_install_ms {
-                emit(mode, &format!("  ✓ bun install ({bun_ms}ms)"));
-            } else {
-                emit(mode, "  ✓ node_modules (cached)");
+            if preflight.has_ui {
+                if let Some(bun_ms) = preflight.bun_install_ms {
+                    emit(mode, &format!("  ✓ bun install ({bun_ms}ms)"));
+                } else {
+                    emit(mode, "  ✓ node_modules (cached)");
+                }
             }
             emit(
                 mode,

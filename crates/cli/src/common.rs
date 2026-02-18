@@ -116,21 +116,19 @@ pub(crate) fn modify_pyproject(
 #[derive(ValueEnum, Clone, Debug, Copy, PartialEq, Eq)]
 #[value(rename_all = "lower")]
 pub enum Template {
-    /// Minimal template with basic UI structure
+    /// Minimal backend-only template (no frontend)
     Minimal,
     /// Standard template with UI and API
     Essential,
-    /// Template with database integration
-    Stateful,
 }
 
 impl Template {
-    /// Get the directory name for this template addon
+    /// Get the directory name for this template
+    #[allow(dead_code)]
     pub fn directory_name(&self) -> &str {
         match self {
-            Template::Minimal => "minimal-ui",
+            Template::Minimal => "base",
             Template::Essential => "base",
-            Template::Stateful => "stateful",
         }
     }
 }

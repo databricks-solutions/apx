@@ -479,7 +479,7 @@ pub fn needs_registry_refresh(registries: &HashMap<String, RegistryConfig>) -> b
 /// Returns true if any registry was refreshed
 pub async fn sync_registry_indexes(app_dir: &Path, force: bool) -> Result<bool, String> {
     let metadata = read_project_metadata(app_dir)?;
-    let cfg = UiConfig::from_metadata(&metadata, app_dir);
+    let cfg = UiConfig::from_metadata(&metadata, app_dir)?;
     let client = reqwest::Client::new();
     let style = cfg.style();
     let mut refreshed = false;

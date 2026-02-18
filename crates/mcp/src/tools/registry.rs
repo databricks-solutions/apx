@@ -66,7 +66,8 @@ impl ApxServer {
 
         // Check if registry indexes need refresh
         if let Ok(metadata) = apx_core::common::read_project_metadata(&path) {
-            let cfg = apx_core::components::UiConfig::from_metadata(&metadata, &path);
+            let cfg = apx_core::components::UiConfig::from_metadata(&metadata, &path)
+                .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
             if needs_registry_refresh(&cfg.registries) {
                 tracing::info!("Registry indexes stale, refreshing...");
                 if let Ok(true) = sync_registry_indexes(&path, false).await {
@@ -165,7 +166,8 @@ impl ApxServer {
 
         // Check if registry indexes need refresh
         if let Ok(metadata) = apx_core::common::read_project_metadata(&path) {
-            let cfg = apx_core::components::UiConfig::from_metadata(&metadata, &path);
+            let cfg = apx_core::components::UiConfig::from_metadata(&metadata, &path)
+                .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
             if needs_registry_refresh(&cfg.registries) {
                 tracing::info!("Registry indexes stale, refreshing...");
                 if let Ok(true) = sync_registry_indexes(&path, false).await {

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tera::Context;
 use walkdir::WalkDir;
 
-use crate::common::{Assistant, Layout, Template, find_app_dir};
+use crate::common::{Assistant, Layout, find_app_dir};
 use crate::run_cli_async_helper;
 use apx_core::interop::extract_templates;
 
@@ -25,11 +25,16 @@ pub enum Addon {
     /// Codex AI assistant rules
     Codex,
 
-    // Template addons (from common::Template)
-    /// Stateful addon with database support
-    Stateful,
-    /// Essential/base template files
-    Essential,
+    // Backend addons
+    /// Lakebase (Databricks Database) integration
+    Lakebase,
+    /// SQL Warehouse connection
+    Sql,
+    /// Serving Endpoint client
+    #[value(name = "serving-endpoint")]
+    ServingEndpoint,
+    /// Genie Space client
+    Genie,
 
     // Layout addons (from common::Layout)
     /// Sidebar layout addon
@@ -45,18 +50,155 @@ impl Addon {
             Addon::Vscode => Assistant::Vscode.directory_name(),
             Addon::Claude => Assistant::Claude.directory_name(),
             Addon::Codex => Assistant::Codex.directory_name(),
-            // Template addons
-            Addon::Stateful => Template::Stateful.directory_name(),
-            Addon::Essential => Template::Essential.directory_name(),
+            // Backend addons
+            Addon::Lakebase => "lakebase",
+            Addon::Sql => "sql",
+            Addon::ServingEndpoint => "serving-endpoint",
+            Addon::Genie => "genie",
             // Layout addons
             Addon::Sidebar => Layout::Sidebar.directory_name().unwrap_or("sidebar"),
         }
     }
 
-    /// Check if this addon is the base template (not in addons folder)
-    fn is_base(&self) -> bool {
-        matches!(self, Addon::Essential)
+    /// Check if this addon is a backend addon (uses AST-based application)
+    fn is_backend(&self) -> bool {
+        matches!(
+            self,
+            Addon::Lakebase | Addon::Sql | Addon::ServingEndpoint | Addon::Genie
+        )
     }
+
+    /// Get the BackendAddonSpec for this addon, if it's a backend addon
+    fn backend_spec(&self) -> Option<BackendAddonSpec> {
+        match self {
+            Addon::Lakebase => Some(BackendAddonSpec {
+                name: "lakebase",
+                template_dir: "lakebase",
+                python_edits: vec![
+                    PythonEdit::AddImport {
+                        file: "backend/core/__init__.py".into(),
+                        statement: "from .lakebase import DatabaseConfig, lakebase_lifespan".into(),
+                    },
+                    PythonEdit::AddImport {
+                        file: "backend/core/dependencies.py".into(),
+                        statement: "from .lakebase import get_session".into(),
+                    },
+                    PythonEdit::AddImport {
+                        file: "backend/core/dependencies.py".into(),
+                        statement: "from sqlmodel import Session".into(),
+                    },
+                    PythonEdit::AddDependency {
+                        name: "Session".into(),
+                        type_alias_code: "Session: TypeAlias = Annotated[Session, Depends(get_session)]".into(),
+                    },
+                    PythonEdit::AddImport {
+                        file: "backend/app.py".into(),
+                        statement: "from .core import lakebase_lifespan".into(),
+                    },
+                    PythonEdit::AddLifespan {
+                        lifespan_name: "lakebase_lifespan".into(),
+                    },
+                ],
+                python_deps: vec!["sqlmodel>=0.0.27", "psycopg[binary,pool]>=3.2.11"],
+            }),
+            Addon::Sql => Some(BackendAddonSpec {
+                name: "sql",
+                template_dir: "sql",
+                python_edits: vec![
+                    PythonEdit::AddImport {
+                        file: "backend/core/__init__.py".into(),
+                        statement: "from .sql import get_connection".into(),
+                    },
+                    PythonEdit::AddImport {
+                        file: "backend/core/dependencies.py".into(),
+                        statement: "from .sql import get_connection".into(),
+                    },
+                    PythonEdit::AddImport {
+                        file: "backend/core/dependencies.py".into(),
+                        statement: "from databricks.sdk.service.sql import StatementExecutionAPI".into(),
+                    },
+                    PythonEdit::AddDependency {
+                        name: "Connection".into(),
+                        type_alias_code: "Connection: TypeAlias = Annotated[StatementExecutionAPI, Depends(get_connection)]".into(),
+                    },
+                ],
+                python_deps: vec![],
+            }),
+            Addon::ServingEndpoint => Some(BackendAddonSpec {
+                name: "serving-endpoint",
+                template_dir: "serving-endpoint",
+                python_edits: vec![
+                    PythonEdit::AddImport {
+                        file: "backend/core/__init__.py".into(),
+                        statement: "from .serving import get_serving_endpoint".into(),
+                    },
+                    PythonEdit::AddImport {
+                        file: "backend/core/dependencies.py".into(),
+                        statement: "from .serving import get_serving_endpoint".into(),
+                    },
+                    PythonEdit::AddImport {
+                        file: "backend/core/dependencies.py".into(),
+                        statement: "from databricks.sdk.service.serving import ServingEndpointsAPI".into(),
+                    },
+                    PythonEdit::AddDependency {
+                        name: "ServingEndpoint".into(),
+                        type_alias_code: "ServingEndpoint: TypeAlias = Annotated[ServingEndpointsAPI, Depends(get_serving_endpoint)]".into(),
+                    },
+                ],
+                python_deps: vec![],
+            }),
+            Addon::Genie => Some(BackendAddonSpec {
+                name: "genie",
+                template_dir: "genie",
+                python_edits: vec![
+                    PythonEdit::AddImport {
+                        file: "backend/core/__init__.py".into(),
+                        statement: "from .genie import get_genie".into(),
+                    },
+                    PythonEdit::AddImport {
+                        file: "backend/core/dependencies.py".into(),
+                        statement: "from .genie import get_genie".into(),
+                    },
+                    PythonEdit::AddImport {
+                        file: "backend/core/dependencies.py".into(),
+                        statement: "from databricks.sdk.service.dashboards import GenieAPI".into(),
+                    },
+                    PythonEdit::AddDependency {
+                        name: "GenieSpace".into(),
+                        type_alias_code: "GenieSpace: TypeAlias = Annotated[GenieAPI, Depends(get_genie)]".into(),
+                    },
+                ],
+                python_deps: vec![],
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Specification for a backend addon.
+struct BackendAddonSpec {
+    /// Name (for display)
+    name: &'static str,
+    /// Template directory under addons/
+    template_dir: &'static str,
+    /// Python AST edits to apply after copying template files
+    python_edits: Vec<PythonEdit>,
+    /// Python dependencies to add to pyproject.toml
+    python_deps: Vec<&'static str>,
+}
+
+/// A Python source code edit to apply via AST.
+enum PythonEdit {
+    /// Add import to a file (relative to app's src/{app_slug}/)
+    AddImport { file: String, statement: String },
+    /// Add TypeAlias member to the Dependencies class in dependencies.py
+    AddDependency {
+        #[allow(dead_code)]
+        name: String,
+        type_alias_code: String,
+    },
+    /// Add lifespan to create_app() call in app.py
+    AddLifespan { lifespan_name: String },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -148,6 +290,8 @@ impl FileChange {
 }
 
 async fn run_inner(args: ApplyArgs) -> Result<(), String> {
+    let addon = args.addon;
+    let yes = args.yes;
     let app_dir = find_app_dir(args.app_path)?;
 
     // Read project context
@@ -156,26 +300,26 @@ async fn run_inner(args: ApplyArgs) -> Result<(), String> {
     // Extract embedded templates to a temporary directory
     let templates_dir = extract_templates()?;
 
-    // Get addon source directory
-    let addon_source = if args.addon.is_base() {
-        templates_dir.join(args.addon.directory_name())
-    } else {
-        templates_dir
-            .join("addons")
-            .join(args.addon.directory_name())
-    };
+    if addon.is_backend() {
+        return apply_backend_addon(addon, yes, &app_dir, &app_slug, &templates_dir);
+    }
+
+    // Get addon source directory (file-overlay based addons)
+    let addon_source = templates_dir
+        .join("addons")
+        .join(addon.directory_name());
 
     if !addon_source.exists() {
         return Err(format!(
             "Addon '{}' not found at {}",
-            args.addon.directory_name(),
+            addon.directory_name(),
             addon_source.display()
         ));
     }
 
     println!(
         "Applying {} addon to {}...\n",
-        args.addon.directory_name(),
+        addon.directory_name(),
         app_dir
             .canonicalize()
             .unwrap_or_else(|_| app_dir.clone())
@@ -240,7 +384,7 @@ async fn run_inner(args: ApplyArgs) -> Result<(), String> {
     }
 
     // Ask for confirmation unless -y flag is provided
-    if !args.yes {
+    if !yes {
         let confirmed = Confirm::new()
             .with_prompt("Do you want to apply these changes?")
             .default(true)
@@ -277,9 +421,201 @@ async fn run_inner(args: ApplyArgs) -> Result<(), String> {
 
     println!(
         "\n\x1b[32m✓\x1b[0m Applied {} addon: {} file(s) created, {} file(s) modified",
-        args.addon.directory_name(),
+        addon.directory_name(),
         created,
         modified
+    );
+
+    Ok(())
+}
+
+/// Apply a backend addon using AST-based edits.
+fn apply_backend_addon(
+    addon: Addon,
+    _yes: bool,
+    app_dir: &Path,
+    app_slug: &str,
+    templates_dir: &Path,
+) -> Result<(), String> {
+    let spec = addon
+        .backend_spec()
+        .ok_or("Not a backend addon")?;
+
+    println!(
+        "Applying {} backend addon to {}...\n",
+        spec.name,
+        app_dir
+            .canonicalize()
+            .unwrap_or_else(|_| app_dir.to_path_buf())
+            .display()
+    );
+
+    let src_prefix = PathBuf::from("src").join(app_slug);
+
+    // 1. Copy template files from addon
+    let addon_source = templates_dir.join("addons").join(spec.template_dir);
+    let mut copied_files = Vec::new();
+    if addon_source.exists() {
+        for entry in WalkDir::new(&addon_source) {
+            let entry = entry.map_err(|e| format!("Failed to read addon directory: {e}"))?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let rel = entry
+                .path()
+                .strip_prefix(&addon_source)
+                .map_err(|e| format!("Path error: {e}"))?;
+            let mut path_str = rel.to_string_lossy().replace('\\', "/");
+            if path_str.contains("/base/") || path_str.starts_with("base/") {
+                path_str = path_str
+                    .replace("/base/", &format!("/{app_slug}/"))
+                    .replace("base/", &format!("{app_slug}/"));
+            }
+            // Skip jinja2 config templates (databricks.yml, pyproject.toml, .env) — those need special handling
+            let is_template = entry.path().extension() == Some(OsStr::new("jinja2"));
+            if is_template && !path_str.contains("/backend/") {
+                // Render config templates
+                let final_path = path_str.trim_end_matches(".jinja2");
+                let target = app_dir.join(final_path);
+                let content = fs::read_to_string(entry.path())
+                    .map_err(|e| format!("Failed to read template: {e}"))?;
+                let app_name_from_slug = app_slug.replace('_', "-");
+                let mut ctx = Context::new();
+                ctx.insert("app_name", &app_name_from_slug);
+                ctx.insert("app_slug", app_slug);
+                let rendered = tera::Tera::one_off(&content, &ctx, false)
+                    .map_err(|e| format!("Template render error: {e}"))?;
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent).map_err(|e| format!("mkdir error: {e}"))?;
+                }
+                fs::write(&target, rendered).map_err(|e| format!("write error: {e}"))?;
+                copied_files.push(final_path.to_string());
+                continue;
+            }
+            let final_path = if is_template {
+                path_str.trim_end_matches(".jinja2").to_string()
+            } else {
+                path_str.clone()
+            };
+            let target = app_dir.join(&final_path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("mkdir error: {e}"))?;
+            }
+            fs::copy(entry.path(), &target).map_err(|e| format!("copy error: {e}"))?;
+            copied_files.push(final_path);
+        }
+    }
+
+    // 2. Apply Python AST edits
+    let mut ast_edits_applied = 0;
+    for edit in &spec.python_edits {
+        match edit {
+            PythonEdit::AddImport { file, statement } => {
+                let target = app_dir.join(&src_prefix).join(file);
+                if !target.exists() {
+                    tracing::warn!("Target file for AST edit not found: {}", target.display());
+                    continue;
+                }
+                let source = fs::read_to_string(&target)
+                    .map_err(|e| format!("Read error: {e}"))?;
+                match apx_core::py_edit::add_import(&source, statement) {
+                    Ok(new_source) => {
+                        fs::write(&target, new_source)
+                            .map_err(|e| format!("Write error: {e}"))?;
+                        ast_edits_applied += 1;
+                    }
+                    Err(apx_core::py_edit::PyEditError::AlreadyPresent(_)) => {
+                        // Idempotent — skip
+                    }
+                    Err(e) => return Err(format!("AST edit error on {}: {e}", target.display())),
+                }
+            }
+            PythonEdit::AddDependency {
+                name: _,
+                type_alias_code,
+            } => {
+                let target = app_dir
+                    .join(&src_prefix)
+                    .join("backend/core/dependencies.py");
+                if !target.exists() {
+                    tracing::warn!("dependencies.py not found: {}", target.display());
+                    continue;
+                }
+                let source = fs::read_to_string(&target)
+                    .map_err(|e| format!("Read error: {e}"))?;
+                match apx_core::py_edit::add_class_member(&source, "Dependencies", type_alias_code)
+                {
+                    Ok(new_source) => {
+                        fs::write(&target, new_source)
+                            .map_err(|e| format!("Write error: {e}"))?;
+                        ast_edits_applied += 1;
+                    }
+                    Err(apx_core::py_edit::PyEditError::AlreadyPresent(_)) => {}
+                    Err(e) => return Err(format!("AST edit error on dependencies.py: {e}")),
+                }
+            }
+            PythonEdit::AddLifespan { lifespan_name } => {
+                let target = app_dir.join(&src_prefix).join("backend/app.py");
+                if !target.exists() {
+                    tracing::warn!("app.py not found: {}", target.display());
+                    continue;
+                }
+                let source = fs::read_to_string(&target)
+                    .map_err(|e| format!("Read error: {e}"))?;
+                match apx_core::py_edit::add_call_keyword(
+                    &source,
+                    "create_app",
+                    "lifespans",
+                    lifespan_name,
+                ) {
+                    Ok(new_source) => {
+                        fs::write(&target, new_source)
+                            .map_err(|e| format!("Write error: {e}"))?;
+                        ast_edits_applied += 1;
+                    }
+                    Err(apx_core::py_edit::PyEditError::AlreadyPresent(_)) => {}
+                    Err(e) => return Err(format!("AST edit error on app.py: {e}")),
+                }
+            }
+        }
+    }
+
+    // 3. Add Python dependencies to pyproject.toml
+    if !spec.python_deps.is_empty() {
+        let pyproject_path = app_dir.join("pyproject.toml");
+        crate::common::modify_pyproject(&pyproject_path, |doc| {
+            let project = doc["project"]
+                .as_table_mut()
+                .ok_or("Missing [project] in pyproject.toml")?;
+            let deps = project["dependencies"]
+                .as_array_mut()
+                .ok_or("Missing project.dependencies")?;
+            for dep in &spec.python_deps {
+                let already = deps.iter().any(|v| {
+                    v.as_str()
+                        .map(|s| s.starts_with(dep.split('>').next().unwrap_or(dep)))
+                        .unwrap_or(false)
+                });
+                if !already {
+                    deps.push(*dep);
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    if !copied_files.is_empty() {
+        println!("\x1b[32mFiles copied:\x1b[0m");
+        for f in &copied_files {
+            println!("  \x1b[32m+\x1b[0m {f}");
+        }
+    }
+
+    println!(
+        "\n\x1b[32m✓\x1b[0m Applied {} backend addon: {} file(s) copied, {} AST edit(s) applied",
+        spec.name,
+        copied_files.len(),
+        ast_edits_applied
     );
 
     Ok(())

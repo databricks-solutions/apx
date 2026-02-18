@@ -14,17 +14,25 @@ pub struct UiConfig {
 
 impl UiConfig {
     /// Construct UiConfig from ProjectMetadata
-    pub fn from_metadata(metadata: &ProjectMetadata, app_dir: &Path) -> Self {
-        let root = app_dir.join(&metadata.ui_root);
+    pub fn from_metadata(metadata: &ProjectMetadata, app_dir: &Path) -> Result<Self, String> {
+        let ui_root = metadata
+            .ui_root
+            .as_ref()
+            .ok_or("Project has no UI configured (missing [tool.apx.ui] in pyproject.toml)")?;
+        let root = app_dir.join(ui_root);
 
         // Convert string registries to RegistryConfig
         let registries: HashMap<String, RegistryConfig> = metadata
             .ui_registries
-            .iter()
-            .map(|(k, v)| (k.clone(), RegistryConfig::Template(v.clone())))
-            .collect();
+            .as_ref()
+            .map(|regs| {
+                regs.iter()
+                    .map(|(k, v)| (k.clone(), RegistryConfig::Template(v.clone())))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        Self { root, registries }
+        Ok(Self { root, registries })
     }
 
     /// Hardcoded shadcn style

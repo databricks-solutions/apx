@@ -1,6 +1,6 @@
 from databricks.sdk.service.iam import User as UserOut
 
-from .core import Dependency, create_router
+from .core import Dependencies, create_router
 from .models import VersionOut
 
 router = create_router()
@@ -12,5 +12,5 @@ async def version():
 
 
 @router.get("/current-user", response_model=UserOut, operation_id="currentUser")
-def me(user_ws: Dependency.UserClient):
+def me(user_ws: Dependencies.UserClient):
     return user_ws.current_user.me()

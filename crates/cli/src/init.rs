@@ -79,9 +79,8 @@ pub async fn run(args: InitArgs) -> i32 {
 }
 
 async fn run_inner(mut args: InitArgs) -> Result<(), String> {
-    // Eagerly resolve both tools to surface errors early
+    // Eagerly resolve uv (always needed)
     let _uv = apx_core::download::resolve_uv().await?;
-    let _bun = BunCommand::new().await?;
 
     let workspace_root = resolve_app_dir(args.app_path.take());
 
@@ -129,11 +128,11 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     let app_slug = app_name.replace("-", "_");
 
     if args.template.is_none() {
-        let choices = [Template::Minimal, Template::Essential, Template::Stateful];
+        let choices = [Template::Minimal, Template::Essential];
         let default_idx = 1; // Default to essential
         let selection = Select::new()
             .with_prompt("Which template would you like to use?")
-            .items(&["minimal", "essential", "stateful"])
+            .items(&["minimal (backend-only)", "essential (full-stack)"])
             .default(default_idx)
             .interact()
             .map_err(|err| format!("Failed to select template: {err}"))?;
@@ -203,6 +202,11 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
     let template = args.template.take().unwrap_or(Template::Essential);
 
+    // Resolve bun only for Essential template (has frontend)
+    if matches!(template, Template::Essential) {
+        let _bun = BunCommand::new().await?;
+    }
+
     // Skip layout selection for minimal template (always uses basic layout)
     if !matches!(template, Template::Minimal) && args.layout.is_none() {
         let choices = [Layout::Sidebar, Layout::Basic];
@@ -249,26 +253,35 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
             fs::write(build_dir.join(".gitignore"), "*\n")
                 .map_err(|err| format!("Failed to write .build .gitignore: {err}"))?;
 
-            if matches!(template, Template::Stateful) {
-                let stateful_addon = templates_dir.join("addons").join("stateful");
-                process_template_directory(&stateful_addon, &app_path, &app_name, &app_slug)?;
-            }
-
-            // Apply minimal UI overlay and cleanup unused files
+            // Minimal template: delete UI folder and frontend config files
             if matches!(template, Template::Minimal) {
-                let minimal_ui_addon = templates_dir.join("addons").join("minimal-ui");
-                process_template_directory(&minimal_ui_addon, &app_path, &app_name, &app_slug)?;
-
-                // Delete unused files for minimal template
                 let ui_path = app_path.join("src").join(&app_slug).join("ui");
-                // Remove components/ui/ (shadcn)
-                let _ = fs::remove_dir_all(ui_path.join("components/ui"));
-                // Remove components/backgrounds/
-                let _ = fs::remove_dir_all(ui_path.join("components/backgrounds"));
-                // Remove unused apx components
-                let _ = fs::remove_file(ui_path.join("components/apx/mode-toggle.tsx"));
-                let _ = fs::remove_file(ui_path.join("components/apx/navbar.tsx"));
-                let _ = fs::remove_file(ui_path.join("components/apx/theme-provider.tsx"));
+                let _ = fs::remove_dir_all(&ui_path);
+
+                // Delete frontend config files
+                for file in &[
+                    "package.json",
+                    "vite.config.ts",
+                    "tsconfig.json",
+                    "tailwind.config.ts",
+                    "components.json",
+                    ".prettierrc",
+                ] {
+                    let _ = fs::remove_file(app_path.join(file));
+                }
+
+                // Remove [tool.apx.ui] from pyproject.toml
+                let pyproject_path = app_path.join("pyproject.toml");
+                if pyproject_path.exists() {
+                    crate::common::modify_pyproject(&pyproject_path, |doc| {
+                        if let Some(tool) = doc.get_mut("tool").and_then(|t| t.as_table_mut()) {
+                            if let Some(apx) = tool.get_mut("apx").and_then(|a| a.as_table_mut()) {
+                                apx.remove("ui");
+                            }
+                        }
+                        Ok(())
+                    })?;
+                }
             }
 
             if let Some(profile) = args.profile.as_deref() {

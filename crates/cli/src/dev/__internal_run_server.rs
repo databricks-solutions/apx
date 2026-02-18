@@ -5,6 +5,7 @@ use tracing::{debug, warn};
 
 use crate::run_cli_async_helper;
 use apx_core::app_state::set_app_dir;
+use apx_core::common::read_project_metadata;
 use apx_core::dev::common::{
     BACKEND_PORT_END, BACKEND_PORT_START, BIND_HOST, DB_PORT_END, DB_PORT_START, FRONTEND_PORT_END,
     FRONTEND_PORT_START, find_random_port_in_range,
@@ -61,13 +62,23 @@ async fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
         // when multiple dev servers start simultaneously
         let backend_port =
             find_random_port_in_range(&args.host, BACKEND_PORT_START, BACKEND_PORT_END)?;
-        let frontend_port =
-            find_random_port_in_range(&args.host, FRONTEND_PORT_START, FRONTEND_PORT_END)?;
         let db_port = find_random_port_in_range(&args.host, DB_PORT_START, DB_PORT_END)?;
+
+        // Only allocate a frontend port if the project has a UI
+        let metadata = read_project_metadata(&args.app_dir)?;
+        let frontend_port = if metadata.has_ui() {
+            Some(find_random_port_in_range(
+                &args.host,
+                FRONTEND_PORT_START,
+                FRONTEND_PORT_END,
+            )?)
+        } else {
+            None
+        };
 
         debug!(
             attempt,
-            backend_port, frontend_port, db_port, "Attempting to start dev server with ports"
+            backend_port, ?frontend_port, db_port, "Attempting to start dev server with ports"
         );
 
         match run_server(
