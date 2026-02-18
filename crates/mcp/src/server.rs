@@ -6,7 +6,7 @@ use crate::tools::databricks::DatabricksAppsLogsArgs;
 use crate::tools::devserver::LogsToolArgs;
 use crate::tools::docs::DocsArgs;
 use crate::tools::project::GetRouteInfoArgs;
-use crate::tools::registry::{AddComponentArgs, SearchRegistryComponentsArgs};
+use crate::tools::registry::{AddComponentArgs, ListRegistryComponentsArgs, SearchRegistryComponentsArgs};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -186,6 +186,18 @@ impl ApxServer {
         Parameters(args): Parameters<AddComponentArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         self.handle_add_component(args).await
+    }
+
+    #[tool(
+        name = "list_registry_components",
+        description = "List all available components in a registry. Use default shadcn registry if no registry specified.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_registry_components(
+        &self,
+        Parameters(args): Parameters<ListRegistryComponentsArgs>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.handle_list_registry_components(args).await
     }
 
     // --- Docs tools ---

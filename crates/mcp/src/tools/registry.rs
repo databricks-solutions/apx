@@ -2,7 +2,7 @@ use crate::indexing::{rebuild_search_index, wait_for_index_ready};
 use crate::server::ApxServer;
 use crate::tools::ToolResultExt;
 use crate::validation::validate_app_path;
-use apx_core::components::{needs_registry_refresh, sync_registry_indexes};
+use apx_core::components::{get_all_registry_indexes, needs_registry_refresh, sync_registry_indexes};
 use apx_core::search::ComponentIndex;
 use rmcp::model::*;
 use rmcp::schemars;
@@ -31,6 +31,14 @@ pub struct AddComponentArgs {
     /// Force overwrite existing files
     #[serde(default)]
     pub force: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListRegistryComponentsArgs {
+    /// Absolute path to the project directory
+    pub app_path: String,
+    /// Registry name (e.g. "@animate-ui"). Omit or leave empty for default shadcn registry.
+    pub registry: Option<String>,
 }
 
 impl ApxServer {
@@ -144,5 +152,84 @@ impl ApxServer {
                 "Failed to add component: {e}"
             ))])),
         }
+    }
+
+    pub async fn handle_list_registry_components(
+        &self,
+        args: ListRegistryComponentsArgs,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let path = validate_app_path(&args.app_path)
+            .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
+
+        // Check if registry indexes need refresh
+        if let Ok(metadata) = apx_core::common::read_project_metadata(&path) {
+            let cfg = apx_core::components::UiConfig::from_metadata(&metadata, &path);
+            if needs_registry_refresh(&cfg.registries) {
+                tracing::info!("Registry indexes stale, refreshing...");
+                if let Ok(true) = sync_registry_indexes(&path, false).await {
+                    let pool = self.ctx.dev_db.pool().clone();
+                    if let Err(e) = rebuild_search_index(pool.clone()).await {
+                        tracing::warn!("Failed to rebuild search index after refresh: {}", e);
+                    }
+                }
+            }
+        }
+
+        let all_indexes = match get_all_registry_indexes() {
+            Ok(indexes) => indexes,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to load registry indexes: {e}"
+                ))]));
+            }
+        };
+
+        // Determine which registry key to look up
+        let registry_key = match &args.registry {
+            Some(name) if !name.is_empty() => name.trim_start_matches('@').to_string(),
+            _ => "ui".to_string(),
+        };
+
+        let items = match all_indexes.get(&registry_key) {
+            Some(items) => items,
+            None => {
+                let available: Vec<&String> = all_indexes.keys().collect();
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Registry '{}' not found. Available registries: {:?}",
+                    registry_key, available
+                ))]));
+            }
+        };
+
+        #[derive(serde::Serialize)]
+        struct ListResponse {
+            registry: String,
+            total: usize,
+            items: Vec<ListItem>,
+        }
+
+        #[derive(serde::Serialize)]
+        struct ListItem {
+            name: String,
+            description: Option<String>,
+            dependencies: usize,
+            registry_dependencies: usize,
+        }
+
+        let response = ListResponse {
+            registry: registry_key,
+            total: items.len(),
+            items: items
+                .iter()
+                .map(|item| ListItem {
+                    name: item.name.clone(),
+                    description: item.description.clone(),
+                    dependencies: item.dependencies.len(),
+                    registry_dependencies: item.registry_dependencies.len(),
+                })
+                .collect(),
+        };
+
+        Ok(CallToolResult::from_serializable(&response))
     }
 }
