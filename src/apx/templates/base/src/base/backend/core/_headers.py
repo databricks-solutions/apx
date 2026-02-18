@@ -13,11 +13,11 @@ class DatabricksAppsHeaders(BaseModel):
     See: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/http-headers
     """
 
-    host: str
-    user_name: str
-    user_id: str
-    user_email: str
-    request_id: UUID
+    host: str | None
+    user_name: str | None
+    user_id: str | None
+    user_email: str | None
+    request_id: UUID | None
     token: SecretStr | None
 
 
@@ -29,16 +29,14 @@ def get_databricks_headers(
     user_id: Annotated[str | None, Header(alias="X-Forwarded-User")] = None,
     user_email: Annotated[str | None, Header(alias="X-Forwarded-Email")] = None,
     request_id: Annotated[str | None, Header(alias="X-Request-Id")] = None,
-    token: Annotated[
-        str | None, Header(alias="X-Forwarded-Access-Token")
-    ] = None,
+    token: Annotated[str | None, Header(alias="X-Forwarded-Access-Token")] = None,
 ) -> DatabricksAppsHeaders:
     """Extract Databricks Apps headers from the incoming request."""
     return DatabricksAppsHeaders(
-        host=host or "",
-        user_name=user_name or "",
-        user_id=user_id or "",
-        user_email=user_email or "",
-        request_id=request_id or "00000000-0000-0000-0000-000000000000",
+        host=host,
+        user_name=user_name,
+        user_id=user_id,
+        user_email=user_email,
+        request_id=UUID(request_id) if request_id else None,
         token=SecretStr(token) if token else None,
     )

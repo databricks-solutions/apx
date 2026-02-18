@@ -5,11 +5,12 @@ from typing import Annotated, TypeAlias
 from databricks.sdk import WorkspaceClient
 from fastapi import Depends, Header, Request
 
-from .config import AppConfig
-from .headers import DatabricksAppsHeaders, get_databricks_headers
+from ._config import AppConfig
+from ._defaults import ConfigDependency, WorkspaceClientDependency  # noqa: F401 — triggers auto-registration
+from ._headers import DatabricksAppsHeaders, get_databricks_headers
 
 
-# --- Dependencies ---
+# --- Getters ---
 
 
 def get_config(request: Request) -> AppConfig:
@@ -74,6 +75,8 @@ class Dependencies:
     """Application configuration loaded from environment variables.
     Recommended usage: `config: Dependencies.Config`"""
 
-    Headers: TypeAlias = Annotated[DatabricksAppsHeaders, Depends(get_databricks_headers)]
+    Headers: TypeAlias = Annotated[
+        DatabricksAppsHeaders, Depends(get_databricks_headers)
+    ]
     """Databricks Apps HTTP headers for the current request.
     Recommended usage: `headers: Dependencies.Headers`"""

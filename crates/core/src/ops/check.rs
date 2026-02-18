@@ -10,10 +10,13 @@ use tracing::debug;
 /// Run type checking (tsc + ty) in parallel for the given app directory.
 pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
     // Run preflight checks (installs deps if needed)
-    run_preflight_checks(app_dir).await?;
+    let preflight = run_preflight_checks(app_dir).await?;
+    let has_ui = preflight.has_ui;
 
-    // Generate route tree (must complete before tsc)
-    generate_route_tree(app_dir, mode).await?;
+    // Generate route tree (must complete before tsc) — only for UI projects
+    if has_ui {
+        generate_route_tree(app_dir, mode).await?;
+    }
 
     // Spinner for the parallel type-check phase (CLI only)
     let check_spinner = if mode == OutputMode::Interactive {
@@ -24,30 +27,34 @@ pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
         None
     };
 
-    // Run tsc -b --incremental in one tokio thread
-    let bun = BunCommand::new().await?;
-    let app_dir_clone = app_dir.to_path_buf();
-    let tsc_task = tokio::spawn(async move {
-        debug!(bun_path = %bun.path().display(), "Running tsc -b --incremental.");
-        let output = bun
-            .tokio_command()
-            .arg("run")
-            .arg("tsc")
-            .arg("-b")
-            .arg("--incremental")
-            .current_dir(&app_dir_clone)
-            .output()
-            .await
-            .map_err(|err| format!("Failed to run tsc: {err}"))?;
+    // Run tsc -b --incremental in one tokio thread — only for UI projects
+    let tsc_task = if has_ui {
+        let bun = BunCommand::new().await?;
+        let app_dir_clone = app_dir.to_path_buf();
+        Some(tokio::spawn(async move {
+            debug!(bun_path = %bun.path().display(), "Running tsc -b --incremental.");
+            let output = bun
+                .tokio_command()
+                .arg("run")
+                .arg("tsc")
+                .arg("-b")
+                .arg("--incremental")
+                .current_dir(&app_dir_clone)
+                .output()
+                .await
+                .map_err(|err| format!("Failed to run tsc: {err}"))?;
 
-        Ok::<(bool, String, String), String>((
-            output.status.success(),
-            String::from_utf8_lossy(&output.stdout).to_string(),
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ))
-    });
+            Ok::<(bool, String, String), String>((
+                output.status.success(),
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ))
+        }))
+    } else {
+        None
+    };
 
-    // Run ty check in another thread
+    // Run ty check in another thread — always
     let app_dir_clone = app_dir.to_path_buf();
     let uv_path = resolve_uv().await?.path;
     let ty_task = tokio::spawn(async move {
@@ -69,47 +76,59 @@ pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
         ))
     });
 
-    let (tsc_result, ty_result) = tokio::try_join!(tsc_task, ty_task)
-        .map_err(|err| format!("Failed to join tasks: {err}"))?;
+    // Await results
+    let tsc_result = if let Some(task) = tsc_task {
+        Some(
+            task.await
+                .map_err(|err| format!("Failed to join tsc task: {err}"))?,
+        )
+    } else {
+        None
+    };
+
+    let ty_result = ty_task
+        .await
+        .map_err(|err| format!("Failed to join ty task: {err}"))?;
 
     // Clear the spinner before printing results
     if let Some(sp) = check_spinner {
         sp.finish_and_clear();
     }
 
-    let tsc_result = tsc_result?;
-    let ty_result = ty_result?;
-
     let mut errors = Vec::new();
 
-    if !tsc_result.0 {
-        emit(mode, "❌ [tsc] TypeScript compilation failed");
-        let combined_output = if !tsc_result.2.is_empty() && !tsc_result.1.is_empty() {
-            format!("{}\n{}", tsc_result.1, tsc_result.2)
-        } else if !tsc_result.2.is_empty() {
-            tsc_result.2.clone()
-        } else if !tsc_result.1.is_empty() {
-            tsc_result.1.clone()
-        } else {
-            String::new()
-        };
-
-        if !combined_output.is_empty() {
-            emit(mode, &combined_output);
-        }
-
-        errors.push(format!(
-            "[tsc] TypeScript compilation failed: {}",
-            if combined_output.is_empty() {
-                "no output"
+    if let Some(tsc_result) = tsc_result {
+        let tsc_result = tsc_result?;
+        if !tsc_result.0 {
+            emit(mode, "❌ [tsc] TypeScript compilation failed");
+            let combined_output = if !tsc_result.2.is_empty() && !tsc_result.1.is_empty() {
+                format!("{}\n{}", tsc_result.1, tsc_result.2)
+            } else if !tsc_result.2.is_empty() {
+                tsc_result.2.clone()
+            } else if !tsc_result.1.is_empty() {
+                tsc_result.1.clone()
             } else {
-                &combined_output
+                String::new()
+            };
+
+            if !combined_output.is_empty() {
+                emit(mode, &combined_output);
             }
-        ));
-    } else {
-        emit(mode, "✅ [tsc] TypeScript compilation succeeded");
+
+            errors.push(format!(
+                "[tsc] TypeScript compilation failed: {}",
+                if combined_output.is_empty() {
+                    "no output"
+                } else {
+                    &combined_output
+                }
+            ));
+        } else {
+            emit(mode, "✅ [tsc] TypeScript compilation succeeded");
+        }
     }
 
+    let ty_result = ty_result?;
     if !ty_result.0 {
         emit(mode, "❌ [ty] Python type check failed");
         let combined_output = if !ty_result.1.is_empty() && !ty_result.2.is_empty() {

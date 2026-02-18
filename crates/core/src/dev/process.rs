@@ -268,9 +268,7 @@ impl ProcessManager {
     /// Runs all three checks in parallel using tokio::join! to avoid blocking.
     pub async fn status(&self) -> (String, String, String) {
         // Run all checks in parallel - no mutex held during HTTP probes
-        let frontend_http_check = self
-            .frontend_port
-            .map(|p| ("localhost", p));
+        let frontend_http_check = self.frontend_port.map(|p| ("localhost", p));
         let (frontend_status, backend_status, db_status) = tokio::join!(
             self.status_for_process(&self.frontend_child, frontend_http_check),
             self.status_for_process(&self.backend_child, Some((&self.host, self.backend_port))),

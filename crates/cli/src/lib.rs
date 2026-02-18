@@ -178,3 +178,6 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod test_check_flow;

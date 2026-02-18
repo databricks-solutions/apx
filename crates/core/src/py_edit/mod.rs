@@ -33,8 +33,7 @@ pub fn add_import(source: &str, import_stmt: &str) -> Result<String, PyEditError
         return Err(PyEditError::AlreadyPresent(trimmed.to_string()));
     }
 
-    let parsed =
-        parse_module(source).map_err(|e| PyEditError::Parse(e.to_string()))?;
+    let parsed = parse_module(source).map_err(|e| PyEditError::Parse(e.to_string()))?;
     let stmts = parsed.suite();
 
     let insert_offset = find::find_last_import_end(stmts).unwrap_or(0);
@@ -54,8 +53,7 @@ pub fn add_class_member(
 ) -> Result<String, PyEditError> {
     let trimmed = member_code.trim();
 
-    let parsed =
-        parse_module(source).map_err(|e| PyEditError::Parse(e.to_string()))?;
+    let parsed = parse_module(source).map_err(|e| PyEditError::Parse(e.to_string()))?;
     let stmts = parsed.suite();
 
     let class_def = find::find_class(stmts, class_name)
@@ -86,8 +84,7 @@ pub fn add_call_keyword(
     kwarg_name: &str,
     kwarg_value: &str,
 ) -> Result<String, PyEditError> {
-    let parsed =
-        parse_module(source).map_err(|e| PyEditError::Parse(e.to_string()))?;
+    let parsed = parse_module(source).map_err(|e| PyEditError::Parse(e.to_string()))?;
     let stmts = parsed.suite();
 
     let call_info = find::find_call(stmts, call_target)
@@ -98,8 +95,7 @@ pub fn add_call_keyword(
         // Kwarg exists — check if it's a list and append
         if let Some(list_range) = &kw.list_range {
             // Extract the list text to check for duplicates
-            let list_text =
-                &source[usize::from(list_range.start())..usize::from(list_range.end())];
+            let list_text = &source[usize::from(list_range.start())..usize::from(list_range.end())];
             if list_text.contains(kwarg_value) {
                 return Err(PyEditError::AlreadyPresent(format!(
                     "{kwarg_value} in {kwarg_name}"
@@ -215,8 +211,7 @@ mod tests {
     #[test]
     fn test_add_call_keyword_extend_list() {
         let source = "app = create_app(routers=[router], lifespans=[lifespan_a])\n";
-        let result =
-            add_call_keyword(source, "create_app", "lifespans", "lifespan_b").unwrap();
+        let result = add_call_keyword(source, "create_app", "lifespans", "lifespan_b").unwrap();
         assert!(result.contains("lifespan_a, lifespan_b"));
     }
 

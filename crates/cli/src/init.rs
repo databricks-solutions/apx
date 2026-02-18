@@ -494,9 +494,7 @@ fn render_embedded_templates(
 
     for file_path in &files {
         // Strip the prefix to get the relative path for the output
-        let rel = file_path
-            .strip_prefix(prefix)
-            .unwrap_or(file_path.as_str());
+        let rel = file_path.strip_prefix(prefix).unwrap_or(file_path.as_str());
 
         let mut path_str = rel.to_string();
         if path_str.contains("/base/") || path_str.starts_with("base/") {

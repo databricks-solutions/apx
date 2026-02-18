@@ -1,21 +1,29 @@
-"""Lakebase (Databricks Database) integration: config, engine, session, and lifespan."""
+"""Lakebase (Databricks Database) integration: config, engine, session, and dependency."""
+# /// apx
+# exports = ["from .lakebase import DatabaseConfig, LakebaseDependency, get_session"]
+# imports = [
+#     "from .lakebase import get_session",
+#     "from sqlmodel import Session",
+# ]
+# dependencies = ["sqlmodel>=0.0.27", "psycopg[binary,pool]>=3.2.11"]
+# aliases = ["Session: TypeAlias = Annotated[Session, Depends(get_session)]"]
+# ///
 
 from __future__ import annotations
 
 import logging
 import os
 from collections.abc import Generator
-from contextlib import asynccontextmanager
-from typing import Any, ClassVar
+from typing import Any
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
 from fastapi import FastAPI, Request
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import Engine, create_engine, event
 from sqlmodel import Session, SQLModel, text
 
+from ._base import AddonConfig, Dependency
 from ..._metadata import app_name
 
 logger = logging.getLogger(app_name)
@@ -24,10 +32,7 @@ logger = logging.getLogger(app_name)
 # --- Database Config ---
 
 
-class DatabaseConfig(BaseSettings):
-    model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
-        extra="ignore",
-    )
+class DatabaseConfig(AddonConfig):
     port: int = Field(
         description="The port of the database", default=5432, validation_alias="PGPORT"
     )
@@ -144,27 +149,28 @@ def initialize_models(engine: Engine) -> None:
     logger.info("Database models initialized successfully")
 
 
-# --- Lifespan ---
-
-
-@asynccontextmanager
-async def lakebase_lifespan(app: FastAPI):
-    """Lifespan that initializes and disposes the database engine."""
-    db_config = DatabaseConfig()
-    ws = app.state.workspace_client
-
-    engine = create_db_engine(db_config, ws)
-    validate_db(engine, db_config)
-    initialize_models(engine)
-
-    app.state.engine = engine
-
-    yield
-
-    engine.dispose()
-
-
 # --- Dependency ---
+
+
+class LakebaseDependency(Dependency[Session]):
+    REGISTRY_NAME = "Session"
+
+    async def initialize(self, app: FastAPI) -> None:
+        db_config = DatabaseConfig()  # ty: ignore[missing-argument]
+        ws = app.state.workspace_client
+
+        engine = create_db_engine(db_config, ws)
+        validate_db(engine, db_config)
+        initialize_models(engine)
+
+        app.state.engine = engine
+
+    async def shutdown(self, app: FastAPI) -> None:
+        if hasattr(app.state, "engine"):
+            app.state.engine.dispose()
+
+    def get_instance(self, request: Request) -> Session:
+        return Session(request.app.state.engine)
 
 
 def get_session(request: Request) -> Generator[Session, None, None]:

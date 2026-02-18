@@ -11,7 +11,7 @@ from starlette.staticfiles import NotModifiedResponse, StaticFiles
 from starlette.types import Scope
 
 from ..._metadata import api_prefix, dist_dir
-from .config import logger
+from ._config import logger
 
 
 class CachedStaticFiles(StaticFiles):

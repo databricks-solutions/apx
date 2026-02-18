@@ -53,11 +53,9 @@ pub fn list_templates(prefix: Option<&str>) -> Vec<String> {
 /// Returns the path to the written file.
 pub fn ensure_entrypoint(project_root: &std::path::Path) -> Result<PathBuf, String> {
     let dir = project_root.join("node_modules").join(".apx");
-    fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
     let dest = dir.join("entrypoint.ts");
-    fs::write(&dest, ENTRYPOINT_TS)
-        .map_err(|e| format!("Failed to write entrypoint.ts: {e}"))?;
+    fs::write(&dest, ENTRYPOINT_TS).map_err(|e| format!("Failed to write entrypoint.ts: {e}"))?;
     Ok(dest)
 }
 

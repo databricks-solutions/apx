@@ -262,10 +262,7 @@ pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, Str
     let ui = apx.get("ui");
 
     let ui_root = ui.map(|u| {
-        let root = u
-            .get("root")
-            .and_then(|v| v.as_str())
-            .unwrap_or("src/ui");
+        let root = u.get("root").and_then(|v| v.as_str()).unwrap_or("src/ui");
         PathBuf::from(root)
     });
 

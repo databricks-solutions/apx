@@ -78,7 +78,10 @@ async fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
 
         debug!(
             attempt,
-            backend_port, ?frontend_port, db_port, "Attempting to start dev server with ports"
+            backend_port,
+            ?frontend_port,
+            db_port,
+            "Attempting to start dev server with ports"
         );
 
         match run_server(
