@@ -1,13 +1,4 @@
 """Lakebase (Databricks Database) integration: config, engine, session, and dependency."""
-# /// apx
-# exports = ["from .lakebase import DatabaseConfig, LakebaseDependency, get_session"]
-# imports = [
-#     "from .lakebase import get_session",
-#     "from sqlmodel import Session",
-# ]
-# dependencies = ["sqlmodel>=0.0.27", "psycopg[binary,pool]>=3.2.11"]
-# aliases = ["Session: TypeAlias = Annotated[Session, Depends(get_session)]"]
-# ///
 
 from __future__ import annotations
 

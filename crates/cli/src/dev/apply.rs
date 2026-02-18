@@ -3,17 +3,125 @@ use dialoguer::Confirm;
 use similar::{ChangeTag, TextDiff};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tera::Context;
 
-use crate::common::{Assistant, Layout, find_app_dir};
+use crate::common::{find_app_dir, has_ui_config};
+use crate::components::add::{ComponentInput, add_components};
+use crate::init::merge_ui_pyproject_config;
 use crate::run_cli_async_helper;
+use apx_core::common::{BunCommand, format_elapsed_ms, spinner};
 use apx_core::interop::{get_template_content, list_template_files};
+
+// ─── Addon manifest types ───────────────────────────────
+
+#[derive(serde::Deserialize, Default)]
+#[allow(dead_code)]
+pub(crate) struct AddonManifest {
+    #[serde(default)]
+    pub addon: AddonInfo,
+    #[serde(default)]
+    pub python: PythonMeta,
+    #[serde(default)]
+    pub typescript: TypeScriptMeta,
+    #[serde(default)]
+    pub components: ComponentsMeta,
+    #[serde(default)]
+    pub config: ConfigMeta,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[allow(dead_code)]
+pub(crate) struct AddonInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub group: String,
+    #[serde(default)]
+    pub default: bool,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct PythonMeta {
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub edits: PythonEdits,
+}
+
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct PythonEdits {
+    #[serde(default)]
+    pub exports: Vec<String>,
+    #[serde(default)]
+    pub imports: Vec<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[allow(dead_code)]
+pub(crate) struct TypeScriptMeta {
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct ComponentsMeta {
+    #[serde(default)]
+    pub install: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct ConfigMeta {
+    #[serde(default)]
+    pub requires_bun: bool,
+}
+
+/// Read and parse the `addon.toml` manifest for an addon.
+pub(crate) fn read_addon_manifest(addon_dir_name: &str) -> Option<AddonManifest> {
+    let path = format!("addons/{}/addon.toml", addon_dir_name);
+    let content = get_template_content(&path).ok()?;
+    toml::from_str(&content).ok()
+}
+
+/// Discover all available addons by scanning embedded template files for `addon.toml`.
+/// Returns a list of (directory_name, manifest) pairs.
+pub(crate) fn discover_all_addons() -> Vec<(String, AddonManifest)> {
+    let all_files = list_template_files("addons/");
+    let mut seen = std::collections::HashSet::new();
+    let mut addons = Vec::new();
+
+    for file in &all_files {
+        // Match paths like "addons/<name>/addon.toml"
+        if let Some(rest) = file.strip_prefix("addons/") {
+            if let Some(slash) = rest.find('/') {
+                let dir_name = &rest[..slash];
+                if seen.insert(dir_name.to_string()) {
+                    if let Some(manifest) = read_addon_manifest(dir_name) {
+                        addons.push((dir_name.to_string(), manifest));
+                    }
+                }
+            }
+        }
+    }
+
+    addons
+}
+
+// ─── Addon enum ─────────────────────────────────────────
 
 /// Available addons that can be applied
 #[derive(ValueEnum, Clone, Debug, Copy)]
 #[value(rename_all = "lower")]
 pub enum Addon {
-    // Assistant addons (from common::Assistant)
+    /// Frontend UI with React, Vite, and TanStack Router
+    Ui,
+
     /// Cursor AI assistant rules
     Cursor,
     /// VSCode AI assistant rules
@@ -43,60 +151,42 @@ impl Addon {
     /// Get the directory name for this addon in the templates folder
     fn directory_name(&self) -> &str {
         match self {
-            // Assistant addons
-            Addon::Cursor => Assistant::Cursor.directory_name(),
-            Addon::Vscode => Assistant::Vscode.directory_name(),
-            Addon::Claude => Assistant::Claude.directory_name(),
-            Addon::Codex => Assistant::Codex.directory_name(),
-            // Backend addons
+            Addon::Ui => "ui",
+            Addon::Cursor => "cursor",
+            Addon::Vscode => "vscode",
+            Addon::Claude => "claude",
+            Addon::Codex => "codex",
             Addon::Lakebase => "lakebase",
             Addon::Sql => "sql",
             Addon::ServingEndpoint => "serving-endpoint",
             Addon::Genie => "genie",
-            // Layout addons
-            Addon::Sidebar => Layout::Sidebar.directory_name().unwrap_or("sidebar"),
-        }
-    }
-
-    /// Check if this addon is a backend addon (uses AST-based application)
-    fn is_backend(&self) -> bool {
-        matches!(
-            self,
-            Addon::Lakebase | Addon::Sql | Addon::ServingEndpoint | Addon::Genie
-        )
-    }
-
-    /// Get the BackendAddonSpec for this addon, if it's a backend addon
-    fn backend_spec(&self) -> Option<BackendAddonSpec> {
-        match self {
-            Addon::Lakebase => Some(BackendAddonSpec {
-                name: "lakebase",
-                template_dir: "lakebase",
-            }),
-            Addon::Sql => Some(BackendAddonSpec {
-                name: "sql",
-                template_dir: "sql",
-            }),
-            Addon::ServingEndpoint => Some(BackendAddonSpec {
-                name: "serving-endpoint",
-                template_dir: "serving-endpoint",
-            }),
-            Addon::Genie => Some(BackendAddonSpec {
-                name: "genie",
-                template_dir: "genie",
-            }),
-            _ => None,
+            Addon::Sidebar => "sidebar",
         }
     }
 }
 
-/// Specification for a backend addon.
-struct BackendAddonSpec {
-    /// Name (for display)
-    name: &'static str,
-    /// Template directory under addons/
-    template_dir: &'static str,
+/// Check if an addon's manifest has non-empty Python edits.
+fn has_python_edits(manifest: &AddonManifest) -> bool {
+    !manifest.python.edits.exports.is_empty()
+        || !manifest.python.edits.imports.is_empty()
+        || !manifest.python.edits.aliases.is_empty()
 }
+
+/// Check whether a given addon is already applied by inspecting the project.
+fn is_addon_applied(addon_name: &str, app_dir: &Path) -> Result<bool, String> {
+    match addon_name {
+        "ui" => {
+            let pyproject_path = app_dir.join("pyproject.toml");
+            Ok(has_ui_config(&pyproject_path))
+        }
+        _ => {
+            // For other addons, we don't have a reliable check yet
+            Ok(false)
+        }
+    }
+}
+
+// ─── Python edit types ──────────────────────────────────
 
 /// A Python source code edit to apply via AST.
 enum PythonEdit {
@@ -106,82 +196,30 @@ enum PythonEdit {
     AddAlias { type_alias_code: String },
 }
 
-/// Inline metadata parsed from a `# /// apx` ... `# ///` TOML block.
-#[derive(serde::Deserialize, Default)]
-struct AddonMetadata {
-    /// Import statements to add to `backend/core/__init__.py`
-    #[serde(default)]
-    exports: Vec<String>,
-    /// Import statements to add to `backend/core/dependencies.py`
-    #[serde(default)]
-    imports: Vec<String>,
-    /// Python package dependencies to add to pyproject.toml
-    #[serde(default)]
-    dependencies: Vec<String>,
-    /// TypeAlias members to add to the `Dependencies` class
-    #[serde(default)]
-    aliases: Vec<String>,
-}
-
-/// Extract and parse the `# /// apx` TOML block from a Python source file.
-fn parse_addon_metadata(source: &str) -> AddonMetadata {
-    // Extract the TOML payload between `# /// apx` and `# ///`
-    let mut in_block = false;
-    let mut toml_lines = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed == "# /// apx" {
-            in_block = true;
-            continue;
-        }
-        if in_block {
-            if trimmed == "# ///" {
-                break;
-            }
-            // Strip the leading `# ` comment prefix
-            let payload = trimmed
-                .strip_prefix("# ")
-                .unwrap_or(trimmed.strip_prefix("#").unwrap_or(trimmed));
-            toml_lines.push(payload);
-        }
-    }
-
-    if toml_lines.is_empty() {
-        return AddonMetadata::default();
-    }
-
-    let toml_str = toml_lines.join("\n");
-    match toml::from_str(&toml_str) {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!("Failed to parse # /// apx metadata: {e}");
-            AddonMetadata::default()
-        }
-    }
-}
-
-/// Convert an [`AddonMetadata`] into a list of [`PythonEdit`]s.
-fn metadata_to_edits(meta: &AddonMetadata) -> Vec<PythonEdit> {
-    let mut edits = Vec::new();
-    for stmt in &meta.exports {
-        edits.push(PythonEdit::AddImport {
+/// Convert [`PythonEdits`] from manifest into a list of [`PythonEdit`]s.
+fn metadata_to_edits(edits: &PythonEdits) -> Vec<PythonEdit> {
+    let mut result = Vec::new();
+    for stmt in &edits.exports {
+        result.push(PythonEdit::AddImport {
             file: "backend/core/__init__.py".into(),
             statement: stmt.clone(),
         });
     }
-    for stmt in &meta.imports {
-        edits.push(PythonEdit::AddImport {
+    for stmt in &edits.imports {
+        result.push(PythonEdit::AddImport {
             file: "backend/core/dependencies.py".into(),
             statement: stmt.clone(),
         });
     }
-    for code in &meta.aliases {
-        edits.push(PythonEdit::AddAlias {
+    for code in &edits.aliases {
+        result.push(PythonEdit::AddAlias {
             type_alias_code: code.clone(),
         });
     }
-    edits
+    result
 }
+
+// ─── CLI args ───────────────────────────────────────────
 
 #[derive(Args, Debug, Clone)]
 pub struct ApplyArgs {
@@ -206,6 +244,8 @@ pub struct ApplyArgs {
 pub async fn run(args: ApplyArgs) -> i32 {
     run_cli_async_helper(|| run_inner(args)).await
 }
+
+// ─── File change tracking ───────────────────────────────
 
 /// Represents a file that will be created or modified
 #[derive(Debug)]
@@ -271,6 +311,8 @@ impl FileChange {
     }
 }
 
+// ─── Main apply flow ────────────────────────────────────
+
 async fn run_inner(args: ApplyArgs) -> Result<(), String> {
     let addon = args.addon;
     let yes = args.yes;
@@ -279,33 +321,115 @@ async fn run_inner(args: ApplyArgs) -> Result<(), String> {
     // Read project context
     let (app_name, app_slug) = read_project_context(&app_dir)?;
 
-    if addon.is_backend() {
-        return apply_backend_addon(addon, yes, &app_dir, &app_slug);
+    // Apply addon (and its dependencies recursively)
+    apply_single_addon(addon.directory_name(), yes, &app_dir, &app_name, &app_slug).await
+}
+
+/// Apply a single addon by name, auto-resolving any `depends_on` first.
+async fn apply_single_addon(
+    addon_name: &str,
+    yes: bool,
+    app_dir: &Path,
+    app_name: &str,
+    app_slug: &str,
+) -> Result<(), String> {
+    let manifest = read_addon_manifest(addon_name);
+
+    // Auto-resolve dependencies: apply any missing depends_on addons first
+    if let Some(ref manifest) = manifest {
+        for dep in &manifest.addon.depends_on {
+            if !is_addon_applied(dep, app_dir)? {
+                println!(
+                    "📦 Addon '{}' requires '{}' — applying it first...\n",
+                    addon_name, dep
+                );
+                Box::pin(apply_single_addon(dep, yes, app_dir, app_name, app_slug)).await?;
+                println!();
+            }
+        }
+
+        // Resolve bun if needed
+        if manifest.config.requires_bun {
+            let _bun = BunCommand::new().await?;
+        }
     }
 
-    let addon_prefix = format!("addons/{}/", addon.directory_name());
+    // Determine if this addon has python edits (backend addon)
+    let is_backend = manifest
+        .as_ref()
+        .map(|m| has_python_edits(m))
+        .unwrap_or(false);
+
+    // Build a temporary Addon value for display/file-copy (non-backend path)
+    if is_backend {
+        let manifest = manifest.as_ref().unwrap();
+        apply_backend_addon(addon_name, manifest, yes, app_dir, app_slug)?;
+    } else {
+        apply_file_addon_by_name(addon_name, yes, app_dir, app_name, app_slug)?;
+    }
+
+    // Handle UI addon's pyproject merge
+    if addon_name == "ui" {
+        merge_ui_pyproject_config(app_dir, app_slug)?;
+    }
+
+    // Install components from manifest
+    if let Some(ref manifest) = manifest {
+        let components: Vec<ComponentInput> = manifest
+            .components
+            .install
+            .iter()
+            .map(|c| ComponentInput::new(c))
+            .collect();
+        if !components.is_empty() {
+            let components_start = Instant::now();
+            let sp = spinner("🎨 Adding components...");
+            let result = add_components(app_dir, &components, true).await?;
+            sp.finish_and_clear();
+            println!(
+                "✅ Components added ({})",
+                format_elapsed_ms(components_start)
+            );
+            if !result.warnings.is_empty() {
+                for warning in &result.warnings {
+                    eprintln!("   ⚠️  {warning}");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply a non-backend addon using file copy with diff preview.
+fn apply_file_addon_by_name(
+    addon_name: &str,
+    yes: bool,
+    app_dir: &Path,
+    app_name: &str,
+    app_slug: &str,
+) -> Result<(), String> {
+    let addon_prefix = format!("addons/{}/", addon_name);
     let addon_files = list_template_files(&addon_prefix);
 
     if addon_files.is_empty() {
         return Err(format!(
             "Addon '{}' not found (no embedded templates with prefix '{}')",
-            addon.directory_name(),
-            addon_prefix,
+            addon_name, addon_prefix,
         ));
     }
 
     println!(
         "Applying {} addon to {}...\n",
-        addon.directory_name(),
+        addon_name,
         app_dir
             .canonicalize()
-            .unwrap_or_else(|_| app_dir.clone())
+            .unwrap_or_else(|_| app_dir.to_path_buf())
             .display()
     );
 
     // Collect all file changes
-    let changes =
-        collect_file_changes(&addon_prefix, &addon_files, &app_dir, &app_name, &app_slug)?;
+    let changes = collect_file_changes(&addon_prefix, &addon_files, app_dir, app_name, app_slug)?;
 
     if changes.is_empty() {
         println!("No changes to apply.");
@@ -399,26 +523,23 @@ async fn run_inner(args: ApplyArgs) -> Result<(), String> {
 
     println!(
         "\n\x1b[32m✓\x1b[0m Applied {} addon: {} file(s) created, {} file(s) modified",
-        addon.directory_name(),
-        created,
-        modified
+        addon_name, created, modified
     );
 
     Ok(())
 }
 
-/// Apply a backend addon using AST-based edits.
+/// Apply a backend addon using AST-based edits, reading metadata from addon.toml manifest.
 fn apply_backend_addon(
-    addon: Addon,
+    addon_dir: &str,
+    manifest: &AddonManifest,
     _yes: bool,
     app_dir: &Path,
     app_slug: &str,
 ) -> Result<(), String> {
-    let spec = addon.backend_spec().ok_or("Not a backend addon")?;
-
     println!(
         "Applying {} backend addon to {}...\n",
-        spec.name,
+        addon_dir,
         app_dir
             .canonicalize()
             .unwrap_or_else(|_| app_dir.to_path_buf())
@@ -428,13 +549,19 @@ fn apply_backend_addon(
     let src_prefix = PathBuf::from("src").join(app_slug);
 
     // 1. Copy template files from addon (embedded)
-    let addon_prefix = format!("addons/{}/", spec.template_dir);
+    let addon_prefix = format!("addons/{}/", addon_dir);
     let addon_files = list_template_files(&addon_prefix);
     let mut copied_files = Vec::new();
     for file_path in &addon_files {
         let rel = file_path
             .strip_prefix(&addon_prefix)
             .unwrap_or(file_path.as_str());
+
+        // Skip addon manifest — internal metadata, not user-facing
+        if rel == "addon.toml" || rel.ends_with("/addon.toml") {
+            continue;
+        }
+
         let mut path_str = rel.to_string();
         if path_str.contains("/base/") || path_str.starts_with("base/") {
             path_str = path_str
@@ -442,7 +569,7 @@ fn apply_backend_addon(
                 .replace("base/", &format!("{app_slug}/"));
         }
         let is_template = path_str.ends_with(".jinja2");
-        // Skip jinja2 config templates (databricks.yml, pyproject.toml, .env) — those need special handling
+        // Skip jinja2 config templates (databricks.yml, .env) — those need special handling
         if is_template && !path_str.contains("/backend/") {
             // Render config templates
             let final_path = path_str.trim_end_matches(".jinja2");
@@ -475,75 +602,56 @@ fn apply_backend_addon(
         copied_files.push(final_path);
     }
 
-    // 2. Parse metadata from copied Python files and apply AST edits
+    // 2. Apply AST edits from manifest
     let mut ast_edits_applied = 0;
-    let mut all_python_deps: Vec<String> = Vec::new();
-    for file_rel in &copied_files {
-        if file_rel.contains("/backend/core/") && file_rel.ends_with(".py") {
-            let full_path = app_dir.join(file_rel);
-            let source = fs::read_to_string(&full_path).map_err(|e| format!("Read error: {e}"))?;
-            let meta = parse_addon_metadata(&source);
-            all_python_deps.extend(meta.dependencies.iter().cloned());
-            for edit in &metadata_to_edits(&meta) {
-                match edit {
-                    PythonEdit::AddImport { file, statement } => {
-                        let target = app_dir.join(&src_prefix).join(file);
-                        if !target.exists() {
-                            tracing::warn!(
-                                "Target file for AST edit not found: {}",
-                                target.display()
-                            );
-                            continue;
-                        }
-                        let source =
-                            fs::read_to_string(&target).map_err(|e| format!("Read error: {e}"))?;
-                        match apx_core::py_edit::add_import(&source, statement) {
-                            Ok(new_source) => {
-                                fs::write(&target, new_source)
-                                    .map_err(|e| format!("Write error: {e}"))?;
-                                ast_edits_applied += 1;
-                            }
-                            Err(apx_core::py_edit::PyEditError::AlreadyPresent(_)) => {
-                                // Idempotent — skip
-                            }
-                            Err(e) => {
-                                return Err(format!("AST edit error on {}: {e}", target.display()));
-                            }
-                        }
+    for edit in &metadata_to_edits(&manifest.python.edits) {
+        match edit {
+            PythonEdit::AddImport { file, statement } => {
+                let target = app_dir.join(&src_prefix).join(file);
+                if !target.exists() {
+                    tracing::warn!("Target file for AST edit not found: {}", target.display());
+                    continue;
+                }
+                let source = fs::read_to_string(&target).map_err(|e| format!("Read error: {e}"))?;
+                match apx_core::py_edit::add_import(&source, statement) {
+                    Ok(new_source) => {
+                        fs::write(&target, new_source).map_err(|e| format!("Write error: {e}"))?;
+                        ast_edits_applied += 1;
                     }
-                    PythonEdit::AddAlias { type_alias_code } => {
-                        let target = app_dir
-                            .join(&src_prefix)
-                            .join("backend/core/dependencies.py");
-                        if !target.exists() {
-                            tracing::warn!("dependencies.py not found: {}", target.display());
-                            continue;
-                        }
-                        let source =
-                            fs::read_to_string(&target).map_err(|e| format!("Read error: {e}"))?;
-                        match apx_core::py_edit::add_class_member(
-                            &source,
-                            "Dependencies",
-                            type_alias_code,
-                        ) {
-                            Ok(new_source) => {
-                                fs::write(&target, new_source)
-                                    .map_err(|e| format!("Write error: {e}"))?;
-                                ast_edits_applied += 1;
-                            }
-                            Err(apx_core::py_edit::PyEditError::AlreadyPresent(_)) => {}
-                            Err(e) => {
-                                return Err(format!("AST edit error on dependencies.py: {e}"));
-                            }
-                        }
+                    Err(apx_core::py_edit::PyEditError::AlreadyPresent(_)) => {
+                        // Idempotent — skip
+                    }
+                    Err(e) => {
+                        return Err(format!("AST edit error on {}: {e}", target.display()));
+                    }
+                }
+            }
+            PythonEdit::AddAlias { type_alias_code } => {
+                let target = app_dir
+                    .join(&src_prefix)
+                    .join("backend/core/dependencies.py");
+                if !target.exists() {
+                    tracing::warn!("dependencies.py not found: {}", target.display());
+                    continue;
+                }
+                let source = fs::read_to_string(&target).map_err(|e| format!("Read error: {e}"))?;
+                match apx_core::py_edit::add_class_member(&source, "Dependencies", type_alias_code)
+                {
+                    Ok(new_source) => {
+                        fs::write(&target, new_source).map_err(|e| format!("Write error: {e}"))?;
+                        ast_edits_applied += 1;
+                    }
+                    Err(apx_core::py_edit::PyEditError::AlreadyPresent(_)) => {}
+                    Err(e) => {
+                        return Err(format!("AST edit error on dependencies.py: {e}"));
                     }
                 }
             }
         }
     }
 
-    // 3. Add Python dependencies to pyproject.toml (from metadata)
-    if !all_python_deps.is_empty() {
+    // 3. Add Python dependencies to pyproject.toml (from manifest)
+    if !manifest.python.dependencies.is_empty() {
         let pyproject_path = app_dir.join("pyproject.toml");
         crate::common::modify_pyproject(&pyproject_path, |doc| {
             let project = doc["project"]
@@ -552,7 +660,7 @@ fn apply_backend_addon(
             let deps = project["dependencies"]
                 .as_array_mut()
                 .ok_or("Missing project.dependencies")?;
-            for dep in &all_python_deps {
+            for dep in &manifest.python.dependencies {
                 let already = deps.iter().any(|v| {
                     v.as_str()
                         .map(|s| s.starts_with(dep.split('>').next().unwrap_or(dep)))
@@ -575,13 +683,15 @@ fn apply_backend_addon(
 
     println!(
         "\n\x1b[32m✓\x1b[0m Applied {} backend addon: {} file(s) copied, {} AST edit(s) applied",
-        spec.name,
+        addon_dir,
         copied_files.len(),
         ast_edits_applied
     );
 
     Ok(())
 }
+
+// ─── Helpers ────────────────────────────────────────────
 
 /// Read project context (app_name and app_slug) from pyproject.toml
 fn read_project_context(app_dir: &Path) -> Result<(String, String), String> {
@@ -626,6 +736,11 @@ fn collect_file_changes(
 
     for file_path in files {
         let rel = file_path.strip_prefix(prefix).unwrap_or(file_path.as_str());
+
+        // Skip addon manifest — internal metadata, not user-facing
+        if rel == "addon.toml" || rel.ends_with("/addon.toml") {
+            continue;
+        }
 
         let mut path_str = rel.to_string();
 

@@ -10,20 +10,18 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::common::{Assistant, Layout, Template};
     use crate::dev::apply::{Addon, ApplyArgs};
     use crate::dev::check::CheckArgs;
     use crate::init::InitArgs;
 
     /// Run `apx init` with the given parameters, asserting exit code 0.
-    async fn apx_init(app_path: &Path, template: Template, layout: Option<Layout>) {
+    async fn apx_init(app_path: &Path, addons: Vec<&str>) {
         let code = crate::init::run(InitArgs {
             app_path: Some(app_path.to_path_buf()),
             app_name: Some("test-app".to_string()),
-            template: Some(template),
+            addons: Some(addons.into_iter().map(String::from).collect()),
+            no_addons: false,
             profile: Some("default".to_string()),
-            assistant: Some(Assistant::Claude),
-            layout,
             as_member: None,
         })
         .await;
@@ -55,31 +53,33 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let app_path = dir.path().join("test-app");
 
-        // Step 1: Init as minimal (no UI)
-        apx_init(&app_path, Template::Minimal, None).await;
+        // Step 1: Init without addons (backend-only)
+        apx_init(&app_path, vec!["none"]).await;
         assert!(
             app_path.join("src/test_app/backend").exists(),
-            "backend directory should exist after minimal init"
+            "backend directory should exist after no-addon init"
         );
         assert!(
             !app_path.join("package.json").exists(),
-            "package.json should NOT exist for minimal template"
+            "package.json should NOT exist for no-addon init"
         );
         // ty-only check (no tsc, no route tree)
         apx_check(&app_path).await;
 
-        // Step 2: Re-init as essential (with UI + sidebar layout, which installs
-        // the required shadcn components like sidebar, avatar, card, etc.)
-        apx_init(&app_path, Template::Essential, Some(Layout::Sidebar)).await;
+        // Step 2: Re-init with UI + sidebar + claude addons
+        apx_init(&app_path, vec!["ui", "sidebar", "claude"]).await;
         assert!(
             app_path.join("package.json").exists(),
-            "package.json should exist for essential template"
+            "package.json should exist for ui-enabled init"
+        );
+        assert!(
+            app_path.join("CLAUDE.md").exists(),
+            "CLAUDE.md should exist after claude addon"
         );
         // Full check: tsc + ty
         apx_check(&app_path).await;
 
         // Step 3: Apply each backend addon, checking after each.
-        // Sidebar is already applied via the layout above, so we only test backend addons.
         // Addon configs are validated during lifespan (not import), so no env vars needed.
         for addon in [
             Addon::Sql,

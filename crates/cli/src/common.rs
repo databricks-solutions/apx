@@ -1,6 +1,5 @@
 //! Common types shared across CLI commands
 
-use clap::ValueEnum;
 use std::fs;
 use std::path::{Path, PathBuf};
 use toml_edit::DocumentMut;
@@ -112,71 +111,13 @@ pub(crate) fn modify_pyproject(
     Ok(())
 }
 
-/// Project template types
-#[derive(ValueEnum, Clone, Debug, Copy, PartialEq, Eq)]
-#[value(rename_all = "lower")]
-pub enum Template {
-    /// Minimal backend-only template (no frontend)
-    Minimal,
-    /// Standard template with UI and API
-    Essential,
-}
-
-impl Template {
-    /// Get the directory name for this template
-    #[allow(dead_code)]
-    pub fn directory_name(&self) -> &str {
-        match self {
-            Template::Minimal => "base",
-            Template::Essential => "base",
-        }
-    }
-}
-
-/// AI assistant configuration types
-#[derive(ValueEnum, Clone, Debug, Copy, PartialEq, Eq)]
-#[value(rename_all = "lower")]
-pub enum Assistant {
-    /// Cursor IDE rules and MCP config
-    Cursor,
-    /// VSCode instructions and MCP config
-    Vscode,
-    /// OpenAI Codex AGENTS.md file
-    Codex,
-    /// Claude project file and MCP config
-    Claude,
-}
-
-impl Assistant {
-    /// Get the directory name for this assistant addon
-    pub fn directory_name(&self) -> &str {
-        match self {
-            Assistant::Cursor => "cursor",
-            Assistant::Vscode => "vscode",
-            Assistant::Codex => "codex",
-            Assistant::Claude => "claude",
-        }
-    }
-}
-
-/// UI layout types
-#[derive(ValueEnum, Clone, Debug, Copy, PartialEq, Eq)]
-#[value(rename_all = "lower")]
-pub enum Layout {
-    /// Basic layout without sidebar
-    Basic,
-    /// Sidebar navigation layout
-    Sidebar,
-}
-
-impl Layout {
-    /// Get the directory name for this layout addon (None for Basic)
-    pub fn directory_name(&self) -> Option<&str> {
-        match self {
-            Layout::Basic => None,
-            Layout::Sidebar => Some("sidebar"),
-        }
-    }
+/// Check whether a `pyproject.toml` file contains a `[tool.apx.ui]` section.
+pub(crate) fn has_ui_config(pyproject_path: &Path) -> bool {
+    fs::read_to_string(pyproject_path)
+        .ok()
+        .and_then(|s| s.parse::<toml::Value>().ok())
+        .and_then(|v| v.get("tool")?.get("apx")?.get("ui").cloned())
+        .is_some()
 }
 
 #[cfg(test)]

@@ -1,12 +1,4 @@
 """Genie Space client dependency."""
-# /// apx
-# exports = ["from .genie import GenieDependency, get_genie"]
-# imports = [
-#     "from .genie import get_genie",
-#     "from databricks.sdk.service.dashboards import GenieAPI",
-# ]
-# aliases = ["GenieSpace: TypeAlias = Annotated[GenieAPI, Depends(get_genie)]"]
-# ///
 
 from __future__ import annotations
 

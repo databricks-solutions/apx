@@ -1,12 +1,4 @@
 """SQL Warehouse connection dependency."""
-# /// apx
-# exports = ["from .sql import SqlDependency, get_connection"]
-# imports = [
-#     "from .sql import get_connection",
-#     "from databricks.sdk.service.sql import StatementExecutionAPI",
-# ]
-# aliases = ["Connection: TypeAlias = Annotated[StatementExecutionAPI, Depends(get_connection)]"]
-# ///
 
 from __future__ import annotations
 

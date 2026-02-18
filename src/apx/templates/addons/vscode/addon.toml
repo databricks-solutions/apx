@@ -1,0 +1,4 @@
+[addon]
+name = "vscode"
+description = "VS Code instructions and MCP config"
+group = "assistants"

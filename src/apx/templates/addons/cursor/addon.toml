@@ -1,0 +1,4 @@
+[addon]
+name = "cursor"
+description = "Cursor IDE rules and MCP config"
+group = "assistants"

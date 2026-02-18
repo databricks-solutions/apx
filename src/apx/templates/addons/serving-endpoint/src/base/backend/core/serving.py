@@ -1,12 +1,4 @@
 """Serving Endpoint client dependency."""
-# /// apx
-# exports = ["from .serving import ServingDependency, get_serving_endpoint"]
-# imports = [
-#     "from .serving import get_serving_endpoint",
-#     "from databricks.sdk.service.serving import ServingEndpointsAPI",
-# ]
-# aliases = ["ServingEndpoint: TypeAlias = Annotated[ServingEndpointsAPI, Depends(get_serving_endpoint)]"]
-# ///
 
 from __future__ import annotations
 

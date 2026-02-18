@@ -1,0 +1,11 @@
+[addon]
+name = "ui"
+description = "Frontend UI with React, Vite, and TanStack Router"
+group = "ui"
+default = true
+
+[components]
+install = ["button"]
+
+[config]
+requires_bun = true
