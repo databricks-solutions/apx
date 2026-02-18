@@ -140,10 +140,10 @@ pub async fn run_server(
     );
 
     // Start OpenAPI watcher with shutdown receiver (only for projects with UI)
-    if process_manager.has_ui() {
-        if let Err(err) = start_openapi_watcher(app_dir.clone(), shutdown_tx.subscribe()) {
-            warn!("Failed to start OpenAPI watcher: {err}");
-        }
+    if process_manager.has_ui()
+        && let Err(err) = start_openapi_watcher(app_dir.clone(), shutdown_tx.subscribe())
+    {
+        warn!("Failed to start OpenAPI watcher: {err}");
     }
 
     // Start filesystem watcher to stop server if project folder or lock file is removed

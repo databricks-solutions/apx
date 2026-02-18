@@ -98,14 +98,14 @@ pub(crate) fn discover_all_addons() -> Vec<(String, AddonManifest)> {
 
     for file in &all_files {
         // Match paths like "addons/<name>/addon.toml"
-        if let Some(rest) = file.strip_prefix("addons/") {
-            if let Some(slash) = rest.find('/') {
-                let dir_name = &rest[..slash];
-                if seen.insert(dir_name.to_string()) {
-                    if let Some(manifest) = read_addon_manifest(dir_name) {
-                        addons.push((dir_name.to_string(), manifest));
-                    }
-                }
+        if let Some(rest) = file.strip_prefix("addons/")
+            && let Some(slash) = rest.find('/')
+        {
+            let dir_name = &rest[..slash];
+            if seen.insert(dir_name.to_string())
+                && let Some(manifest) = read_addon_manifest(dir_name)
+            {
+                addons.push((dir_name.to_string(), manifest));
             }
         }
     }
@@ -354,15 +354,10 @@ async fn apply_single_addon(
         }
     }
 
-    // Determine if this addon has python edits (backend addon)
-    let is_backend = manifest
-        .as_ref()
-        .map(|m| has_python_edits(m))
-        .unwrap_or(false);
-
-    // Build a temporary Addon value for display/file-copy (non-backend path)
-    if is_backend {
-        let manifest = manifest.as_ref().unwrap();
+    // Apply backend addon if manifest has python edits, otherwise apply file addon
+    if let Some(ref manifest) = manifest
+        && has_python_edits(manifest)
+    {
         apply_backend_addon(addon_name, manifest, yes, app_dir, app_slug)?;
     } else {
         apply_file_addon_by_name(addon_name, yes, app_dir, app_name, app_slug)?;
@@ -379,7 +374,7 @@ async fn apply_single_addon(
             .components
             .install
             .iter()
-            .map(|c| ComponentInput::new(c))
+            .map(ComponentInput::new)
             .collect();
         if !components.is_empty() {
             let components_start = Instant::now();

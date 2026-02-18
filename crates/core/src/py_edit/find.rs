@@ -27,10 +27,10 @@ pub fn import_exists(source: &str, import_stmt: &str) -> bool {
 /// Find a class definition by name. Returns the class def node's range and body info.
 pub fn find_class<'a>(stmts: &'a [Stmt], class_name: &str) -> Option<&'a StmtClassDef> {
     for stmt in stmts {
-        if let Stmt::ClassDef(class_def) = stmt {
-            if class_def.name.as_str() == class_name {
-                return Some(class_def);
-            }
+        if let Stmt::ClassDef(class_def) = stmt
+            && class_def.name.as_str() == class_name
+        {
+            return Some(class_def);
         }
     }
     None
@@ -117,7 +117,7 @@ fn find_call_in_expr(expr: &Expr, call_target: &str) -> Option<CallInfo> {
                 .arguments
                 .keywords
                 .iter()
-                .filter_map(|kw| keyword_info(kw))
+                .filter_map(keyword_info)
                 .collect();
 
             return Some(CallInfo {
