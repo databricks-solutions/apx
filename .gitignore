@@ -42,6 +42,10 @@ src/apx/binaries/*
 experiments/
 target/
 
+# Claude addon build artifacts (copied by build.rs)
+src/apx/templates/addons/claude/.claude/
+src/apx/templates/addons/claude/hooks/
+
 *.so
 
 .bins/

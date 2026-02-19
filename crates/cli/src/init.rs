@@ -390,8 +390,11 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
                 let prefix = format!("addons/{}/", addon_name);
                 render_embedded_templates(&prefix, &app_path, &app_name, &app_slug)?;
 
-                // Apply Python AST edits (imports + Dependencies aliases) from manifest
+                // Apply Python AST edits and install skills from manifest
                 if let Some(manifest) = read_addon_manifest(addon_name) {
+                    if let Some(ref skill_path) = manifest.addon.skill_path {
+                        crate::skill::install::install_skills_to(&app_path, skill_path)?;
+                    }
                     apply_python_edits(&manifest, &app_path, &app_slug)?;
                 }
 

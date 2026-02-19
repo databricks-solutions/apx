@@ -1,6 +1,6 @@
 use clap::Args;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::run_cli_async_helper;
 use apx_core::interop::{get_template_content, list_template_files};
@@ -10,6 +10,10 @@ pub struct InstallArgs {
     /// Install to ~/.claude/ (global) instead of .claude/ (project-level)
     #[arg(long)]
     pub global: bool,
+
+    /// Directory where skill files are installed (relative to base dir)
+    #[arg(long, default_value = ".claude/skills/apx")]
+    pub path: String,
 }
 
 pub async fn run(args: InstallArgs) -> i32 {
@@ -24,34 +28,10 @@ async fn run_inner(args: InstallArgs) -> Result<(), String> {
             .map_err(|e| format!("Could not determine current directory: {e}"))?
     };
 
-    let prefix = "addons/claude/";
-    let all_files = list_template_files(prefix);
+    let installed = install_skills_to(&base_dir, &args.path)?;
 
-    if all_files.is_empty() {
-        return Err("No embedded skill files found".into());
-    }
-
-    let mut installed = Vec::new();
-
-    for file_path in &all_files {
-        let rel = file_path.strip_prefix(prefix).unwrap_or(file_path.as_str());
-
-        // Skip addon.toml (internal metadata) and .gitignore
-        if rel == "addon.toml" || rel == ".gitignore" {
-            continue;
-        }
-
-        let target = base_dir.join(rel);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
-        }
-
-        let content = get_template_content(file_path)?;
-        fs::write(&target, content.as_bytes())
-            .map_err(|e| format!("Failed to write {}: {e}", target.display()))?;
-
-        installed.push(rel.to_string());
+    if installed.is_empty() {
+        return Err("No skill files found to install".into());
     }
 
     let location = if args.global {
@@ -65,6 +45,57 @@ async fn run_inner(args: InstallArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Install skill infrastructure files (skills, .mcp.json, hooks) to a target directory.
+///
+/// Reads embedded files from `addons/claude/` and writes:
+/// - `.claude/skills/apx/*` → `{base_dir}/{skill_path}/`
+/// - `.mcp.json` → `{base_dir}/.mcp.json`
+/// - `hooks/*` → `{base_dir}/hooks/`
+///
+/// Skips addon-specific files (addon.toml, templates, cursor/vscode/github configs).
+pub fn install_skills_to(base_dir: &Path, skill_path: &str) -> Result<Vec<String>, String> {
+    let prefix = "addons/claude/";
+    let all_files = list_template_files(prefix);
+
+    if all_files.is_empty() {
+        return Err("No embedded skill files found".into());
+    }
+
+    let skill_source_prefix = ".claude/skills/apx/";
+    let mut installed = Vec::new();
+
+    for file_path in &all_files {
+        let rel = file_path.strip_prefix(prefix).unwrap_or(file_path.as_str());
+
+        // Determine output path based on file type
+        let output_rel = if let Some(skill_rel) = rel.strip_prefix(skill_source_prefix) {
+            // Skill markdown files: rebase from .claude/skills/apx/ to skill_path/
+            format!("{}/{}", skill_path, skill_rel)
+        } else if rel == ".mcp.json" {
+            ".mcp.json".to_string()
+        } else if rel.starts_with("hooks/") {
+            rel.to_string()
+        } else {
+            // Skip addon.toml, CLAUDE.md.jinja2, and any other addon-specific files
+            continue;
+        };
+
+        let target = base_dir.join(&output_rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
+        }
+
+        let content = get_template_content(file_path)?;
+        fs::write(&target, content.as_bytes())
+            .map_err(|e| format!("Failed to write {}: {e}", target.display()))?;
+
+        installed.push(output_rel);
+    }
+
+    Ok(installed)
 }
 
 fn home_dir() -> Result<PathBuf, String> {

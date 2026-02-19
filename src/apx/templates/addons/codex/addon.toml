@@ -2,3 +2,4 @@
 name = "codex"
 description = "🧠 OpenAI Codex AGENTS.md file"
 group = "assistants"
+skill_path = ".agents/skills/apx"

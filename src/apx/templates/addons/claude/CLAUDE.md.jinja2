@@ -1,0 +1,84 @@
+# apx Project
+
+Full-stack Databricks App built with apx (React + Vite frontend, FastAPI backend).
+
+## Do's and Don'ts
+- OpenAPI client auto-regenerates on code changes when dev servers are running - don't manually regenerate.
+- Prefer running apx related commands via MCP server if it's available.
+- Use the apx MCP `search_registry_components` and `add_component` tools to find and add shadcn/ui components.
+- When using the API calls on the frontend, use error boundaries to handle errors.
+- Run `apx dev check` command (via CLI or MCP) to check for errors in the project code after making changes.
+- If agent has access to native browser tool, use it to verify changes on the frontend. If such tool is not present or is not working, use playwright MCP to automate browser actions (e.g. screenshots, clicks, etc.).
+- Avoid unnecessary restarts of the development servers
+- **Databricks SDK:** Use the apx MCP `docs` tool to search Databricks SDK documentation instead of guessing or hallucinating API signatures.
+
+## Package Management
+- **Frontend:** Use `apx bun install` or `apx bun add <dependency>` for frontend package management.
+- **Python:** Always use `uv` (never `pip`)
+
+## Component Management
+- **Finding components:** Use MCP `search_registry_components` to search for available shadcn/ui components
+- **Adding components:** Use MCP `add_component` or CLI `apx components add <component> --yes` to add components
+- **Component location:** If component was added to a wrong location (e.g. stored into `src/components` instead of `src/{{app_name}}/ui/components`), move it to the proper folder
+- **Component organization:** Prefer grouping components by functionality rather than by file type (e.g. `src/{{app_name}}/ui/components/chat/`)
+
+## Project Structure
+Full-stack app: `src/{{app_name}}/ui/` (React + Vite) and `src/{{app_name}}/backend/` (FastAPI). Backend serves frontend at `/` and API at `/api`. API client auto-generated from OpenAPI schema.
+
+## Dependencies & Dependency Injection
+
+The `Dependency` class in `src/{{app_name}}/backend/core.py` provides typed FastAPI dependencies. **Always use these instead of manually creating clients or accessing `request.app.state`.**
+
+| Dependency | Type | Description |
+|---|---|---|
+| `Dependency.Client` | `WorkspaceClient` | Databricks client using app-level service principal credentials |
+| `Dependency.UserClient` | `WorkspaceClient` | Databricks client authenticated on behalf of the current user (requires OBO token) |
+| `Dependency.Config` | `AppConfig` | Application configuration loaded from environment variables |
+| `Dependency.Session` | `Session` | SQLModel database session, scoped to request (stateful apps only) |
+
+## Models & API
+- **3-model pattern:** `Entity` (DB), `EntityIn` (input), `EntityOut` (output)
+- **API routes must have:** `response_model` and `operation_id` for client generation
+
+## Frontend Rules
+- **Routing:** `@tanstack/react-router` (routes in `src/{{app_name}}/ui/routes/`)
+- **Data fetching:** Always use `useXSuspense` hooks with `Suspense` and `Skeleton` components
+- **Pattern:** Render static elements immediately, fetch API data with suspense
+- **Components:** Use shadcn/ui, add to `src/{{app_name}}/ui/components/`
+- **Data access:** Use `selector()` function for clean destructuring (e.g., `const {data: profile} = useProfileSuspense(selector())`)
+
+## MCP Tools Reference
+
+This project is configured with the **apx MCP server** (see `.mcp.json`). Always prefer MCP tools over CLI commands — they are faster and provide structured output.
+
+| Tool | Description |
+|------|-------------|
+| `start` | Start development server and return the URL |
+| `stop` | Stop the development server |
+| `restart` | Restart the development server (preserves port if possible) |
+| `logs` | Fetch recent dev server logs |
+| `check` | Check project code for errors (runs tsc and ty checks in parallel) |
+| `refresh_openapi` | Regenerate OpenAPI schema and API client |
+| `search_registry_components` | Search shadcn registry components using semantic search |
+| `add_component` | Add a component to the project |
+| `docs` | Search Databricks SDK documentation for code examples and API references |
+| `databricks_apps_logs` | Fetch logs from deployed Databricks app using Databricks CLI |
+| `get_route_info` | Get code example for using a specific API route |
+
+## Development Commands
+
+CLI equivalents (use MCP tools above when available):
+
+| Command | Description |
+|---------|-------------|
+| `apx dev start` | Start all dev servers (backend + frontend + OpenAPI watcher) |
+| `apx dev stop` | Stop all dev servers |
+| `apx dev status` | Check running server status and ports |
+| `apx dev check` | Check for TypeScript/Python errors |
+| `apx dev logs` | View recent logs (default: last 10m) |
+| `apx dev logs -f` | Follow/stream logs live |
+| `apx build` | Build for production |
+
+## Detailed Patterns
+
+For backend patterns (DI, CRUD routers, AppConfig, lifespan) and frontend patterns (Suspense, mutations, selector, components), see `.claude/skills/apx/`.

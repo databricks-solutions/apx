@@ -49,6 +49,8 @@ pub(crate) struct AddonInfo {
     pub order: i32,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub skill_path: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]

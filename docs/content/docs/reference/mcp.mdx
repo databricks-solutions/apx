@@ -47,7 +47,7 @@ Choose your AI assistant to see the configuration:
     }
     ```
 
-    Or apply the Cursor addon:
+    Or apply the Cursor addon (also installs skill files to `.claude/skills/apx/`, `.mcp.json`, and hooks):
 
     ```bash
     apx dev apply cursor
@@ -76,7 +76,7 @@ Choose your AI assistant to see the configuration:
     }
     ```
 
-    Or apply the VSCode addon:
+    Or apply the VSCode addon (also installs skill files to `.claude/skills/apx/`, `.mcp.json`, and hooks):
 
     ```bash
     apx dev apply vscode
@@ -105,26 +105,30 @@ Choose your AI assistant to see the configuration:
     }
     ```
 
-    Or apply the Claude addon:
+    Or apply the Claude addon (also installs skill files, `CLAUDE.md`, and hooks):
 
     ```bash
     apx dev apply claude
     ```
 
-    This also creates a `CLAUDE.md` file with project instructions.
-
   </Tab>
   <Tab value="Codex">
-    Apply the Codex addon to create `AGENTS.md`:
+    Apply the Codex addon:
 
     ```bash
     apx dev apply codex
     ```
 
-    This creates an `AGENTS.md` file with project instructions for OpenAI Codex.
+    This creates `AGENTS.md` with project instructions and installs skill files to `.agents/skills/apx/`, `.mcp.json`, and hooks.
 
   </Tab>
 </Tabs>
+
+<Callout type="info">
+  All assistant addons automatically install apx skill files (quick reference + backend/frontend patterns)
+  during `apx init`. Each addon uses its configured skill path — most use `.claude/skills/apx/`,
+  while Codex uses `.agents/skills/apx/`.
+</Callout>
 
 ---
 

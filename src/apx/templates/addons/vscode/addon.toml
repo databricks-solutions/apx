@@ -2,3 +2,4 @@
 name = "vscode"
 description = "💻 VS Code instructions and MCP config"
 group = "assistants"
+skill_path = ".claude/skills/apx"

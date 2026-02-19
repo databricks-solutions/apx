@@ -61,6 +61,23 @@ The plugin registers the `apx mcp` server, which provides these tools:
 | `docs` | Search Databricks SDK documentation for Python code examples and API references. Always call this before writing any Databricks SDK (ws.*) call to verify the correct method signature. |
 | `databricks_apps_logs` | Fetch logs from a deployed Databricks App using the Databricks CLI. Use for debugging deployed (not local dev) issues. |
 
+## Automatic Installation via `apx init`
+
+When you initialize a project with any assistant addon, skill files are installed automatically:
+
+```bash
+# Claude addon: skills → .claude/skills/apx/
+apx init --addons=ui,claude
+
+# Cursor addon: skills → .claude/skills/apx/
+apx init --addons=ui,cursor
+
+# Codex addon: skills → .agents/skills/apx/
+apx init --addons=ui,codex
+```
+
+Each assistant addon installs skill markdown files, `.mcp.json`, and `hooks/hooks.json` alongside its own configuration files (e.g., `CLAUDE.md`, `.cursor/rules/`, `AGENTS.md`).
+
 ## Skill Installation (Standalone)
 
 If you only need the knowledge reference without MCP tools, install the standalone skill:
@@ -76,6 +93,19 @@ For global installation (all projects):
 ```bash
 apx skill install --global
 ```
+
+To install to a custom path (e.g., for Codex):
+
+```bash
+apx skill install --path .agents/skills/apx
+```
+
+### Options
+
+| Option     | Description                                                   |
+|------------|---------------------------------------------------------------|
+| `--global` | Install to home directory (`~/`) instead of current directory |
+| `--path`   | Skill files directory (default: `.claude/skills/apx`)         |
 
 ### Using the install script
 
@@ -104,6 +134,8 @@ irm https://databricks-solutions.github.io/apx/install.ps1 | iex -Skill -Global
 This installs skill files to `~/.claude/skills/apx/`.
 
 ### Skill Files
+
+The skill install command copies these files plus `.mcp.json` and `hooks/hooks.json`:
 
 | File | Content |
 |------|---------|

@@ -2,3 +2,4 @@
 name = "claude"
 description = "🤖 Claude Code skills, MCP config, and hooks"
 group = "assistants"
+skill_path = ".claude/skills/apx"
