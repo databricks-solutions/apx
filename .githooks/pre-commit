@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Cargo fmt — must match CI exactly:
+#   cargo fmt --all -- --check
+echo "Running cargo fmt --all -- --check..."
+if ! cargo fmt --all -- --check; then
+    echo ""
+    echo "Formatting check failed. Run 'cargo fmt --all' to fix."
+    exit 1
+fi
