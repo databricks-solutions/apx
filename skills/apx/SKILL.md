@@ -14,10 +14,9 @@ Before using apx, verify the CLI is installed:
 ```bash
 apx --version
 ```
-If not installed, install it:
-```bash
-curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh
-```
+If not installed:
+- **macOS/Linux:** `curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh`
+- **Windows (PowerShell):** `irm https://databricks-solutions.github.io/apx/install.ps1 | iex`
 
 ## When to Use This Skill
 
@@ -56,6 +55,26 @@ src/<app>/
 | `apx build` | Build for production |
 | `apx bun <args>` | Run bun commands (install, add, etc.) |
 | `apx components add <name>` | Add a shadcn/ui component |
+| `apx init --as-member` | Add apx to an existing project as a uv workspace member |
+
+## Adding to an Existing Project
+
+Use `--as-member` to add apx into an existing Python project or monorepo as a uv workspace member:
+
+```bash
+# Recommended: explicit member path
+apx init --as-member=packages/app
+
+# Or just auto-detect (when pyproject.toml exists without [tool.apx])
+apx init
+```
+
+Auto-detected: running `apx init` in a directory with an existing `pyproject.toml` (without `[tool.apx]`) automatically uses member mode with default path `packages/app`.
+
+The command:
+- Creates app files in the member subdirectory (e.g. `packages/app`)
+- Configures `[tool.uv.workspace]` in the root `pyproject.toml`
+- Initializes git at the workspace root if needed
 
 ## MCP Tools
 

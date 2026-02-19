@@ -18,8 +18,12 @@ The plugin provides MCP tools for dev server management, component search, SDK d
 
 Install the apx CLI first:
 
-```bash
+```bash tab="macOS/Linux"
 curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh
+```
+
+```powershell tab="Windows"
+irm https://databricks-solutions.github.io/apx/install.ps1 | iex
 ```
 
 ### Install from Marketplace
@@ -77,16 +81,24 @@ apx skill install --global
 
 #### Project-Level (Current Project)
 
-```bash
+```bash tab="macOS/Linux"
 curl -fsSL https://databricks-solutions.github.io/apx/install.sh --skill | sh
+```
+
+```powershell tab="Windows"
+irm https://databricks-solutions.github.io/apx/install.ps1 | iex -Skill
 ```
 
 This installs skill files to `.claude/skills/apx/` in the current directory.
 
 #### Global (All Projects)
 
-```bash
+```bash tab="macOS/Linux"
 curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh -s -- --skill --global
+```
+
+```powershell tab="Windows"
+irm https://databricks-solutions.github.io/apx/install.ps1 | iex -Skill -Global
 ```
 
 This installs skill files to `~/.claude/skills/apx/`.

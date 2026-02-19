@@ -73,8 +73,8 @@ mod tests {
             "package.json should exist for ui-enabled init"
         );
         assert!(
-            app_path.join("CLAUDE.md").exists(),
-            "CLAUDE.md should exist after claude addon"
+            app_path.join(".claude/skills/apx/SKILL.md").exists(),
+            "SKILL.md should exist after claude addon"
         );
         // Full check: tsc + ty
         apx_check(&app_path).await;

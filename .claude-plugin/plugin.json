@@ -3,8 +3,7 @@
   "version": "1.0.0",
   "description": "Build full-stack Databricks Apps with React + FastAPI. Provides MCP tools, skills, and hooks for the complete app development lifecycle.",
   "author": {
-    "name": "Databricks Solutions",
-    "email": "labs@databricks.com"
+    "name": "Databricks Solutions"
   },
   "homepage": "https://databricks-solutions.github.io/apx/",
   "repository": "https://github.com/databricks-solutions/apx",
