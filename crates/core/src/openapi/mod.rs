@@ -225,9 +225,11 @@ mod tests {
         println!("=== SPECIAL CHARS CODE ===\n{ts_code}\n=== END ===");
 
         // Verify URN enum values are properly quoted
+        // SWC may use single quotes for keys, so check with normalize_ws
+        let norm = normalize_ws(&ts_code);
         assert!(
-            ts_code.contains(r#""urn:ietf:params:scim:schemas:core:2.0:User": "urn:ietf:params:scim:schemas:core:2.0:User""#),
-            "URN enum key should be quoted"
+            norm.contains(r#""urn:ietf:params:scim:schemas:core:2.0:User": "urn:ietf:params:scim:schemas:core:2.0:User""#),
+            "URN enum key should be quoted. Generated:\n{ts_code}"
         );
         assert!(
             ts_code.contains(r#""urn:ietf:params:scim:schemas:extension:workspace:2.0:User""#),
@@ -1093,8 +1095,9 @@ mod tests {
         println!("=== BINARY STREAM CODE ===\n{ts_code}\n=== END ===");
 
         // Must return raw Response — not consume the body with json()/blob()/text()
+        // SWC formats objects multi-line, so use whitespace-normalized check
         assert!(
-            ts_code.contains("{ data: res }"),
+            normalize_ws(&ts_code).contains("{ data: res }"),
             "Should return raw Response for unknown binary content type"
         );
         assert!(
@@ -2255,6 +2258,12 @@ mod tests {
         }
     }
 
+    /// Normalize whitespace in generated code for format-resilient assertions.
+    /// Collapses all whitespace sequences (including newlines) into single spaces.
+    fn normalize_ws(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
     /// Helper that generates TypeScript code from OpenAPI JSON and verifies it compiles with tsc.
     /// Use this ONLY for positive tests where generated code should be valid TypeScript.
     #[allow(clippy::panic)]
@@ -2468,8 +2477,10 @@ export function useGetCatBuggy<TData = { data: { meow: string } }>(
         assert!(ts_code.contains("data: {"), "data should be present");
 
         // Verify mutation hook calls fetch with correct argument order
+        // SWC omits spaces around `=>` in arrow functions
         assert!(
-            ts_code.contains("(vars) => createUserPost(vars.params, vars.data)"),
+            normalize_ws(&ts_code).contains("(vars)=>createUserPost(vars.params, vars.data)") ||
+            normalize_ws(&ts_code).contains("(vars) => createUserPost(vars.params, vars.data)"),
             "Mutation hook should call fetch with (params, data) order when params is required"
         );
     }
@@ -2593,8 +2604,10 @@ export function useGetCatBuggy<TData = { data: { meow: string } }>(
         assert!(ts_code.contains("data: {"), "data should be present");
 
         // Verify mutation hook has correct argument order
+        // SWC omits spaces around `=>` in arrow functions
         assert!(
-            ts_code.contains("(vars) => updateResource(vars.params, vars.data)"),
+            normalize_ws(&ts_code).contains("(vars)=>updateResource(vars.params, vars.data)") ||
+            normalize_ws(&ts_code).contains("(vars) => updateResource(vars.params, vars.data)"),
             "Mutation hook should use (params, data) order when params has required fields"
         );
     }
@@ -2629,18 +2642,18 @@ export function useGetCatBuggy<TData = { data: { meow: string } }>(
         println!("=== BODY FIRST (ALL PARAMS OPTIONAL) ===\n{ts_code}\n=== END ===");
 
         // data (required) must come before params (optional)
-        let signature = ts_code
-            .lines()
-            .find(|l| l.contains("export const uploadFile"))
-            .expect("uploadFile not found");
+        // SWC may break function signatures across multiple lines
+        let norm = normalize_ws(&ts_code);
         assert!(
-            signature.contains("data:") && signature.contains("params?:"),
+            norm.contains("data:") && norm.contains("params?:"),
             "Should have required data and optional params"
         );
 
         // Mutation hook should call with (data, params) order
+        // SWC omits spaces around `=>` in arrow functions
         assert!(
-            ts_code.contains("(vars) => uploadFile(vars.data, vars.params)"),
+            norm.contains("(vars)=>uploadFile(vars.data, vars.params)") ||
+            norm.contains("(vars) => uploadFile(vars.data, vars.params)"),
             "Mutation hook should use (data, params) order when params is optional. Generated:\n{ts_code}"
         );
     }

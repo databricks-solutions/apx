@@ -92,6 +92,12 @@ ruff_python_ast = { git = "https://github.com/astral-sh/ruff", tag = "0.14.5" }
 ruff_text_size = { git = "https://github.com/astral-sh/ruff", tag = "0.14.5" }
 schemars = "1.2.0"
 
+# SWC (TypeScript AST & codegen)
+swc_common = "18"
+swc_ecma_ast = "20"
+swc_ecma_codegen = "23"
+swc_atoms = "9"
+
 # Temporary files
 tempfile = "3.15"
 

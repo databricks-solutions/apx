@@ -1,9 +1,9 @@
-//! TypeScript IR types for code generation.
+//! TypeScript IR types for type-level code generation.
 //!
-//! This module defines the TypeScript type system representation:
-//! - TsType: Types (primitives, arrays, unions, objects, etc.)
-//! - TsExpr: Expressions (identifiers, calls, arrows, etc.)
-//! - TsLiteral: Literal values (strings, numbers, booleans)
+//! This module defines the domain-level type system representation used by
+//! `normalize.rs` and the SWC codegen. Only type-related IR is kept here;
+//! all code-level AST (expressions, statements, functions) is now handled
+//! directly by SWC's `swc_ecma_ast`.
 
 // Allow dead code for IR types that are part of the design but not yet fully utilized.
 #![allow(dead_code)]
@@ -104,113 +104,6 @@ pub enum TsLiteral {
     Null,
 }
 
-/// TypeScript expression
-#[derive(Debug, Clone)]
-pub enum TsExpr {
-    /// Identifier: foo
-    Ident(String),
-    /// Literal value: "bar", 42
-    Literal(TsLiteral),
-    /// Function call: foo(a, b)
-    Call {
-        callee: Box<TsExpr>,
-        args: Vec<TsExpr>,
-    },
-    /// Arrow function: (x) => x.foo
-    Arrow {
-        params: Vec<TsParam>,
-        body: Box<TsExpr>,
-    },
-    /// Object literal: { a: 1, b: 2 }
-    Object(Vec<(String, TsExpr)>),
-    /// Member access: foo.bar
-    Member { object: Box<TsExpr>, prop: String },
-    /// Template literal: `${foo}/bar`
-    Template(Vec<TemplatePart>),
-    /// Await expression: await fetch()
-    Await(Box<TsExpr>),
-    /// Spread: ...options
-    Spread(Box<TsExpr>),
-    /// Conditional: a !== undefined
-    BinOp {
-        left: Box<TsExpr>,
-        op: BinOp,
-        right: Box<TsExpr>,
-    },
-    /// Optional chaining member access: foo?.bar
-    OptionalMember { object: Box<TsExpr>, prop: String },
-    /// new URL(...)
-    New {
-        callee: Box<TsExpr>,
-        args: Vec<TsExpr>,
-    },
-    /// Throw expression (for error handling)
-    Throw(Box<TsExpr>),
-    /// Ternary/conditional: cond ? a : b
-    Ternary {
-        cond: Box<TsExpr>,
-        then_expr: Box<TsExpr>,
-        else_expr: Box<TsExpr>,
-    },
-    /// Index/bracket access: obj[key]
-    Index {
-        object: Box<TsExpr>,
-        index: Box<TsExpr>,
-    },
-    /// Array literal: [a, b, c]
-    Array(Vec<TsExpr>),
-    /// Type cast: expr as Type
-    Cast { expr: Box<TsExpr>, ty: TsType },
-    /// Raw code that doesn't fit the AST
-    Raw(String),
-}
-
-/// Binary operators
-#[derive(Debug, Clone, Copy)]
-pub enum BinOp {
-    NotEqual,
-    StrictNotEqual,
-}
-
-/// Function parameter
-#[derive(Debug, Clone)]
-pub struct TsParam {
-    pub name: String,
-    pub ty: Option<TsType>,
-    pub optional: bool,
-}
-
-/// Template literal part
-#[derive(Debug, Clone)]
-pub enum TemplatePart {
-    /// Static string part
-    Static(String),
-    /// Dynamic expression part: ${expr}
-    Dynamic(TsExpr),
-}
-
-// =============================================================================
-// Module-Level IR (for printer)
-// =============================================================================
-
-/// Import statement
-#[derive(Debug, Clone)]
-pub struct TsImport {
-    /// Items to import
-    pub items: Vec<ImportItem>,
-    /// Module path
-    pub from: String,
-    /// Whether this is a type-only import
-    pub type_only: bool,
-}
-
-/// Import item
-#[derive(Debug, Clone)]
-pub struct ImportItem {
-    pub name: String,
-    pub alias: Option<String>,
-}
-
 /// Type definition kind
 #[derive(Debug, Clone)]
 pub enum TypeDefKind {
@@ -227,58 +120,4 @@ pub enum TypeDefKind {
 pub struct TsTypeDef {
     pub name: String,
     pub kind: TypeDefKind,
-}
-
-/// Statement in a function body
-#[derive(Debug, Clone)]
-pub enum TsStmt {
-    /// const/let declaration
-    VarDecl {
-        kind: VarKind,
-        name: String,
-        ty: Option<TsType>,
-        init: TsExpr,
-    },
-    /// Expression statement
-    Expr(TsExpr),
-    /// Return statement
-    Return(Option<TsExpr>),
-    /// If statement
-    If {
-        cond: TsExpr,
-        then_body: Vec<TsStmt>,
-        else_body: Option<Vec<TsStmt>>,
-    },
-    /// Throw statement
-    Throw(TsExpr),
-    /// Raw code block (for complex patterns that don't fit the AST)
-    Raw(String),
-}
-
-/// Variable declaration kind
-#[derive(Debug, Clone, Copy)]
-pub enum VarKind {
-    Const,
-    Let,
-}
-
-/// Function definition
-#[derive(Debug, Clone)]
-pub struct TsFunction {
-    pub name: String,
-    pub type_params: Vec<String>,
-    pub params: Vec<TsParam>,
-    pub return_type: Option<TsType>,
-    pub body: Vec<TsStmt>,
-    pub is_async: bool,
-    pub is_export: bool,
-    pub is_arrow: bool,
-}
-
-/// Complete TypeScript module
-#[derive(Debug, Clone)]
-pub struct TsModule {
-    pub imports: Vec<TsImport>,
-    pub types: Vec<TsTypeDef>,
-    pub functions: Vec<TsFunction>,
 }

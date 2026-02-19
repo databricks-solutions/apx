@@ -1,222 +1,211 @@
-//! Code generation from Domain IR to TypeScript AST.
+//! Code generation from Domain IR to SWC AST.
 //!
 //! This module transforms the high-level API IR (operations, hooks, params)
-//! into TypeScript AST nodes (functions, statements, expressions).
-//!
-//! The generated AST can then be emitted to strings via the `Emit` trait.
+//! into `swc_ecma_ast::Module` nodes, which can then be emitted to TypeScript
+//! strings via SWC's codegen.
+
+use swc_common::DUMMY_SP;
+use swc_ecma_ast::*;
 
 use super::api::{
     ApiIR, BodyContentType, FetchArgIR, FetchIR, HookIR, HookKind, OperationIR, ParamsIR,
     QueryKeyIR, ResponseContentType, UrlPart,
 };
-use super::emit::Emit;
-use super::types::{
-    ImportItem, TsExpr, TsFunction, TsImport, TsLiteral, TsModule, TsParam, TsProp, TsStmt, TsType,
-    TsTypeDef, TypeDefKind, TypeRef, VarKind,
-};
-use super::utils::{escape_js_string, format_param_access, needs_bracket_notation};
+use super::builders::*;
+use super::types::{TsType as IrTsType, TypeRef};
+use super::utils::{escape_js_string, needs_bracket_notation};
 
-/// Generate a complete TypeScript module from API IR.
-pub fn codegen_module(api: &ApiIR) -> TsModule {
-    let mut imports = Vec::new();
-    let mut types = Vec::new();
-    let mut functions = Vec::new();
+/// Generate a complete SWC Module from API IR.
+pub fn codegen_module(api: &ApiIR) -> Module {
+    let mut body = Vec::new();
 
     // Generate imports
     if api.has_queries || api.has_mutations {
-        imports.extend(codegen_imports(api.has_queries, api.has_mutations));
-
-        // Generate ApiError class as a raw function (it's actually a class)
-        functions.push(codegen_api_error_class());
+        body.extend(codegen_imports(api.has_queries, api.has_mutations));
+        // Generate ApiError class
+        body.push(codegen_api_error_class());
     }
 
     // Add component schema types
-    types.extend(api.types.iter().cloned());
+    for td in &api.types {
+        body.extend(ir_typedef_to_module_items(td));
+    }
 
     // Generate operations
     for op in &api.operations {
-        let (op_types, op_funcs) = codegen_operation(op);
-        types.extend(op_types);
-        functions.extend(op_funcs);
+        body.extend(codegen_operation(op));
     }
 
-    TsModule {
-        imports,
-        types,
-        functions,
+    Module {
+        span: DUMMY_SP,
+        body,
+        shebang: None,
     }
 }
 
 /// Generate import statements.
-fn codegen_imports(has_queries: bool, has_mutations: bool) -> Vec<TsImport> {
+fn codegen_imports(has_queries: bool, has_mutations: bool) -> Vec<ModuleItem> {
     let mut imports = Vec::new();
 
-    let mut runtime_items = Vec::new();
-    let mut type_items = Vec::new();
+    let mut runtime_items: Vec<(&str, Option<&str>)> = Vec::new();
+    let mut type_items: Vec<(&str, Option<&str>)> = Vec::new();
 
     if has_queries {
-        runtime_items.push(ImportItem {
-            name: "useQuery".into(),
-            alias: None,
-        });
-        runtime_items.push(ImportItem {
-            name: "useSuspenseQuery".into(),
-            alias: None,
-        });
-        type_items.push(ImportItem {
-            name: "UseQueryOptions".into(),
-            alias: None,
-        });
-        type_items.push(ImportItem {
-            name: "UseSuspenseQueryOptions".into(),
-            alias: None,
-        });
+        runtime_items.push(("useQuery", None));
+        runtime_items.push(("useSuspenseQuery", None));
+        type_items.push(("UseQueryOptions", None));
+        type_items.push(("UseSuspenseQueryOptions", None));
     }
 
     if has_mutations {
-        runtime_items.push(ImportItem {
-            name: "useMutation".into(),
-            alias: None,
-        });
-        type_items.push(ImportItem {
-            name: "UseMutationOptions".into(),
-            alias: None,
-        });
+        runtime_items.push(("useMutation", None));
+        type_items.push(("UseMutationOptions", None));
     }
 
     if !runtime_items.is_empty() {
-        imports.push(TsImport {
-            items: runtime_items,
-            from: "@tanstack/react-query".into(),
-            type_only: false,
-        });
+        imports.push(import_named(
+            runtime_items,
+            "@tanstack/react-query",
+            false,
+        ));
     }
 
     if !type_items.is_empty() {
-        imports.push(TsImport {
-            items: type_items,
-            from: "@tanstack/react-query".into(),
-            type_only: true,
-        });
+        imports.push(import_named(type_items, "@tanstack/react-query", true));
     }
 
     imports
 }
 
-/// Generate the ApiError class.
-/// Since our AST doesn't have class support, we use a raw function that outputs the class.
-fn codegen_api_error_class() -> TsFunction {
-    TsFunction {
-        name: "".into(), // Empty name signals this is a raw block
-        type_params: vec![],
-        params: vec![],
-        return_type: None,
-        body: vec![TsStmt::Raw(
-            r#"export class ApiError extends Error {
-  status: number;
-  statusText: string;
-  body: unknown;
+/// Generate the ApiError class as a proper SWC ClassDecl.
+fn codegen_api_error_class() -> ModuleItem {
+    let status_prop = class_prop("status", ts_number());
+    let status_text_prop = class_prop("statusText", ts_string());
+    let body_prop = class_prop("body", ts_unknown());
 
-  constructor(status: number, statusText: string, body: unknown) {
-    super(`HTTP ${status}: ${statusText}`);
-    this.name = "ApiError";
-    this.status = status;
-    this.statusText = statusText;
-    this.body = body;
-  }
-}"#
-            .into(),
-        )],
-        is_async: false,
-        is_export: false,
-        is_arrow: false,
-    }
+    // constructor(status: number, statusText: string, body: unknown) { ... }
+    let ctor = constructor(
+        vec![
+            constructor_param("status", Some(ts_number())),
+            constructor_param("statusText", Some(ts_string())),
+            constructor_param("body", Some(ts_unknown())),
+        ],
+        block(vec![
+            // super(`HTTP ${status}: ${statusText}`)
+            expr_stmt(Expr::Call(CallExpr {
+                span: DUMMY_SP,
+                ctxt: swc_common::SyntaxContext::empty(),
+                callee: Callee::Super(Super { span: DUMMY_SP }),
+                args: vec![arg(tpl(
+                    vec!["HTTP ", ": ", ""],
+                    vec![ident_expr("status"), ident_expr("statusText")],
+                ))],
+                type_args: None,
+            })),
+            // this.name = "ApiError"
+            expr_stmt(assign_expr(
+                member(Expr::This(ThisExpr { span: DUMMY_SP }), "name"),
+                str_lit("ApiError"),
+            )),
+            // this.status = status
+            expr_stmt(assign_expr(
+                member(Expr::This(ThisExpr { span: DUMMY_SP }), "status"),
+                ident_expr("status"),
+            )),
+            // this.statusText = statusText
+            expr_stmt(assign_expr(
+                member(Expr::This(ThisExpr { span: DUMMY_SP }), "statusText"),
+                ident_expr("statusText"),
+            )),
+            // this.body = body
+            expr_stmt(assign_expr(
+                member(Expr::This(ThisExpr { span: DUMMY_SP }), "body"),
+                ident_expr("body"),
+            )),
+        ]),
+    );
+
+    export_class(
+        "ApiError",
+        Some("Error"),
+        vec![status_prop, status_text_prop, body_prop, ctor],
+    )
 }
 
 /// Generate code for a single operation.
-/// Returns (type_definitions, functions).
-fn codegen_operation(op: &OperationIR) -> (Vec<TsTypeDef>, Vec<TsFunction>) {
-    let mut types = Vec::new();
-    let mut functions = Vec::new();
+fn codegen_operation(op: &OperationIR) -> Vec<ModuleItem> {
+    let mut items = Vec::new();
 
-    // Generate params type if needed
+    // Generate params interface
     if let Some(params) = &op.params {
-        types.push(codegen_params_type(params));
+        items.push(codegen_params_type(params));
     }
 
     // Generate fetch function
-    functions.push(codegen_fetch_function(&op.fetch));
+    items.push(codegen_fetch_function(&op.fetch));
 
-    // Generate query key function (for queries)
+    // Generate query key function
     if let Some(qk) = &op.query_key {
-        functions.push(codegen_query_key_function(qk));
+        items.push(codegen_query_key_function(qk));
     }
 
     // Generate hooks
     for hook in &op.hooks {
-        functions.push(codegen_hook(hook));
+        items.push(codegen_hook(hook));
     }
 
-    (types, functions)
+    items
 }
 
 /// Generate a params interface type.
-fn codegen_params_type(params: &ParamsIR) -> TsTypeDef {
+fn codegen_params_type(params: &ParamsIR) -> ModuleItem {
     let properties = params
         .fields
         .iter()
-        .map(|field| TsProp {
-            name: field.name.clone(),
-            ty: field.ty.to_ts_type(),
-            optional: !field.required,
+        .map(|field| {
+            ts_property_sig(
+                &field.name,
+                ir_typeref_to_swc(&field.ty),
+                !field.required,
+            )
         })
         .collect();
 
-    TsTypeDef {
-        name: params.type_name.clone(),
-        kind: TypeDefKind::Interface { properties },
-    }
+    export_interface(&params.type_name, properties)
 }
 
 /// Generate a fetch function.
-fn codegen_fetch_function(fetch: &FetchIR) -> TsFunction {
+fn codegen_fetch_function(fetch: &FetchIR) -> ModuleItem {
     let mut params = Vec::new();
     let mut body_content_type = None;
 
     // Build parameters
-    for arg in &fetch.args {
-        match arg {
+    for a in &fetch.args {
+        match a {
             FetchArgIR::Params { ty, optional } => {
-                params.push(TsParam {
-                    name: "params".into(),
-                    ty: Some(ty.to_ts_type()),
-                    optional: *optional,
-                });
+                let swc_ty = ir_typeref_to_swc(ty);
+                if *optional {
+                    params.push(pat_ident_optional("params", Some(swc_ty)));
+                } else {
+                    params.push(pat_ident("params", Some(swc_ty)));
+                }
             }
             FetchArgIR::Body { ty, content_type } => {
                 body_content_type = Some(*content_type);
                 let ty_type = match content_type {
-                    BodyContentType::FormData => TsType::Ref("FormData".into()),
-                    BodyContentType::UrlEncoded | BodyContentType::Json => ty.to_ts_type(),
+                    BodyContentType::FormData => ts_type_ref("FormData"),
+                    BodyContentType::UrlEncoded | BodyContentType::Json => ir_typeref_to_swc(ty),
                 };
-                params.push(TsParam {
-                    name: "data".into(),
-                    ty: Some(ty_type),
-                    optional: false,
-                });
+                params.push(pat_ident("data", Some(ty_type)));
             }
             FetchArgIR::Options => {
-                params.push(TsParam {
-                    name: "options".into(),
-                    ty: Some(TsType::Ref("RequestInit".into())),
-                    optional: true,
-                });
+                params.push(pat_ident_optional("options", Some(ts_type_ref("RequestInit"))));
             }
         }
     }
 
     // Build return type
-    let response_type_str = fetch.response.ty.emit();
+    let response_type_str = ir_typeref_to_string(&fetch.response.ty);
     let ts_response_type = match fetch.response.content_type {
         ResponseContentType::Text => "string".to_string(),
         ResponseContentType::Blob => "Blob".to_string(),
@@ -225,26 +214,17 @@ fn codegen_fetch_function(fetch: &FetchIR) -> TsFunction {
     };
 
     let return_type = if ts_response_type == "void" {
-        TsType::Ref("Promise<void>".into())
+        ts_type_ref("Promise<void>")
     } else if fetch.response.has_void_status {
-        TsType::Ref(format!("Promise<{{ data: {ts_response_type} }} | void>"))
+        ts_type_ref(&format!("Promise<{{ data: {ts_response_type} }} | void>"))
     } else {
-        TsType::Ref(format!("Promise<{{ data: {ts_response_type} }}>"))
+        ts_type_ref(&format!("Promise<{{ data: {ts_response_type} }}>"))
     };
 
     // Build function body
-    let body = codegen_fetch_body(fetch, body_content_type, &ts_response_type);
+    let body_stmts = codegen_fetch_body(fetch, body_content_type, &ts_response_type);
 
-    TsFunction {
-        name: fetch.fn_name.clone(),
-        type_params: vec![],
-        params,
-        return_type: Some(return_type),
-        body,
-        is_async: true,
-        is_export: true,
-        is_arrow: true,
-    }
+    export_const_arrow(&fetch.fn_name, params, Some(return_type), block(body_stmts), true)
 }
 
 /// Generate the body of a fetch function.
@@ -252,7 +232,7 @@ fn codegen_fetch_body(
     fetch: &FetchIR,
     body_content_type: Option<BodyContentType>,
     ts_response_type: &str,
-) -> Vec<TsStmt> {
+) -> Vec<Stmt> {
     let mut stmts = Vec::new();
 
     // URL building
@@ -264,74 +244,90 @@ fn codegen_fetch_body(
     let has_query_params = !fetch.url.query_params.is_empty();
 
     if has_path_params || has_query_params {
-        let path_template = build_path_template_string(&fetch.url.template);
-
         if has_query_params {
-            // Create URLSearchParams
-            stmts.push(TsStmt::VarDecl {
-                kind: VarKind::Const,
-                name: "searchParams".into(),
-                ty: None,
-                init: TsExpr::New {
-                    callee: Box::new(TsExpr::Ident("URLSearchParams".into())),
-                    args: vec![],
-                },
-            });
+            // const searchParams = new URLSearchParams()
+            stmts.push(const_decl(
+                "searchParams",
+                new_expr(ident_expr("URLSearchParams"), vec![]),
+            ));
 
             // Add query params
             for qp in &fetch.url.query_params {
-                let access = format_param_access("params", &qp.name, qp.required);
+                let access_expr = build_param_access_expr("params", &qp.name, qp.required);
 
                 if qp.ty.is_array() {
-                    // Array params: forEach with append
-                    stmts.push(TsStmt::Raw(format!(
-                        "if ({} != null) {}.forEach((v) => searchParams.append(\"{}\", String(v)));",
-                        access, access, qp.original_name
-                    )));
+                    // if (access != null) access.forEach((v) => searchParams.append("name", String(v)));
+                    let check_expr = not_null_check(access_expr.clone());
+                    let foreach_call = call(
+                        member(access_expr, "forEach"),
+                        vec![arrow_fn_expr(
+                            vec![pat_ident("v", None)],
+                            call(
+                                member(ident_expr("searchParams"), "append"),
+                                vec![
+                                    str_lit(&qp.original_name),
+                                    call(ident_expr("String"), vec![ident_expr("v")]),
+                                ],
+                            ),
+                        )],
+                    );
+                    stmts.push(if_stmt(check_expr, expr_stmt(foreach_call), None));
                 } else {
-                    // Single params: set
-                    stmts.push(TsStmt::Raw(format!(
-                        "if ({} != null) searchParams.set(\"{}\", String({}));",
-                        access, qp.original_name, access
-                    )));
+                    // if (access != null) searchParams.set("name", String(access));
+                    let check_expr = not_null_check(access_expr.clone());
+                    let set_call = call(
+                        member(ident_expr("searchParams"), "set"),
+                        vec![
+                            str_lit(&qp.original_name),
+                            call(ident_expr("String"), vec![access_expr]),
+                        ],
+                    );
+                    stmts.push(if_stmt(check_expr, expr_stmt(set_call), None));
                 }
             }
 
-            // Build URL with query string
-            stmts.push(TsStmt::VarDecl {
-                kind: VarKind::Const,
-                name: "queryString".into(),
-                ty: None,
-                init: TsExpr::Call {
-                    callee: Box::new(TsExpr::Member {
-                        object: Box::new(TsExpr::Ident("searchParams".into())),
-                        prop: "toString".into(),
-                    }),
-                    args: vec![],
-                },
-            });
+            // const queryString = searchParams.toString()
+            stmts.push(const_decl(
+                "queryString",
+                call(member(ident_expr("searchParams"), "toString"), vec![]),
+            ));
 
-            stmts.push(TsStmt::VarDecl {
-                kind: VarKind::Const,
-                name: "url".into(),
-                ty: None,
-                init: TsExpr::Ternary {
-                    cond: Box::new(TsExpr::Ident("queryString".into())),
-                    then_expr: Box::new(TsExpr::Raw(format!("`{path_template}?${{queryString}}`"))),
-                    else_expr: Box::new(TsExpr::Raw(format!("`{path_template}`"))),
-                },
-            });
+            // const url = queryString ? `path?${queryString}` : `path`
+            let path_template = build_path_template(&fetch.url.template);
+            let (path_quasis_q, path_exprs_q) =
+                build_tpl_parts_with_suffix(&fetch.url.template, Some("queryString"));
+            let (path_quasis, path_exprs) =
+                build_tpl_parts_with_suffix(&fetch.url.template, None);
+
+            let url_with_qs = tpl(
+                path_quasis_q.iter().map(|s| s.as_str()).collect(),
+                path_exprs_q,
+            );
+            let url_without_qs = if path_exprs.is_empty() {
+                str_lit(&path_template)
+            } else {
+                tpl(
+                    path_quasis.iter().map(|s| s.as_str()).collect(),
+                    path_exprs,
+                )
+            };
+
+            stmts.push(const_decl(
+                "url",
+                cond_expr(ident_expr("queryString"), url_with_qs, url_without_qs),
+            ));
 
             // Fetch call with url variable
-            stmts.push(codegen_fetch_call("url", true, fetch, body_content_type));
-        } else {
-            // Just path params, use template literal directly
-            stmts.push(codegen_fetch_call(
-                &format!("`{path_template}`"),
-                false,
+            stmts.push(codegen_fetch_call_stmt(
+                ident_expr("url"),
                 fetch,
                 body_content_type,
             ));
+        } else {
+            // Just path params, use template literal directly
+            let (quasis, exprs) = build_tpl_parts_with_suffix(&fetch.url.template, None);
+            let url_expr = tpl(quasis.iter().map(|s| s.as_str()).collect(), exprs);
+            stmts.push(codegen_fetch_call_stmt(url_expr, fetch, body_content_type));
         }
     } else {
         // No params at all - static URL
@@ -345,65 +341,68 @@ fn codegen_fetch_body(
             })
             .collect::<Vec<_>>()
             .join("");
-
-        stmts.push(codegen_fetch_call(
-            &format!("\"{path}\""),
-            false,
+        stmts.push(codegen_fetch_call_stmt(
+            str_lit(&path),
             fetch,
             body_content_type,
         ));
     }
 
-    // Error handling
-    stmts.push(TsStmt::Raw(
-        r#"if (!res.ok) {
-  const body = await res.text();
-  let parsed: unknown;
-  try { parsed = JSON.parse(body); } catch { parsed = body; }
-  throw new ApiError(res.status, res.statusText, parsed);
-}"#
-        .into(),
-    ));
+    // Error handling: if (!res.ok) { ... }
+    stmts.push(codegen_error_handling());
 
     // Return statement based on response type
     if ts_response_type == "void" {
-        stmts.push(TsStmt::Return(None));
+        stmts.push(return_stmt(None));
     } else if fetch.response.has_void_status {
-        stmts.push(TsStmt::Raw("if (res.status === 204) return;".into()));
-        let expr = response_expr_for_content_type(fetch.response.content_type);
-        stmts.push(TsStmt::Raw(format!("return {{ data: {expr} }};")));
+        // if (res.status === 204) return;
+        stmts.push(if_stmt(
+            bin_expr(
+                member(ident_expr("res"), "status"),
+                BinaryOp::EqEqEq,
+                num_lit(204.0),
+            ),
+            return_stmt(None),
+            None,
+        ));
+        let data_expr = response_data_expr(fetch.response.content_type);
+        stmts.push(return_stmt(Some(obj_lit(vec![kv_prop("data", data_expr)]))));
     } else {
-        let expr = response_expr_for_content_type(fetch.response.content_type);
-        stmts.push(TsStmt::Raw(format!("return {{ data: {expr} }};")));
+        let data_expr = response_data_expr(fetch.response.content_type);
+        stmts.push(return_stmt(Some(obj_lit(vec![kv_prop("data", data_expr)]))));
     }
 
     stmts
 }
 
-/// Generate the fetch() call statement.
-fn codegen_fetch_call(
-    url_expr: &str,
-    _is_variable: bool,
+/// Generate the `const res = await fetch(url, { ... })` statement.
+fn codegen_fetch_call_stmt(
+    url_expr: Expr,
     fetch: &FetchIR,
     body_content_type: Option<BodyContentType>,
-) -> TsStmt {
-    let mut fetch_options = format!("...options, method: \"{}\"", fetch.method.as_str());
-
+) -> Stmt {
     let has_header_params = !fetch.header_params.is_empty();
     let has_body = fetch.body.is_some();
 
+    let mut fetch_props: Vec<PropOrSpread> = vec![
+        spread_prop(ident_expr("options")),
+        kv_prop("method", str_lit(fetch.method.as_str())),
+    ];
+
     if has_body || has_header_params {
-        fetch_options.push_str(", headers: { ");
+        let mut header_props: Vec<PropOrSpread> = Vec::new();
 
         // Add content-type header
         if let Some(content_type) = body_content_type {
             match content_type {
                 BodyContentType::Json => {
-                    fetch_options.push_str("\"Content-Type\": \"application/json\", ");
+                    header_props.push(kv_prop_str("Content-Type", str_lit("application/json")));
                 }
                 BodyContentType::UrlEncoded => {
-                    fetch_options
-                        .push_str("\"Content-Type\": \"application/x-www-form-urlencoded\", ");
+                    header_props.push(kv_prop_str(
+                        "Content-Type",
+                        str_lit("application/x-www-form-urlencoded"),
+                    ));
                 }
                 BodyContentType::FormData => {
                     // Don't set Content-Type for FormData - browser sets it with boundary
@@ -414,51 +413,150 @@ fn codegen_fetch_call(
         // Add header params
         for hp in &fetch.header_params {
             if hp.required {
-                let access = format_param_access("params", &hp.name, true);
-                fetch_options.push_str(&format!("\"{}\": {}, ", hp.original_name, access));
+                let access = build_param_access_expr("params", &hp.name, true);
+                header_props.push(kv_prop_str(&hp.original_name, access));
             } else {
-                let access = format_param_access("params", &hp.name, false);
-                let direct_access = format_param_access("params", &hp.name, true);
-                fetch_options.push_str(&format!(
-                    "...({} != null && {{ \"{}\": {} }}), ",
-                    access, hp.original_name, direct_access
-                ));
+                // ...( access != null && { "name": direct_access } )
+                let access = build_param_access_expr("params", &hp.name, false);
+                let direct_access = build_param_access_expr("params", &hp.name, true);
+                let conditional = bin_expr(
+                    not_null_check(access),
+                    BinaryOp::LogicalAnd,
+                    obj_lit(vec![kv_prop_str(&hp.original_name, direct_access)]),
+                );
+                header_props.push(spread_prop(paren(conditional)));
             }
         }
 
-        fetch_options.push_str("...options?.headers }");
+        // ...options?.headers
+        header_props.push(spread_prop(opt_chain_member(ident_expr("options"), "headers")));
+
+        fetch_props.push(kv_prop("headers", obj_lit(header_props)));
 
         // Add body
         if has_body {
             match body_content_type {
                 Some(BodyContentType::Json) => {
-                    fetch_options.push_str(", body: JSON.stringify(data)");
+                    fetch_props.push(kv_prop(
+                        "body",
+                        call(
+                            member(ident_expr("JSON"), "stringify"),
+                            vec![ident_expr("data")],
+                        ),
+                    ));
                 }
                 Some(BodyContentType::UrlEncoded) => {
-                    fetch_options
-                        .push_str(", body: new URLSearchParams(data as Record<string, string>)");
+                    fetch_props.push(kv_prop(
+                        "body",
+                        new_expr(
+                            ident_expr("URLSearchParams"),
+                            vec![ts_as_expr(
+                                ident_expr("data"),
+                                ts_type_ref_with_params(
+                                    "Record",
+                                    vec![ts_string(), ts_string()],
+                                ),
+                            )],
+                        ),
+                    ));
                 }
                 Some(BodyContentType::FormData) => {
-                    fetch_options.push_str(", body: data");
+                    fetch_props.push(kv_prop("body", ident_expr("data")));
                 }
                 None => {}
             }
         }
     }
 
-    // Generate the full fetch statement
-    let url_part = url_expr.to_string();
+    let fetch_call = await_expr(call(
+        ident_expr("fetch"),
+        vec![url_expr, obj_lit(fetch_props)],
+    ));
 
-    TsStmt::VarDecl {
-        kind: VarKind::Const,
-        name: "res".into(),
-        ty: None,
-        init: TsExpr::Raw(format!("await fetch({url_part}, {{ {fetch_options} }})")),
+    const_decl("res", fetch_call)
+}
+
+/// Generate error handling block:
+/// ```ts
+/// if (!res.ok) {
+///   const body = await res.text();
+///   let parsed: unknown;
+///   try { parsed = JSON.parse(body); } catch { parsed = body; }
+///   throw new ApiError(res.status, res.statusText, parsed);
+/// }
+/// ```
+fn codegen_error_handling() -> Stmt {
+    let body_decl = const_decl(
+        "body",
+        await_expr(call(member(ident_expr("res"), "text"), vec![])),
+    );
+
+    let parsed_decl = Stmt::Decl(Decl::Var(Box::new(VarDecl {
+        span: DUMMY_SP,
+        ctxt: swc_common::SyntaxContext::empty(),
+        kind: VarDeclKind::Let,
+        declare: false,
+        decls: vec![VarDeclarator {
+            span: DUMMY_SP,
+            name: Pat::Ident(binding_ident("parsed", Some(ts_unknown()))),
+            init: None,
+            definite: false,
+        }],
+    })));
+
+    let try_block = block(vec![expr_stmt(Expr::Assign(AssignExpr {
+        span: DUMMY_SP,
+        op: AssignOp::Assign,
+        left: AssignTarget::Simple(SimpleAssignTarget::Ident(binding_ident("parsed", None))),
+        right: Box::new(call(
+            member(ident_expr("JSON"), "parse"),
+            vec![ident_expr("body")],
+        )),
+    }))]);
+
+    let catch_block = block(vec![expr_stmt(Expr::Assign(AssignExpr {
+        span: DUMMY_SP,
+        op: AssignOp::Assign,
+        left: AssignTarget::Simple(SimpleAssignTarget::Ident(binding_ident("parsed", None))),
+        right: Box::new(ident_expr("body")),
+    }))]);
+
+    let try_catch = try_stmt(try_block, Some(catch_block));
+
+    let throw = throw_stmt(new_expr(
+        ident_expr("ApiError"),
+        vec![
+            member(ident_expr("res"), "status"),
+            member(ident_expr("res"), "statusText"),
+            ident_expr("parsed"),
+        ],
+    ));
+
+    if_stmt(
+        unary_not(member(ident_expr("res"), "ok")),
+        block_stmt(vec![body_decl, parsed_decl, try_catch, throw]),
+        None,
+    )
+}
+
+/// Get response data expression based on content type.
+fn response_data_expr(content_type: ResponseContentType) -> Expr {
+    match content_type {
+        ResponseContentType::Json => {
+            await_expr(call(member(ident_expr("res"), "json"), vec![]))
+        }
+        ResponseContentType::Text => {
+            await_expr(call(member(ident_expr("res"), "text"), vec![]))
+        }
+        ResponseContentType::Blob => {
+            await_expr(call(member(ident_expr("res"), "blob"), vec![]))
+        }
+        ResponseContentType::Unknown => ident_expr("res"),
     }
 }
 
-/// Build path template string for URL construction.
-fn build_path_template_string(template: &[UrlPart]) -> String {
+/// Build a plain path template string (for fallback/display).
+fn build_path_template(template: &[UrlPart]) -> String {
     template
         .iter()
         .map(|p| match p {
@@ -475,62 +573,82 @@ fn build_path_template_string(template: &[UrlPart]) -> String {
         .join("")
 }
 
-/// Get response expression based on content type.
-/// For JSON/Text/Blob, this awaits a body-consuming method.
-/// For Unknown, returns the raw `Response` object (preserving streaming capability).
-fn response_expr_for_content_type(content_type: ResponseContentType) -> &'static str {
-    match content_type {
-        ResponseContentType::Json => "await res.json()",
-        ResponseContentType::Text => "await res.text()",
-        ResponseContentType::Blob => "await res.blob()",
-        ResponseContentType::Unknown => "res",
+/// Build template literal quasis and expressions for a URL template.
+/// If `suffix_var` is provided, appends `?${suffix_var}` to the template.
+fn build_tpl_parts_with_suffix(
+    template: &[UrlPart],
+    suffix_var: Option<&str>,
+) -> (Vec<String>, Vec<Expr>) {
+    let mut quasis = Vec::new();
+    let mut exprs = Vec::new();
+    let mut current_static = String::new();
+
+    for part in template {
+        match part {
+            UrlPart::Static(s) => {
+                current_static.push_str(s);
+            }
+            UrlPart::Param(name) => {
+                quasis.push(current_static.clone());
+                current_static.clear();
+                exprs.push(build_param_access_expr("params", name, true));
+            }
+        }
+    }
+
+    if let Some(var) = suffix_var {
+        current_static.push('?');
+        quasis.push(current_static);
+        exprs.push(ident_expr(var));
+        quasis.push(String::new());
+    } else {
+        quasis.push(current_static);
+    }
+
+    (quasis, exprs)
+}
+
+/// Build an expression that accesses a parameter, handling bracket notation and optional chaining.
+fn build_param_access_expr(obj: &str, prop: &str, required: bool) -> Expr {
+    if needs_bracket_notation(prop) {
+        let key = str_lit(&escape_js_string(prop));
+        if required {
+            computed_member(ident_expr(obj), key)
+        } else {
+            opt_chain_computed(ident_expr(obj), key)
+        }
+    } else if required {
+        member(ident_expr(obj), prop)
+    } else {
+        opt_chain_member(ident_expr(obj), prop)
     }
 }
 
 /// Generate a query key function.
-fn codegen_query_key_function(qk: &QueryKeyIR) -> TsFunction {
-    let base_key_lit = TsExpr::Literal(TsLiteral::String(qk.base_key.clone()));
+fn codegen_query_key_function(qk: &QueryKeyIR) -> ModuleItem {
+    let base_key = str_lit(&qk.base_key);
 
     let (params, body_expr) = if let Some(params_type) = &qk.params_type {
-        let params = vec![TsParam {
-            name: "params".into(),
-            ty: Some(params_type.to_ts_type()),
-            optional: true,
-        }];
-        let body_expr = TsExpr::Cast {
-            expr: Box::new(TsExpr::Array(vec![
-                base_key_lit,
-                TsExpr::Ident("params".into()),
-            ])),
-            ty: TsType::Ref("const".into()),
-        };
+        let params = vec![pat_ident_optional("params", Some(ir_typeref_to_swc(params_type)))];
+        let body_expr = as_const(array_lit(vec![base_key, ident_expr("params")]));
         (params, body_expr)
     } else {
-        let body_expr = TsExpr::Cast {
-            expr: Box::new(TsExpr::Array(vec![base_key_lit])),
-            ty: TsType::Ref("const".into()),
-        };
+        let body_expr = as_const(array_lit(vec![base_key]));
         (vec![], body_expr)
     };
 
-    // For query key, we output a simple arrow function that returns an array
-    // export const listItemsKey = (params?: ParamsType) => ["/items", params] as const;
-    TsFunction {
-        name: qk.fn_name.clone(),
-        type_params: vec![],
+    export_const_arrow(
+        &qk.fn_name,
         params,
-        return_type: None,
-        body: vec![TsStmt::Raw(format!("return {};", body_expr.emit()))],
-        is_async: false,
-        is_export: true,
-        is_arrow: true,
-    }
+        None,
+        block(vec![return_stmt(Some(body_expr))]),
+        false,
+    )
 }
 
 /// Generate a React Query hook.
-fn codegen_hook(hook: &HookIR) -> TsFunction {
-    // Determine the actual TypeScript response type based on content type
-    let response_str = hook.response_type.emit();
+fn codegen_hook(hook: &HookIR) -> ModuleItem {
+    let response_str = ir_typeref_to_string(&hook.response_type);
     let ts_response_type = match hook.response_content_type {
         ResponseContentType::Text => "string".to_string(),
         ResponseContentType::Blob => "Blob".to_string(),
@@ -538,7 +656,6 @@ fn codegen_hook(hook: &HookIR) -> TsFunction {
         ResponseContentType::Json => response_str.clone(),
     };
 
-    // Build wrapped type, accounting for void status
     let wrapped_type = if ts_response_type == "void" {
         "void".to_string()
     } else if hook.response_has_void_status {
@@ -555,7 +672,7 @@ fn codegen_hook(hook: &HookIR) -> TsFunction {
 
 /// Generate a query hook (useQuery or useSuspenseQuery).
 #[allow(clippy::expect_used)]
-fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> TsFunction {
+fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> ModuleItem {
     let key_fn = hook
         .query_key_fn
         .as_ref()
@@ -571,139 +688,209 @@ fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> TsFunction {
         "UseSuspenseQueryOptions"
     };
 
-    let (options_param_type, body, options_optional) = if let Some(vars) = &hook.vars_type {
-        let vars_str = vars.emit();
-        // When params are required, make params non-optional in the type
+    let (options_param_type, body_stmt, options_optional) = if let Some(vars) = &hook.vars_type {
+        let vars_str = ir_typeref_to_string(vars);
         let params_modifier = if hook.params_required { "" } else { "?" };
         let options_type_str = format!(
             "{{ params{params_modifier}: {vars_str}; query?: Omit<{options_type}<{wrapped_type}, ApiError, TData>, \"queryKey\" | \"queryFn\"> }}"
         );
-        // When params are required, access as options.params (not options?.params)
-        let param_access = if hook.params_required {
-            "options.params"
+        // return hookFn({ queryKey: keyFn(param_access), queryFn: () => fetchFn(param_access), ...options?.query })
+        let param_access_expr: Expr = if hook.params_required {
+            member(ident_expr("options"), "params")
         } else {
-            "options?.params"
+            opt_chain_member(ident_expr("options"), "params")
         };
-        let body = format!(
-            "return {}({{ queryKey: {}({param_access}), queryFn: () => {}({param_access}), ...options?.query }});",
-            hook_fn, key_fn, hook.fetch_fn
+
+        let hook_call = call(
+            ident_expr(hook_fn),
+            vec![obj_lit(vec![
+                kv_prop("queryKey", call(ident_expr(key_fn), vec![param_access_expr.clone()])),
+                kv_prop(
+                    "queryFn",
+                    arrow_fn_expr(
+                        vec![],
+                        call(ident_expr(&hook.fetch_fn), vec![param_access_expr]),
+                    ),
+                ),
+                spread_prop(opt_chain_member(ident_expr("options"), "query")),
+            ])],
         );
-        // options parameter is optional only when params are optional
+
+        let body = return_stmt(Some(hook_call));
         (options_type_str, body, !hook.params_required)
     } else {
         let options_type_str = format!(
             "{{ query?: Omit<{options_type}<{wrapped_type}, ApiError, TData>, \"queryKey\" | \"queryFn\"> }}"
         );
-        let body = format!(
-            "return {}({{ queryKey: {}(), queryFn: () => {}(), ...options?.query }});",
-            hook_fn, key_fn, hook.fetch_fn
+
+        let hook_call = call(
+            ident_expr(hook_fn),
+            vec![obj_lit(vec![
+                kv_prop("queryKey", call(ident_expr(key_fn), vec![])),
+                kv_prop(
+                    "queryFn",
+                    arrow_fn_expr(vec![], call(ident_expr(&hook.fetch_fn), vec![])),
+                ),
+                spread_prop(opt_chain_member(ident_expr("options"), "query")),
+            ])],
         );
+
+        let body = return_stmt(Some(hook_call));
         (options_type_str, body, true)
     };
 
-    TsFunction {
-        name: hook.name.clone(),
-        type_params: vec![format!("TData = {}", wrapped_type)],
-        params: vec![TsParam {
-            name: "options".into(),
-            ty: Some(TsType::Ref(options_param_type)),
-            optional: options_optional,
-        }],
-        return_type: None,
-        body: vec![TsStmt::Raw(body)],
-        is_async: false,
-        is_export: true,
-        is_arrow: false,
-    }
+    let type_param_str = format!("TData = {}", wrapped_type);
+    let options_ty = ts_type_ref(&options_param_type);
+
+    let param = if options_optional {
+        param_optional("options", Some(options_ty))
+    } else {
+        param("options", Some(options_ty))
+    };
+
+    export_function(
+        &hook.name,
+        Some(vec![&type_param_str]),
+        vec![param],
+        None,
+        block(vec![body_stmt]),
+        false,
+    )
 }
 
 /// Generate a mutation hook.
-fn codegen_mutation_hook(hook: &HookIR, wrapped_type: &str) -> TsFunction {
+fn codegen_mutation_hook(hook: &HookIR, wrapped_type: &str) -> ModuleItem {
     let vars_str = hook
         .vars_type
         .as_ref()
-        .map(|v| v.emit())
+        .map(|v| ir_typeref_to_string(v))
         .unwrap_or_else(|| "void".to_string());
 
-    // Build mutation function call
+    // Build mutation function expression
     let mutation_fn = if let Some(vars) = &hook.vars_type {
         match vars {
             TypeRef::Inline(t) => match &**t {
-                TsType::Object(props) => {
+                IrTsType::Object(props) => {
                     let has_params = props.iter().any(|p| p.name == "params");
                     let has_data = props.iter().any(|p| p.name == "data");
                     match (has_params, has_data) {
                         (true, true) => {
-                            // Use correct argument order based on fetch function signature
                             if hook.body_before_params {
-                                format!("(vars) => {}(vars.data, vars.params)", hook.fetch_fn)
+                                arrow_fn_expr(
+                                    vec![pat_ident("vars", None)],
+                                    call(
+                                        ident_expr(&hook.fetch_fn),
+                                        vec![
+                                            member(ident_expr("vars"), "data"),
+                                            member(ident_expr("vars"), "params"),
+                                        ],
+                                    ),
+                                )
                             } else {
-                                format!("(vars) => {}(vars.params, vars.data)", hook.fetch_fn)
+                                arrow_fn_expr(
+                                    vec![pat_ident("vars", None)],
+                                    call(
+                                        ident_expr(&hook.fetch_fn),
+                                        vec![
+                                            member(ident_expr("vars"), "params"),
+                                            member(ident_expr("vars"), "data"),
+                                        ],
+                                    ),
+                                )
                             }
                         }
-                        (true, false) => {
-                            format!("(vars) => {}(vars.params)", hook.fetch_fn)
-                        }
-                        _ => format!("(data) => {}(data)", hook.fetch_fn),
+                        (true, false) => arrow_fn_expr(
+                            vec![pat_ident("vars", None)],
+                            call(
+                                ident_expr(&hook.fetch_fn),
+                                vec![member(ident_expr("vars"), "params")],
+                            ),
+                        ),
+                        _ => arrow_fn_expr(
+                            vec![pat_ident("data", None)],
+                            call(ident_expr(&hook.fetch_fn), vec![ident_expr("data")]),
+                        ),
                     }
                 }
-                _ => format!("(data) => {}(data)", hook.fetch_fn),
+                _ => arrow_fn_expr(
+                    vec![pat_ident("data", None)],
+                    call(ident_expr(&hook.fetch_fn), vec![ident_expr("data")]),
+                ),
             },
-            TypeRef::Named(_) => format!("(data) => {}(data)", hook.fetch_fn),
+            TypeRef::Named(_) => arrow_fn_expr(
+                vec![pat_ident("data", None)],
+                call(ident_expr(&hook.fetch_fn), vec![ident_expr("data")]),
+            ),
         }
     } else {
-        format!("() => {}()", hook.fetch_fn)
+        arrow_fn_expr(
+            vec![],
+            call(ident_expr(&hook.fetch_fn), vec![]),
+        )
     };
 
     let options_type_str =
         format!("{{ mutation?: UseMutationOptions<{wrapped_type}, ApiError, {vars_str}> }}");
 
-    let body =
-        format!("return useMutation({{ mutationFn: {mutation_fn}, ...options?.mutation }});");
+    let mutation_call = call(
+        ident_expr("useMutation"),
+        vec![obj_lit(vec![
+            kv_prop("mutationFn", mutation_fn),
+            spread_prop(opt_chain_member(ident_expr("options"), "mutation")),
+        ])],
+    );
 
-    TsFunction {
-        name: hook.name.clone(),
-        type_params: vec![],
-        params: vec![TsParam {
-            name: "options".into(),
-            ty: Some(TsType::Ref(options_type_str)),
-            optional: true,
-        }],
-        return_type: None,
-        body: vec![TsStmt::Raw(body)],
-        is_async: false,
-        is_export: true,
-        is_arrow: false,
-    }
+    let body = return_stmt(Some(mutation_call));
+
+    export_function(
+        &hook.name,
+        None,
+        vec![param_optional("options", Some(ts_type_ref(&options_type_str)))],
+        None,
+        block(vec![body]),
+        false,
+    )
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use super::super::api::*;
 
     #[test]
     fn test_codegen_imports_queries_only() {
-        let imports = codegen_imports(true, false);
-        assert_eq!(imports.len(), 2); // runtime + types
+        let items = codegen_imports(true, false);
+        assert_eq!(items.len(), 2); // runtime + types
 
-        let runtime = &imports[0];
-        assert!(!runtime.type_only);
-        assert!(runtime.items.iter().any(|i| i.name == "useQuery"));
-        assert!(runtime.items.iter().any(|i| i.name == "useSuspenseQuery"));
+        // Verify runtime import
+        if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = &items[0] {
+            assert!(!import.type_only);
+            assert!(import.specifiers.iter().any(|s| matches!(s, ImportSpecifier::Named(n) if n.local.sym.as_ref() == "useQuery")));
+            assert!(import.specifiers.iter().any(|s| matches!(s, ImportSpecifier::Named(n) if n.local.sym.as_ref() == "useSuspenseQuery")));
+        } else {
+            panic!("Expected import declaration");
+        }
 
-        let types = &imports[1];
-        assert!(types.type_only);
-        assert!(types.items.iter().any(|i| i.name == "UseQueryOptions"));
+        // Verify type import
+        if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = &items[1] {
+            assert!(import.type_only);
+            assert!(import.specifiers.iter().any(|s| matches!(s, ImportSpecifier::Named(n) if n.local.sym.as_ref() == "UseQueryOptions")));
+        } else {
+            panic!("Expected type import declaration");
+        }
     }
 
     #[test]
     fn test_codegen_imports_mutations_only() {
-        let imports = codegen_imports(false, true);
-        assert_eq!(imports.len(), 2);
+        let items = codegen_imports(false, true);
+        assert_eq!(items.len(), 2);
 
-        let runtime = &imports[0];
-        assert!(runtime.items.iter().any(|i| i.name == "useMutation"));
+        if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = &items[0] {
+            assert!(import.specifiers.iter().any(|s| matches!(s, ImportSpecifier::Named(n) if n.local.sym.as_ref() == "useMutation")));
+        } else {
+            panic!("Expected import declaration");
+        }
     }
 
     #[test]
@@ -713,11 +900,30 @@ mod tests {
             base_key: "/items".into(),
             params_type: None,
         };
-        let func = codegen_query_key_function(&qk);
-        assert_eq!(func.name, "listItemsKey");
-        assert!(func.is_export);
-        assert!(func.is_arrow);
-        assert!(func.params.is_empty());
+        let item = codegen_query_key_function(&qk);
+
+        // Should be an export const arrow
+        if let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
+            decl: Decl::Var(var_decl),
+            ..
+        })) = &item
+        {
+            assert_eq!(var_decl.kind, VarDeclKind::Const);
+            let declarator = &var_decl.decls[0];
+            if let Pat::Ident(bi) = &declarator.name {
+                assert_eq!(bi.id.sym.as_ref(), "listItemsKey");
+            }
+            // Check it's an arrow function with no params
+            if let Some(init) = &declarator.init {
+                if let Expr::Arrow(arrow) = &**init {
+                    assert!(arrow.params.is_empty());
+                } else {
+                    panic!("Expected arrow expression");
+                }
+            }
+        } else {
+            panic!("Expected export var declaration");
+        }
     }
 
     #[test]
@@ -727,9 +933,26 @@ mod tests {
             base_key: "/items/{id}".into(),
             params_type: Some(TypeRef::Named("GetItemParams".into())),
         };
-        let func = codegen_query_key_function(&qk);
-        assert_eq!(func.name, "getItemKey");
-        assert_eq!(func.params.len(), 1);
-        assert!(func.params[0].optional);
+        let item = codegen_query_key_function(&qk);
+
+        if let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
+            decl: Decl::Var(var_decl),
+            ..
+        })) = &item
+        {
+            let declarator = &var_decl.decls[0];
+            if let Some(init) = &declarator.init {
+                if let Expr::Arrow(arrow) = &**init {
+                    assert_eq!(arrow.params.len(), 1);
+                    if let Pat::Ident(bi) = &arrow.params[0] {
+                        assert!(bi.id.optional);
+                    }
+                } else {
+                    panic!("Expected arrow expression");
+                }
+            }
+        } else {
+            panic!("Expected export var declaration");
+        }
     }
 }

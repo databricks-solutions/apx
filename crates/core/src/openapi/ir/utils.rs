@@ -104,6 +104,7 @@ pub fn quote_if_needed(name: &str) -> String {
 /// * `obj` - The object name (e.g., "params")
 /// * `prop` - The property name
 /// * `required` - Whether the property is required (affects optional chaining)
+#[allow(dead_code)]
 pub fn format_param_access(obj: &str, prop: &str, required: bool) -> String {
     if needs_bracket_notation(prop) {
         if required {
