@@ -79,16 +79,16 @@ fn codegen_imports(has_queries: bool, has_mutations: bool) -> Vec<ModuleItem> {
 
 /// Generate the ApiError class as a proper SWC ClassDecl.
 fn codegen_api_error_class() -> ModuleItem {
-    let status_prop = class_prop("status", ts_number());
-    let status_text_prop = class_prop("statusText", ts_string());
-    let body_prop = class_prop("body", ts_unknown());
+    let status_prop = class_prop("status", ts_kw!(number));
+    let status_text_prop = class_prop("statusText", ts_kw!(string));
+    let body_prop = class_prop("body", ts_kw!(unknown));
 
     // constructor(status: number, statusText: string, body: unknown) { ... }
     let ctor = constructor(
         vec![
-            constructor_param("status", Some(ts_number())),
-            constructor_param("statusText", Some(ts_string())),
-            constructor_param("body", Some(ts_unknown())),
+            constructor_param("status", Some(ts_kw!(number))),
+            constructor_param("statusText", Some(ts_kw!(string))),
+            constructor_param("body", Some(ts_kw!(unknown))),
         ],
         block(vec![
             // super(`HTTP ${status}: ${statusText}`)
@@ -184,11 +184,7 @@ fn codegen_fetch_function(fetch: &FetchIR) -> ModuleItem {
         match a {
             FetchArgIR::Params { ty, optional } => {
                 let swc_ty = ir_typeref_to_swc(ty);
-                if *optional {
-                    params.push(pat_ident_optional("params", Some(swc_ty)));
-                } else {
-                    params.push(pat_ident("params", Some(swc_ty)));
-                }
+                params.push(pat_ident("params", Some(swc_ty), *optional));
             }
             FetchArgIR::Body { ty, content_type } => {
                 body_content_type = Some(*content_type);
@@ -196,33 +192,28 @@ fn codegen_fetch_function(fetch: &FetchIR) -> ModuleItem {
                     BodyContentType::FormData => ts_type_ref("FormData"),
                     BodyContentType::UrlEncoded | BodyContentType::Json => ir_typeref_to_swc(ty),
                 };
-                params.push(pat_ident("data", Some(ty_type)));
+                params.push(pat_ident("data", Some(ty_type), false));
             }
             FetchArgIR::Options => {
-                params.push(pat_ident_optional("options", Some(ts_type_ref("RequestInit"))));
+                params.push(pat_ident("options", Some(ts_type_ref("RequestInit")), true));
             }
         }
     }
 
     // Build return type
-    let response_type_str = ir_typeref_to_string(&fetch.response.ty);
-    let ts_response_type = match fetch.response.content_type {
-        ResponseContentType::Text => "string".to_string(),
-        ResponseContentType::Blob => "Blob".to_string(),
-        ResponseContentType::Unknown => "Response".to_string(),
-        ResponseContentType::Json => response_type_str.clone(),
-    };
+    let response_swc_type = resolve_content_type(fetch.response.content_type, &fetch.response.ty);
+    let is_void_response = is_void_type(&response_swc_type);
 
-    let return_type = if ts_response_type == "void" {
-        ts_type_ref("Promise<void>")
+    let return_type = if is_void_response {
+        promise_type(ts_kw!(void))
     } else if fetch.response.has_void_status {
-        ts_type_ref(&format!("Promise<{{ data: {ts_response_type} }} | void>"))
+        promise_type(ts_union(vec![data_wrapper_type(response_swc_type), ts_kw!(void)]))
     } else {
-        ts_type_ref(&format!("Promise<{{ data: {ts_response_type} }}>"))
+        promise_type(data_wrapper_type(response_swc_type))
     };
 
     // Build function body
-    let body_stmts = codegen_fetch_body(fetch, body_content_type, &ts_response_type);
+    let body_stmts = codegen_fetch_body(fetch, body_content_type, is_void_response);
 
     export_const_arrow(&fetch.fn_name, params, Some(return_type), block(body_stmts), true)
 }
@@ -231,7 +222,7 @@ fn codegen_fetch_function(fetch: &FetchIR) -> ModuleItem {
 fn codegen_fetch_body(
     fetch: &FetchIR,
     body_content_type: Option<BodyContentType>,
-    ts_response_type: &str,
+    is_void_response: bool,
 ) -> Vec<Stmt> {
     let mut stmts = Vec::new();
 
@@ -261,7 +252,7 @@ fn codegen_fetch_body(
                     let foreach_call = call(
                         member(access_expr, "forEach"),
                         vec![arrow_fn_expr(
-                            vec![pat_ident("v", None)],
+                            vec![pat_ident("v", None, false)],
                             call(
                                 member(ident_expr("searchParams"), "append"),
                                 vec![
@@ -352,7 +343,7 @@ fn codegen_fetch_body(
     stmts.push(codegen_error_handling());
 
     // Return statement based on response type
-    if ts_response_type == "void" {
+    if is_void_response {
         stmts.push(return_stmt(None));
     } else if fetch.response.has_void_status {
         // if (res.status === 204) return;
@@ -454,7 +445,7 @@ fn codegen_fetch_call_stmt(
                                 ident_expr("data"),
                                 ts_type_ref_with_params(
                                     "Record",
-                                    vec![ts_string(), ts_string()],
+                                    vec![ts_kw!(string), ts_kw!(string)],
                                 ),
                             )],
                         ),
@@ -498,7 +489,7 @@ fn codegen_error_handling() -> Stmt {
         declare: false,
         decls: vec![VarDeclarator {
             span: DUMMY_SP,
-            name: Pat::Ident(binding_ident("parsed", Some(ts_unknown()))),
+            name: Pat::Ident(binding_ident("parsed", Some(ts_kw!(unknown)), false)),
             init: None,
             definite: false,
         }],
@@ -507,7 +498,7 @@ fn codegen_error_handling() -> Stmt {
     let try_block = block(vec![expr_stmt(Expr::Assign(AssignExpr {
         span: DUMMY_SP,
         op: AssignOp::Assign,
-        left: AssignTarget::Simple(SimpleAssignTarget::Ident(binding_ident("parsed", None))),
+        left: AssignTarget::Simple(SimpleAssignTarget::Ident(binding_ident("parsed", None, false))),
         right: Box::new(call(
             member(ident_expr("JSON"), "parse"),
             vec![ident_expr("body")],
@@ -517,7 +508,7 @@ fn codegen_error_handling() -> Stmt {
     let catch_block = block(vec![expr_stmt(Expr::Assign(AssignExpr {
         span: DUMMY_SP,
         op: AssignOp::Assign,
-        left: AssignTarget::Simple(SimpleAssignTarget::Ident(binding_ident("parsed", None))),
+        left: AssignTarget::Simple(SimpleAssignTarget::Ident(binding_ident("parsed", None, false))),
         right: Box::new(ident_expr("body")),
     }))]);
 
@@ -553,6 +544,30 @@ fn response_data_expr(content_type: ResponseContentType) -> Expr {
         }
         ResponseContentType::Unknown => ident_expr("res"),
     }
+}
+
+/// Resolve the SWC type for a response based on content type.
+fn resolve_content_type(
+    content_type: ResponseContentType,
+    ty: &TypeRef,
+) -> Box<swc_ecma_ast::TsType> {
+    match content_type {
+        ResponseContentType::Text => ts_kw!(string),
+        ResponseContentType::Blob => ts_type_ref("Blob"),
+        ResponseContentType::Unknown => ts_type_ref("Response"),
+        ResponseContentType::Json => ir_typeref_to_swc(ty),
+    }
+}
+
+/// Check if an SWC type is the `void` keyword.
+fn is_void_type(ty: &swc_ecma_ast::TsType) -> bool {
+    matches!(
+        ty,
+        swc_ecma_ast::TsType::TsKeywordType(swc_ecma_ast::TsKeywordType {
+            kind: TsKeywordTypeKind::TsVoidKeyword,
+            ..
+        })
+    )
 }
 
 /// Build a plain path template string (for fallback/display).
@@ -629,7 +644,7 @@ fn codegen_query_key_function(qk: &QueryKeyIR) -> ModuleItem {
     let base_key = str_lit(&qk.base_key);
 
     let (params, body_expr) = if let Some(params_type) = &qk.params_type {
-        let params = vec![pat_ident_optional("params", Some(ir_typeref_to_swc(params_type)))];
+        let params = vec![pat_ident("params", Some(ir_typeref_to_swc(params_type)), true)];
         let body_expr = as_const(array_lit(vec![base_key, ident_expr("params")]));
         (params, body_expr)
     } else {
@@ -648,31 +663,36 @@ fn codegen_query_key_function(qk: &QueryKeyIR) -> ModuleItem {
 
 /// Generate a React Query hook.
 fn codegen_hook(hook: &HookIR) -> ModuleItem {
-    let response_str = ir_typeref_to_string(&hook.response_type);
-    let ts_response_type = match hook.response_content_type {
-        ResponseContentType::Text => "string".to_string(),
-        ResponseContentType::Blob => "Blob".to_string(),
-        ResponseContentType::Unknown => "Response".to_string(),
-        ResponseContentType::Json => response_str.clone(),
-    };
+    let response_swc_type =
+        resolve_content_type(hook.response_content_type, &hook.response_type);
+    let is_void = is_void_type(&response_swc_type);
 
-    let wrapped_type = if ts_response_type == "void" {
-        "void".to_string()
+    let wrapped_type: Box<swc_ecma_ast::TsType> = if is_void {
+        ts_kw!(void)
     } else if hook.response_has_void_status {
-        format!("{{ data: {ts_response_type} }} | void")
+        ts_union(vec![data_wrapper_type(response_swc_type), ts_kw!(void)])
     } else {
-        format!("{{ data: {ts_response_type} }}")
+        data_wrapper_type(response_swc_type)
     };
 
     match hook.kind {
-        HookKind::Query | HookKind::SuspenseQuery => codegen_query_hook(hook, &wrapped_type),
-        HookKind::Mutation => codegen_mutation_hook(hook, &wrapped_type),
+        HookKind::Query | HookKind::SuspenseQuery => codegen_query_hook(hook, wrapped_type),
+        HookKind::Mutation => codegen_mutation_hook(hook, wrapped_type),
     }
+}
+
+/// Build `Omit<OptionsType<Wrapped, ApiError, TData>, "queryKey" | "queryFn">`.
+fn omit_query_opts(options_type: &str, wrapped: &swc_ecma_ast::TsType) -> Box<swc_ecma_ast::TsType> {
+    let opts = ts_type_ref_with_params(
+        options_type,
+        vec![Box::new(wrapped.clone()), ts_type_ref("ApiError"), ts_type_ref("TData")],
+    );
+    ts_omit(opts, ts_union(vec![ts_lit_str("queryKey"), ts_lit_str("queryFn")]))
 }
 
 /// Generate a query hook (useQuery or useSuspenseQuery).
 #[allow(clippy::expect_used)]
-fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> ModuleItem {
+fn codegen_query_hook(hook: &HookIR, wrapped_type: Box<swc_ecma_ast::TsType>) -> ModuleItem {
     let key_fn = hook
         .query_key_fn
         .as_ref()
@@ -682,19 +702,22 @@ fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> ModuleItem {
     } else {
         "useSuspenseQuery"
     };
-    let options_type = if hook.kind == HookKind::Query {
+    let options_type_name = if hook.kind == HookKind::Query {
         "UseQueryOptions"
     } else {
         "UseSuspenseQueryOptions"
     };
 
     let (options_param_type, body_stmt, options_optional) = if let Some(vars) = &hook.vars_type {
-        let vars_str = ir_typeref_to_string(vars);
-        let params_modifier = if hook.params_required { "" } else { "?" };
-        let options_type_str = format!(
-            "{{ params{params_modifier}: {vars_str}; query?: Omit<{options_type}<{wrapped_type}, ApiError, TData>, \"queryKey\" | \"queryFn\"> }}"
+        let vars_swc = ir_typeref_to_swc(vars);
+        let params_prop = ts_property_sig("params", vars_swc, !hook.params_required);
+        let query_prop = ts_property_sig(
+            "query",
+            omit_query_opts(options_type_name, &wrapped_type),
+            true,
         );
-        // return hookFn({ queryKey: keyFn(param_access), queryFn: () => fetchFn(param_access), ...options?.query })
+        let opts_type = ts_object_type(vec![params_prop, query_prop]);
+
         let param_access_expr: Expr = if hook.params_required {
             member(ident_expr("options"), "params")
         } else {
@@ -717,11 +740,14 @@ fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> ModuleItem {
         );
 
         let body = return_stmt(Some(hook_call));
-        (options_type_str, body, !hook.params_required)
+        (opts_type, body, !hook.params_required)
     } else {
-        let options_type_str = format!(
-            "{{ query?: Omit<{options_type}<{wrapped_type}, ApiError, TData>, \"queryKey\" | \"queryFn\"> }}"
+        let query_prop = ts_property_sig(
+            "query",
+            omit_query_opts(options_type_name, &wrapped_type),
+            true,
         );
+        let opts_type = ts_object_type(vec![query_prop]);
 
         let hook_call = call(
             ident_expr(hook_fn),
@@ -736,22 +762,17 @@ fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> ModuleItem {
         );
 
         let body = return_stmt(Some(hook_call));
-        (options_type_str, body, true)
+        (opts_type, body, true)
     };
 
-    let type_param_str = format!("TData = {}", wrapped_type);
-    let options_ty = ts_type_ref(&options_param_type);
+    let tdata_param = ts_type_param("TData", Some(wrapped_type));
 
-    let param = if options_optional {
-        param_optional("options", Some(options_ty))
-    } else {
-        param("options", Some(options_ty))
-    };
+    let options_param = param("options", Some(options_param_type), options_optional);
 
     export_function(
         &hook.name,
-        Some(vec![&type_param_str]),
-        vec![param],
+        Some(vec![tdata_param]),
+        vec![options_param],
         None,
         block(vec![body_stmt]),
         false,
@@ -759,12 +780,12 @@ fn codegen_query_hook(hook: &HookIR, wrapped_type: &str) -> ModuleItem {
 }
 
 /// Generate a mutation hook.
-fn codegen_mutation_hook(hook: &HookIR, wrapped_type: &str) -> ModuleItem {
-    let vars_str = hook
+fn codegen_mutation_hook(hook: &HookIR, wrapped_type: Box<swc_ecma_ast::TsType>) -> ModuleItem {
+    let vars_swc_type = hook
         .vars_type
         .as_ref()
-        .map(|v| ir_typeref_to_string(v))
-        .unwrap_or_else(|| "void".to_string());
+        .map(|v| ir_typeref_to_swc(v))
+        .unwrap_or_else(|| ts_kw!(void));
 
     // Build mutation function expression
     let mutation_fn = if let Some(vars) = &hook.vars_type {
@@ -777,7 +798,7 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: &str) -> ModuleItem {
                         (true, true) => {
                             if hook.body_before_params {
                                 arrow_fn_expr(
-                                    vec![pat_ident("vars", None)],
+                                    vec![pat_ident("vars", None, false)],
                                     call(
                                         ident_expr(&hook.fetch_fn),
                                         vec![
@@ -788,7 +809,7 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: &str) -> ModuleItem {
                                 )
                             } else {
                                 arrow_fn_expr(
-                                    vec![pat_ident("vars", None)],
+                                    vec![pat_ident("vars", None, false)],
                                     call(
                                         ident_expr(&hook.fetch_fn),
                                         vec![
@@ -800,25 +821,25 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: &str) -> ModuleItem {
                             }
                         }
                         (true, false) => arrow_fn_expr(
-                            vec![pat_ident("vars", None)],
+                            vec![pat_ident("vars", None, false)],
                             call(
                                 ident_expr(&hook.fetch_fn),
                                 vec![member(ident_expr("vars"), "params")],
                             ),
                         ),
                         _ => arrow_fn_expr(
-                            vec![pat_ident("data", None)],
+                            vec![pat_ident("data", None, false)],
                             call(ident_expr(&hook.fetch_fn), vec![ident_expr("data")]),
                         ),
                     }
                 }
                 _ => arrow_fn_expr(
-                    vec![pat_ident("data", None)],
+                    vec![pat_ident("data", None, false)],
                     call(ident_expr(&hook.fetch_fn), vec![ident_expr("data")]),
                 ),
             },
             TypeRef::Named(_) => arrow_fn_expr(
-                vec![pat_ident("data", None)],
+                vec![pat_ident("data", None, false)],
                 call(ident_expr(&hook.fetch_fn), vec![ident_expr("data")]),
             ),
         }
@@ -829,8 +850,14 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: &str) -> ModuleItem {
         )
     };
 
-    let options_type_str =
-        format!("{{ mutation?: UseMutationOptions<{wrapped_type}, ApiError, {vars_str}> }}");
+    // { mutation?: UseMutationOptions<WrappedType, ApiError, VarsType> }
+    let mutation_opts = ts_type_ref_with_params(
+        "UseMutationOptions",
+        vec![wrapped_type, ts_type_ref("ApiError"), vars_swc_type],
+    );
+    let options_type = ts_object_type(vec![
+        ts_property_sig("mutation", mutation_opts, true),
+    ]);
 
     let mutation_call = call(
         ident_expr("useMutation"),
@@ -845,7 +872,7 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: &str) -> ModuleItem {
     export_function(
         &hook.name,
         None,
-        vec![param_optional("options", Some(ts_type_ref(&options_type_str)))],
+        vec![param("options", Some(options_type), true)],
         None,
         block(vec![body]),
         false,

@@ -1110,7 +1110,7 @@ mod tests {
         );
         // Return type should be Response
         assert!(
-            ts_code.contains("Promise<{ data: Response }>"),
+            normalize_ws(&ts_code).contains("Promise<{ data: Response; }>"),
             "Return type should be Promise<{{ data: Response }}>"
         );
     }
@@ -1845,13 +1845,14 @@ mod tests {
             "Missing useGetItem hook"
         );
 
+        let flat = normalize_ws(&ts_code);
         // Check that params is required (no ? after params)
         assert!(
-            ts_code.contains("{ params: GetItemParams;"),
+            flat.contains("{ params: GetItemParams;"),
             "useGetItem should have required params, not optional. Generated:\n{ts_code}"
         );
         assert!(
-            !ts_code.contains("{ params?: GetItemParams;"),
+            !flat.contains("{ params?: GetItemParams;"),
             "useGetItem should NOT have optional params. Generated:\n{ts_code}"
         );
 
@@ -1863,7 +1864,7 @@ mod tests {
 
         // Same for useGetCutieCat with multiple path params
         assert!(
-            ts_code.contains("{ params: GetCutieCatParams;"),
+            flat.contains("{ params: GetCutieCatParams;"),
             "useGetCutieCat should have required params. Generated:\n{ts_code}"
         );
     }
@@ -1900,9 +1901,10 @@ mod tests {
             "Missing useListItems hook"
         );
 
+        let flat = normalize_ws(&ts_code);
         // Check that params is optional
         assert!(
-            ts_code.contains("{ params?: ListItemsParams;"),
+            flat.contains("{ params?: ListItemsParams;"),
             "useListItems should have optional params. Generated:\n{ts_code}"
         );
 
@@ -1947,9 +1949,10 @@ mod tests {
             "Missing useGetUserPosts hook"
         );
 
+        let flat = normalize_ws(&ts_code);
         // Check that params is required (not optional)
         assert!(
-            ts_code.contains("{ params: GetUserPostsParams;"),
+            flat.contains("{ params: GetUserPostsParams;"),
             "useGetUserPosts should have required params due to required path param. Generated:\n{ts_code}"
         );
 
@@ -1995,8 +1998,9 @@ mod tests {
             "Missing useGetItemSuspense hook"
         );
 
+        let flat = normalize_ws(&ts_code);
         // Count occurrences of required params pattern
-        let required_params_count = ts_code.matches("{ params: GetItemParams;").count();
+        let required_params_count = flat.matches("{ params: GetItemParams;").count();
         assert!(
             required_params_count >= 2,
             "Both useGetItem and useGetItemSuspense should have required params. Found {required_params_count} occurrences. Generated:\n{ts_code}"
@@ -2037,9 +2041,10 @@ mod tests {
             "Hook without params should not have params type. Generated:\n{ts_code}"
         );
 
+        let flat = normalize_ws(&ts_code);
         // The options should be optional and only contain query
         assert!(
-            ts_code.contains("options?: { query?:"),
+            flat.contains("options?: { query?:"),
             "Hook without params should have optional options with only query. Generated:\n{ts_code}"
         );
     }
@@ -2070,9 +2075,10 @@ mod tests {
         let ts_code = generate_and_verify(openapi_json);
         println!("=== REQUIRED QUERY PARAM ===\n{ts_code}\n=== END ===");
 
+        let flat = normalize_ws(&ts_code);
         // Even though it's a query param, it's required - so params should be required
         assert!(
-            ts_code.contains("{ params: SearchParams;"),
+            flat.contains("{ params: SearchParams;"),
             "Required query param should make params required. Generated:\n{ts_code}"
         );
         assert!(
@@ -2106,9 +2112,10 @@ mod tests {
         let ts_code = generate_and_verify(openapi_json);
         println!("=== REQUIRED HEADER PARAM ===\n{ts_code}\n=== END ===");
 
+        let flat = normalize_ws(&ts_code);
         // Required header param should make params required
         assert!(
-            ts_code.contains("{ params: GetSecureDataParams;"),
+            flat.contains("{ params: GetSecureDataParams;"),
             "Required header param should make params required. Generated:\n{ts_code}"
         );
     }
@@ -3684,10 +3691,11 @@ export function useGetCatBuggy<TData = { data: { meow: string } }>(
             "Should have FormData data"
         );
 
+        let flat = normalize_ws(&ts_code);
         // Mutation hook vars should include both
         assert!(
-            ts_code.contains("{ params: UploadAvatarParams; data: FormData }"),
-            "Mutation vars should have params and FormData"
+            flat.contains("{ params: UploadAvatarParams; data: FormData; }"),
+            "Mutation vars should have params and FormData. Generated:\n{ts_code}"
         );
     }
 
@@ -4059,9 +4067,10 @@ export function useGetCatBuggy<TData = { data: { meow: string } }>(
             "Fetch function params should be required (non-optional)"
         );
 
+        let flat = normalize_ws(&ts_code);
         // Hook: options object must be required (contains required params)
         assert!(
-            ts_code.contains("(options: { params: GetScanParams"),
+            flat.contains("(options: { params: GetScanParams"),
             "Hook options should be required with required params field"
         );
 

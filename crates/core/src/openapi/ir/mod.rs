@@ -20,6 +20,7 @@
 //! - `utils`: Common utilities shared across modules
 
 mod api;
+#[macro_use]
 pub mod builders;
 mod codegen;
 mod normalize;

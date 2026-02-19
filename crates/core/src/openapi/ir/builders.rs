@@ -3,8 +3,6 @@
 //! These helpers reduce the verbosity of building `swc_ecma_ast` types
 //! when generating TypeScript code programmatically.
 
-#![allow(dead_code)]
-
 use swc_atoms::Atom;
 use swc_common::{DUMMY_SP, SyntaxContext};
 use swc_ecma_ast::*;
@@ -26,17 +24,10 @@ pub fn ident_name(name: &str) -> IdentName {
     }
 }
 
-pub fn binding_ident(name: &str, ty: Option<Box<TsType>>) -> BindingIdent {
-    BindingIdent {
-        id: ident(name),
-        type_ann: ty.map(ts_type_ann),
-    }
-}
-
-pub fn binding_ident_optional(name: &str, ty: Option<Box<TsType>>) -> BindingIdent {
+pub fn binding_ident(name: &str, ty: Option<Box<TsType>>, optional: bool) -> BindingIdent {
     BindingIdent {
         id: Ident {
-            optional: true,
+            optional,
             ..ident(name)
         },
         type_ann: ty.map(ts_type_ann),
@@ -47,40 +38,30 @@ pub fn binding_ident_optional(name: &str, ty: Option<Box<TsType>>) -> BindingIde
 // TypeScript Types
 // =============================================================================
 
-pub fn ts_keyword(kind: TsKeywordTypeKind) -> Box<TsType> {
+fn ts_keyword(kind: TsKeywordTypeKind) -> Box<TsType> {
     Box::new(TsType::TsKeywordType(TsKeywordType {
         span: DUMMY_SP,
         kind,
     }))
 }
 
-pub fn ts_string() -> Box<TsType> {
-    ts_keyword(TsKeywordTypeKind::TsStringKeyword)
+macro_rules! ts_kw {
+    (string)  => { $crate::openapi::ir::builders::ts_keyword_string() };
+    (number)  => { $crate::openapi::ir::builders::ts_keyword_number() };
+    (boolean) => { $crate::openapi::ir::builders::ts_keyword_boolean() };
+    (null)    => { $crate::openapi::ir::builders::ts_keyword_null() };
+    (void)    => { $crate::openapi::ir::builders::ts_keyword_void() };
+    (unknown) => { $crate::openapi::ir::builders::ts_keyword_unknown() };
 }
 
-pub fn ts_number() -> Box<TsType> {
-    ts_keyword(TsKeywordTypeKind::TsNumberKeyword)
-}
-
-pub fn ts_boolean() -> Box<TsType> {
-    ts_keyword(TsKeywordTypeKind::TsBooleanKeyword)
-}
-
-pub fn ts_null() -> Box<TsType> {
-    ts_keyword(TsKeywordTypeKind::TsNullKeyword)
-}
-
-pub fn ts_void() -> Box<TsType> {
-    ts_keyword(TsKeywordTypeKind::TsVoidKeyword)
-}
-
-pub fn ts_unknown() -> Box<TsType> {
-    ts_keyword(TsKeywordTypeKind::TsUnknownKeyword)
-}
-
-pub fn ts_any() -> Box<TsType> {
-    ts_keyword(TsKeywordTypeKind::TsAnyKeyword)
-}
+// These are pub so the macro can reference them from other modules.
+// Prefer using ts_kw!(...) directly.
+pub fn ts_keyword_string() -> Box<TsType> { ts_keyword(TsKeywordTypeKind::TsStringKeyword) }
+pub fn ts_keyword_number() -> Box<TsType> { ts_keyword(TsKeywordTypeKind::TsNumberKeyword) }
+pub fn ts_keyword_boolean() -> Box<TsType> { ts_keyword(TsKeywordTypeKind::TsBooleanKeyword) }
+pub fn ts_keyword_null() -> Box<TsType> { ts_keyword(TsKeywordTypeKind::TsNullKeyword) }
+pub fn ts_keyword_void() -> Box<TsType> { ts_keyword(TsKeywordTypeKind::TsVoidKeyword) }
+pub fn ts_keyword_unknown() -> Box<TsType> { ts_keyword(TsKeywordTypeKind::TsUnknownKeyword) }
 
 pub fn ts_type_ref(name: &str) -> Box<TsType> {
     Box::new(TsType::TsTypeRef(TsTypeRef {
@@ -199,6 +180,34 @@ pub fn ts_paren(ty: Box<TsType>) -> Box<TsType> {
     }))
 }
 
+/// `Promise<T>`
+pub fn promise_type(inner: Box<TsType>) -> Box<TsType> {
+    ts_type_ref_with_params("Promise", vec![inner])
+}
+
+/// `{ data: T }`
+pub fn data_wrapper_type(ty: Box<TsType>) -> Box<TsType> {
+    ts_object_type(vec![ts_property_sig("data", ty, false)])
+}
+
+/// `Omit<T, K>`
+pub fn ts_omit(ty: Box<TsType>, keys: Box<TsType>) -> Box<TsType> {
+    ts_type_ref_with_params("Omit", vec![ty, keys])
+}
+
+/// Create a `TsTypeParam` with an optional default type.
+pub fn ts_type_param(name: &str, default: Option<Box<TsType>>) -> TsTypeParam {
+    TsTypeParam {
+        span: DUMMY_SP,
+        name: ident(name),
+        is_in: false,
+        is_out: false,
+        is_const: false,
+        constraint: None,
+        default,
+    }
+}
+
 // =============================================================================
 // Expressions
 // =============================================================================
@@ -250,16 +259,6 @@ pub fn call(callee: Expr, args: Vec<Expr>) -> Expr {
     })
 }
 
-pub fn call_with_spread(callee: Expr, args: Vec<ExprOrSpread>) -> Expr {
-    Expr::Call(CallExpr {
-        span: DUMMY_SP,
-        ctxt: SyntaxContext::empty(),
-        callee: Callee::Expr(Box::new(callee)),
-        args,
-        type_args: None,
-    })
-}
-
 pub fn member(obj: Expr, prop: &str) -> Expr {
     Expr::Member(MemberExpr {
         span: DUMMY_SP,
@@ -306,19 +305,6 @@ pub fn opt_chain_computed(obj: Expr, prop: Expr) -> Expr {
     })
 }
 
-pub fn arrow_fn(params: Vec<Pat>, body: BlockStmt) -> Expr {
-    Expr::Arrow(ArrowExpr {
-        span: DUMMY_SP,
-        ctxt: SyntaxContext::empty(),
-        params,
-        body: Box::new(BlockStmtOrExpr::BlockStmt(body)),
-        is_async: false,
-        is_generator: false,
-        type_params: None,
-        return_type: None,
-    })
-}
-
 pub fn arrow_fn_expr(params: Vec<Pat>, body: Expr) -> Expr {
     Expr::Arrow(ArrowExpr {
         span: DUMMY_SP,
@@ -326,19 +312,6 @@ pub fn arrow_fn_expr(params: Vec<Pat>, body: Expr) -> Expr {
         params,
         body: Box::new(BlockStmtOrExpr::Expr(Box::new(body))),
         is_async: false,
-        is_generator: false,
-        type_params: None,
-        return_type: None,
-    })
-}
-
-pub fn async_arrow_fn(params: Vec<Pat>, body: BlockStmt) -> Expr {
-    Expr::Arrow(ArrowExpr {
-        span: DUMMY_SP,
-        ctxt: SyntaxContext::empty(),
-        params,
-        body: Box::new(BlockStmtOrExpr::BlockStmt(body)),
-        is_async: true,
         is_generator: false,
         type_params: None,
         return_type: None,
@@ -387,13 +360,6 @@ pub fn new_expr(callee: Expr, args: Vec<Expr>) -> Expr {
     })
 }
 
-pub fn spread(expr: Expr) -> ExprOrSpread {
-    ExprOrSpread {
-        spread: Some(DUMMY_SP),
-        expr: Box::new(expr),
-    }
-}
-
 pub fn arg(expr: Expr) -> ExprOrSpread {
     ExprOrSpread {
         spread: None,
@@ -424,10 +390,6 @@ pub fn kv_prop_str(key: &str, value: Expr) -> PropOrSpread {
         }),
         value: Box::new(value),
     })))
-}
-
-pub fn shorthand_prop(name: &str) -> PropOrSpread {
-    PropOrSpread::Prop(Box::new(Prop::Shorthand(ident(name))))
 }
 
 pub fn spread_prop(expr: Expr) -> PropOrSpread {
@@ -530,37 +492,7 @@ pub fn const_decl(name: &str, init: Expr) -> Stmt {
         declare: false,
         decls: vec![VarDeclarator {
             span: DUMMY_SP,
-            name: Pat::Ident(binding_ident(name, None)),
-            init: Some(Box::new(init)),
-            definite: false,
-        }],
-    })))
-}
-
-pub fn const_typed_decl(name: &str, ty: Box<TsType>, init: Expr) -> Stmt {
-    Stmt::Decl(Decl::Var(Box::new(VarDecl {
-        span: DUMMY_SP,
-        ctxt: SyntaxContext::empty(),
-        kind: VarDeclKind::Const,
-        declare: false,
-        decls: vec![VarDeclarator {
-            span: DUMMY_SP,
-            name: Pat::Ident(binding_ident(name, Some(ty))),
-            init: Some(Box::new(init)),
-            definite: false,
-        }],
-    })))
-}
-
-pub fn let_decl(name: &str, init: Expr) -> Stmt {
-    Stmt::Decl(Decl::Var(Box::new(VarDecl {
-        span: DUMMY_SP,
-        ctxt: SyntaxContext::empty(),
-        kind: VarDeclKind::Let,
-        declare: false,
-        decls: vec![VarDeclarator {
-            span: DUMMY_SP,
-            name: Pat::Ident(binding_ident(name, None)),
+            name: Pat::Ident(binding_ident(name, None, false)),
             init: Some(Box::new(init)),
             definite: false,
         }],
@@ -685,7 +617,7 @@ pub fn export_const_arrow(
         declare: false,
         decls: vec![VarDeclarator {
             span: DUMMY_SP,
-            name: Pat::Ident(binding_ident(name, None)),
+            name: Pat::Ident(binding_ident(name, None, false)),
             init: Some(Box::new(Expr::Arrow(arrow))),
             definite: false,
         }],
@@ -694,7 +626,7 @@ pub fn export_const_arrow(
 
 pub fn export_function(
     name: &str,
-    type_params: Option<Vec<&str>>,
+    type_params: Option<Vec<TsTypeParam>>,
     params: Vec<Param>,
     ret: Option<Box<TsType>>,
     body_stmts: BlockStmt,
@@ -703,18 +635,7 @@ pub fn export_function(
     let tp = type_params.map(|tps| {
         Box::new(TsTypeParamDecl {
             span: DUMMY_SP,
-            params: tps
-                .into_iter()
-                .map(|name| TsTypeParam {
-                    span: DUMMY_SP,
-                    name: ident(name),
-                    is_in: false,
-                    is_out: false,
-                    is_const: false,
-                    constraint: None,
-                    default: None,
-                })
-                .collect(),
+            params: tps,
         })
     });
 
@@ -811,32 +732,20 @@ pub fn constructor(params: Vec<ParamOrTsParamProp>, body: BlockStmt) -> ClassMem
 // Parameter helpers
 // =============================================================================
 
-pub fn param(name: &str, ty: Option<Box<TsType>>) -> Param {
+pub fn param(name: &str, ty: Option<Box<TsType>>, optional: bool) -> Param {
     Param {
         span: DUMMY_SP,
         decorators: vec![],
-        pat: Pat::Ident(binding_ident(name, ty)),
+        pat: Pat::Ident(binding_ident(name, ty, optional)),
     }
 }
 
-pub fn param_optional(name: &str, ty: Option<Box<TsType>>) -> Param {
-    Param {
-        span: DUMMY_SP,
-        decorators: vec![],
-        pat: Pat::Ident(binding_ident_optional(name, ty)),
-    }
-}
-
-pub fn pat_ident(name: &str, ty: Option<Box<TsType>>) -> Pat {
-    Pat::Ident(binding_ident(name, ty))
-}
-
-pub fn pat_ident_optional(name: &str, ty: Option<Box<TsType>>) -> Pat {
-    Pat::Ident(binding_ident_optional(name, ty))
+pub fn pat_ident(name: &str, ty: Option<Box<TsType>>, optional: bool) -> Pat {
+    Pat::Ident(binding_ident(name, ty, optional))
 }
 
 pub fn constructor_param(name: &str, ty: Option<Box<TsType>>) -> ParamOrTsParamProp {
-    ParamOrTsParamProp::Param(param(name, ty))
+    ParamOrTsParamProp::Param(param(name, ty, false))
 }
 
 // =============================================================================
@@ -847,12 +756,12 @@ pub fn constructor_param(name: &str, ty: Option<Box<TsType>>) -> ParamOrTsParamP
 pub fn ir_type_to_swc(ty: &ir::TsType) -> Box<TsType> {
     match ty {
         ir::TsType::Primitive(p) => match p {
-            ir::TsPrimitive::String => ts_string(),
-            ir::TsPrimitive::Number => ts_number(),
-            ir::TsPrimitive::Boolean => ts_boolean(),
-            ir::TsPrimitive::Null => ts_null(),
-            ir::TsPrimitive::Void => ts_void(),
-            ir::TsPrimitive::Unknown => ts_unknown(),
+            ir::TsPrimitive::String => ts_kw!(string),
+            ir::TsPrimitive::Number => ts_kw!(number),
+            ir::TsPrimitive::Boolean => ts_kw!(boolean),
+            ir::TsPrimitive::Null => ts_kw!(null),
+            ir::TsPrimitive::Void => ts_kw!(void),
+            ir::TsPrimitive::Unknown => ts_kw!(unknown),
         },
         ir::TsType::Array(inner) => {
             let elem = ir_type_to_swc(inner);
@@ -904,7 +813,7 @@ fn ir_literal_to_swc_type(lit: &ir::TsLiteral) -> Box<TsType> {
         ir::TsLiteral::Number(n) => ts_lit_num(*n),
         ir::TsLiteral::Int(i) => ts_lit_num(*i as f64),
         ir::TsLiteral::Bool(b) => ts_lit_bool(*b),
-        ir::TsLiteral::Null => ts_null(),
+        ir::TsLiteral::Null => ts_kw!(null),
     }
 }
 
@@ -957,7 +866,7 @@ pub fn ir_typedef_to_module_items(td: &ir::TsTypeDef) -> Vec<ModuleItem> {
                 declare: false,
                 decls: vec![VarDeclarator {
                     span: DUMMY_SP,
-                    name: Pat::Ident(binding_ident(&td.name, None)),
+                    name: Pat::Ident(binding_ident(&td.name, None, false)),
                     init: Some(Box::new(const_obj)),
                     definite: false,
                 }],
@@ -995,86 +904,5 @@ fn ir_literal_to_expr(lit: &ir::TsLiteral) -> Expr {
         ir::TsLiteral::Int(i) => num_lit(*i as f64),
         ir::TsLiteral::Bool(b) => bool_lit(*b),
         ir::TsLiteral::Null => null_lit(),
-    }
-}
-
-/// Emit an IR type to its string representation (for use in raw type strings).
-/// This is a temporary helper to bridge between old `Emit` trait usage and the new SWC approach.
-pub fn ir_type_to_string(ty: &ir::TsType) -> String {
-    match ty {
-        ir::TsType::Primitive(p) => match p {
-            ir::TsPrimitive::String => "string".to_string(),
-            ir::TsPrimitive::Number => "number".to_string(),
-            ir::TsPrimitive::Boolean => "boolean".to_string(),
-            ir::TsPrimitive::Null => "null".to_string(),
-            ir::TsPrimitive::Void => "void".to_string(),
-            ir::TsPrimitive::Unknown => "unknown".to_string(),
-        },
-        ir::TsType::Array(inner) => {
-            let inner_str = ir_type_to_string(inner);
-            if matches!(**inner, ir::TsType::Union(_) | ir::TsType::Intersection(_)) {
-                format!("({inner_str})[]")
-            } else {
-                format!("{inner_str}[]")
-            }
-        }
-        ir::TsType::Union(types) => types
-            .iter()
-            .map(ir_type_to_string)
-            .collect::<Vec<_>>()
-            .join(" | "),
-        ir::TsType::Intersection(types) => types
-            .iter()
-            .map(|t| {
-                let s = ir_type_to_string(t);
-                if matches!(t, ir::TsType::Union(_)) {
-                    format!("({s})")
-                } else {
-                    s
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" & "),
-        ir::TsType::Object(props) => {
-            if props.is_empty() {
-                "{}".to_string()
-            } else {
-                let parts: Vec<_> = props
-                    .iter()
-                    .map(|p| {
-                        let key = super::utils::quote_if_needed(&p.name);
-                        let opt = if p.optional { "?" } else { "" };
-                        format!("{}{}: {}", key, opt, ir_type_to_string(&p.ty))
-                    })
-                    .collect();
-                format!("{{ {} }}", parts.join("; "))
-            }
-        }
-        ir::TsType::Record { key, value } => {
-            format!(
-                "Record<{}, {}>",
-                ir_type_to_string(key),
-                ir_type_to_string(value)
-            )
-        }
-        ir::TsType::Literal(lit) => match lit {
-            ir::TsLiteral::String(s) => {
-                let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-                format!("\"{escaped}\"")
-            }
-            ir::TsLiteral::Number(n) => n.to_string(),
-            ir::TsLiteral::Int(i) => i.to_string(),
-            ir::TsLiteral::Bool(b) => b.to_string(),
-            ir::TsLiteral::Null => "null".to_string(),
-        },
-        ir::TsType::Ref(name) => name.clone(),
-    }
-}
-
-/// Emit an IR TypeRef to its string representation.
-pub fn ir_typeref_to_string(tr: &TypeRef) -> String {
-    match tr {
-        TypeRef::Named(n) => n.clone(),
-        TypeRef::Inline(t) => ir_type_to_string(t),
     }
 }

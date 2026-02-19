@@ -98,27 +98,6 @@ pub fn quote_if_needed(name: &str) -> String {
     }
 }
 
-/// Format a parameter access expression (e.g., `params.foo` or `params["foo-bar"]`).
-///
-/// # Arguments
-/// * `obj` - The object name (e.g., "params")
-/// * `prop` - The property name
-/// * `required` - Whether the property is required (affects optional chaining)
-#[allow(dead_code)]
-pub fn format_param_access(obj: &str, prop: &str, required: bool) -> String {
-    if needs_bracket_notation(prop) {
-        if required {
-            format!("{}[\"{}\"]", obj, escape_js_string(prop))
-        } else {
-            format!("{}?.[\"{}\"]", obj, escape_js_string(prop))
-        }
-    } else if required {
-        format!("{obj}.{prop}")
-    } else {
-        format!("{obj}?.{prop}")
-    }
-}
-
 /// Sanitize an identifier to be a valid TypeScript identifier.
 /// - Replaces `-`, `.`, ` ` with separators and converts to camelCase
 /// - Prepends `_` if starts with digit
@@ -268,20 +247,6 @@ mod tests {
         assert_eq!(quote_if_needed("foo"), "foo");
         assert_eq!(quote_if_needed("foo-bar"), "\"foo-bar\"");
         assert_eq!(quote_if_needed("123"), "\"123\"");
-    }
-
-    #[test]
-    fn test_format_param_access() {
-        assert_eq!(format_param_access("params", "foo", true), "params.foo");
-        assert_eq!(format_param_access("params", "foo", false), "params?.foo");
-        assert_eq!(
-            format_param_access("params", "foo-bar", true),
-            "params[\"foo-bar\"]"
-        );
-        assert_eq!(
-            format_param_access("params", "foo-bar", false),
-            "params?.[\"foo-bar\"]"
-        );
     }
 
     #[test]
