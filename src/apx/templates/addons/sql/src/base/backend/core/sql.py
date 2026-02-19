@@ -32,7 +32,7 @@ class Sql(BaseModel):
     api: StatementExecutionAPI
 
 
-class _SqlDependency(LifespanDependency[StatementExecutionAPI]):
+class _SqlDependency(LifespanDependency):
     @asynccontextmanager
     async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.sql_config = SqlConfig()  # ty: ignore[missing-argument]
@@ -41,14 +41,12 @@ class _SqlDependency(LifespanDependency[StatementExecutionAPI]):
     def get_routers(self) -> list[APIRouter]:
         return [query_router]
 
-    @classmethod
-    def get_instance(
-        cls, user_ws: UserWorkspaceClientDependency, request: Request
-    ) -> Sql:
+    @staticmethod
+    def get_instance(user_ws: UserWorkspaceClientDependency, request: Request) -> Sql:
         return Sql(config=request.app.state.sql_config, api=user_ws.statement_execution)
 
 
-SqlDependency: TypeAlias = Annotated[Sql, Depends(_SqlDependency.as_depends())]
+SqlDependency: TypeAlias = Annotated[Sql, Depends(_SqlDependency.get_instance)]
 
 # --- Routes ---
 

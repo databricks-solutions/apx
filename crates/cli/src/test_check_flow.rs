@@ -83,9 +83,6 @@ mod tests {
         // Addon configs are validated during lifespan (not import), so no env vars needed.
         for addon in [
             Addon::Sql,
-            Addon::Genie,
-            Addon::ServingEndpoint,
-            Addon::Lakebase,
         ] {
             apx_apply(&app_path, addon).await;
             apx_check(&app_path).await;

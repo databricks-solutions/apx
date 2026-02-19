@@ -132,15 +132,8 @@ pub enum Addon {
     Codex,
 
     // Backend addons
-    /// Lakebase (Databricks Database) integration
-    Lakebase,
     /// SQL Warehouse connection
     Sql,
-    /// Serving Endpoint client
-    #[value(name = "serving-endpoint")]
-    ServingEndpoint,
-    /// Genie Space client
-    Genie,
 
     // Layout addons (from common::Layout)
     /// Sidebar layout addon
@@ -156,10 +149,7 @@ impl Addon {
             Addon::Vscode => "vscode",
             Addon::Claude => "claude",
             Addon::Codex => "codex",
-            Addon::Lakebase => "lakebase",
             Addon::Sql => "sql",
-            Addon::ServingEndpoint => "serving-endpoint",
-            Addon::Genie => "genie",
             Addon::Sidebar => "sidebar",
         }
     }
@@ -524,6 +514,91 @@ fn apply_file_addon_by_name(
     Ok(())
 }
 
+/// Apply Python AST edits (imports + class member aliases) and add dependencies from a manifest.
+///
+/// Called by both `init` (after `render_embedded_templates`) and `apply_backend_addon`.
+/// Returns the number of AST edits applied.
+pub(crate) fn apply_python_edits(
+    manifest: &AddonManifest,
+    app_dir: &Path,
+    app_slug: &str,
+) -> Result<usize, String> {
+    let src_prefix = PathBuf::from("src").join(app_slug);
+    let mut ast_edits_applied = 0;
+
+    for edit in &metadata_to_edits(&manifest.python.edits) {
+        match edit {
+            PythonEdit::AddImport { file, statement } => {
+                let target = app_dir.join(&src_prefix).join(file);
+                if !target.exists() {
+                    tracing::warn!("Target file for AST edit not found: {}", target.display());
+                    continue;
+                }
+                let source = fs::read_to_string(&target).map_err(|e| format!("Read error: {e}"))?;
+                match apx_core::py_edit::add_import(&source, statement) {
+                    Ok(new_source) => {
+                        fs::write(&target, new_source).map_err(|e| format!("Write error: {e}"))?;
+                        ast_edits_applied += 1;
+                    }
+                    Err(apx_core::py_edit::PyEditError::AlreadyPresent(_)) => {
+                        // Idempotent — skip
+                    }
+                    Err(e) => {
+                        return Err(format!("AST edit error on {}: {e}", target.display()));
+                    }
+                }
+            }
+            PythonEdit::AddAlias { type_alias_code } => {
+                let target = app_dir
+                    .join(&src_prefix)
+                    .join("backend/core/dependencies.py");
+                if !target.exists() {
+                    tracing::warn!("dependencies.py not found: {}", target.display());
+                    continue;
+                }
+                let source = fs::read_to_string(&target).map_err(|e| format!("Read error: {e}"))?;
+                match apx_core::py_edit::add_class_member(&source, "Dependencies", type_alias_code)
+                {
+                    Ok(new_source) => {
+                        fs::write(&target, new_source).map_err(|e| format!("Write error: {e}"))?;
+                        ast_edits_applied += 1;
+                    }
+                    Err(apx_core::py_edit::PyEditError::AlreadyPresent(_)) => {}
+                    Err(e) => {
+                        return Err(format!("AST edit error on dependencies.py: {e}"));
+                    }
+                }
+            }
+        }
+    }
+
+    // Add Python dependencies to pyproject.toml
+    if !manifest.python.dependencies.is_empty() {
+        let pyproject_path = app_dir.join("pyproject.toml");
+        crate::common::modify_pyproject(&pyproject_path, |doc| {
+            let project = doc["project"]
+                .as_table_mut()
+                .ok_or("Missing [project] in pyproject.toml")?;
+            let deps = project["dependencies"]
+                .as_array_mut()
+                .ok_or("Missing project.dependencies")?;
+            for dep in &manifest.python.dependencies {
+                let already = deps.iter().any(|v| {
+                    v.as_str()
+                        .map(|s| s.starts_with(dep.split('>').next().unwrap_or(dep)))
+                        .unwrap_or(false)
+                });
+                if !already {
+                    deps.push(dep.as_str());
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    Ok(ast_edits_applied)
+}
+
 /// Apply a backend addon using AST-based edits, reading metadata from addon.toml manifest.
 fn apply_backend_addon(
     addon_dir: &str,
@@ -540,8 +615,6 @@ fn apply_backend_addon(
             .unwrap_or_else(|_| app_dir.to_path_buf())
             .display()
     );
-
-    let src_prefix = PathBuf::from("src").join(app_slug);
 
     // 1. Copy template files from addon (embedded)
     let addon_prefix = format!("addons/{}/", addon_dir);
@@ -597,77 +670,8 @@ fn apply_backend_addon(
         copied_files.push(final_path);
     }
 
-    // 2. Apply AST edits from manifest
-    let mut ast_edits_applied = 0;
-    for edit in &metadata_to_edits(&manifest.python.edits) {
-        match edit {
-            PythonEdit::AddImport { file, statement } => {
-                let target = app_dir.join(&src_prefix).join(file);
-                if !target.exists() {
-                    tracing::warn!("Target file for AST edit not found: {}", target.display());
-                    continue;
-                }
-                let source = fs::read_to_string(&target).map_err(|e| format!("Read error: {e}"))?;
-                match apx_core::py_edit::add_import(&source, statement) {
-                    Ok(new_source) => {
-                        fs::write(&target, new_source).map_err(|e| format!("Write error: {e}"))?;
-                        ast_edits_applied += 1;
-                    }
-                    Err(apx_core::py_edit::PyEditError::AlreadyPresent(_)) => {
-                        // Idempotent — skip
-                    }
-                    Err(e) => {
-                        return Err(format!("AST edit error on {}: {e}", target.display()));
-                    }
-                }
-            }
-            PythonEdit::AddAlias { type_alias_code } => {
-                let target = app_dir
-                    .join(&src_prefix)
-                    .join("backend/core/dependencies.py");
-                if !target.exists() {
-                    tracing::warn!("dependencies.py not found: {}", target.display());
-                    continue;
-                }
-                let source = fs::read_to_string(&target).map_err(|e| format!("Read error: {e}"))?;
-                match apx_core::py_edit::add_class_member(&source, "Dependencies", type_alias_code)
-                {
-                    Ok(new_source) => {
-                        fs::write(&target, new_source).map_err(|e| format!("Write error: {e}"))?;
-                        ast_edits_applied += 1;
-                    }
-                    Err(apx_core::py_edit::PyEditError::AlreadyPresent(_)) => {}
-                    Err(e) => {
-                        return Err(format!("AST edit error on dependencies.py: {e}"));
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Add Python dependencies to pyproject.toml (from manifest)
-    if !manifest.python.dependencies.is_empty() {
-        let pyproject_path = app_dir.join("pyproject.toml");
-        crate::common::modify_pyproject(&pyproject_path, |doc| {
-            let project = doc["project"]
-                .as_table_mut()
-                .ok_or("Missing [project] in pyproject.toml")?;
-            let deps = project["dependencies"]
-                .as_array_mut()
-                .ok_or("Missing project.dependencies")?;
-            for dep in &manifest.python.dependencies {
-                let already = deps.iter().any(|v| {
-                    v.as_str()
-                        .map(|s| s.starts_with(dep.split('>').next().unwrap_or(dep)))
-                        .unwrap_or(false)
-                });
-                if !already {
-                    deps.push(dep.as_str());
-                }
-            }
-            Ok(())
-        })?;
-    }
+    // 2. Apply AST edits from manifest + add Python dependencies
+    let ast_edits_applied = apply_python_edits(manifest, app_dir, app_slug)?;
 
     if !copied_files.is_empty() {
         println!("\x1b[32mFiles copied:\x1b[0m");
@@ -794,4 +798,102 @@ fn collect_file_changes(
     changes.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
 
     Ok(changes)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Set up a temp project dir with the base `dependencies.py`, mimicking what
+    /// `render_embedded_templates("base/", ...)` produces.
+    fn setup_base_project(app_slug: &str) -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let app_dir = dir.path().to_path_buf();
+
+        let deps_dir = app_dir.join("src").join(app_slug).join("backend/core");
+        fs::create_dir_all(&deps_dir).unwrap();
+
+        // Write the base dependencies.py (matches the base template)
+        let deps_py = deps_dir.join("dependencies.py");
+        fs::write(
+            &deps_py,
+            r#"from __future__ import annotations
+
+from typing import TypeAlias
+from ._defaults import ConfigDependency, ClientDependency, UserWorkspaceClientDependency
+from ._headers import HeadersDependency
+
+
+class Dependencies:
+    """FastAPI dependency injection shorthand for route handler parameters."""
+
+    Client: TypeAlias = ClientDependency
+    UserClient: TypeAlias = UserWorkspaceClientDependency
+    Config: TypeAlias = ConfigDependency
+    Headers: TypeAlias = HeadersDependency
+"#,
+        )
+        .unwrap();
+
+        // Write a minimal pyproject.toml so apply_python_edits can add deps if needed
+        fs::write(
+            app_dir.join("pyproject.toml"),
+            "[project]\nname = \"test-app\"\ndependencies = []\n",
+        )
+        .unwrap();
+
+        (dir, app_dir)
+    }
+
+    #[test]
+    fn test_apply_python_edits_adds_sql_dependency() {
+        let (_dir, app_dir) = setup_base_project("test_app");
+
+        let manifest = read_addon_manifest("sql").expect("sql addon manifest must exist");
+        let edits = apply_python_edits(&manifest, &app_dir, "test_app").unwrap();
+        assert!(edits > 0, "should have applied at least one AST edit");
+
+        // Re-read the file and verify via ruff parser that the alias is present
+        let deps_path = app_dir.join("src/test_app/backend/core/dependencies.py");
+        let source = fs::read_to_string(&deps_path).unwrap();
+
+        // Trying to add the same alias again must return AlreadyPresent
+        let err = apx_core::py_edit::add_class_member(
+            &source,
+            "Dependencies",
+            "Sql: TypeAlias = SqlDependency",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, apx_core::py_edit::PyEditError::AlreadyPresent(_)),
+            "Dependencies.Sql should already be present, got: {err}"
+        );
+
+        // Also verify the import was added
+        let import_err =
+            apx_core::py_edit::add_import(&source, "from .sql import SqlDependency").unwrap_err();
+        assert!(
+            matches!(
+                import_err,
+                apx_core::py_edit::PyEditError::AlreadyPresent(_)
+            ),
+            "SqlDependency import should already be present, got: {import_err}"
+        );
+    }
+
+    #[test]
+    fn test_apply_python_edits_idempotent() {
+        let (_dir, app_dir) = setup_base_project("test_app");
+
+        let manifest = read_addon_manifest("sql").expect("sql addon manifest must exist");
+
+        // Apply twice
+        let edits1 = apply_python_edits(&manifest, &app_dir, "test_app").unwrap();
+        let edits2 = apply_python_edits(&manifest, &app_dir, "test_app").unwrap();
+
+        assert!(edits1 > 0);
+        assert_eq!(edits2, 0, "second apply should be a no-op");
+    }
 }

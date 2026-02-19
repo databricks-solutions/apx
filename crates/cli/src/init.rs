@@ -10,7 +10,7 @@ use tracing::debug;
 
 use crate::common::{has_apx_config, modify_pyproject, resolve_app_dir};
 use crate::components::add::{ComponentInput, add_components};
-use crate::dev::apply::{discover_all_addons, read_addon_manifest};
+use crate::dev::apply::{apply_python_edits, discover_all_addons, read_addon_manifest};
 use crate::run_cli_async_helper;
 use apx_core::common::list_profiles;
 use apx_core::common::{
@@ -275,6 +275,11 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
             for addon_name in &selected_addons {
                 let prefix = format!("addons/{}/", addon_name);
                 render_embedded_templates(&prefix, &app_path, &app_name, &app_slug)?;
+
+                // Apply Python AST edits (imports + Dependencies aliases) from manifest
+                if let Some(manifest) = read_addon_manifest(addon_name) {
+                    apply_python_edits(&manifest, &app_path, &app_slug)?;
+                }
 
                 // Handle UI addon's pyproject merge
                 if addon_name == "ui" {

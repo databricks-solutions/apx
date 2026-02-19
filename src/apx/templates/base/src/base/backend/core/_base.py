@@ -3,14 +3,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from inspect import isabstract
-from typing import Any, AsyncGenerator, Generic, TypeVar
+from typing import AsyncGenerator
 
-from fastapi import APIRouter, FastAPI, Request, Depends
-
-T = TypeVar("T")
+from fastapi import APIRouter, FastAPI
 
 
-class LifespanDependency(ABC, Generic[T]):
+class LifespanDependency(ABC):
     """
     All lifespan dependencies must inherit from this class.
     """
@@ -30,11 +28,3 @@ class LifespanDependency(ABC, Generic[T]):
     def get_routers(self) -> list[APIRouter]:
         """Override to contribute routers to the application."""
         return []
-
-    @abstractmethod
-    @classmethod
-    def get_instance(cls, request: Request) -> T: ...
-
-    @classmethod
-    def as_depends(cls) -> Any:
-        return Depends(cls.get_instance)

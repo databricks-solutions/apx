@@ -10,7 +10,7 @@ from ._config import AppConfig, logger
 from ._headers import HeadersDependency
 
 
-class _ConfigDependency(LifespanDependency[AppConfig]):
+class _ConfigDependency(LifespanDependency):
     REGISTRY_NAME = "Config"
 
     @asynccontextmanager
@@ -19,19 +19,19 @@ class _ConfigDependency(LifespanDependency[AppConfig]):
         logger.info(f"Starting app with configuration:\n{app.state.config}")
         yield
 
-    @classmethod
-    def get_instance(cls, request: Request) -> AppConfig:
+    @staticmethod
+    def get_instance(request: Request) -> AppConfig:
         return request.app.state.config
 
 
-class _WorkspaceClientDependency(LifespanDependency[WorkspaceClient]):
+class _WorkspaceClientDependency(LifespanDependency):
     @asynccontextmanager
     async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.workspace_client = WorkspaceClient()
         yield
 
-    @classmethod
-    def get_instance(cls, request: Request) -> WorkspaceClient:
+    @staticmethod
+    def get_instance(request: Request) -> WorkspaceClient:
         return request.app.state.workspace_client
 
 
@@ -55,7 +55,7 @@ def _get_user_ws(
     )  # set pat explicitly to avoid issues with SP client
 
 
-ConfigDependency: TypeAlias = Annotated[AppConfig, Depends(_ConfigDependency)]
+ConfigDependency: TypeAlias = Annotated[AppConfig, Depends(_ConfigDependency.get_instance)]
 
 ClientDependency: TypeAlias = Annotated[
     WorkspaceClient, Depends(_WorkspaceClientDependency.get_instance)
