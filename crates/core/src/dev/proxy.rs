@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use futures_util::SinkExt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::select;
 use tokio_stream::StreamExt;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
@@ -340,20 +340,32 @@ async fn proxy_http(
     let response = match builder.body(body_bytes).send().await {
         Ok(response) => response,
         Err(err) => {
-            warn!(
-                target = target_name,
-                host = %host,
-                port = target_port,
-                path = %path_and_query,
-                error = %err,
-                "Proxy request failed - could not connect to upstream server."
-            );
             let elapsed = start.elapsed().as_millis();
-            // Always log proxy failures to help debug connectivity issues
-            info!(
-                "<~ {} {} {} 502 [{}ms] (connection failed: {})",
-                target_name, method, path_and_query, elapsed, err
-            );
+            if err.is_connect() {
+                // Connection refused is expected during startup while upstream boots
+                debug!(
+                    target = target_name,
+                    path = %path_and_query,
+                    "Proxy request failed - upstream not ready yet."
+                );
+                debug!(
+                    "<~ {} {} {} 502 [{}ms] (upstream not ready)",
+                    target_name, method, path_and_query, elapsed
+                );
+            } else {
+                warn!(
+                    target = target_name,
+                    host = %host,
+                    port = target_port,
+                    path = %path_and_query,
+                    error = %err,
+                    "Proxy request failed - could not connect to upstream server."
+                );
+                info!(
+                    "<~ {} {} {} 502 [{}ms] (connection failed: {})",
+                    target_name, method, path_and_query, elapsed, err
+                );
+            }
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
@@ -410,6 +422,7 @@ async fn proxy_websocket(
     };
 
     let mut upstream = upstream;
+    let idle_timeout = Duration::from_secs(300); // 5 minutes
     loop {
         select! {
             downstream_msg = downstream.recv() => {
@@ -446,6 +459,10 @@ async fn proxy_websocket(
                     }
                     None => break,
                 }
+            }
+            _ = tokio::time::sleep(idle_timeout) => {
+                debug!("WebSocket idle timeout, closing proxy connection.");
+                break;
             }
         }
     }

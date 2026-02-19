@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use rand::{Rng, distributions::Alphanumeric};
@@ -21,7 +21,15 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
-use reqwest;
+/// Shared HTTP client for health probes.
+/// Reused across all health checks to avoid creating a new client per probe.
+static HEALTH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .pool_max_idle_per_host(2)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
 
 use crate::common::{ApxCommand, BunCommand, UvCommand, handle_spawn_error, read_project_metadata};
 use crate::dev::common::CLIENT_HOST;
@@ -268,10 +276,12 @@ impl ProcessManager {
     /// Runs all three checks in parallel using tokio::join! to avoid blocking.
     pub async fn status(&self) -> (String, String, String) {
         // Run all checks in parallel - no mutex held during HTTP probes
-        let frontend_http_check = self.frontend_port.map(|p| ("localhost", p));
+        // Use CLIENT_HOST (127.0.0.1) for health probes, not the bind host (0.0.0.0)
+        // which doesn't resolve to localhost on Windows.
+        let frontend_http_check = self.frontend_port.map(|p| (CLIENT_HOST, p));
         let (frontend_status, backend_status, db_status) = tokio::join!(
             self.status_for_process(&self.frontend_child, frontend_http_check),
-            self.status_for_process(&self.backend_child, Some((&self.host, self.backend_port))),
+            self.status_for_process(&self.backend_child, Some((CLIENT_HOST, self.backend_port))),
             self.status_for_process(&self.db_child, None), // DB: no HTTP check, just process status
         );
         // For backend-only projects, report frontend as "n/a" instead of "stopped"
@@ -587,6 +597,7 @@ impl ProcessManager {
         let dev_token = self.dev_token.clone();
         let db_password = self.db_password.clone();
         let dev_config = self.dev_config.clone();
+        let restarting = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         tokio::spawn(async move {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(100);
@@ -663,7 +674,21 @@ impl ProcessManager {
                         continue;
                     }
 
-                    // No more events, proceed with restart
+                    // No more events, proceed with restart.
+                    // Guard against concurrent restarts (e.g. rapid successive file changes).
+                    if restarting
+                        .compare_exchange(
+                            false,
+                            true,
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                        )
+                        .is_err()
+                    {
+                        debug!("Restart already in progress, skipping.");
+                        continue;
+                    }
+
                     info!("{} changed, restarting uvicorn", file_name);
 
                     // Run uv sync if Python dependencies changed
@@ -712,6 +737,7 @@ impl ProcessManager {
                     {
                         warn!("Failed to restart backend: {}", e);
                     }
+                    restarting.store(false, std::sync::atomic::Ordering::SeqCst);
                 }
             }
         });
@@ -968,13 +994,18 @@ impl ProcessManager {
     }
 
     /// Send SIGTERM to a child process tree (polite shutdown request).
+    /// On Windows, SIGTERM is not supported — falls back to SIGKILL (TerminateProcess).
     async fn send_sigterm(name: &str, child: &Arc<Mutex<Option<Child>>>) {
         let guard = child.lock().await;
         if let Some(child) = guard.as_ref()
             && let Some(pid) = child.id()
         {
-            debug!(process = name, pid, "Sending SIGTERM to process tree.");
-            Self::send_signal_to_tree(pid, Signal::Term, name.to_string()).await;
+            #[cfg(unix)]
+            let signal = Signal::Term;
+            #[cfg(not(unix))]
+            let signal = Signal::Kill;
+            debug!(process = name, pid, signal = ?signal, "Sending signal to process tree.");
+            Self::send_signal_to_tree(pid, signal, name.to_string()).await;
         }
     }
 
@@ -1001,6 +1032,8 @@ impl ProcessManager {
     }
 
     /// Force kill a child process tree (SIGKILL).
+    /// After the sysinfo-based tree kill, also uses tokio's cross-platform kill
+    /// as a fallback (important on Windows where sysinfo's kill_with may fail).
     async fn force_kill(name: &str, child: &Arc<Mutex<Option<Child>>>) {
         let mut guard = child.lock().await;
         if let Some(mut child) = guard.take() {
@@ -1014,13 +1047,18 @@ impl ProcessManager {
                     );
                 }
                 Ok(None) => {
-                    // Still running, force kill
+                    // Still running, force kill via sysinfo tree walk
                     if let Some(pid) = child.id() {
                         debug!(process = name, pid, "Force killing process tree.");
                         Self::send_signal_to_tree(pid, Signal::Kill, name.to_string()).await;
-                        // Brief wait to allow kill to take effect
-                        let _ = timeout(Duration::from_millis(100), child.wait()).await;
                     }
+                    // Fallback: use tokio's cross-platform kill for the direct child.
+                    // This ensures termination even if sysinfo's kill_with fails (e.g. on Windows).
+                    if let Err(err) = child.kill().await {
+                        debug!(error = %err, process = name, "Tokio child.kill() fallback failed (process may have already exited).");
+                    }
+                    // Brief wait to allow kill to take effect
+                    let _ = timeout(Duration::from_millis(100), child.wait()).await;
                 }
                 Err(err) => {
                     warn!(error = %err, process = name, "Failed to check process status.");
@@ -1214,15 +1252,7 @@ impl ProcessManager {
     /// Returns true if the service responds with any non-5xx status code.
     async fn http_health_probe(host: &str, port: u16) -> bool {
         let url = format!("http://{host}:{port}/");
-        let client = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        match client.get(&url).send().await {
+        match HEALTH_CLIENT.get(&url).send().await {
             Ok(resp) => !resp.status().is_server_error(), // 5xx = unhealthy, else healthy
             Err(_) => false,
         }
@@ -1300,11 +1330,16 @@ impl ProcessManager {
                 return;
             }
             let name = process.name();
-            let killed = process.kill_with(Signal::Kill).unwrap_or(false);
-            if killed {
-                debug!(pid = ?pid, process_name = ?name, process = label, "Killed process.");
-            } else {
-                warn!(pid = ?pid, process_name = ?name, process = label, "Failed to kill process.");
+            match process.kill_with(Signal::Kill) {
+                Some(true) => {
+                    debug!(pid = ?pid, process_name = ?name, process = label, "Killed process.");
+                }
+                Some(false) => {
+                    warn!(pid = ?pid, process_name = ?name, process = label, "kill_with(SIGKILL) returned false — process may require elevated privileges.");
+                }
+                None => {
+                    warn!(pid = ?pid, process_name = ?name, process = label, "kill_with(SIGKILL) not supported on this platform for this process.");
+                }
             }
         }
     }

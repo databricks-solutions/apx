@@ -209,8 +209,13 @@ pub async fn run_server(
             match shutdown_rx.recv().await {
                 Ok(Shutdown::Stop) => {
                     debug!("Stop signal received, shutting down server.");
-                    // ProcessManager owns all process termination
-                    process_manager.stop().await;
+                    // Give process_manager.stop() a hard deadline to prevent indefinite hangs
+                    match tokio::time::timeout(Duration::from_secs(10), process_manager.stop())
+                        .await
+                    {
+                        Ok(()) => debug!("Process shutdown complete."),
+                        Err(_) => warn!("Process shutdown timed out after 10s, forcing exit."),
+                    }
 
                     // Remove lock file after processes are stopped
                     let _ = remove_lock(&lock);

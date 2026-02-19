@@ -4,9 +4,20 @@
 //! to the flux collector. Used by both subprocess log forwarding and browser log forwarding.
 
 use std::path::Path;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::flux::FLUX_PORT;
+
+/// Shared HTTP client for forwarding logs to flux.
+/// Reused across all calls to avoid creating a new client per log line.
+static FLUX_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(1))
+        .pool_max_idle_per_host(2)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
 
 /// Convert severity level string to OTLP severity number.
 fn severity_to_number(level: &str) -> u8 {
@@ -89,16 +100,7 @@ pub async fn forward_log_to_flux(message: &str, level: &str, service_name: &str,
     let payload = build_otlp_log_payload(message, level, timestamp_ns, service_name, app_path);
     let endpoint = format!("http://127.0.0.1:{FLUX_PORT}/v1/logs");
 
-    // Use a simple HTTP client - fire and forget
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(1))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    let _ = client
+    let _ = FLUX_CLIENT
         .post(&endpoint)
         .header("Content-Type", "application/json")
         .json(&payload)
