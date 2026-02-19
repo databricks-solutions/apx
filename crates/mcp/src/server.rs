@@ -46,7 +46,7 @@ impl ApxServer {
 
     #[tool(
         name = "start",
-        description = "Start development server and return the URL",
+        description = "Start the development server and return its URL. Call before testing UI or API changes.",
         annotations(destructive_hint = true, read_only_hint = false)
     )]
     async fn start(
@@ -58,7 +58,7 @@ impl ApxServer {
 
     #[tool(
         name = "stop",
-        description = "Stop the development server",
+        description = "Stop the development server.",
         annotations(
             destructive_hint = true,
             read_only_hint = false,
@@ -74,7 +74,7 @@ impl ApxServer {
 
     #[tool(
         name = "restart",
-        description = "Restart the development server (preserves port if possible)",
+        description = "Restart the development server (preserves port). Use after backend code changes.",
         annotations(destructive_hint = true, read_only_hint = false)
     )]
     async fn restart(
@@ -86,7 +86,7 @@ impl ApxServer {
 
     #[tool(
         name = "logs",
-        description = "Fetch recent dev server logs",
+        description = "Fetch recent dev server logs. Use to diagnose runtime errors or startup issues.",
         annotations(read_only_hint = true)
     )]
     async fn logs(
@@ -100,7 +100,7 @@ impl ApxServer {
 
     #[tool(
         name = "check",
-        description = "Check the project code for errors (runs tsc and ty checks in parallel)",
+        description = "Run TypeScript and Python type checks in parallel. Returns categorized errors. Call after making changes to verify correctness.",
         annotations(read_only_hint = true)
     )]
     async fn check(
@@ -112,7 +112,7 @@ impl ApxServer {
 
     #[tool(
         name = "refresh_openapi",
-        description = "Regenerate OpenAPI schema and API client",
+        description = "Regenerate the OpenAPI schema and TypeScript API client from backend routes. Run after adding or modifying backend routes.",
         annotations(
             destructive_hint = true,
             read_only_hint = false,
@@ -128,7 +128,7 @@ impl ApxServer {
 
     #[tool(
         name = "get_route_info",
-        description = "Get code example for using a specific API route",
+        description = "Get a complete frontend code example for a specific API route, including Suspense/ErrorBoundary scaffold and correct hook usage with parameters. Call this before writing any frontend code that uses an API route. Pass the operation_id from the routes tool.",
         annotations(read_only_hint = true)
     )]
     async fn get_route_info(
@@ -140,7 +140,7 @@ impl ApxServer {
 
     #[tool(
         name = "routes",
-        description = "List all API routes from the OpenAPI schema",
+        description = "List all API routes with their parameters, request/response schemas, and generated hook names. Call this first to understand the project's API surface before reading source files.",
         annotations(read_only_hint = true)
     )]
     async fn routes(
@@ -154,7 +154,7 @@ impl ApxServer {
 
     #[tool(
         name = "databricks_apps_logs",
-        description = "Fetch Databricks Apps logs from an already deployed app using the Databricks CLI",
+        description = "Fetch logs from a deployed Databricks App using the Databricks CLI. Use for debugging deployed (not local dev) issues.",
         annotations(read_only_hint = true)
     )]
     async fn databricks_apps_logs(
@@ -168,7 +168,7 @@ impl ApxServer {
 
     #[tool(
         name = "search_registry_components",
-        description = "Search shadcn registry components using semantic search. Supports filtering by category, type, and registry.",
+        description = "Semantic search for UI components across configured registries (shadcn, etc). Returns component IDs usable with add_component.",
         annotations(read_only_hint = true)
     )]
     async fn search_registry_components(
@@ -180,7 +180,7 @@ impl ApxServer {
 
     #[tool(
         name = "add_component",
-        description = "Add a component to the project. Component ID can be 'component-name' (from default registry) or '@registry-name/component-name'.",
+        description = "Install a UI component into the project. Accepts 'component-name' (default registry) or '@registry-name/component-name'.",
         annotations(destructive_hint = true, read_only_hint = false)
     )]
     async fn add_component(
@@ -192,7 +192,7 @@ impl ApxServer {
 
     #[tool(
         name = "list_registry_components",
-        description = "List all available components in a registry. Use default shadcn registry if no registry specified.",
+        description = "List all available components in a registry. Defaults to shadcn registry if none specified.",
         annotations(read_only_hint = true)
     )]
     async fn list_registry_components(
@@ -206,7 +206,7 @@ impl ApxServer {
 
     #[tool(
         name = "docs",
-        description = "Search Databricks SDK documentation for relevant code examples and API references",
+        description = "Search Databricks SDK documentation for Python code examples and API references. Always call this before writing any Databricks SDK (ws.*) call to verify the correct method signature.",
         annotations(read_only_hint = true)
     )]
     async fn docs(
@@ -252,16 +252,35 @@ impl ServerHandler for ApxServer {
         })
     }
 
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, rmcp::ErrorData> {
+        Ok(ListResourceTemplatesResult {
+            resource_templates: crate::resources::list_resource_templates(),
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, rmcp::ErrorData> {
-        crate::resources::read_resource(request.uri.as_str()).map_err(|e| {
-            rmcp::ErrorData::resource_not_found(
-                e,
-                Some(serde_json::json!({ "uri": request.uri.as_str() })),
-            )
+        let uri = request.uri.as_str();
+
+        if let Some(app_path) = uri.strip_prefix("apx://project/") {
+            return crate::resources::read_project_resource(app_path)
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::resource_not_found(e, Some(serde_json::json!({ "uri": uri })))
+                });
+        }
+
+        crate::resources::read_resource(uri).map_err(|e| {
+            rmcp::ErrorData::resource_not_found(e, Some(serde_json::json!({ "uri": uri })))
         })
     }
 }
