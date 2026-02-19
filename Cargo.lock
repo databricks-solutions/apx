@@ -194,11 +194,9 @@ dependencies = [
 name = "apx-common"
 version = "0.3.0-rc1"
 dependencies = [
- "chrono",
  "dirs 5.0.1",
  "serde",
  "serde_json",
- "tracing",
 ]
 
 [[package]]
@@ -223,9 +221,7 @@ dependencies = [
  "opentelemetry 0.29.1",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
- "opentelemetry-proto 0.31.0",
  "opentelemetry_sdk 0.29.0",
- "prost 0.14.3",
  "rand 0.8.5",
  "rayon",
  "reqwest 0.13.1",
@@ -237,9 +233,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
- "serde_yaml",
  "sha2",
- "similar",
  "sqlx",
  "swc_atoms",
  "swc_common",
@@ -253,7 +247,6 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "tokio-tungstenite",
- "tokio-util",
  "toml 0.8.23",
  "toml_edit 0.24.0+spec-1.1.0",
  "tracing",
@@ -310,7 +303,6 @@ version = "0.3.0-rc1"
 dependencies = [
  "dirs 5.0.1",
  "serde",
- "serde_json",
  "tauri",
  "tauri-build",
  "toml 0.8.23",
@@ -4928,7 +4920,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
