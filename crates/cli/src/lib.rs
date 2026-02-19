@@ -18,6 +18,7 @@ pub(crate) mod dev;
 pub(crate) mod flux;
 pub(crate) mod frontend;
 pub(crate) mod init;
+pub(crate) mod skill;
 pub(crate) mod upgrade;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -55,6 +56,9 @@ enum Commands {
     /// 📊 Flux OTEL collector commands
     #[command(subcommand)]
     Flux(FluxCommands),
+    /// 🧠 Skill commands (Claude Code integration)
+    #[command(subcommand)]
+    Skill(SkillCommands),
     /// ⬆️  Upgrade apx to the latest version
     Upgrade,
     /// Internal: generate OpenAPI schema and client
@@ -95,6 +99,12 @@ enum DevCommands {
     /// Internal: run dev server
     #[command(name = "__internal__run_server", hide = true)]
     InternalRunServer(dev::__internal_run_server::InternalRunServerArgs),
+}
+
+#[derive(Subcommand)]
+enum SkillCommands {
+    /// Install Claude Code skill files into the current project (or globally with --global)
+    Install(skill::install::InstallArgs),
 }
 
 #[derive(Subcommand)]
@@ -157,6 +167,9 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
             Some(Commands::Flux(flux_cmd)) => match flux_cmd {
                 FluxCommands::Start(args) => flux::start::run(args).await,
                 FluxCommands::Stop(args) => flux::stop::run(args).await,
+            },
+            Some(Commands::Skill(skill_cmd)) => match skill_cmd {
+                SkillCommands::Install(args) => skill::install::run(args).await,
             },
             Some(Commands::Upgrade) => upgrade::run().await,
             Some(Commands::GenerateOpenapi(args)) => __generate_openapi::run(args).await,

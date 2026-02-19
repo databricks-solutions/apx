@@ -5,11 +5,15 @@
 #   -Version <tag>     Install a specific version (default: latest)
 #   -NoModifyPath      Don't modify the user PATH
 #   -InstallDir <dir>  Override installation directory
+#   -Skill             Install Claude Code skill files only (no binary)
+#   -Global            With -Skill, install to ~/.claude/ instead of project
 
 param(
     [string]$Version = "",
     [switch]$NoModifyPath,
-    [string]$InstallDir = ""
+    [string]$InstallDir = "",
+    [switch]$Skill,
+    [switch]$Global
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,6 +47,72 @@ function Write-Ok {
     param([string]$Message)
     Write-Host "success: " -ForegroundColor Green -NoNewline
     Write-Host $Message
+}
+
+# ---------------------------------------------------------------------------
+# Skill-only install
+# ---------------------------------------------------------------------------
+if ($Skill) {
+    $Branch = "main"
+    $BaseUrl = "https://raw.githubusercontent.com/$Repo/$Branch"
+
+    $SkillFiles = @("skills/apx/SKILL.md", "skills/apx/backend-patterns.md", "skills/apx/frontend-patterns.md")
+
+    if ($Global) {
+        $SkillDir = Join-Path $env:USERPROFILE ".claude\skills\apx"
+        $McpDir = Join-Path $env:USERPROFILE ".claude"
+        Write-Info "Installing apx skill globally to $SkillDir\"
+    } else {
+        $SkillDir = ".claude\skills\apx"
+        $McpDir = "."
+        Write-Info "Installing apx skill to $SkillDir\ (project-level)"
+    }
+
+    if (-not (Test-Path $SkillDir)) {
+        New-Item -ItemType Directory -Path $SkillDir -Force | Out-Null
+    }
+
+    $Failed = $false
+    foreach ($file in $SkillFiles) {
+        $filename = Split-Path $file -Leaf
+        Write-Info "Downloading $filename..."
+        try {
+            Invoke-WebRequest -Uri "$BaseUrl/$file" -OutFile (Join-Path $SkillDir $filename) -UseBasicParsing
+        } catch {
+            Write-Err "Failed to download $filename"
+            $Failed = $true
+        }
+    }
+
+    # Download .mcp.json
+    Write-Info "Downloading .mcp.json..."
+    try {
+        Invoke-WebRequest -Uri "$BaseUrl/.mcp.json" -OutFile (Join-Path $McpDir ".mcp.json") -UseBasicParsing
+    } catch {
+        Write-Err "Failed to download .mcp.json"
+        $Failed = $true
+    }
+
+    if ($Failed) {
+        Write-Err "Some files failed to download. Check your network connection and try again."
+        return
+    }
+
+    Write-Ok "apx skill installed!"
+    Write-Host ""
+    Write-Host "  Skill files:"
+    foreach ($file in $SkillFiles) {
+        $filename = Split-Path $file -Leaf
+        Write-Host "    $(Join-Path $SkillDir $filename)"
+    }
+    Write-Host "  MCP config:  $(Join-Path $McpDir '.mcp.json')"
+    Write-Host ""
+
+    if (-not $Global) {
+        Write-Info "Tip: Use -Global to install for all projects instead."
+    }
+
+    return
 }
 
 # ---------------------------------------------------------------------------

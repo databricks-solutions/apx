@@ -11,6 +11,7 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     copy_agent_binary(workspace_root, &out_dir);
+    copy_skill_files(workspace_root);
 
     println!(
         "cargo:rerun-if-changed={}",
@@ -23,6 +24,14 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         workspace_root.join(".bins/agent").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("skills/apx").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("hooks/hooks.json").display()
     );
 }
 
@@ -50,6 +59,38 @@ fn copy_platform_binary(
     let dest = out_dir.join(dest_name);
     fs::copy(&source, &dest).unwrap_or_else(|e| panic!("Failed to copy {dest_name} binary: {e}"));
     println!("cargo:rerun-if-changed={}", source.display());
+}
+
+/// Copy skill files and hooks from the repo root into the claude addon template
+/// directory so they get embedded by rust-embed. This keeps `skills/apx/` as the
+/// single source of truth while still bundling them into the binary.
+fn copy_skill_files(workspace_root: &std::path::Path) {
+    let claude_addon = workspace_root.join("src/apx/templates/addons/claude");
+
+    let copies: &[(&str, &str)] = &[
+        ("skills/apx/SKILL.md", ".claude/skills/apx/SKILL.md"),
+        (
+            "skills/apx/backend-patterns.md",
+            ".claude/skills/apx/backend-patterns.md",
+        ),
+        (
+            "skills/apx/frontend-patterns.md",
+            ".claude/skills/apx/frontend-patterns.md",
+        ),
+        ("hooks/hooks.json", "hooks/hooks.json"),
+    ];
+
+    for (src_rel, dst_rel) in copies {
+        let src = workspace_root.join(src_rel);
+        let dst = claude_addon.join(dst_rel);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)
+                .unwrap_or_else(|e| panic!("Failed to create directory {}: {e}", parent.display()));
+        }
+        fs::copy(&src, &dst).unwrap_or_else(|e| {
+            panic!("Failed to copy {} -> {}: {e}", src.display(), dst.display())
+        });
+    }
 }
 
 fn copy_agent_binary(workspace_root: &std::path::Path, out_dir: &std::path::Path) {

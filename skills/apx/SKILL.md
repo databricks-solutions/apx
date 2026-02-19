@@ -14,7 +14,10 @@ Before using apx, verify the CLI is installed:
 ```bash
 apx --version
 ```
-If not installed, see https://github.com/databricks-solutions/apx for installation instructions.
+If not installed, install it:
+```bash
+curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh
+```
 
 ## When to Use This Skill
 
@@ -60,19 +63,19 @@ When the apx MCP server is running, these tools are available:
 
 | Tool | Description |
 |------|-------------|
-| `start` | Start development server and return the URL |
-| `stop` | Stop the development server |
-| `restart` | Restart development server (preserves port if possible) |
-| `logs` | Fetch recent dev server logs |
-| `check` | Check project code for errors (tsc + ty in parallel) |
-| `routes` | List all API routes to understand the project's API surface |
-| `get_route_info` | Get code example for using a specific API route |
-| `refresh_openapi` | Regenerate OpenAPI schema and API client |
-| `search_registry_components` | Search shadcn registry components (semantic search) |
-| `add_component` | Add a component to the project |
-| `list_registry_components` | List all available shadcn registry components |
-| `docs` | Search Databricks SDK docs for code examples |
-| `databricks_apps_logs` | Fetch logs from deployed app via Databricks CLI |
+| `start` | Start the development server and return its URL. Call before testing UI or API changes. |
+| `stop` | Stop the development server. |
+| `restart` | Restart the development server (preserves port). Use after backend code changes. |
+| `logs` | Fetch recent dev server logs. Use to diagnose runtime errors or startup issues. |
+| `check` | Run TypeScript and Python type checks in parallel. Returns categorized errors. Call after making changes to verify correctness. |
+| `routes` | List all API routes with their parameters, request/response schemas, and generated hook names. Call this first to understand the project's API surface before reading source files. |
+| `get_route_info` | Get a complete frontend code example for a specific API route, including Suspense/ErrorBoundary scaffold and correct hook usage with parameters. Call this before writing any frontend code that uses an API route. Pass the operation_id from the routes tool. |
+| `refresh_openapi` | Regenerate the OpenAPI schema and TypeScript API client from backend routes. Run after adding or modifying backend routes. |
+| `search_registry_components` | Semantic search for UI components across configured registries (shadcn, etc). Returns component IDs usable with add_component. |
+| `add_component` | Install a UI component into the project. Accepts 'component-name' (default registry) or '@registry-name/component-name'. |
+| `list_registry_components` | List all available components in a registry. Defaults to shadcn registry if none specified. |
+| `docs` | Search Databricks SDK documentation for Python code examples and API references. Always call this before writing any Databricks SDK (ws.*) call to verify the correct method signature. |
+| `databricks_apps_logs` | Fetch logs from a deployed Databricks App using the Databricks CLI. Use for debugging deployed (not local dev) issues. |
 
 ## Recommended Workflow
 

@@ -6,6 +6,8 @@
 #   --version <tag>     Install a specific version (default: latest)
 #   --no-modify-path    Don't modify shell profile to add to PATH
 #   --install-dir <dir> Override the installation directory
+#   --skill             Install Claude Code skill files only (no binary)
+#   --global            With --skill, install to ~/.claude/ instead of project
 
 set -eu
 
@@ -54,6 +56,8 @@ success() {
 VERSION=""
 NO_MODIFY_PATH=0
 INSTALL_DIR=""
+SKILL_ONLY=0
+GLOBAL=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -68,12 +72,20 @@ while [ $# -gt 0 ]; do
             shift
             INSTALL_DIR="$1"
             ;;
+        --skill)
+            SKILL_ONLY=1
+            ;;
+        --global)
+            GLOBAL=1
+            ;;
         -h|--help)
             printf "Usage: install.sh [OPTIONS]\n\n"
             printf "Options:\n"
             printf "  --version <tag>     Install a specific version (default: latest)\n"
             printf "  --no-modify-path    Don't modify shell profile\n"
             printf "  --install-dir <dir> Override installation directory\n"
+            printf "  --skill             Install Claude Code skill files only (no binary)\n"
+            printf "  --global            With --skill, install to ~/.claude/ instead of project\n"
             printf "  -h, --help          Show this help\n"
             exit 0
             ;;
@@ -288,9 +300,73 @@ print_banner() {
 }
 
 # ---------------------------------------------------------------------------
+# Skill-only install
+# ---------------------------------------------------------------------------
+install_skill() {
+    BRANCH="main"
+    BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
+
+    SKILL_FILES="skills/apx/SKILL.md skills/apx/backend-patterns.md skills/apx/frontend-patterns.md"
+
+    if [ "$GLOBAL" = 1 ]; then
+        SKILL_DIR="$HOME/.claude/skills/apx"
+        MCP_DIR="$HOME/.claude"
+        info "Installing apx skill globally to ${SKILL_DIR}/"
+    else
+        SKILL_DIR=".claude/skills/apx"
+        MCP_DIR="."
+        info "Installing apx skill to ${SKILL_DIR}/ (project-level)"
+    fi
+
+    mkdir -p "$SKILL_DIR"
+
+    FAILED=0
+    for file in $SKILL_FILES; do
+        filename="$(basename "$file")"
+        info "Downloading ${filename}..."
+        if ! curl -fsSL "${BASE_URL}/${file}" -o "${SKILL_DIR}/${filename}"; then
+            error "Failed to download ${filename}"
+            FAILED=1
+        fi
+    done
+
+    # Download .mcp.json
+    info "Downloading .mcp.json..."
+    if ! curl -fsSL "${BASE_URL}/.mcp.json" -o "${MCP_DIR}/.mcp.json"; then
+        error "Failed to download .mcp.json"
+        FAILED=1
+    fi
+
+    if [ "$FAILED" -ne 0 ]; then
+        error "Some files failed to download. Check your network connection and try again."
+        exit 1
+    fi
+
+    printf "\n"
+    success "apx skill installed!"
+    printf "\n"
+    printf "  Skill files:\n"
+    for file in $SKILL_FILES; do
+        filename="$(basename "$file")"
+        printf "    %s\n" "${SKILL_DIR}/${filename}"
+    done
+    printf "  MCP config:  %s\n" "${MCP_DIR}/.mcp.json"
+    printf "\n"
+
+    if [ "$GLOBAL" = 0 ]; then
+        info "Tip: Use --global to install for all projects instead."
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 main() {
+    if [ "$SKILL_ONLY" = 1 ]; then
+        install_skill
+        return
+    fi
+
     detect_platform
     check_existing
     determine_install_dir

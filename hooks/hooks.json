@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v apx >/dev/null 2>&1 || echo 'WARNING: apx CLI is not installed. Install with: uv tool install apx'",
+            "command": "command -v apx >/dev/null 2>&1 || echo 'WARNING: apx CLI is not installed. Install with: curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh'",
             "timeout": 5
           }
         ]

@@ -1,4 +1,4 @@
 [addon]
 name = "claude"
-description = "🤖 Claude Code project rules and MCP config"
+description = "🤖 Claude Code skills, MCP config, and hooks"
 group = "assistants"
