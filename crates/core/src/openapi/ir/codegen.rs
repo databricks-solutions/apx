@@ -63,11 +63,7 @@ fn codegen_imports(has_queries: bool, has_mutations: bool) -> Vec<ModuleItem> {
     }
 
     if !runtime_items.is_empty() {
-        imports.push(import_named(
-            runtime_items,
-            "@tanstack/react-query",
-            false,
-        ));
+        imports.push(import_named(runtime_items, "@tanstack/react-query", false));
     }
 
     if !type_items.is_empty() {
@@ -162,13 +158,7 @@ fn codegen_params_type(params: &ParamsIR) -> ModuleItem {
     let properties = params
         .fields
         .iter()
-        .map(|field| {
-            ts_property_sig(
-                &field.name,
-                ir_typeref_to_swc(&field.ty),
-                !field.required,
-            )
-        })
+        .map(|field| ts_property_sig(&field.name, ir_typeref_to_swc(&field.ty), !field.required))
         .collect();
 
     export_interface(&params.type_name, properties)
@@ -207,7 +197,10 @@ fn codegen_fetch_function(fetch: &FetchIR) -> ModuleItem {
     let return_type = if is_void_response {
         promise_type(ts_kw!(void))
     } else if fetch.response.has_void_status {
-        promise_type(ts_union(vec![data_wrapper_type(response_swc_type), ts_kw!(void)]))
+        promise_type(ts_union(vec![
+            data_wrapper_type(response_swc_type),
+            ts_kw!(void),
+        ]))
     } else {
         promise_type(data_wrapper_type(response_swc_type))
     };
@@ -215,7 +208,13 @@ fn codegen_fetch_function(fetch: &FetchIR) -> ModuleItem {
     // Build function body
     let body_stmts = codegen_fetch_body(fetch, body_content_type, is_void_response);
 
-    export_const_arrow(&fetch.fn_name, params, Some(return_type), block(body_stmts), true)
+    export_const_arrow(
+        &fetch.fn_name,
+        params,
+        Some(return_type),
+        block(body_stmts),
+        true,
+    )
 }
 
 /// Generate the body of a fetch function.
@@ -287,8 +286,7 @@ fn codegen_fetch_body(
             let path_template = build_path_template(&fetch.url.template);
             let (path_quasis_q, path_exprs_q) =
                 build_tpl_parts_with_suffix(&fetch.url.template, Some("queryString"));
-            let (path_quasis, path_exprs) =
-                build_tpl_parts_with_suffix(&fetch.url.template, None);
+            let (path_quasis, path_exprs) = build_tpl_parts_with_suffix(&fetch.url.template, None);
 
             let url_with_qs = tpl(
                 path_quasis_q.iter().map(|s| s.as_str()).collect(),
@@ -297,10 +295,7 @@ fn codegen_fetch_body(
             let url_without_qs = if path_exprs.is_empty() {
                 str_lit(&path_template)
             } else {
-                tpl(
-                    path_quasis.iter().map(|s| s.as_str()).collect(),
-                    path_exprs,
-                )
+                tpl(path_quasis.iter().map(|s| s.as_str()).collect(), path_exprs)
             };
 
             stmts.push(const_decl(
@@ -420,7 +415,10 @@ fn codegen_fetch_call_stmt(
         }
 
         // ...options?.headers
-        header_props.push(spread_prop(opt_chain_member(ident_expr("options"), "headers")));
+        header_props.push(spread_prop(opt_chain_member(
+            ident_expr("options"),
+            "headers",
+        )));
 
         fetch_props.push(kv_prop("headers", obj_lit(header_props)));
 
@@ -498,7 +496,9 @@ fn codegen_error_handling() -> Stmt {
     let try_block = block(vec![expr_stmt(Expr::Assign(AssignExpr {
         span: DUMMY_SP,
         op: AssignOp::Assign,
-        left: AssignTarget::Simple(SimpleAssignTarget::Ident(binding_ident("parsed", None, false))),
+        left: AssignTarget::Simple(SimpleAssignTarget::Ident(binding_ident(
+            "parsed", None, false,
+        ))),
         right: Box::new(call(
             member(ident_expr("JSON"), "parse"),
             vec![ident_expr("body")],
@@ -508,7 +508,9 @@ fn codegen_error_handling() -> Stmt {
     let catch_block = block(vec![expr_stmt(Expr::Assign(AssignExpr {
         span: DUMMY_SP,
         op: AssignOp::Assign,
-        left: AssignTarget::Simple(SimpleAssignTarget::Ident(binding_ident("parsed", None, false))),
+        left: AssignTarget::Simple(SimpleAssignTarget::Ident(binding_ident(
+            "parsed", None, false,
+        ))),
         right: Box::new(ident_expr("body")),
     }))]);
 
@@ -533,15 +535,9 @@ fn codegen_error_handling() -> Stmt {
 /// Get response data expression based on content type.
 fn response_data_expr(content_type: ResponseContentType) -> Expr {
     match content_type {
-        ResponseContentType::Json => {
-            await_expr(call(member(ident_expr("res"), "json"), vec![]))
-        }
-        ResponseContentType::Text => {
-            await_expr(call(member(ident_expr("res"), "text"), vec![]))
-        }
-        ResponseContentType::Blob => {
-            await_expr(call(member(ident_expr("res"), "blob"), vec![]))
-        }
+        ResponseContentType::Json => await_expr(call(member(ident_expr("res"), "json"), vec![])),
+        ResponseContentType::Text => await_expr(call(member(ident_expr("res"), "text"), vec![])),
+        ResponseContentType::Blob => await_expr(call(member(ident_expr("res"), "blob"), vec![])),
         ResponseContentType::Unknown => ident_expr("res"),
     }
 }
@@ -644,7 +640,11 @@ fn codegen_query_key_function(qk: &QueryKeyIR) -> ModuleItem {
     let base_key = str_lit(&qk.base_key);
 
     let (params, body_expr) = if let Some(params_type) = &qk.params_type {
-        let params = vec![pat_ident("params", Some(ir_typeref_to_swc(params_type)), true)];
+        let params = vec![pat_ident(
+            "params",
+            Some(ir_typeref_to_swc(params_type)),
+            true,
+        )];
         let body_expr = as_const(array_lit(vec![base_key, ident_expr("params")]));
         (params, body_expr)
     } else {
@@ -663,8 +663,7 @@ fn codegen_query_key_function(qk: &QueryKeyIR) -> ModuleItem {
 
 /// Generate a React Query hook.
 fn codegen_hook(hook: &HookIR) -> ModuleItem {
-    let response_swc_type =
-        resolve_content_type(hook.response_content_type, &hook.response_type);
+    let response_swc_type = resolve_content_type(hook.response_content_type, &hook.response_type);
     let is_void = is_void_type(&response_swc_type);
 
     let wrapped_type: Box<swc_ecma_ast::TsType> = if is_void {
@@ -682,12 +681,22 @@ fn codegen_hook(hook: &HookIR) -> ModuleItem {
 }
 
 /// Build `Omit<OptionsType<Wrapped, ApiError, TData>, "queryKey" | "queryFn">`.
-fn omit_query_opts(options_type: &str, wrapped: &swc_ecma_ast::TsType) -> Box<swc_ecma_ast::TsType> {
+fn omit_query_opts(
+    options_type: &str,
+    wrapped: &swc_ecma_ast::TsType,
+) -> Box<swc_ecma_ast::TsType> {
     let opts = ts_type_ref_with_params(
         options_type,
-        vec![Box::new(wrapped.clone()), ts_type_ref("ApiError"), ts_type_ref("TData")],
+        vec![
+            Box::new(wrapped.clone()),
+            ts_type_ref("ApiError"),
+            ts_type_ref("TData"),
+        ],
     );
-    ts_omit(opts, ts_union(vec![ts_lit_str("queryKey"), ts_lit_str("queryFn")]))
+    ts_omit(
+        opts,
+        ts_union(vec![ts_lit_str("queryKey"), ts_lit_str("queryFn")]),
+    )
 }
 
 /// Generate a query hook (useQuery or useSuspenseQuery).
@@ -727,7 +736,10 @@ fn codegen_query_hook(hook: &HookIR, wrapped_type: Box<swc_ecma_ast::TsType>) ->
         let hook_call = call(
             ident_expr(hook_fn),
             vec![obj_lit(vec![
-                kv_prop("queryKey", call(ident_expr(key_fn), vec![param_access_expr.clone()])),
+                kv_prop(
+                    "queryKey",
+                    call(ident_expr(key_fn), vec![param_access_expr.clone()]),
+                ),
                 kv_prop(
                     "queryFn",
                     arrow_fn_expr(
@@ -844,10 +856,7 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: Box<swc_ecma_ast::TsType>)
             ),
         }
     } else {
-        arrow_fn_expr(
-            vec![],
-            call(ident_expr(&hook.fetch_fn), vec![]),
-        )
+        arrow_fn_expr(vec![], call(ident_expr(&hook.fetch_fn), vec![]))
     };
 
     // { mutation?: UseMutationOptions<WrappedType, ApiError, VarsType> }
@@ -855,9 +864,7 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: Box<swc_ecma_ast::TsType>)
         "UseMutationOptions",
         vec![wrapped_type, ts_type_ref("ApiError"), vars_swc_type],
     );
-    let options_type = ts_object_type(vec![
-        ts_property_sig("mutation", mutation_opts, true),
-    ]);
+    let options_type = ts_object_type(vec![ts_property_sig("mutation", mutation_opts, true)]);
 
     let mutation_call = call(
         ident_expr("useMutation"),
@@ -882,8 +889,8 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: Box<swc_ecma_ast::TsType>)
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
     use super::super::api::*;
+    use super::*;
 
     #[test]
     fn test_codegen_imports_queries_only() {
@@ -893,7 +900,9 @@ mod tests {
         // Verify runtime import
         if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = &items[0] {
             assert!(!import.type_only);
-            assert!(import.specifiers.iter().any(|s| matches!(s, ImportSpecifier::Named(n) if n.local.sym.as_ref() == "useQuery")));
+            assert!(import.specifiers.iter().any(
+                |s| matches!(s, ImportSpecifier::Named(n) if n.local.sym.as_ref() == "useQuery")
+            ));
             assert!(import.specifiers.iter().any(|s| matches!(s, ImportSpecifier::Named(n) if n.local.sym.as_ref() == "useSuspenseQuery")));
         } else {
             panic!("Expected import declaration");
@@ -914,7 +923,9 @@ mod tests {
         assert_eq!(items.len(), 2);
 
         if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = &items[0] {
-            assert!(import.specifiers.iter().any(|s| matches!(s, ImportSpecifier::Named(n) if n.local.sym.as_ref() == "useMutation")));
+            assert!(import.specifiers.iter().any(
+                |s| matches!(s, ImportSpecifier::Named(n) if n.local.sym.as_ref() == "useMutation")
+            ));
         } else {
             panic!("Expected import declaration");
         }

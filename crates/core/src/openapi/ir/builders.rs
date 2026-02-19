@@ -46,22 +46,46 @@ fn ts_keyword(kind: TsKeywordTypeKind) -> Box<TsType> {
 }
 
 macro_rules! ts_kw {
-    (string)  => { $crate::openapi::ir::builders::ts_keyword_string() };
-    (number)  => { $crate::openapi::ir::builders::ts_keyword_number() };
-    (boolean) => { $crate::openapi::ir::builders::ts_keyword_boolean() };
-    (null)    => { $crate::openapi::ir::builders::ts_keyword_null() };
-    (void)    => { $crate::openapi::ir::builders::ts_keyword_void() };
-    (unknown) => { $crate::openapi::ir::builders::ts_keyword_unknown() };
+    (string) => {
+        $crate::openapi::ir::builders::ts_keyword_string()
+    };
+    (number) => {
+        $crate::openapi::ir::builders::ts_keyword_number()
+    };
+    (boolean) => {
+        $crate::openapi::ir::builders::ts_keyword_boolean()
+    };
+    (null) => {
+        $crate::openapi::ir::builders::ts_keyword_null()
+    };
+    (void) => {
+        $crate::openapi::ir::builders::ts_keyword_void()
+    };
+    (unknown) => {
+        $crate::openapi::ir::builders::ts_keyword_unknown()
+    };
 }
 
 // These are pub so the macro can reference them from other modules.
 // Prefer using ts_kw!(...) directly.
-pub fn ts_keyword_string() -> Box<TsType> { ts_keyword(TsKeywordTypeKind::TsStringKeyword) }
-pub fn ts_keyword_number() -> Box<TsType> { ts_keyword(TsKeywordTypeKind::TsNumberKeyword) }
-pub fn ts_keyword_boolean() -> Box<TsType> { ts_keyword(TsKeywordTypeKind::TsBooleanKeyword) }
-pub fn ts_keyword_null() -> Box<TsType> { ts_keyword(TsKeywordTypeKind::TsNullKeyword) }
-pub fn ts_keyword_void() -> Box<TsType> { ts_keyword(TsKeywordTypeKind::TsVoidKeyword) }
-pub fn ts_keyword_unknown() -> Box<TsType> { ts_keyword(TsKeywordTypeKind::TsUnknownKeyword) }
+pub fn ts_keyword_string() -> Box<TsType> {
+    ts_keyword(TsKeywordTypeKind::TsStringKeyword)
+}
+pub fn ts_keyword_number() -> Box<TsType> {
+    ts_keyword(TsKeywordTypeKind::TsNumberKeyword)
+}
+pub fn ts_keyword_boolean() -> Box<TsType> {
+    ts_keyword(TsKeywordTypeKind::TsBooleanKeyword)
+}
+pub fn ts_keyword_null() -> Box<TsType> {
+    ts_keyword(TsKeywordTypeKind::TsNullKeyword)
+}
+pub fn ts_keyword_void() -> Box<TsType> {
+    ts_keyword(TsKeywordTypeKind::TsVoidKeyword)
+}
+pub fn ts_keyword_unknown() -> Box<TsType> {
+    ts_keyword(TsKeywordTypeKind::TsUnknownKeyword)
+}
 
 pub fn ts_type_ref(name: &str) -> Box<TsType> {
     Box::new(TsType::TsTypeRef(TsTypeRef {
@@ -470,12 +494,10 @@ pub fn assign_expr(target: Expr, value: Expr) -> Expr {
     Expr::Assign(AssignExpr {
         span: DUMMY_SP,
         op: AssignOp::Assign,
-        left: AssignTarget::Simple(SimpleAssignTarget::Member(
-            match target {
-                Expr::Member(m) => m,
-                _ => unreachable!("assign_expr target must be a MemberExpr"),
-            },
-        )),
+        left: AssignTarget::Simple(SimpleAssignTarget::Member(match target {
+            Expr::Member(m) => m,
+            _ => unreachable!("assign_expr target must be a MemberExpr"),
+        })),
         right: Box::new(value),
     })
 }
@@ -767,15 +789,11 @@ pub fn ir_type_to_swc(ty: &ir::TsType) -> Box<TsType> {
             let elem = ir_type_to_swc(inner);
             // Wrap union/intersection in parens: (A | B)[]
             match &**inner {
-                ir::TsType::Union(_) | ir::TsType::Intersection(_) => {
-                    ts_array(ts_paren(elem))
-                }
+                ir::TsType::Union(_) | ir::TsType::Intersection(_) => ts_array(ts_paren(elem)),
                 _ => ts_array(elem),
             }
         }
-        ir::TsType::Union(types) => {
-            ts_union(types.iter().map(ir_type_to_swc).collect())
-        }
+        ir::TsType::Union(types) => ts_union(types.iter().map(ir_type_to_swc).collect()),
         ir::TsType::Intersection(types) => {
             let parts: Vec<_> = types
                 .iter()

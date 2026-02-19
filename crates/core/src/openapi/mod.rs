@@ -2486,8 +2486,9 @@ export function useGetCatBuggy<TData = { data: { meow: string } }>(
         // Verify mutation hook calls fetch with correct argument order
         // SWC omits spaces around `=>` in arrow functions
         assert!(
-            normalize_ws(&ts_code).contains("(vars)=>createUserPost(vars.params, vars.data)") ||
-            normalize_ws(&ts_code).contains("(vars) => createUserPost(vars.params, vars.data)"),
+            normalize_ws(&ts_code).contains("(vars)=>createUserPost(vars.params, vars.data)")
+                || normalize_ws(&ts_code)
+                    .contains("(vars) => createUserPost(vars.params, vars.data)"),
             "Mutation hook should call fetch with (params, data) order when params is required"
         );
     }
@@ -2613,8 +2614,9 @@ export function useGetCatBuggy<TData = { data: { meow: string } }>(
         // Verify mutation hook has correct argument order
         // SWC omits spaces around `=>` in arrow functions
         assert!(
-            normalize_ws(&ts_code).contains("(vars)=>updateResource(vars.params, vars.data)") ||
-            normalize_ws(&ts_code).contains("(vars) => updateResource(vars.params, vars.data)"),
+            normalize_ws(&ts_code).contains("(vars)=>updateResource(vars.params, vars.data)")
+                || normalize_ws(&ts_code)
+                    .contains("(vars) => updateResource(vars.params, vars.data)"),
             "Mutation hook should use (params, data) order when params has required fields"
         );
     }
@@ -2659,8 +2661,8 @@ export function useGetCatBuggy<TData = { data: { meow: string } }>(
         // Mutation hook should call with (data, params) order
         // SWC omits spaces around `=>` in arrow functions
         assert!(
-            norm.contains("(vars)=>uploadFile(vars.data, vars.params)") ||
-            norm.contains("(vars) => uploadFile(vars.data, vars.params)"),
+            norm.contains("(vars)=>uploadFile(vars.data, vars.params)")
+                || norm.contains("(vars) => uploadFile(vars.data, vars.params)"),
             "Mutation hook should use (data, params) order when params is optional. Generated:\n{ts_code}"
         );
     }
