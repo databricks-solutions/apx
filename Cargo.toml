@@ -54,6 +54,7 @@ thiserror = "2.0"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+console = "0.15"
 dialoguer = "0.11.0"
 indicatif = "0.17.9"
 

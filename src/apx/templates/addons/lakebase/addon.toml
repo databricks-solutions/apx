@@ -1,0 +1,21 @@
+[addon]
+name = "lakebase"
+description = "Lakebase integration"
+group = "backend"
+
+[python]
+dependencies = ["sqlmodel>=0.0.27", "psycopg[binary,pool]>=3.2.11"]
+
+[python.edits]
+exports = [
+    "from .lakebase import LakebaseDependency",
+]
+imports = [
+    "from .lakebase import LakebaseDependency",
+]
+
+[[python.edits.aliases]]
+code = "Session: TypeAlias = LakebaseDependency"
+doc = """
+Lakebase session dependency.
+Recommended usage: `session: Dependencies.Session`"""

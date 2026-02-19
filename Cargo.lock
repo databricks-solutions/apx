@@ -161,6 +161,7 @@ dependencies = [
  "apx-mcp",
  "chrono",
  "clap",
+ "console",
  "dialoguer",
  "indicatif",
  "rand 0.8.5",

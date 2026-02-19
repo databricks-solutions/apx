@@ -25,9 +25,12 @@ class SqlConfig(BaseSettings):
 # --- Addon dependency ---
 
 
-class Sql(BaseModel):
-    config: SqlConfig
-    api: StatementExecutionAPI
+class Sql:
+    """SQL Warehouse connection and query API."""
+
+    def __init__(self, config: SqlConfig, api: StatementExecutionAPI):
+        self.config: SqlConfig = config
+        self.api: StatementExecutionAPI = api
 
     @property
     def execute_statement(self):
@@ -44,8 +47,8 @@ class _SqlDependency(LifespanDependency):
         yield
 
     @staticmethod
-    def get_instance(user_ws: UserWorkspaceClientDependency, request: Request) -> Sql:
+    def __call__(request: Request, user_ws: UserWorkspaceClientDependency) -> Sql:
         return Sql(config=request.app.state.sql_config, api=user_ws.statement_execution)
 
 
-SqlDependency: TypeAlias = Annotated[Sql, Depends(_SqlDependency.get_instance)]
+SqlDependency: TypeAlias = Annotated[Sql, _SqlDependency.depends()]

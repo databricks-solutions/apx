@@ -1,12 +1,79 @@
 use clap::Args;
+use console::style;
+use dialoguer::theme::{ColorfulTheme, Theme};
 use dialoguer::{Confirm, Input, MultiSelect};
 use rand::seq::SliceRandom;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tera::Context;
 use tokio::process::Command;
 use tracing::debug;
+
+/// Marker prefix for group header items in the multi-select list.
+const HEADER_MARKER: &str = "\x01";
+
+/// Custom theme that renders group headers as bold labels without checkboxes.
+struct GroupedTheme {
+    inner: ColorfulTheme,
+}
+
+impl GroupedTheme {
+    fn new() -> Self {
+        Self {
+            inner: ColorfulTheme::default(),
+        }
+    }
+}
+
+impl Theme for GroupedTheme {
+    fn format_multi_select_prompt(
+        &self,
+        f: &mut dyn fmt::Write,
+        prompt: &str,
+    ) -> fmt::Result {
+        self.inner.format_multi_select_prompt(f, prompt)
+    }
+
+    fn format_multi_select_prompt_item(
+        &self,
+        f: &mut dyn fmt::Write,
+        text: &str,
+        checked: bool,
+        active: bool,
+    ) -> fmt::Result {
+        if let Some(label) = text.strip_prefix(HEADER_MARKER) {
+            write!(f, "  {}:", style(label).for_stderr().bold())
+        } else {
+            self.inner
+                .format_multi_select_prompt_item(f, text, checked, active)
+        }
+    }
+
+    fn format_multi_select_prompt_selection(
+        &self,
+        f: &mut dyn fmt::Write,
+        prompt: &str,
+        selections: &[&str],
+    ) -> fmt::Result {
+        let filtered: Vec<&str> = selections
+            .iter()
+            .filter(|s| !s.starts_with(HEADER_MARKER))
+            .copied()
+            .collect();
+        self.inner
+            .format_multi_select_prompt_selection(f, prompt, &filtered)
+    }
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
+}
 
 use crate::common::{has_apx_config, modify_pyproject, resolve_app_dir};
 use crate::components::add::{ComponentInput, add_components};
@@ -156,8 +223,6 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
             ));
         }
 
-        // Build flat list of items in group order
-        let mut items: Vec<(String, String, bool)> = Vec::new(); // (name, label, default)
         let mut ordered_groups: Vec<String> = Vec::new();
         for g in &group_order {
             if groups.contains_key(*g) {
@@ -170,29 +235,60 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
             }
         }
 
+        // Build flat list with header items interleaved
+        let mut labels: Vec<String> = Vec::new();
+        let mut defaults: Vec<bool> = Vec::new();
+        let mut is_header: Vec<bool> = Vec::new();
+        let mut addon_for_index: Vec<Option<String>> = Vec::new();
+
         for group_name in &ordered_groups {
             if let Some(group_addons) = groups.get(group_name) {
+                // Group header (non-selectable visually)
+                labels.push(format!("{}{}", HEADER_MARKER, capitalize_first(group_name)));
+                defaults.push(false);
+                is_header.push(true);
+                addon_for_index.push(None);
+
                 for (name, desc, default) in group_addons {
                     let label = if desc.is_empty() {
-                        format!("[{}] {}", group_name, name)
+                        name.clone()
                     } else {
-                        format!("[{}] {} — {}", group_name, name, desc)
+                        format!("{name} — {desc}")
                     };
-                    items.push((name.clone(), label, *default));
+                    labels.push(label);
+                    defaults.push(*default);
+                    is_header.push(false);
+                    addon_for_index.push(Some(name.clone()));
                 }
             }
         }
 
-        let labels: Vec<&str> = items.iter().map(|(_, l, _)| l.as_str()).collect();
-        let defaults: Vec<bool> = items.iter().map(|(_, _, d)| *d).collect();
-
-        let selections = MultiSelect::new()
-            .with_prompt("Which addons would you like to enable?")
-            .items(&labels)
+        let label_refs: Vec<&str> = labels.iter().map(|l| l.as_str()).collect();
+        let theme = GroupedTheme::new();
+        let selections = MultiSelect::with_theme(&theme)
+            .with_prompt(
+                "Which addons would you like to enable? (space = toggle, enter = confirm, a = all)",
+            )
+            .items(&label_refs)
             .defaults(&defaults)
+            .report(false)
             .interact()
             .map_err(|err| format!("Failed to select addons: {err}"))?;
-        selections.into_iter().map(|i| items[i].0.clone()).collect()
+
+        // Filter out header indices and map to addon names
+        let selected: Vec<String> = selections
+            .into_iter()
+            .filter(|&i| !is_header[i])
+            .filter_map(|i| addon_for_index[i].clone())
+            .collect();
+
+        if selected.is_empty() {
+            println!("  Addons: none");
+        } else {
+            println!("  Addons: {}", selected.join(", "));
+        }
+
+        selected
     };
 
     let ui_enabled = selected_addons.iter().any(|a| a == "ui");

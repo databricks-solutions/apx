@@ -141,6 +141,8 @@ pub enum Addon {
     // Backend addons
     /// SQL Warehouse connection
     Sql,
+    /// Lakebase (Databricks Database) integration
+    Lakebase,
 
     // Layout addons (from common::Layout)
     /// Sidebar layout addon
@@ -157,6 +159,7 @@ impl Addon {
             Addon::Claude => "claude",
             Addon::Codex => "codex",
             Addon::Sql => "sql",
+            Addon::Lakebase => "lakebase",
             Addon::Sidebar => "sidebar",
         }
     }

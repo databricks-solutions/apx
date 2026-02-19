@@ -11,6 +11,7 @@ apx-db.workspace = true
 apx-databricks-sdk = { path = "../databricks_sdk" , version = "0.3.0-rc1" }
 apx-mcp = { path = "../mcp" , version = "0.3.0-rc1" }
 clap.workspace = true
+console.workspace = true
 dialoguer.workspace = true
 indicatif.workspace = true
 tera.workspace = true
