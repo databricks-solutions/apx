@@ -1,7 +1,8 @@
 [addon]
 name = "sql"
-description = "SQL Warehouse connection and query API"
+description = "🗃️ SQL Warehouse connection and query API"
 group = "backend"
+group_display_name = "Backend"
 
 [python.edits]
 imports = [

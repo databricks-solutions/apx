@@ -1,8 +1,9 @@
 [addon]
 name = "sidebar"
-description = "Sidebar navigation layout"
+description = "📐 Sidebar navigation layout (includes UI)"
 group = "ui"
 depends_on = ["ui"]
+order = 1
 
 [components]
 install = ["avatar", "sidebar", "separator", "skeleton", "badge", "card"]

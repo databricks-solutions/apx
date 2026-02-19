@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from functools import partial
-from typing import Annotated, AsyncGenerator, Callable, TypeAlias
+from typing import Annotated, AsyncGenerator, TypeAlias
 
 from databricks.sdk.service.sql import (
     StatementExecutionAPI,
 )
-from fastapi import Depends, FastAPI, Request
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, Request
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from ._base import LifespanDependency

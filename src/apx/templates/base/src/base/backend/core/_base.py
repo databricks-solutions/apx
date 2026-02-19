@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, FastAPI
 class LifespanDependency(ABC):
     """
     All lifespan dependencies must inherit from this class.
-    Typical usage scenario for such dependencies is to 
+    Typical usage scenario for such dependencies is to
     initialize a resource and make it available to the application
     during the lifespan of the application (and through the request lifecycle).
     """

@@ -1,4 +1,5 @@
 [addon]
 name = "cursor"
-description = "Cursor IDE rules and MCP config"
+description = "✏️ Cursor IDE rules and MCP config"
 group = "assistants"
+group_display_name = "AI Assistants"

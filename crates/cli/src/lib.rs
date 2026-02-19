@@ -121,6 +121,16 @@ pub fn run_cli(args: Vec<String>) -> i32 {
 }
 
 async fn run_cli_async(args: Vec<String>) -> i32 {
+    // Restore terminal cursor visibility on Ctrl+C (SIGINT).
+    // dialoguer hides the cursor during interactive widgets; if the process
+    // is killed by a signal before cleanup runs, the cursor stays hidden.
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = console::Term::stderr().show_cursor();
+            std::process::exit(130);
+        }
+    });
+
     match Cli::try_parse_from(args) {
         Ok(cli) => match cli.command {
             Some(Commands::Init(init_args)) => init::run(init_args).await,
