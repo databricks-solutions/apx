@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v apx >/dev/null 2>&1 || echo 'WARNING: apx CLI is not installed. Install with: uv tool install apx'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

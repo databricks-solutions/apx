@@ -1,4 +1,4 @@
 {
   "title": "Reference",
-  "pages": ["cli", "mcp", "config-reference"]
+  "pages": ["cli", "mcp", "config-reference", "claude-code"]
 }

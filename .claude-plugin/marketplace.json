@@ -1,0 +1,29 @@
+{
+  "name": "databricks-solutions",
+  "owner": {
+    "name": "Databricks Solutions",
+    "email": "labs@databricks.com"
+  },
+  "metadata": {
+    "description": "Plugins for Databricks development tools",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "apx",
+      "source": ".",
+      "description": "Build full-stack Databricks Apps with React + FastAPI. Provides MCP tools for dev server management, component search, SDK docs, and deployment.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Databricks Solutions",
+        "email": "labs@databricks.com"
+      },
+      "homepage": "https://databricks-solutions.github.io/apx/",
+      "repository": "https://github.com/databricks-solutions/apx",
+      "license": "Databricks License",
+      "keywords": ["databricks", "fastapi", "react", "full-stack", "apps"],
+      "category": "development",
+      "tags": ["databricks", "apx", "mcp"]
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+---
+title: Claude Code Integration
+description: Install apx as a Claude Code plugin or standalone skill
+---
+
+# Claude Code Integration
+
+apx integrates with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) in two ways:
+
+- **Plugin** (recommended) — full experience with MCP tools, hooks, and skills
+- **Skill** — lightweight, knowledge-only (no MCP tools)
+
+## Plugin Installation
+
+The plugin provides MCP tools for dev server management, component search, SDK docs, and more.
+
+### Prerequisites
+
+Install the apx CLI first:
+
+```bash
+uv tool install apx
+```
+
+### Install from Marketplace
+
+```bash
+/plugin marketplace add databricks-solutions/apx
+/plugin install apx@databricks-solutions-apx
+```
+
+### What's Included
+
+| Component | Description |
+|-----------|-------------|
+| **MCP Server** | 13 tools for dev servers, components, docs, routes |
+| **Skills** | Quick reference + detailed backend/frontend patterns |
+| **Hooks** | SessionStart check for apx CLI availability |
+
+### MCP Tools
+
+The plugin registers the `apx mcp` server, which provides these tools:
+
+| Tool | Description |
+|------|-------------|
+| `start` | Start development server and return the URL |
+| `stop` | Stop the development server |
+| `restart` | Restart development server (preserves port if possible) |
+| `logs` | Fetch recent dev server logs |
+| `check` | Check project code for errors (tsc + ty in parallel) |
+| `routes` | List all API routes |
+| `get_route_info` | Get code example for a specific API route |
+| `refresh_openapi` | Regenerate OpenAPI schema and API client |
+| `search_registry_components` | Search shadcn registry components |
+| `add_component` | Add a component to the project |
+| `list_registry_components` | List all available shadcn registry components |
+| `docs` | Search Databricks SDK docs for code examples |
+| `databricks_apps_logs` | Fetch logs from deployed Databricks app |
+
+## Skill Installation (Standalone)
+
+If you only need the knowledge reference without MCP tools, install the standalone skill:
+
+### Project-Level (Current Project)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/databricks-solutions/apx/main/claude-skill/install.sh | bash
+```
+
+This installs skill files to `.claude/skills/apx/` in the current directory.
+
+### Global (All Projects)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/databricks-solutions/apx/main/claude-skill/install.sh | bash -s -- --global
+```
+
+This installs skill files to `~/.claude/skills/apx/`.
+
+### Skill Files
+
+| File | Content |
+|------|---------|
+| `SKILL.md` | Quick reference: commands, MCP tools, workflow, do's and don'ts |
+| `backend-patterns.md` | DI, 3-model pattern, CRUD routers, lifespan, AppConfig |
+| `frontend-patterns.md` | Suspense, mutations, selector, component conventions |
+
+## Project-Level Integration
+
+For project-specific integration with template rendering (fills in your app name, paths, etc.):
+
+```bash
+apx dev apply claude
+```
+
+This generates a tailored `CLAUDE.md`, `.mcp.json`, and skill files using your project's configuration. See the [CLI reference](/docs/reference/cli) for details.
