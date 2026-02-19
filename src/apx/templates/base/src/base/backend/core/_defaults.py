@@ -1,38 +1,34 @@
 from __future__ import annotations
-from typing import Annotated, TypeAlias
+from typing import Annotated, AsyncGenerator, TypeAlias
+from contextlib import asynccontextmanager
 
 from databricks.sdk import WorkspaceClient
 from fastapi import Depends, FastAPI, Request
 
-from ._base import Dependency
+from ._base import LifespanDependency
 from ._config import AppConfig, logger
 from ._headers import HeadersDependency
 
 
-class _ConfigDependency(Dependency[AppConfig]):
+class _ConfigDependency(LifespanDependency[AppConfig]):
     REGISTRY_NAME = "Config"
 
-    async def initialize(self, app: FastAPI) -> None:
-        config = AppConfig()
-        logger.info(f"Starting app with configuration:\n{config}")
-        app.state.config = config
-
-    async def shutdown(self, app: FastAPI) -> None:
-        pass
+    @asynccontextmanager
+    async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
+        app.state.config = AppConfig()
+        logger.info(f"Starting app with configuration:\n{app.state.config}")
+        yield
 
     @classmethod
     def get_instance(cls, request: Request) -> AppConfig:
         return request.app.state.config
 
 
-class _WorkspaceClientDependency(Dependency[WorkspaceClient]):
-    REGISTRY_NAME = "Client"
-
-    async def initialize(self, app: FastAPI) -> None:
+class _WorkspaceClientDependency(LifespanDependency[WorkspaceClient]):
+    @asynccontextmanager
+    async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.workspace_client = WorkspaceClient()
-
-    async def shutdown(self, app: FastAPI) -> None:
-        pass
+        yield
 
     @classmethod
     def get_instance(cls, request: Request) -> WorkspaceClient:

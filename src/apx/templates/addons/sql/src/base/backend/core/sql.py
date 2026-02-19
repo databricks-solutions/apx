@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from contextlib import asynccontextmanager
+from typing import Annotated, AsyncGenerator, TypeAlias
 
 from databricks.sdk.service.sql import (
     Disposition,
@@ -12,13 +13,13 @@ from databricks.sdk.service.sql import (
 )
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from pydantic import BaseModel, Field
-from pydantic_settings import SettingsConfigDict
-from databricks.sdk import WorkspaceClient
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from ._base import AddonConfig, Dependency
+from ._base import LifespanDependency
+from ._defaults import UserWorkspaceClientDependency
 
 
-class SqlConfig(AddonConfig):
+class SqlConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DATABRICKS_SQL_")
     warehouse_id: str = Field(description="SQL Warehouse ID")
 
@@ -26,33 +27,28 @@ class SqlConfig(AddonConfig):
 # --- Addon dependency ---
 
 
-class SqlDependency(Dependency[StatementExecutionAPI]):
-    REGISTRY_NAME = "Sql"
+class Sql(BaseModel):
+    config: SqlConfig
+    api: StatementExecutionAPI
 
-    async def initialize(self, app: FastAPI) -> None:
-        self.config = SqlConfig()  # ty: ignore[missing-argument]
-        app.state.sql_config = self.config
 
-    async def shutdown(self, app: FastAPI) -> None:
-        pass
+class _SqlDependency(LifespanDependency[StatementExecutionAPI]):
+    @asynccontextmanager
+    async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
+        app.state.sql_config = SqlConfig()  # ty: ignore[missing-argument]
+        yield
 
     def get_routers(self) -> list[APIRouter]:
         return [query_router]
 
-# --- FastAPI dependencies ---
+    @classmethod
+    def get_instance(
+        cls, user_ws: UserWorkspaceClientDependency, request: Request
+    ) -> Sql:
+        return Sql(config=request.app.state.sql_config, api=user_ws.statement_execution)
 
 
-def get_sql_config(request: Request) -> SqlConfig:
-    """Returns the SQL Warehouse config from app state."""
-    return request.app.state.sql_config
-
-
-def get_sql(
-    request: Request, user_ws: Annotated[WorkspaceClient, Depends(get_user_ws)]
-) -> StatementExecutionAPI:
-    """FastAPI dependency -- returns a StatementExecutionAPI for the current user."""
-    return user_ws.statement_execution
-
+SqlDependency: TypeAlias = Annotated[Sql, Depends(_SqlDependency.as_depends())]
 
 # --- Routes ---
 
@@ -80,13 +76,12 @@ class ExecuteQueryRequest(BaseModel):
 @query_router.post("", operation_id="executeQuery", response_model=StatementResponse)
 def execute_query(
     body: ExecuteQueryRequest,
-    sql: Annotated[StatementExecutionAPI, Depends(get_sql)],
-    config: Annotated[SqlConfig, Depends(get_sql_config)],
+    sql: SqlDependency,
 ) -> StatementResponse:
     """Execute a SQL statement. Defaults to async (wait_timeout='0s')."""
-    return sql.execute_statement(
+    return sql.api.execute_statement(
         statement=body.statement,
-        warehouse_id=body.warehouse_id or config.warehouse_id,
+        warehouse_id=body.warehouse_id or sql.config.warehouse_id,
         wait_timeout=body.wait_timeout,
         disposition=body.disposition,
         format=body.format,
@@ -102,10 +97,10 @@ def execute_query(
 )
 def get_statement(
     statement_id: str,
-    sql: Annotated[StatementExecutionAPI, Depends(get_sql)],
+    sql: SqlDependency,
 ) -> StatementResponse:
     """Get statement status, manifest, and result data."""
-    return sql.get_statement(statement_id)
+    return sql.api.get_statement(statement_id)
 
 
 @query_router.post(
@@ -113,11 +108,8 @@ def get_statement(
 )
 def cancel_query(
     statement_id: str,
-    sql: Annotated[StatementExecutionAPI, Depends(get_sql)],
+    sql: SqlDependency,
 ):
     """Cancel a running statement execution."""
-    sql.cancel_execution(statement_id)
+    sql.api.cancel_execution(statement_id)
     return Response(status_code=204)
-
-
-

@@ -7,7 +7,7 @@ from functools import lru_cache
 from fastapi import APIRouter, FastAPI
 
 from ..._metadata import api_prefix, app_name, dist_dir
-from ._base import Dependency
+from ._base import LifespanDependency
 
 
 # --- Lifespan ---
@@ -15,7 +15,7 @@ from ._base import Dependency
 
 @asynccontextmanager
 async def _chain_dep_lifespans(
-    deps: list[Dependency],
+    deps: list[LifespanDependency],
     app: FastAPI,
 ) -> AsyncIterator[None]:
     """Chain multiple dependency lifespans into a single nested context manager."""
@@ -49,7 +49,7 @@ def create_app(
     Returns:
         Configured FastAPI application instance.
     """
-    all_deps = [cls() for cls in Dependency._registry]
+    all_deps: list[LifespanDependency] = [cls() for cls in LifespanDependency._registry]
 
     @asynccontextmanager
     async def _composed_lifespan(app: FastAPI):
@@ -58,7 +58,7 @@ def create_app(
 
     app = FastAPI(title=app_name, lifespan=_composed_lifespan)
 
-    api_router = create_router()
+    api_router: APIRouter = create_router()
     for dep in all_deps:
         for r in dep.get_routers():
             api_router.include_router(r)
