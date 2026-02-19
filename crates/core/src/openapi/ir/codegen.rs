@@ -796,7 +796,7 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: Box<swc_ecma_ast::TsType>)
     let vars_swc_type = hook
         .vars_type
         .as_ref()
-        .map(|v| ir_typeref_to_swc(v))
+        .map(ir_typeref_to_swc)
         .unwrap_or_else(|| ts_kw!(void));
 
     // Build mutation function expression
@@ -887,7 +887,7 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: Box<swc_ecma_ast::TsType>)
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::super::api::*;
     use super::*;

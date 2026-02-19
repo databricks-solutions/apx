@@ -2,6 +2,7 @@
 //!
 //! These helpers reduce the verbosity of building `swc_ecma_ast` types
 //! when generating TypeScript code programmatically.
+#![allow(clippy::vec_box)] // SWC's TsTypeParamInstantiation/TsUnionType require Vec<Box<TsType>>
 
 use swc_atoms::Atom;
 use swc_common::{DUMMY_SP, SyntaxContext};
@@ -362,7 +363,7 @@ pub fn tpl(quasis: Vec<&str>, exprs: Vec<Expr>) -> Expr {
         .collect();
     Expr::Tpl(Tpl {
         span: DUMMY_SP,
-        exprs: exprs.into_iter().map(|e| Box::new(e)).collect(),
+        exprs: exprs.into_iter().map(Box::new).collect(),
         quasis,
     })
 }
@@ -524,7 +525,7 @@ pub fn const_decl(name: &str, init: Expr) -> Stmt {
 pub fn return_stmt(expr: Option<Expr>) -> Stmt {
     Stmt::Return(ReturnStmt {
         span: DUMMY_SP,
-        arg: expr.map(|e| Box::new(e)),
+        arg: expr.map(Box::new),
     })
 }
 
