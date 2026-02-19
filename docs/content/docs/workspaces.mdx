@@ -1,0 +1,145 @@
+---
+title: Workspaces
+description: Using apx with uv workspaces for monorepo and multi-project setups
+---
+
+import { File, Folder, Files } from "fumadocs-ui/components/files";
+
+## Overview
+
+[uv workspaces](https://docs.astral.sh/uv/concepts/workspaces/) allow you to manage multiple Python packages in a single repository. apx supports initializing as a **workspace member**, which is useful when you want to add a Databricks App to an existing Python project or monorepo.
+
+When running as a workspace member, apx creates its project files inside a subdirectory while the root `pyproject.toml` manages the workspace configuration and shared dependency resolution.
+
+## Quick Start
+
+To initialize apx as a member of an existing project:
+
+```bash
+cd my-existing-project
+apx init --as-member
+```
+
+This creates the apx app under `packages/app` by default and adds a `[tool.uv.workspace]` section to the root `pyproject.toml`.
+
+## Auto-Detection
+
+If you run `apx init` in a directory that already has a `pyproject.toml` **without** a `[tool.apx]` section, apx automatically switches to member mode. This means you don't need to pass `--as-member` explicitly — apx detects that you're inside an existing Python project and does the right thing.
+
+```bash
+# Inside an existing Python project (has pyproject.toml, no [tool.apx])
+apx init
+# Automatically uses --as-member=packages/app
+```
+
+## Workspace Configuration
+
+When `--as-member` is used, apx modifies the **root** `pyproject.toml` to include a `[tool.uv.workspace]` section:
+
+```toml
+[tool.uv.workspace]
+members = ["packages/*"]
+```
+
+If the root `pyproject.toml` doesn't exist, apx creates a minimal one:
+
+```toml
+[project]
+name = "workspace"
+version = "0.0.0"
+
+[tool.uv.workspace]
+members = ["packages/*"]
+```
+
+If the workspace section already exists, apx appends the new member glob without duplicating existing entries.
+
+## Custom Member Paths
+
+You can specify a custom path for the member project:
+
+```bash
+apx init --as-member=src/apps/my-app
+```
+
+apx derives the glob pattern from the path by replacing the last path segment with `*`. For example:
+
+| `--as-member` value | Glob added to `members` |
+| --- | --- |
+| `packages/app` (default) | `packages/*` |
+| `src/apps/my-app` | `src/apps/*` |
+| `services/dashboard` | `services/*` |
+
+## Project Structure
+
+After running `apx init --as-member` in a project, the layout looks like this:
+
+<div className="font-mono">
+  <Files>
+    <Folder name="my-existing-project" defaultOpen>
+      <File name="pyproject.toml" icon="🐍" />
+      <Folder name="packages" defaultOpen>
+        <Folder name="app" defaultOpen>
+          <File name="pyproject.toml" icon="🐍" />
+          <File name="package.json" icon="📦" />
+          <File name="databricks.yml" icon="⚙️" />
+          <Folder name="src" defaultOpen>
+            <Folder name="app_name" defaultOpen>
+              <Folder name="backend" />
+              <Folder name="ui" />
+            </Folder>
+          </Folder>
+        </Folder>
+      </Folder>
+      <Folder name="src">
+        <File name="(your existing code)" />
+      </Folder>
+    </Folder>
+  </Files>
+</div>
+
+The root `pyproject.toml` owns the workspace, while `packages/app/pyproject.toml` contains the apx project configuration.
+
+## Working with Workspaces
+
+### Git
+
+Git is initialized at the **workspace root** (the directory where you ran `apx init`), not inside the member directory. This keeps a single git history for the entire workspace.
+
+### Development
+
+Run `apx dev start` from the **app directory** (the member path):
+
+```bash
+cd packages/app
+apx dev start
+```
+
+### Dependency Resolution
+
+uv resolves dependencies across the entire workspace. The member project's dependencies (FastAPI, Pydantic, etc.) are resolved alongside any other workspace members, ensuring version consistency.
+
+## Example
+
+Adding an apx app to an existing Python/uv project:
+
+```bash
+# 1. You have an existing project
+cd my-data-pipeline
+
+# 2. Initialize apx as a workspace member
+apx init --as-member
+
+# 3. apx detects pyproject.toml, creates packages/app/,
+#    and adds [tool.uv.workspace] to the root
+
+# 4. Start developing
+cd packages/app
+apx dev start
+```
+
+If you want the app in a different location:
+
+```bash
+apx init --as-member=apps/dashboard --name my-dashboard
+```

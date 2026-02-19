@@ -86,8 +86,6 @@ use apx_core::dotenv::DotenvFile;
 use apx_core::interop::{get_template_content, list_template_files};
 use std::time::Instant;
 
-const APX_INDEX_URL: &str = "https://databricks-solutions.github.io/apx/simple";
-
 #[derive(Args, Debug, Clone)]
 pub struct InitArgs {
     #[arg(
@@ -448,13 +446,6 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
         }
     }
 
-    // Configure apx in pyproject.toml (dependencies will be installed on first command)
-    let pyproject_path = app_path.join("pyproject.toml");
-    let apx_version = env!("CARGO_PKG_VERSION");
-
-    ensure_apx_uv_config(&pyproject_path, apx_version)?;
-    debug!("Configured apx {} from index", apx_version);
-
     // Manifest-driven component installation
     if !selected_addons.is_empty() {
         let mut all_components: Vec<ComponentInput> = Vec::new();
@@ -717,67 +708,7 @@ async fn run_command(cmd: &mut Command, error_msg: &str) -> Result<(), String> {
     Err(message)
 }
 
-use toml_edit::{Array, ArrayOfTables, Item, Table, Value};
-
-/// Configure pyproject.toml for standard apx installation from index.
-/// Adds [[tool.uv.index]] for apx-index, [tool.uv.sources].apx pointing to that index,
-/// and "apx=={version}" to [dependency-groups].dev.
-pub fn ensure_apx_uv_config(pyproject: &Path, version: &str) -> Result<(), String> {
-    modify_pyproject(pyproject, |doc| {
-        let tool = doc["tool"].or_insert(Item::Table(Table::new()));
-        let uv = tool["uv"].or_insert(Item::Table(Table::new()));
-
-        // --- [[tool.uv.index]] ---
-        let indexes = uv["index"].or_insert(Item::ArrayOfTables(ArrayOfTables::new()));
-        let indexes = indexes
-            .as_array_of_tables_mut()
-            .ok_or("tool.uv.index is not an array")?;
-
-        let exists = indexes
-            .iter()
-            .any(|tbl| tbl.get("name").and_then(|v| v.as_str()) == Some("apx-index"));
-
-        if !exists {
-            let mut tbl = Table::new();
-            tbl["name"] = "apx-index".into();
-            tbl["url"] = APX_INDEX_URL.into();
-            indexes.push(tbl);
-        }
-
-        // --- [tool.uv.sources] ---
-        let sources = uv["sources"].or_insert(Item::Table(Table::new()));
-        let sources = sources
-            .as_table_mut()
-            .ok_or("tool.uv.sources is not a table")?;
-
-        if !sources.contains_key("apx") {
-            let mut apx_src = Table::new();
-            apx_src["index"] = "apx-index".into();
-            sources["apx"] = Item::Table(apx_src);
-        }
-
-        // --- [dependency-groups].dev ---
-        let dep_groups = doc["dependency-groups"].or_insert(Item::Table(Table::new()));
-        let dep_groups = dep_groups
-            .as_table_mut()
-            .ok_or("dependency-groups is not a table")?;
-
-        let dev_deps = dep_groups["dev"].or_insert(Item::Value(Value::Array(Array::new())));
-        let dev_array = dev_deps
-            .as_array_mut()
-            .ok_or("dependency-groups.dev is not an array")?;
-
-        let apx_exists = dev_array
-            .iter()
-            .any(|v| v.as_str().map(|s| s.starts_with("apx")).unwrap_or(false));
-        if !apx_exists {
-            let apx_spec = format!("apx=={version}");
-            dev_array.push(apx_spec.as_str());
-        }
-
-        Ok(())
-    })
-}
+use toml_edit::{Array, Item, Table, Value};
 
 /// Add or update `[tool.uv.workspace]` in a root `pyproject.toml`.
 ///
@@ -857,51 +788,6 @@ dev = [
 "#;
         fs::write(&pyproject_path, content).unwrap();
         pyproject_path
-    }
-
-    #[test]
-    fn test_ensure_apx_uv_config_adds_index_and_sources() {
-        let temp_dir = TempDir::new().unwrap();
-        let pyproject_path = create_test_pyproject(temp_dir.path());
-
-        // Run the function
-        ensure_apx_uv_config(&pyproject_path, "0.1.27").unwrap();
-
-        // Read and parse the result
-        let content = fs::read_to_string(&pyproject_path).unwrap();
-
-        // Verify index was added
-        assert!(content.contains("[[tool.uv.index]]"));
-        assert!(content.contains("name = \"apx-index\""));
-        assert!(content.contains("https://databricks-solutions.github.io/apx/simple"));
-
-        // Verify sources was added
-        assert!(content.contains("[tool.uv.sources]"));
-        assert!(content.contains("[tool.uv.sources.apx]"));
-        assert!(content.contains("index = \"apx-index\""));
-
-        // Verify dev dependency was added
-        assert!(content.contains("apx==0.1.27"));
-    }
-
-    #[test]
-    fn test_ensure_apx_uv_config_idempotent() {
-        let temp_dir = TempDir::new().unwrap();
-        let pyproject_path = create_test_pyproject(temp_dir.path());
-
-        // Run twice
-        ensure_apx_uv_config(&pyproject_path, "0.1.27").unwrap();
-        ensure_apx_uv_config(&pyproject_path, "0.1.28").unwrap(); // different version
-
-        // Read and parse the result
-        let content = fs::read_to_string(&pyproject_path).unwrap();
-
-        // Should only have one apx-index entry
-        assert_eq!(content.matches("name = \"apx-index\"").count(), 1);
-
-        // Should only have one apx dependency (the first one)
-        assert!(content.contains("apx==0.1.27"));
-        assert!(!content.contains("apx==0.1.28"));
     }
 
     #[test]

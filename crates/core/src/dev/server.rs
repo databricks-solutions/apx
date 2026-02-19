@@ -82,7 +82,7 @@ pub async fn run_server(
     // Resolve Databricks profile from env or .env file
     let profile = resolve_databricks_profile(&app_dir);
     let databricks_client = match &profile {
-        Some(p) => match DatabricksClient::new(p).await {
+        Some(p) => match DatabricksClient::with_product(p, "apx", env!("CARGO_PKG_VERSION")).await {
             Ok(client) => Some(client),
             Err(err) => {
                 warn!(

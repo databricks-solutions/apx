@@ -4,6 +4,7 @@ pub mod client;
 pub mod config;
 pub mod config_parser;
 pub mod error;
+pub mod useragent;
 
 pub use api::current_user::{User, UserEmail, UserName};
 pub use client::DatabricksClient;

@@ -143,10 +143,17 @@ Choose your AI assistant to see the configuration:
 
 ### Component Tools
 
-| Tool                         | Description                                             |
-| ---------------------------- | ------------------------------------------------------- |
-| `search_registry_components` | Search shadcn registry components using semantic search |
-| `add_component`              | Add a component to the project                          |
+| Tool                         | Description                                                      |
+| ---------------------------- | ---------------------------------------------------------------- |
+| `search_registry_components` | Search shadcn registry components using semantic search           |
+| `list_registry_components`   | List all available components in a registry                       |
+| `add_component`              | Add a component to the project                                    |
+
+### Project Tools
+
+| Tool     | Description                              |
+| -------- | ---------------------------------------- |
+| `routes` | List all API routes from the OpenAPI schema |
 
 ### Documentation Tools
 
@@ -216,6 +223,17 @@ Search for UI components using semantic search across configured registries.
 
 **Returns:** List of matching components with registry and relevance score
 
+### list_registry_components
+
+List all available components in a registry.
+
+**Parameters:**
+
+- `app_path`: Absolute path to the project directory
+- `registry` (optional): Registry name (e.g., `@animate-ui`). Omit for default shadcn registry.
+
+**Returns:** List of component names in the registry
+
 ### add_component
 
 Add a UI component to your project.
@@ -228,6 +246,16 @@ Add a UI component to your project.
 - `force` (optional): Overwrite existing files (default: `false`)
 
 **Returns:** Confirmation message
+
+### routes
+
+List all API routes from the OpenAPI schema.
+
+**Parameters:**
+
+- `app_path`: Absolute path to the project directory
+
+**Returns:** List of API routes with methods, paths, and operation IDs
 
 ### docs
 
@@ -273,10 +301,9 @@ Fetch logs from a deployed Databricks App.
 
 The MCP server also exposes resources that provide project information:
 
-| Resource       | Description                                         |
-| -------------- | --------------------------------------------------- |
-| `apx://info`   | Information about the apx toolkit and project stack |
-| `apx://routes` | List of API routes from OpenAPI schema              |
+| Resource     | Description                                         |
+| ------------ | --------------------------------------------------- |
+| `apx://info` | Information about the apx toolkit and project stack |
 
 ---
 

@@ -123,6 +123,49 @@ The watcher monitors your Python files and regenerates the client whenever you m
 
 ---
 
+## Automatic Tool Management
+
+apx automatically manages its runtime dependencies — **uv** (Python package manager) and **bun** (JavaScript runtime) — so you don't need to install them manually.
+
+### Resolution Order
+
+When apx needs uv or bun, it resolves the binary in this order:
+
+<Steps>
+  <Step>
+    ### Environment variable override
+    `APX_UV_PATH` or `APX_BUN_PATH` — use a custom binary path.
+  </Step>
+  <Step>
+    ### System PATH
+    Uses the existing installation if found on your system.
+  </Step>
+  <Step>
+    ### `~/.apx/bin/`
+    Checks for a previously downloaded binary with matching version.
+  </Step>
+  <Step>
+    ### Download
+    Fetches the pinned version from GitHub releases to `~/.apx/bin/`.
+  </Step>
+</Steps>
+
+### Download Details
+
+- Binaries are downloaded from official GitHub releases
+- SHA-256 checksums are verified after download
+- Downloads are platform-aware (macOS x64/ARM, Linux x64/ARM, Windows x64)
+- A version marker file tracks the installed version to avoid re-downloading
+
+### Environment Variable Overrides
+
+| Variable       | Description                        |
+| -------------- | ---------------------------------- |
+| `APX_UV_PATH`  | Path to a custom uv binary         |
+| `APX_BUN_PATH` | Path to a custom bun binary        |
+
+---
+
 ## Built-in Components CLI
 
 apx provides a CLI for working with [shadcn registries](https://ui.shadcn.com/docs/registry), allowing you to add components from any shadcn-compatible registry to your project. Additional curated registries for animations, AI components, and icons are preconfigured.
@@ -443,6 +486,23 @@ Addons are composable building blocks that you can select during `apx init` or a
 |                | `vscode`   | VS Code instructions and MCP config                     | No      |
 |                | `claude`   | Claude Code project rules and MCP config                | No      |
 |                | `codex`    | OpenAI Codex AGENTS.md file                             | No      |
+
+### Addon Dependencies
+
+Some addons depend on others. When an addon has a dependency, the dependent addon must also be enabled:
+
+- `sidebar` depends on `ui` — it adds a sidebar navigation layout to the UI frontend
+- `lakebase` and `sql` are standalone backend addons with no cross-dependencies
+
+### How Addons Work
+
+Addons are applied using AST-based code generation. When an addon is selected during `apx init` or applied via `apx dev apply`:
+
+1. **Template files** are rendered and copied into your project
+2. **Python AST edits** are applied — imports and `TypeAlias` members (used for the `Dependency` class) are added automatically to existing source files
+3. **Component installation** runs for any UI components declared in the addon manifest
+
+This approach ensures that addons integrate cleanly with your existing code without manual copy-paste or merge conflicts.
 
 ### Usage
 

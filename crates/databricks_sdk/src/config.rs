@@ -7,6 +7,8 @@ use crate::error::{DatabricksError, Result};
 pub struct DatabricksConfig {
     pub profile: String,
     pub host: String,
+    pub product: Option<String>,
+    pub product_version: Option<String>,
 }
 
 /// Return the path to the Databricks config file.
@@ -70,5 +72,10 @@ pub fn resolve_config(profile_name: &str) -> Result<DatabricksConfig> {
         )));
     }
 
-    Ok(DatabricksConfig { profile, host })
+    Ok(DatabricksConfig {
+        profile,
+        host,
+        product: None,
+        product_version: None,
+    })
 }

@@ -9,6 +9,7 @@ use crate::api::current_user::CurrentUserApi;
 use crate::auth::{CachedToken, acquire_token};
 use crate::config::{DatabricksConfig, resolve_config};
 use crate::error::{DatabricksError, Result};
+use crate::useragent::UserAgent;
 
 struct Inner {
     config: DatabricksConfig,
@@ -38,9 +39,31 @@ impl DatabricksClient {
         Ok(Self::from_config(config))
     }
 
+    /// Create a new client with explicit product info for the User-Agent header.
+    pub async fn with_product(
+        profile: &str,
+        product: &str,
+        product_version: &str,
+    ) -> Result<Self> {
+        let mut config = resolve_config(profile)?;
+        config.product = Some(product.to_string());
+        config.product_version = Some(product_version.to_string());
+        Ok(Self::from_config(config))
+    }
+
     /// Create a client from an already-resolved config.
     pub fn from_config(config: DatabricksConfig) -> Self {
-        let http = reqwest::Client::new();
+        let product = config.product.as_deref().unwrap_or("unknown");
+        let product_version = config.product_version.as_deref().unwrap_or("0.0.0");
+
+        let ua = UserAgent::new(product, product_version)
+            .with_auth("databricks-cli");
+
+        let http = reqwest::Client::builder()
+            .user_agent(ua.to_string())
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
             inner: Arc::new(Inner {
                 config,

@@ -11,8 +11,12 @@ Welcome to the apx documentation. apx is a reliable, feature-full, human and LLM
 
 Install apx:
 
-```bash
+```bash tab="macOS/Linux"
 curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh
+```
+
+```powershell tab="Windows"
+irm https://databricks-solutions.github.io/apx/install.ps1 | iex
 ```
 
 Initialize a new project:
@@ -34,6 +38,12 @@ Before getting started, ensure you have:
 
 - **Databricks CLI** - For deployment ([install](https://docs.databricks.com/dev-tools/cli/install.html))
 
+<Callout type="info">
+  **uv** and **bun** are **automatically installed** by apx if not found on your
+  system. They are downloaded to `~/.apx/bin/` with SHA-256 verification. You can
+  override the paths with `APX_UV_PATH` and `APX_BUN_PATH` environment variables.
+</Callout>
+
 ## Documentation
 
 <Cards>
@@ -45,6 +55,9 @@ Before getting started, ensure you have:
   </Card>
   <Card title="Features" href="/docs/features">
     Dev server, components CLI, local database, and more
+  </Card>
+  <Card title="Workspaces" href="/docs/workspaces">
+    Use apx as a uv workspace member in existing projects
   </Card>
 </Cards>
 
@@ -119,6 +132,10 @@ Quick overview of the most important files and directories:
    databricks bundle deploy -p <your-profile>
    ```
 
+<Callout type="info">
+  Run `apx upgrade` at any time to update to the latest version.
+</Callout>
+
 ## Stack
 
 apx is built on modern, production-ready technologies:
@@ -142,5 +159,8 @@ apx is built on modern, production-ready technologies:
   </Card>
   <Card title="Features" href="/docs/features">
     Explore dev server, components, and database
+  </Card>
+  <Card title="Workspaces" href="/docs/workspaces">
+    Add apx to an existing Python project
   </Card>
 </Cards>

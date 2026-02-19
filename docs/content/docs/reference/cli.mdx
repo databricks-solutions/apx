@@ -9,13 +9,18 @@ The apx CLI provides commands to initialize, develop, build, and manage your Dat
 
 Install apx using the install script:
 
-```bash
-# macOS/Linux
-curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh
-
-# Windows (PowerShell)
-irm https://databricks-solutions.github.io/apx/install.ps1 | iex
-```
+<Tabs items={["macOS/Linux", "Windows"]}>
+  <Tab value="macOS/Linux">
+    ```bash
+    curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh
+    ```
+  </Tab>
+  <Tab value="Windows">
+    ```powershell
+    irm https://databricks-solutions.github.io/apx/install.ps1 | iex
+    ```
+  </Tab>
+</Tabs>
 
 Then run commands directly:
 
@@ -35,6 +40,7 @@ apx <command>
 | `mcp`        | Start the MCP server             |
 | `bun`        | Run a command using bun          |
 | `flux`       | Flux OTEL collector commands     |
+| `upgrade`    | Self-update to the latest version |
 
 ---
 
@@ -52,12 +58,13 @@ apx init [OPTIONS] [APP_PATH]
 
 ### Options
 
-| Option                    | Description                                                     |
-| ------------------------- | --------------------------------------------------------------- |
-| `-n, --name <APP_NAME>`   | The name of the project                                         |
-| `--addons <ADDONS>`       | Addons to enable (comma-separated). Use `none` for backend-only |
-| `--no-addons`             | Backend-only project (no addons)                                |
-| `-p, --profile <PROFILE>` | Databricks profile to use                                       |
+| Option                              | Description                                                                                                                                                   |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-n, --name <APP_NAME>`             | The name of the project                                                                                                                                       |
+| `--addons <ADDONS>`                 | Addons to enable (comma-separated). Use `none` for backend-only                                                                                               |
+| `--no-addons`                       | Backend-only project (no addons)                                                                                                                              |
+| `-p, --profile <PROFILE>`           | Databricks profile to use                                                                                                                                     |
+| `--as-member [MEMBER_PATH]`         | Initialize as a uv workspace member (default: `packages/app`). Auto-detected when a `pyproject.toml` without `[tool.apx]` exists in the current directory    |
 
 <Callout type="info">
   **Note:** The `init` command only creates project files and configures
@@ -127,10 +134,11 @@ apx dev start [OPTIONS] [APP_PATH]
 
 #### Options
 
-| Option                          | Description                            |
-| ------------------------------- | -------------------------------------- |
-| `-a, --attached`                | Follow logs and stop server on Ctrl+C  |
-| `--skip-credentials-validation` | Skip credentials validation on startup |
+| Option                          | Description                                                        |
+| ------------------------------- | ------------------------------------------------------------------ |
+| `-a, --attached`                | Follow logs and stop server on Ctrl+C                              |
+| `--skip-credentials-validation` | Skip credentials validation on startup                             |
+| `--timeout <SECONDS>`           | Maximum time to wait for dev server health check (default: `60`)   |
 
 ### dev status
 
@@ -399,3 +407,15 @@ Stop the Flux OTEL collector daemon.
 ```bash
 apx flux stop
 ```
+
+---
+
+## upgrade
+
+Self-update apx to the latest version. Downloads the latest release from GitHub, verifies the SHA-256 checksum, and atomically replaces the current binary.
+
+```bash
+apx upgrade
+```
+
+If you are already on the latest version, the command exits with a message and no changes are made.
