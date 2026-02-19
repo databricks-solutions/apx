@@ -1,6 +1,6 @@
 [addon]
 name = "lakebase"
-description = "Lakebase integration"
+description = "🐘 Lakebase (Postgres) integration"
 group = "backend"
 
 [python]

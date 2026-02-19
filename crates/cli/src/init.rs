@@ -11,6 +11,9 @@ use tera::Context;
 use tokio::process::Command;
 use tracing::debug;
 
+/// (name, display_name, description, is_default, order)
+type AddonEntry = (String, String, String, bool, i32);
+
 /// Marker prefix for group header items in the multi-select list.
 const HEADER_MARKER: &str = "\x01";
 
@@ -28,11 +31,7 @@ impl GroupedTheme {
 }
 
 impl Theme for GroupedTheme {
-    fn format_multi_select_prompt(
-        &self,
-        f: &mut dyn fmt::Write,
-        prompt: &str,
-    ) -> fmt::Result {
+    fn format_multi_select_prompt(&self, f: &mut dyn fmt::Write, prompt: &str) -> fmt::Result {
         self.inner.format_multi_select_prompt(f, prompt)
     }
 
@@ -209,18 +208,30 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
         // Interactive grouped multi-select
         // Group addons by their group field, ordered: ui, backend, assistants, then rest
         let group_order = ["ui", "backend", "assistants"];
-        let mut groups: BTreeMap<String, Vec<(String, String, bool)>> = BTreeMap::new();
+        let mut groups: BTreeMap<String, Vec<AddonEntry>> = BTreeMap::new();
+        let mut group_display_names: BTreeMap<String, String> = BTreeMap::new();
         for (name, manifest) in &all_addons {
             let group = if manifest.addon.group.is_empty() {
                 "common".to_string()
             } else {
                 manifest.addon.group.clone()
             };
+            if !manifest.addon.group_display_name.is_empty() {
+                group_display_names
+                    .entry(group.clone())
+                    .or_insert_with(|| manifest.addon.group_display_name.clone());
+            }
             groups.entry(group).or_default().push((
                 name.clone(),
+                manifest.addon.display_name.clone(),
                 manifest.addon.description.clone(),
                 manifest.addon.default,
+                manifest.addon.order,
             ));
+        }
+        // Sort addons within each group by order
+        for group_addons in groups.values_mut() {
+            group_addons.sort_by_key(|(_, _, _, _, order)| *order);
         }
 
         let mut ordered_groups: Vec<String> = Vec::new();
@@ -244,16 +255,25 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
         for group_name in &ordered_groups {
             if let Some(group_addons) = groups.get(group_name) {
                 // Group header (non-selectable visually)
-                labels.push(format!("{}{}", HEADER_MARKER, capitalize_first(group_name)));
+                let header_label = group_display_names
+                    .get(group_name)
+                    .cloned()
+                    .unwrap_or_else(|| capitalize_first(group_name));
+                labels.push(format!("{}{}", HEADER_MARKER, header_label));
                 defaults.push(false);
                 is_header.push(true);
                 addon_for_index.push(None);
 
-                for (name, desc, default) in group_addons {
-                    let label = if desc.is_empty() {
-                        name.clone()
+                for (name, display_name, desc, default, _order) in group_addons {
+                    let label_name = if display_name.is_empty() {
+                        name.as_str()
                     } else {
-                        format!("{name} — {desc}")
+                        display_name.as_str()
+                    };
+                    let label = if desc.is_empty() {
+                        label_name.to_string()
+                    } else {
+                        format!("{label_name} — {desc}")
                     };
                     labels.push(label);
                     defaults.push(*default);

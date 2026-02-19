@@ -11,7 +11,6 @@ from ._headers import HeadersDependency
 
 
 class _ConfigDependency(LifespanDependency):
-
     @asynccontextmanager
     async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.config = AppConfig()

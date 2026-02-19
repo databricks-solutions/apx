@@ -36,11 +36,17 @@ pub(crate) struct AddonInfo {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub group: String,
     #[serde(default)]
+    pub group_display_name: String,
+    #[serde(default)]
     pub default: bool,
+    #[serde(default)]
+    pub order: i32,
     #[serde(default)]
     pub depends_on: Vec<String>,
 }

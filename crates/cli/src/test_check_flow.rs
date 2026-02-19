@@ -81,9 +81,7 @@ mod tests {
 
         // Step 3: Apply each backend addon, checking after each.
         // Addon configs are validated during lifespan (not import), so no env vars needed.
-        for addon in [
-            Addon::Sql,
-        ] {
+        for addon in [Addon::Sql] {
             apx_apply(&app_path, addon).await;
             apx_check(&app_path).await;
         }

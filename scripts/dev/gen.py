@@ -110,12 +110,7 @@ def patch_pyproject(pyproject_path: Path, wheel_path: Path) -> None:
             new_deps.append(dep)
 
     dep_groups = doc.get("dependency-groups", {})
-    dev_deps = dep_groups.get("dev", [])
-    if isinstance(dev_deps, list):
-        dev_deps.extend(new_deps)
-    else:
-        dev_deps = new_deps
-    dep_groups["dev"] = dev_deps
+    dep_groups["dev"] = new_deps
 
     pyproject_path.write_text(tomlkit.dumps(doc))
     print(f"  Patched {pyproject_path} -> {YELLOW}{wheel_path.name}{RESET}")
@@ -164,7 +159,17 @@ def main() -> None:
 
         with stage("Initializing project", 3, total):
             run(
-                ["uvx", "--from", str(wheel), "apx", "init", str(folder), "-p", profile]
+                [
+                    "uvx",
+                    "--no-cache",
+                    "--from",
+                    str(wheel),
+                    "apx",
+                    "init",
+                    str(folder),
+                    "-p",
+                    profile,
+                ]
                 + extra_args,
                 env={**os.environ, "RUST_LOG": "DEBUG"},
             )
@@ -173,7 +178,7 @@ def main() -> None:
             patch_pyproject(folder / "pyproject.toml", wheel)
 
         with stage("Syncing dependencies", 5, total):
-            run(["uv", "sync"], cwd=folder)
+            run(["uv", "sync", "--reinstall-package", "apx"], cwd=folder)
 
         with stage("Running dev check", 6, total):
             run(

@@ -1,8 +1,10 @@
 [addon]
 name = "ui"
-description = "Frontend UI with React, Vite, and TanStack Router"
+description = "⚡ Frontend with React, Vite, and TanStack Router"
 group = "ui"
+group_display_name = "UI"
 default = true
+order = 0
 
 [components]
 install = ["button"]
