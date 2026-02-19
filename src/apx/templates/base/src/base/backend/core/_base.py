@@ -3,9 +3,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from inspect import isabstract
-from typing import AsyncGenerator, Generic, TypeVar
+from typing import Annotated, Any, AsyncGenerator, Generic, TypeAlias, TypeVar
 
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request, Depends
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 T = TypeVar("T")
@@ -58,5 +58,14 @@ class Dependency(ABC, Generic[T]):
         yield
         await self.shutdown(app)
 
+    def get_routers(self) -> list[APIRouter]:
+        """Override to contribute routers to the application."""
+        return []
+
     @abstractmethod
-    def get_instance(self, request: Request) -> T: ...
+    @classmethod
+    def get_instance(cls, request: Request) -> T: ...
+
+    @classmethod
+    def as_depends(cls) -> Any:
+        return Depends(cls.get_instance)

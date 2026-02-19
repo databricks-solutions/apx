@@ -1,12 +1,16 @@
 [addon]
 name = "sql"
-description = "SQL Warehouse connection"
+description = "SQL Warehouse connection and query API"
 group = "backend"
 
 [python.edits]
-exports = ["from .sql import SqlDependency, get_connection"]
+exports = [
+    "from .sql import SqlDependency, SqlConfig, get_sql, get_sql_config",
+]
 imports = [
-    "from .sql import get_connection",
+    "from .sql import get_sql",
     "from databricks.sdk.service.sql import StatementExecutionAPI",
 ]
-aliases = ["Connection: TypeAlias = Annotated[StatementExecutionAPI, Depends(get_connection)]"]
+aliases = [
+    "Sql: TypeAlias = Annotated[StatementExecutionAPI, Depends(get_sql)]",
+]

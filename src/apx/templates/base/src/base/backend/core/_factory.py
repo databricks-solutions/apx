@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import lru_cache
 
 from fastapi import APIRouter, FastAPI
 
@@ -57,8 +58,15 @@ def create_app(
 
     app = FastAPI(title=app_name, lifespan=_composed_lifespan)
 
+    api_router = create_router()
+    for dep in all_deps:
+        for r in dep.get_routers():
+            api_router.include_router(r)
+    app.include_router(api_router)
+
     for router in routers or []:
-        app.include_router(router)
+        if router is not api_router:
+            app.include_router(router)
 
     if dist_dir.exists():
         from ._static import CachedStaticFiles, add_not_found_handler
@@ -69,6 +77,8 @@ def create_app(
     return app
 
 
+# singleton APIRouter with the application's API prefix
+@lru_cache(maxsize=1)
 def create_router() -> APIRouter:
-    """Create an APIRouter with the application's API prefix."""
+    """Return the singleton APIRouter with the application's API prefix."""
     return APIRouter(prefix=api_prefix)

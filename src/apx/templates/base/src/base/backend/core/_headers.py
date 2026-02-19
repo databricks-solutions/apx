@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, TypeAlias
 from uuid import UUID
 
-from fastapi import Header
+from fastapi import Depends, Header
 from pydantic import BaseModel, SecretStr
 
 
@@ -40,3 +40,8 @@ def get_databricks_headers(
         request_id=UUID(request_id) if request_id else None,
         token=SecretStr(token) if token else None,
     )
+
+
+HeadersDependency: TypeAlias = Annotated[
+    DatabricksAppsHeaders, Depends(get_databricks_headers)
+]
