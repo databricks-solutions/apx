@@ -9,3 +9,12 @@ if ! cargo fmt --all -- --check; then
     echo "Formatting check failed. Run 'cargo fmt --all' to fix."
     exit 1
 fi
+
+# Cargo clippy — must match CI exactly:
+#   cargo clippy --workspace --exclude apx-studio --all-targets -- -D warnings
+echo "Running cargo clippy --workspace --exclude apx-studio --all-targets -- -D warnings..."
+if ! cargo clippy --workspace --exclude apx-studio --all-targets -- -D warnings; then
+    echo ""
+    echo "Clippy check failed. Fix the warnings above."
+    exit 1
+fi

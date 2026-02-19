@@ -105,7 +105,7 @@ fn sanitize(s: &str) -> String {
 /// Detect CI/CD provider from environment variables, matching the Python SDK behavior.
 fn detect_cicd() -> Option<&'static str> {
     let env_is =
-        |key: &str, val: &str| -> bool { std::env::var(key).ok().map_or(false, |v| v == val) };
+        |key: &str, val: &str| -> bool { std::env::var(key).ok().is_some_and(|v| v == val) };
     let env_set = |key: &str| -> bool { std::env::var(key).ok().is_some_and(|v| !v.is_empty()) };
 
     if env_is("GITHUB_ACTIONS", "true") {
