@@ -27,15 +27,15 @@ src/{{app_name}}/
 
 | Command | Description |
 |---------|-------------|
-| `uv run apx dev start` | 🟢 Start all dev servers (backend + frontend + OpenAPI watcher) |
-| `uv run apx dev stop` | 🔴 Stop all dev servers |
-| `uv run apx dev status` | 📊 Check status of running servers |
-| `uv run apx dev check` | ✅ Check for TypeScript/Python errors |
-| `uv run apx dev logs` | 📜 View recent logs (default: last 10m) |
-| `uv run apx dev logs -f` | 📡 Follow/stream logs in real-time |
-| `uv run apx build` | 📦 Build for production |
-| `uv run apx bun <args>` | 🍞 Run bun commands (install, add, etc.) |
-| `uv run apx components add <name>` | 🧩 Add a shadcn/ui component |
+| `apx dev start` | 🟢 Start all dev servers (backend + frontend + OpenAPI watcher) |
+| `apx dev stop` | 🔴 Stop all dev servers |
+| `apx dev status` | 📊 Check status of running servers |
+| `apx dev check` | ✅ Check for TypeScript/Python errors |
+| `apx dev logs` | 📜 View recent logs (default: last 10m) |
+| `apx dev logs -f` | 📡 Follow/stream logs in real-time |
+| `apx build` | 📦 Build for production |
+| `apx bun <args>` | 🍞 Run bun commands (install, add, etc.) |
+| `apx components add <name>` | 🧩 Add a shadcn/ui component |
 
 ## 🔌 MCP Tools
 
@@ -59,33 +59,33 @@ When the apx MCP server is running, these tools are available:
 
 ### Starting Development
 ```bash
-uv run apx dev start      # Starts everything in background
-uv run apx dev status     # Verify servers are running
+apx dev start      # Starts everything in background
+apx dev status     # Verify servers are running
 ```
 
 ### Adding UI Components
 ```bash
 # Search for components first
-uv run apx components add button --yes
-uv run apx components add card --yes
+apx components add button --yes
+apx components add card --yes
 ```
 
 ### Installing Frontend Dependencies
 ```bash
-uv run apx bun add lucide-react     # Add a package
-uv run apx bun install              # Install all deps
+apx bun add lucide-react     # Add a package
+apx bun install              # Install all deps
 ```
 
 ### Checking for Errors
 ```bash
-uv run apx dev check      # TypeScript + Python linting
+apx dev check      # TypeScript + Python linting
 ```
 
 ### Viewing Logs
 ```bash
-uv run apx dev logs                  # Recent logs (last 10m)
-uv run apx dev logs -d 1h            # Logs from last hour
-uv run apx dev logs -f               # Follow/stream logs live
+apx dev logs                  # Recent logs (last 10m)
+apx dev logs -d 1h            # Logs from last hour
+apx dev logs -f               # Follow/stream logs live
 ```
 
 ## ⚡ Key Patterns

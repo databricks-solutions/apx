@@ -5,7 +5,7 @@ description: Project configuration reference for apx projects
 
 ## pyproject.toml Configuration
 
-Below is an example configuration for an apx project. This shows the essential apx-specific settings and UV index configuration.
+Below is an example configuration for an apx project. This shows the essential apx-specific settings.
 
 ```toml
 [project]
@@ -19,11 +19,6 @@ dependencies = [
     "pydantic-settings>=2.11.0",
     "uvicorn>=0.37.0",
     "databricks-sdk>=0.74.0",
-]
-
-[dependency-groups]
-dev = [
-    "apx>=0.2.1",
 ]
 
 [tool.apx.metadata]
@@ -40,15 +35,6 @@ root = "src/charming_aurora/ui"
 "@animate-ui" = "https://animate-ui.com/r/{name}.json"
 "@ai-elements" = "https://registry.ai-sdk.dev/{name}.json"
 "@svgl" = "https://svgl.app/r/{name}.json"
-
-[tool.uv]
-
-[[tool.uv.index]]
-name = "apx-index"
-url = "https://databricks-solutions.github.io/apx/simple"
-
-[tool.uv.sources.apx]
-index = "apx-index"
 ```
 
 ## Configuration Sections

@@ -29,8 +29,20 @@
 
 ## 🚀 Quickstart
 
+Install `apx`:
+
 ```bash
-uvx --index https://databricks-solutions.github.io/apx/simple apx init
+# macOS/Linux
+curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh
+
+# Windows
+irm https://databricks-solutions.github.io/apx/install.ps1 | iex
+```
+
+Initialize a new project:
+
+```bash
+apx init
 ```
 
 ## 📚 Documentation
@@ -39,10 +51,8 @@ uvx --index https://databricks-solutions.github.io/apx/simple apx init
 
 ## ⬆️ Upgrading `apx`
 
-To upgrade `apx`, you can use the following command:
-
 ```bash
-uv sync --upgrade-package apx --index https://databricks-solutions.github.io/apx/simple
+apx upgrade
 ```
 
 ### License and Third Party Libraries
@@ -53,64 +63,71 @@ uv sync --upgrade-package apx --index https://databricks-solutions.github.io/apx
 
 ---
 
-#### Bundled Bun Runtime
-
-`apx` bundles the [Bun](https://bun.sh) JavaScript runtime directly into its wheels to provide an end-to-end development experience for users. This means users don't need to separately install Node.js, npm, or any JavaScript toolchain — everything required for frontend development is included out of the box.
-
-Bun is licensed under the **MIT License**. See the [Bun License](https://github.com/oven-sh/bun/blob/main/LICENSE.md) for details.
-
----
-
 #### Rust Crates
 
 The core of `apx` is written in Rust. Below is the complete list of Rust crates used:
 
 | Crate                          | Description                                                        | License              | Source                                                         |
 | ------------------------------ | ------------------------------------------------------------------ | -------------------- | -------------------------------------------------------------- |
-| clap                           | Command line argument parser with derive macros for CLI definition | MIT/Apache-2.0       | [GitHub](https://github.com/clap-rs/clap)                      |
-| dirs                           | Platform-specific standard directories (config, cache, data paths) | MIT/Apache-2.0       | [GitHub](https://github.com/dirs-dev/dirs-rs)                  |
-| dialoguer                      | Interactive command-line prompts and user input handling           | MIT                  | [GitHub](https://github.com/console-rs/dialoguer)              |
-| indicatif                      | Progress bars, spinners, and CLI status indicators                 | MIT                  | [GitHub](https://github.com/console-rs/indicatif)              |
-| rand                           | Random number generation for various use cases                     | MIT/Apache-2.0       | [GitHub](https://github.com/rust-random/rand)                  |
-| tera                           | Jinja2-like template engine for project scaffolding                | MIT                  | [GitHub](https://github.com/Keats/tera)                        |
-| toml                           | TOML parsing and serialization for configuration files             | MIT/Apache-2.0       | [GitHub](https://github.com/toml-rs/toml)                      |
-| toml_edit                      | TOML editing while preserving formatting and comments              | MIT/Apache-2.0       | [GitHub](https://github.com/toml-rs/toml)                      |
-| walkdir                        | Recursive directory traversal for file operations                  | MIT/Unlicense        | [GitHub](https://github.com/BurntSushi/walkdir)                |
-| chrono                         | Date and time handling with timezone support                       | MIT/Apache-2.0       | [GitHub](https://github.com/chronotope/chrono)                 |
 | axum                           | Modern async web framework with WebSocket support for dev server   | MIT                  | [GitHub](https://github.com/tokio-rs/axum)                     |
-| reqwest                        | HTTP client for making API requests and downloading resources      | MIT/Apache-2.0       | [GitHub](https://github.com/seanmonstar/reqwest)               |
-| serde                          | Serialization/deserialization framework for data structures        | MIT/Apache-2.0       | [GitHub](https://github.com/serde-rs/serde)                    |
-| serde_json                     | JSON serialization/deserialization for API communication           | MIT/Apache-2.0       | [GitHub](https://github.com/serde-rs/json)                     |
-| serde_yaml                     | YAML serialization/deserialization for config files                | MIT/Apache-2.0       | [GitHub](https://github.com/dtolnay/serde-yaml)                |
-| tokio                          | Async runtime powering all concurrent operations                   | MIT                  | [GitHub](https://github.com/tokio-rs/tokio)                    |
-| tokio-stream                   | Stream utilities and adapters for async iteration                  | MIT                  | [GitHub](https://github.com/tokio-rs/tokio)                    |
-| tokio-util                     | Additional utilities for Tokio (I/O helpers, codecs)               | MIT                  | [GitHub](https://github.com/tokio-rs/tokio)                    |
+| biome_css_parser               | CSS parser for analyzing and transforming stylesheets              | MIT                  | [GitHub](https://github.com/biomejs/biome)                     |
+| biome_css_syntax               | CSS syntax tree definitions for parsing                            | MIT                  | [GitHub](https://github.com/biomejs/biome)                     |
+| biome_rowan                    | Red-green tree library for syntax analysis                         | MIT                  | [GitHub](https://github.com/biomejs/biome)                     |
+| chrono                         | Date and time handling with timezone support                       | MIT/Apache-2.0       | [GitHub](https://github.com/chronotope/chrono)                 |
+| clap                           | Command line argument parser with derive macros for CLI definition | MIT/Apache-2.0       | [GitHub](https://github.com/clap-rs/clap)                      |
+| console                        | Terminal styling and interaction utilities                         | MIT                  | [GitHub](https://github.com/console-rs/console)                |
+| dialoguer                      | Interactive command-line prompts and user input handling           | MIT                  | [GitHub](https://github.com/console-rs/dialoguer)              |
+| dirs                           | Platform-specific standard directories (config, cache, data paths) | MIT/Apache-2.0       | [GitHub](https://github.com/dirs-dev/dirs-rs)                  |
+| flate2                         | DEFLATE compression and decompression                              | MIT/Apache-2.0       | [GitHub](https://github.com/rust-lang/flate2-rs)               |
 | futures-util                   | Utilities for working with futures and async streams               | MIT/Apache-2.0       | [GitHub](https://github.com/rust-lang/futures-rs)              |
-| sysinfo                        | System information retrieval (processes, CPU, memory)              | MIT                  | [GitHub](https://github.com/GuillaumeGomez/sysinfo)            |
-| tracing                        | Application-level tracing and structured logging                   | MIT                  | [GitHub](https://github.com/tokio-rs/tracing)                  |
-| tracing-subscriber             | Tracing event subscribers and formatters                           | MIT                  | [GitHub](https://github.com/tokio-rs/tracing)                  |
+| hex                            | Hexadecimal encoding/decoding utilities                            | MIT/Apache-2.0       | [GitHub](https://github.com/KokaKiwi/rust-hex)                 |
+| indicatif                      | Progress bars, spinners, and CLI status indicators                 | MIT                  | [GitHub](https://github.com/console-rs/indicatif)              |
+| notify                         | Cross-platform file system change notifications for hot reload     | CC0-1.0/Artistic-2.0 | [GitHub](https://github.com/notify-rs/notify)                  |
 | opentelemetry                  | Observability SDK for distributed tracing and metrics              | Apache-2.0           | [GitHub](https://github.com/open-telemetry/opentelemetry-rust) |
 | opentelemetry_sdk              | OpenTelemetry SDK implementation with Tokio runtime                | Apache-2.0           | [GitHub](https://github.com/open-telemetry/opentelemetry-rust) |
 | opentelemetry-otlp             | OTLP exporter for sending telemetry to collectors                  | Apache-2.0           | [GitHub](https://github.com/open-telemetry/opentelemetry-rust) |
 | opentelemetry-appender-tracing | Bridge between tracing and OpenTelemetry                           | Apache-2.0           | [GitHub](https://github.com/open-telemetry/opentelemetry-rust) |
 | opentelemetry-proto            | OpenTelemetry protocol buffer definitions                          | Apache-2.0           | [GitHub](https://github.com/open-telemetry/opentelemetry-rust) |
-| notify                         | Cross-platform file system change notifications for hot reload     | CC0-1.0/Artistic-2.0 | [GitHub](https://github.com/notify-rs/notify)                  |
-| tokio-tungstenite              | WebSocket client/server for real-time communication                | MIT                  | [GitHub](https://github.com/snapview/tokio-tungstenite)        |
-| tokio-postgres                 | Async PostgreSQL client for database operations                    | MIT/Apache-2.0       | [GitHub](https://github.com/sfackler/rust-postgres)            |
-| schemars                       | JSON Schema generation from Rust types for API docs                | MIT                  | [GitHub](https://github.com/GREsau/schemars)                   |
-| biome_css_parser               | CSS parser for analyzing and transforming stylesheets              | MIT                  | [GitHub](https://github.com/biomejs/biome)                     |
-| biome_css_syntax               | CSS syntax tree definitions for parsing                            | MIT                  | [GitHub](https://github.com/biomejs/biome)                     |
-| biome_rowan                    | Red-green tree library for syntax analysis                         | MIT                  | [GitHub](https://github.com/biomejs/biome)                     |
-| url                            | URL parsing and manipulation                                       | MIT/Apache-2.0       | [GitHub](https://github.com/servo/rust-url)                    |
-| lancedb                        | Vector database with search capabilities (used in mcp search)      | Apache-2.0           | [GitHub](https://github.com/lancedb/lancedb)                   |
-| arrow                          | Apache Arrow columnar data format implementation                   | Apache-2.0           | [GitHub](https://github.com/apache/arrow-rs)                   |
-| lance-index                    | Lance index implementation for vector search                       | Apache-2.0           | [GitHub](https://github.com/lancedb/lance)                     |
-| zip                            | ZIP archive reading/writing for packaging                          | MIT                  | [GitHub](https://github.com/zip-rs/zip2)                       |
-| rayon                          | Data parallelism library for parallel iteration                    | MIT/Apache-2.0       | [GitHub](https://github.com/rayon-rs/rayon)                    |
-| hex                            | Hexadecimal encoding/decoding utilities                            | MIT/Apache-2.0       | [GitHub](https://github.com/KokaKiwi/rust-hex)                 |
-| rusqlite                       | SQLite bindings for local data storage                             | MIT                  | [GitHub](https://github.com/rusqlite/rusqlite)                 |
 | prost                          | Protocol Buffers implementation for Rust                           | Apache-2.0           | [GitHub](https://github.com/tokio-rs/prost)                    |
+| rand                           | Random number generation for various use cases                     | MIT/Apache-2.0       | [GitHub](https://github.com/rust-random/rand)                  |
+| rayon                          | Data parallelism library for parallel iteration                    | MIT/Apache-2.0       | [GitHub](https://github.com/rayon-rs/rayon)                    |
+| reqwest                        | HTTP client for making API requests and downloading resources      | MIT/Apache-2.0       | [GitHub](https://github.com/seanmonstar/reqwest)               |
+| rmcp                           | Rust SDK for the Model Context Protocol                            | MIT/Apache-2.0       | [Crates.io](https://crates.io/crates/rmcp)                     |
+| ruff_python_ast                | Python AST definitions from the Ruff project                       | MIT                  | [GitHub](https://github.com/astral-sh/ruff)                    |
+| ruff_python_parser             | Python parser from Ruff for AST manipulation                       | MIT                  | [GitHub](https://github.com/astral-sh/ruff)                    |
+| ruff_text_size                 | Text size utilities from the Ruff project                          | MIT/Apache-2.0       | [GitHub](https://github.com/astral-sh/ruff)                    |
+| rust-embed                     | Embed files into Rust binary at compile time                       | MIT                  | [GitHub](https://github.com/pyrossh/rust-embed)                |
+| schemars                       | JSON Schema generation from Rust types for API docs                | MIT                  | [GitHub](https://github.com/GREsau/schemars)                   |
+| serde                          | Serialization/deserialization framework for data structures        | MIT/Apache-2.0       | [GitHub](https://github.com/serde-rs/serde)                    |
+| serde_json                     | JSON serialization/deserialization for API communication           | MIT/Apache-2.0       | [GitHub](https://github.com/serde-rs/json)                     |
+| serde_with                     | Custom serde serialization helpers                                 | MIT/Apache-2.0       | [GitHub](https://github.com/jonasbb/serde_with)                |
+| serde_yaml                     | YAML serialization/deserialization for config files                | MIT/Apache-2.0       | [GitHub](https://github.com/dtolnay/serde-yaml)                |
+| sha2                           | SHA-2 hash functions for integrity verification                    | MIT/Apache-2.0       | [GitHub](https://github.com/RustCrypto/hashes)                 |
+| similar                        | Text diffing library for addon apply diffs                         | MIT                  | [GitHub](https://github.com/mitsuhiko/similar)                 |
+| sqlx                           | Async SQL toolkit with compile-time checked queries (SQLite)       | MIT/Apache-2.0       | [GitHub](https://github.com/launchbadge/sqlx)                  |
+| swc_atoms                      | Interned string atoms for the SWC compiler                         | Apache-2.0           | [GitHub](https://github.com/swc-project/swc)                   |
+| swc_common                     | Common utilities for SWC TypeScript/JavaScript AST                 | Apache-2.0           | [GitHub](https://github.com/swc-project/swc)                   |
+| swc_ecma_ast                   | ECMAScript AST definitions for TypeScript parsing                  | Apache-2.0           | [GitHub](https://github.com/swc-project/swc)                   |
+| swc_ecma_codegen               | ECMAScript code generation from AST                                | Apache-2.0           | [GitHub](https://github.com/swc-project/swc)                   |
+| sysinfo                        | System information retrieval (processes, CPU, memory)              | MIT                  | [GitHub](https://github.com/GuillaumeGomez/sysinfo)            |
+| tar                            | TAR archive reading and writing                                    | MIT/Apache-2.0       | [GitHub](https://github.com/alexcrichton/tar-rs)               |
+| tauri                          | Desktop application framework (used for Studio)                    | MIT/Apache-2.0       | [GitHub](https://github.com/tauri-apps/tauri)                  |
 | tempfile                       | Temporary file and directory creation (dev dependency)             | MIT/Apache-2.0       | [GitHub](https://github.com/Stebalien/tempfile)                |
+| tera                           | Jinja2-like template engine for project scaffolding                | MIT                  | [GitHub](https://github.com/Keats/tera)                        |
+| thiserror                      | Derive macro for Error trait implementations                       | MIT/Apache-2.0       | [GitHub](https://github.com/dtolnay/thiserror)                 |
+| tokio                          | Async runtime powering all concurrent operations                   | MIT                  | [GitHub](https://github.com/tokio-rs/tokio)                    |
+| tokio-postgres                 | Async PostgreSQL client for database operations                    | MIT/Apache-2.0       | [GitHub](https://github.com/sfackler/rust-postgres)            |
+| tokio-stream                   | Stream utilities and adapters for async iteration                  | MIT                  | [GitHub](https://github.com/tokio-rs/tokio)                    |
+| tokio-tungstenite              | WebSocket client/server for real-time communication                | MIT                  | [GitHub](https://github.com/snapview/tokio-tungstenite)        |
+| tokio-util                     | Additional utilities for Tokio (I/O helpers, codecs)               | MIT                  | [GitHub](https://github.com/tokio-rs/tokio)                    |
+| toml                           | TOML parsing and serialization for configuration files             | MIT/Apache-2.0       | [GitHub](https://github.com/toml-rs/toml)                      |
+| toml_edit                      | TOML editing while preserving formatting and comments              | MIT/Apache-2.0       | [GitHub](https://github.com/toml-rs/toml)                      |
+| tracing                        | Application-level tracing and structured logging                   | MIT                  | [GitHub](https://github.com/tokio-rs/tracing)                  |
+| tracing-subscriber             | Tracing event subscribers and formatters                           | MIT                  | [GitHub](https://github.com/tokio-rs/tracing)                  |
+| url                            | URL parsing and manipulation                                       | MIT/Apache-2.0       | [GitHub](https://github.com/servo/rust-url)                    |
+| walkdir                        | Recursive directory traversal for file operations                  | MIT/Unlicense        | [GitHub](https://github.com/BurntSushi/walkdir)                |
+| which                          | Cross-platform executable path discovery                           | MIT                  | [GitHub](https://github.com/harryfei/which-rs)                 |
+| zip                            | ZIP archive reading/writing for packaging (zip2)                   | MIT                  | [GitHub](https://github.com/zip-rs/zip2)                       |
 
 ---
 

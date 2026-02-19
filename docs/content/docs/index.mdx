@@ -9,10 +9,16 @@ Welcome to the apx documentation. apx is a reliable, feature-full, human and LLM
 
 ## Quick Start
 
-Initialize a new project with a single command:
+Install apx:
 
 ```bash
-uvx --index https://databricks-solutions.github.io/apx/simple apx init
+curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh
+```
+
+Initialize a new project:
+
+```bash
+apx init
 ```
 
 This launches an interactive prompt that guides you through:
@@ -20,16 +26,13 @@ This launches an interactive prompt that guides you through:
 - Naming your app
 - Selecting a Databricks profile
 - Setting up AI assistant rules
-- Choosing a template
+- Selecting addons (UI, backend, AI assistants)
 
 ## Prerequisites
 
 Before getting started, ensure you have:
 
-- **uv** - Fast Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
 - **Databricks CLI** - For deployment ([install](https://docs.databricks.com/dev-tools/cli/install.html))
-
-Note: Bun is bundled with apx and does not need to be installed separately.
 
 ## Documentation
 
@@ -90,25 +93,25 @@ Quick overview of the most important files and directories:
 1. **Start the dev server**
 
    ```bash
-   uv run apx dev start
+   apx dev start
    ```
 
 2. **Add UI components**
 
    ```bash
-   uv run apx components add button card
+   apx components add button card
    ```
 
 3. **Check your code**
 
    ```bash
-   uv run apx dev check
+   apx dev check
    ```
 
 4. **Build for deployment**
 
    ```bash
-   uv run apx build
+   apx build
    ```
 
 5. **Deploy to Databricks**
@@ -125,7 +128,7 @@ apx is built on modern, production-ready technologies:
 | Backend  | Python, FastAPI, Pydantic   |
 | Frontend | React, TypeScript, Vite     |
 | UI       | shadcn/ui, Tailwind CSS     |
-| Runtime  | Bun (bundled), uv           |
+| Runtime  | Bun, uv                     |
 | Database | SQLModel, PGlite (optional) |
 
 ## Next Steps

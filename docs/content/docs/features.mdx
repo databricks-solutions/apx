@@ -28,16 +28,16 @@ The apx dev server provides a seamless full-stack development experience with ho
 
 ```bash
 # Start all servers in detached mode
-uv run apx dev start
+apx dev start
 
 # Check status
-uv run apx dev status
+apx dev status
 
 # View logs
-uv run apx dev logs -f
+apx dev logs -f
 
 # Stop when done
-uv run apx dev stop
+apx dev stop
 ```
 
 ### Architecture
@@ -47,7 +47,7 @@ When you run `dev start`, apx launches:
 1. **Backend Server** - FastAPI application with hot reload via uvicorn
 2. **Frontend Server** - Vite dev server with HMR (Hot Module Replacement)
 3. **OpenAPI Watcher** - Monitors Python models and regenerates TypeScript client
-4. **Database Sidecar** - PGlite in-memory PostgreSQL instance (for stateful template)
+4. **Database Sidecar** - PGlite in-memory PostgreSQL instance (for lakebase addon)
 
 All services run in detached mode, allowing you to continue working in your terminal. Logs are collected and can be streamed with `dev logs -f`.
 
@@ -137,10 +137,10 @@ apx provides a CLI for working with [shadcn registries](https://ui.shadcn.com/do
 ### Adding Components
 
 ```bash
-uv run apx components add button
-uv run apx components add card
-uv run apx components add dialog
-uv run apx components add @animate-ui/sidebar # Add a component from a specific registry
+apx components add button
+apx components add card
+apx components add dialog
+apx components add @animate-ui/sidebar # Add a component from a specific registry
 ```
 
 ### Available Registries
@@ -158,10 +158,10 @@ apx comes preconfigured with high-quality component registries:
 
 ```bash
 # Add required components
-uv run apx components add card
-uv run apx components add table
-uv run apx components add chart
-uv run apx components add tabs
+apx components add card
+apx components add table
+apx components add chart
+apx components add tabs
 ```
 
 Then use them in your React code:
@@ -205,23 +205,19 @@ You can add any shadcn-compatible registry by adding its URL pattern to this sec
 
 ## Local Development Database
 
-The **stateful** template includes integrated database support via SQLModel, with [PGlite](https://pglite.dev/) running as an in-memory PostgreSQL sidecar during development that maps to Lakebase in production.
+The **lakebase** addon includes integrated database support via SQLModel, with [PGlite](https://pglite.dev/) running as an in-memory PostgreSQL sidecar during development that maps to Lakebase in production.
 
 ### Initializing with Database Support
 
-```bash
-uvx --index https://databricks-solutions.github.io/apx/simple apx init --template stateful
-```
-
-Or apply to an existing project:
+Select the `lakebase` addon during `apx init`, or apply to an existing project:
 
 ```bash
-uv run apx dev apply stateful
+apx dev apply lakebase
 ```
 
 ### How It Works
 
-When you run `apx dev start` with the stateful template, apx automatically spins up a PGlite instance as a sidecar process. PGlite provides a fully PostgreSQL-compatible database running in-memory, giving you the same SQL dialect and features you'll have in production with Lakebase.
+When you run `apx dev start` with the lakebase addon, apx automatically spins up a PGlite instance as a sidecar process. PGlite provides a fully PostgreSQL-compatible database running in-memory, giving you the same SQL dialect and features you'll have in production with Lakebase.
 
 ### Defining Models
 
@@ -285,7 +281,7 @@ All dependencies are accessed via the `Dependency` class:
 | `Dependency.Client`     | `WorkspaceClient` | App-level Databricks client (service principal) | `ws: Dependency.Client`          |
 | `Dependency.UserClient` | `WorkspaceClient` | User-scoped Databricks client (OBO token)       | `user_ws: Dependency.UserClient` |
 | `Dependency.Config`     | `AppConfig`       | Application configuration                       | `config: Dependency.Config`      |
-| `Dependency.Session`    | `Session`         | Database session (stateful template only)       | `session: Dependency.Session`    |
+| `Dependency.Session`    | `Session`         | Database session (lakebase addon only)          | `session: Dependency.Session`    |
 
 ### Basic Usage
 
@@ -414,9 +410,9 @@ app = create_app(routers=[router], lifespan=custom_lifespan)
 ```
 
 <Callout type="info">
-  For stateful apps, `app.state.engine` (SQLAlchemy engine) is also available
-  inside the custom lifespan — the database is initialized before your lifespan
-  runs.
+  For apps using the lakebase addon, `app.state.engine` (SQLAlchemy engine) is
+  also available inside the custom lifespan — the database is initialized before
+  your lifespan runs.
 </Callout>
 
 ### Type Safety
@@ -431,52 +427,42 @@ This makes it easy to discover available methods and catch type errors early.
 
 ---
 
-## Project Templates
+## Addons
 
-apx offers two project templates to get you started:
+Addons are composable building blocks that you can select during `apx init` or apply later with `apx dev apply`. They allow you to customize your project with only the features you need.
 
-### Essential Template
+### Addon Groups
 
-The basic template includes:
+| Group          | Addon      | Description                                             | Default |
+| -------------- | ---------- | ------------------------------------------------------- | ------- |
+| **UI**         | `ui`       | Frontend with React, Vite, and TanStack Router          | Yes     |
+|                | `sidebar`  | Sidebar navigation layout (depends on `ui`)             | No      |
+| **Backend**    | `sql`      | SQL Warehouse connection and query API                  | No      |
+|                | `lakebase` | Lakebase (Postgres) integration with PGlite dev sidecar | No      |
+| **Assistants** | `cursor`   | Cursor IDE rules and MCP config                         | No      |
+|                | `vscode`   | VS Code instructions and MCP config                     | No      |
+|                | `claude`   | Claude Code project rules and MCP config                | No      |
+|                | `codex`    | OpenAI Codex AGENTS.md file                             | No      |
 
-- FastAPI backend with example routes
-- React frontend with Vite
-- TypeScript API client generation
-- shadcn/ui component integration
-- Tailwind CSS styling
+### Usage
 
-```bash
-uvx --index https://databricks-solutions.github.io/apx/simple apx init --template essential
-```
-
-### Stateful Template
-
-Everything in Essential, plus:
-
-- SQLModel database integration
-- PGlite development database (PostgreSQL-compatible)
-- Lakebase configuration for production
-- Example CRUD operations
+Select addons during initialization:
 
 ```bash
-uvx --index https://databricks-solutions.github.io/apx/simple apx init --template stateful
+apx init --addons=ui,sidebar,cursor
 ```
 
----
-
-## AI Assistant Rules
-
-apx can generate configuration files for popular AI coding assistants:
+Create a backend-only project with no addons:
 
 ```bash
-# During init
-uvx --index https://databricks-solutions.github.io/apx/simple apx init --assistant cursor
-
-# Or apply later
-uv run apx dev apply cursor
-uv run apx dev apply vscode
-uv run apx dev apply claude
-uv run apx dev apply codex
+apx init --no-addons
 ```
 
-These rules help AI assistants understand your project structure and conventions, enabling more effective code generation and assistance.
+Apply an addon to an existing project:
+
+```bash
+apx dev apply lakebase
+apx dev apply cursor
+```
+
+When no `--addons` flag is given, an interactive multi-select prompt with group headers is shown.

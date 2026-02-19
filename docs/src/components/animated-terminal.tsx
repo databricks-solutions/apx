@@ -11,9 +11,53 @@ interface TerminalLine {
 }
 
 const terminalOutput: TerminalLine[] = [
+  // --- curl install ---
   {
-    text: "$ uvx --index https://databricks-solutions.github.io/apx/simple apx init charming-aurora",
+    text: "$ curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh",
     delay: 0,
+    className: "text-blue-400",
+  },
+  {
+    text: "info: Detected platform: darwin aarch64",
+    delay: 200,
+    className: "text-cyan-300",
+  },
+  {
+    text: "info: Install directory: /Users/dev/.local/bin",
+    delay: 100,
+    className: "text-cyan-300",
+  },
+  {
+    text: "info: Fetching latest release...",
+    delay: 100,
+    className: "text-cyan-300",
+  },
+  {
+    text: "info: Latest version: v0.3.0",
+    delay: 200,
+    className: "text-cyan-300",
+  },
+  {
+    text: "info: Downloading apx-aarch64-darwin...",
+    delay: 100,
+    className: "text-cyan-300",
+  },
+  {
+    text: "success: Installed apx to /Users/dev/.local/bin/apx",
+    delay: 300,
+    className: "text-green-400",
+  },
+  { text: "", delay: 100 },
+  {
+    text: "apx v0.3.0 installed successfully!",
+    delay: 200,
+    className: "text-green-400 font-bold",
+  },
+  { text: "", delay: 300 },
+  // --- apx init ---
+  {
+    text: "$ apx init charming-aurora",
+    delay: 300,
     className: "text-blue-400",
   },
   {
@@ -23,15 +67,66 @@ const terminalOutput: TerminalLine[] = [
   },
   { text: "", delay: 100 },
   {
-    text: "What's the name of your app?: charming-aurora",
+    text: "? Which addons would you like to enable? (space = toggle, enter = confirm, a = all) ›",
     delay: 200,
     className: "text-cyan-300",
   },
   {
-    text: "Which template would you like to use?: essential",
-    delay: 200,
-    className: "text-cyan-300",
+    text: "  UI:",
+    delay: 100,
+    className: "text-white font-bold",
   },
+  {
+    text: "✔ ui — ⚡ Frontend with React, Vite, and TanStack Router",
+    delay: 100,
+    className: "text-emerald-400",
+  },
+  {
+    text: "✔ sidebar — 📐 Sidebar navigation layout (includes UI)",
+    delay: 100,
+    className: "text-emerald-400",
+  },
+  {
+    text: "  Backend:",
+    delay: 100,
+    className: "text-white font-bold",
+  },
+  {
+    text: "⬚ lakebase — 🐘 Lakebase (Postgres) integration",
+    delay: 100,
+    className: "text-gray-400",
+  },
+  {
+    text: "⬚ sql — 🗃️ SQL Warehouse connection and query API",
+    delay: 100,
+    className: "text-gray-400",
+  },
+  {
+    text: "  AI Assistants:",
+    delay: 100,
+    className: "text-white font-bold",
+  },
+  {
+    text: "✔ cursor — ✏️ Cursor IDE rules and MCP config",
+    delay: 100,
+    className: "text-emerald-400",
+  },
+  {
+    text: "⬚ codex — 🧠 OpenAI Codex AGENTS.md file",
+    delay: 50,
+    className: "text-gray-400",
+  },
+  {
+    text: "⬚ claude — 🤖 Claude Code project rules and MCP config",
+    delay: 50,
+    className: "text-gray-400",
+  },
+  {
+    text: "⬚ vscode — 💻 VS Code instructions and MCP config",
+    delay: 50,
+    className: "text-gray-400",
+  },
+  { text: "", delay: 200 },
   {
     text: "Available Databricks profiles: DEFAULT, dev",
     delay: 200,
@@ -39,21 +134,6 @@ const terminalOutput: TerminalLine[] = [
   },
   {
     text: "Which Databricks profile would you like to use? (leave empty to skip): dev",
-    delay: 200,
-    className: "text-cyan-300",
-  },
-  {
-    text: "Would you like to set up AI assistant rules? yes",
-    delay: 200,
-    className: "text-cyan-300",
-  },
-  {
-    text: "Which assistant would you like to use?: cursor",
-    delay: 200,
-    className: "text-cyan-300",
-  },
-  {
-    text: "Which layout would you like to use?: sidebar",
     delay: 200,
     className: "text-cyan-300",
   },
@@ -109,7 +189,7 @@ export function AnimatedTerminal() {
   const [copied, setCopied] = useState(false);
 
   const command =
-    "uvx --index https://databricks-solutions.github.io/apx/simple apx init";
+    "curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh";
 
   // Auto-play on first load
   useEffect(() => {

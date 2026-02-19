@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "apx": {
-      "command": "uv",
-      "args": ["run", "apx", "mcp"]
+      "command": "apx",
+      "args": ["mcp"]
     }
   }
 }

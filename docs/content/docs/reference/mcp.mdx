@@ -19,7 +19,7 @@ The MCP server provides tools for:
 ## Starting the MCP Server
 
 ```bash
-uv run apx mcp
+apx mcp
 ```
 
 The MCP server runs over stdio and integrates with AI assistants that support the Model Context Protocol.
@@ -40,17 +40,17 @@ Choose your AI assistant to see the configuration:
           "args": ["x", "--bun", "shadcn@latest", "mcp"]
         },
         "apx": {
-          "command": "uv",
-          "args": ["run", "apx", "mcp"]
+          "command": "apx",
+          "args": ["mcp"]
         }
       }
     }
     ```
 
-    Or apply the Cursor template:
+    Or apply the Cursor addon:
 
     ```bash
-    uv run apx dev apply cursor
+    apx dev apply cursor
     ```
 
   </Tab>
@@ -65,21 +65,21 @@ Choose your AI assistant to see the configuration:
           "args": ["x", "--bun", "shadcn@latest", "mcp"]
         },
         "apx": {
-          "command": "uv",
-          "args": ["run", "apx", "mcp"]
+          "command": "apx",
+          "args": ["mcp"]
         },
         "playwright": {
-          "command": "bun",
-          "args": ["x", "--bun", "@playwright/mcp@latest"]
+          "command": "apx",
+          "args": ["bun", "x", "--bun", "@playwright/mcp@latest"]
         }
       }
     }
     ```
 
-    Or apply the VSCode template:
+    Or apply the VSCode addon:
 
     ```bash
-    uv run apx dev apply vscode
+    apx dev apply vscode
     ```
 
   </Tab>
@@ -94,31 +94,31 @@ Choose your AI assistant to see the configuration:
           "args": ["x", "--bun", "shadcn@latest", "mcp"]
         },
         "apx": {
-          "command": "uv",
-          "args": ["run", "apx", "mcp"]
+          "command": "apx",
+          "args": ["mcp"]
         },
         "playwright": {
-          "command": "bun",
-          "args": ["x", "--bun", "@playwright/mcp@latest"]
+          "command": "apx",
+          "args": ["bun", "x", "--bun", "@playwright/mcp@latest"]
         }
       }
     }
     ```
 
-    Or apply the Claude template:
+    Or apply the Claude addon:
 
     ```bash
-    uv run apx dev apply claude
+    apx dev apply claude
     ```
 
     This also creates a `CLAUDE.md` file with project instructions.
 
   </Tab>
   <Tab value="Codex">
-    Apply the Codex template to create `AGENTS.md`:
+    Apply the Codex addon to create `AGENTS.md`:
 
     ```bash
-    uv run apx dev apply codex
+    apx dev apply codex
     ```
 
     This creates an `AGENTS.md` file with project instructions for OpenAI Codex.

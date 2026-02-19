@@ -7,16 +7,20 @@ The apx CLI provides commands to initialize, develop, build, and manage your Dat
 
 ## Installation
 
-apx is distributed from a custom PyPI registry. Install and run using `uvx`:
+Install apx using the install script:
 
 ```bash
-uvx --index https://databricks-solutions.github.io/apx/simple apx <command>
+# macOS/Linux
+curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh
+
+# Windows (PowerShell)
+irm https://databricks-solutions.github.io/apx/install.ps1 | iex
 ```
 
-Or after adding to your project:
+Then run commands directly:
 
 ```bash
-uv run apx <command>
+apx <command>
 ```
 
 ## Commands Overview
@@ -39,7 +43,7 @@ uv run apx <command>
 Initialize a new apx project with interactive prompts for configuration.
 
 ```bash
-uvx --index https://databricks-solutions.github.io/apx/simple apx init [OPTIONS] [APP_PATH]
+apx init [OPTIONS] [APP_PATH]
 ```
 
 ### Arguments
@@ -48,13 +52,12 @@ uvx --index https://databricks-solutions.github.io/apx/simple apx init [OPTIONS]
 
 ### Options
 
-| Option                        | Description                                              |
-| ----------------------------- | -------------------------------------------------------- |
-| `-n, --name <APP_NAME>`       | The name of the project                                  |
-| `-t, --template <TEMPLATE>`   | Template to use: `minimal`, `essential`, `stateful`      |
-| `-p, --profile <PROFILE>`     | Databricks profile to use                                |
-| `-a, --assistant <ASSISTANT>` | AI assistant type: `cursor`, `vscode`, `codex`, `claude` |
-| `-l, --layout <LAYOUT>`       | Layout to use: `basic`, `sidebar`                        |
+| Option                    | Description                                                     |
+| ------------------------- | --------------------------------------------------------------- |
+| `-n, --name <APP_NAME>`   | The name of the project                                         |
+| `--addons <ADDONS>`       | Addons to enable (comma-separated). Use `none` for backend-only |
+| `--no-addons`             | Backend-only project (no addons)                                |
+| `-p, --profile <PROFILE>` | Databricks profile to use                                       |
 
 <Callout type="info">
   **Note:** The `init` command only creates project files and configures
@@ -63,43 +66,27 @@ uvx --index https://databricks-solutions.github.io/apx/simple apx init [OPTIONS]
   any command like `apx dev start`, `apx build`, or `apx frontend build`.
 </Callout>
 
-### Templates
+### Addons
 
-<Tabs items={["Minimal", "Essential", "Stateful"]}>
-  <Tab value="Minimal">
-    Minimal template with basic UI structure and no additional features.
+Select addons during initialization with `--addons`:
 
-    ```bash
-    uvx --index https://databricks-solutions.github.io/apx/simple apx init --template minimal
-    ```
+```bash
+# Select specific addons
+apx init --addons=ui,sidebar,cursor
 
-  </Tab>
-  <Tab value="Essential">
-    Standard template with UI and API, including shadcn/ui components and OpenAPI client generation.
+# Backend-only project
+apx init --no-addons
+```
 
-    ```bash
-    uvx --index https://databricks-solutions.github.io/apx/simple apx init --template essential
-    ```
-
-  </Tab>
-  <Tab value="Stateful">
-    Everything in Essential, plus SQLModel database integration and Lakebase configuration.
-
-    ```bash
-    uvx --index https://databricks-solutions.github.io/apx/simple apx init --template stateful
-    ```
-
-  </Tab>
-</Tabs>
+When no `--addons` flag is given, an interactive multi-select prompt with group headers is shown.
 
 ### Example
 
 ```bash
-uvx --index https://databricks-solutions.github.io/apx/simple apx init \
+apx init \
   --name my-app \
-  --template essential \
+  --addons=ui,cursor \
   --profile my-profile \
-  --assistant cursor \
   my-app
 ```
 
@@ -110,7 +97,7 @@ uvx --index https://databricks-solutions.github.io/apx/simple apx init \
 Prepare the app for deployment by building both frontend assets and Python wheel.
 
 ```bash
-uv run apx build [OPTIONS] [APP_PATH]
+apx build [OPTIONS] [APP_PATH]
 ```
 
 ### Arguments
@@ -135,7 +122,7 @@ The `dev` command group manages development servers.
 Start development servers in detached mode.
 
 ```bash
-uv run apx dev start [OPTIONS] [APP_PATH]
+apx dev start [OPTIONS] [APP_PATH]
 ```
 
 #### Options
@@ -150,7 +137,7 @@ uv run apx dev start [OPTIONS] [APP_PATH]
 Check the status of running development servers.
 
 ```bash
-uv run apx dev status [APP_PATH]
+apx dev status [APP_PATH]
 ```
 
 ### dev logs
@@ -158,7 +145,7 @@ uv run apx dev status [APP_PATH]
 Display logs from development servers.
 
 ```bash
-uv run apx dev logs [OPTIONS] [APP_PATH]
+apx dev logs [OPTIONS] [APP_PATH]
 ```
 
 #### Options
@@ -173,7 +160,7 @@ uv run apx dev logs [OPTIONS] [APP_PATH]
 Restart all running development servers.
 
 ```bash
-uv run apx dev restart [APP_PATH]
+apx dev restart [APP_PATH]
 ```
 
 ### dev stop
@@ -181,7 +168,7 @@ uv run apx dev restart [APP_PATH]
 Stop all running development servers.
 
 ```bash
-uv run apx dev stop [APP_PATH]
+apx dev stop [APP_PATH]
 ```
 
 ### dev check
@@ -189,7 +176,7 @@ uv run apx dev stop [APP_PATH]
 Check the project code for errors using TypeScript compiler and Python type checker.
 
 ```bash
-uv run apx dev check [APP_PATH]
+apx dev check [APP_PATH]
 ```
 
 ### dev apply
@@ -197,7 +184,7 @@ uv run apx dev check [APP_PATH]
 Apply an addon to an existing project. Shows a diff of changes and asks for confirmation before applying.
 
 ```bash
-uv run apx dev apply <ADDON> [OPTIONS] [APP_PATH]
+apx dev apply <ADDON> [OPTIONS] [APP_PATH]
 ```
 
 #### Arguments
@@ -213,44 +200,44 @@ uv run apx dev apply <ADDON> [OPTIONS] [APP_PATH]
 
 #### Available Addons
 
-<Tabs items={["Assistant Rules", "Templates", "Layouts"]}>
-  <Tab value="Assistant Rules">
+<Tabs items={["Assistants", "Backend", "UI"]}>
+  <Tab value="Assistants">
     Configure AI assistant integration:
 
     - `cursor` - Cursor IDE rules and MCP config
-    - `vscode` - VSCode instructions and MCP config
-    - `claude` - Claude project file and MCP config
+    - `vscode` - VS Code instructions and MCP config
+    - `claude` - Claude Code project rules and MCP config
     - `codex` - OpenAI Codex AGENTS.md file
 
     ```bash
-    uv run apx dev apply cursor
-    uv run apx dev apply vscode
-    uv run apx dev apply claude
-    uv run apx dev apply codex
+    apx dev apply cursor
+    apx dev apply vscode
+    apx dev apply claude
+    apx dev apply codex
     ```
 
   </Tab>
-  <Tab value="Templates">
-    Apply project templates:
+  <Tab value="Backend">
+    Apply backend addons:
 
-    - `essential` - Standard template with UI and API
-    - `stateful` - Template with database integration
+    - `sql` - SQL Warehouse connection and query API
+    - `lakebase` - Lakebase (Postgres) integration
 
     ```bash
-    uv run apx dev apply essential
-    uv run apx dev apply stateful
+    apx dev apply sql
+    apx dev apply lakebase
     ```
 
   </Tab>
-  <Tab value="Layouts">
-    Apply UI layouts:
+  <Tab value="UI">
+    Apply UI addons:
 
+    - `ui` - Frontend with React, Vite, and TanStack Router
     - `sidebar` - Sidebar navigation layout
-    - `minimal-ui` - Minimal UI structure
 
     ```bash
-    uv run apx dev apply sidebar
-    uv run apx dev apply minimal-ui
+    apx dev apply ui
+    apx dev apply sidebar
     ```
 
   </Tab>
@@ -260,10 +247,10 @@ uv run apx dev apply <ADDON> [OPTIONS] [APP_PATH]
 
 ```bash
 # Apply Cursor rules with confirmation prompt
-uv run apx dev apply cursor
+apx dev apply cursor
 
-# Apply stateful addon without confirmation
-uv run apx dev apply stateful -y
+# Apply lakebase addon without confirmation
+apx dev apply lakebase -y
 ```
 
 The command will:
@@ -291,7 +278,7 @@ A CLI for working with [shadcn registries](https://ui.shadcn.com/docs/registry).
 Add a UI component to your project.
 
 ```bash
-uv run apx components add [OPTIONS] <COMPONENT> [APP_PATH]
+apx components add [OPTIONS] <COMPONENT> [APP_PATH]
 ```
 
 #### Arguments
@@ -309,13 +296,13 @@ uv run apx components add [OPTIONS] <COMPONENT> [APP_PATH]
 
 ```bash
 # Add from default registry (shadcn/ui)
-uv run apx components add button
+apx components add button
 
 # Add from specific registry
-uv run apx components add @animate-ui/accordion
+apx components add @animate-ui/accordion
 
 # Force overwrite
-uv run apx components add card --force
+apx components add card --force
 ```
 
 #### Registry Configuration
@@ -347,7 +334,7 @@ Projects include these component repositories by default:
 Start the MCP (Model Context Protocol) server.
 
 ```bash
-uv run apx mcp
+apx mcp
 ```
 
 See the [MCP](/docs/reference/mcp) reference for available tools and configuration.
@@ -363,7 +350,7 @@ Frontend-specific commands.
 Run the frontend development server standalone.
 
 ```bash
-uv run apx frontend dev
+apx frontend dev
 ```
 
 ### frontend build
@@ -371,7 +358,7 @@ uv run apx frontend dev
 Build the frontend for production.
 
 ```bash
-uv run apx frontend build
+apx frontend build
 ```
 
 ---
@@ -381,7 +368,7 @@ uv run apx frontend build
 Run commands using the bundled bun runtime.
 
 ```bash
-uv run apx bun <ARGS>
+apx bun <ARGS>
 ```
 
 ---
@@ -402,7 +389,7 @@ OpenTelemetry collector commands for observability.
 Start the Flux OTEL collector daemon.
 
 ```bash
-uv run apx flux start
+apx flux start
 ```
 
 ### flux stop
@@ -410,5 +397,5 @@ uv run apx flux start
 Stop the Flux OTEL collector daemon.
 
 ```bash
-uv run apx flux stop
+apx flux stop
 ```

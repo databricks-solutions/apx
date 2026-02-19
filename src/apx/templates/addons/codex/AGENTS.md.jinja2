@@ -8,12 +8,12 @@
 - **Databricks SDK:** Use the apx MCP `docs` tool to search Databricks SDK documentation instead of guessing or hallucinating API signatures.
 
 ## Package Management
-- **Frontend:** Bun might not be present on user's $PATH. It's recommended to use prebundled bun (e.g., `uv run apx bun install` or `uv run apx bun add <dependency>`), unless user explicitly stated otherwise.
+- **Frontend:** Use `apx bun install` or `apx bun add <dependency>` for frontend package management.
 - **Python:** Always use `uv` (never `pip`)
 
 ## Component Management
 - **Finding components:** Use MCP `search_registry_components` to search for available shadcn/ui components
-- **Adding components:** Use MCP `add_component` or CLI `uv run apx components add <component> --yes` to add components
+- **Adding components:** Use MCP `add_component` or CLI `apx components add <component> --yes` to add components
 - **Component location:** If component was added to a wrong location (e.g. stored into `src/components` instead of `src/{{app_name}}/ui/components`), move it to the proper folder
 - **Component organization:** Prefer grouping components by functionality rather than by file type (e.g. `src/{{app_name}}/ui/components/chat/`)
 
@@ -83,34 +83,34 @@ app = create_app(routers=[router], lifespan=custom_lifespan)
 
 **Start dev servers** (backend, frontend, OpenAPI watcher):
 ```bash
-uv run apx dev start
+apx dev start
 ```
 
 **Check status** (shows running servers and ports):
 ```bash
-uv run apx dev status
+apx dev status
 ```
 
 **Check for errors** (TypeScript, Python linting):
 ```bash
-uv run apx dev check
+apx dev check
 ```
 
 **View logs:**
 ```bash
-uv run apx dev logs              # Recent logs (default: last 10m)
-uv run apx dev logs -d 1h        # Logs from last hour
-uv run apx dev logs -f           # Follow/stream logs live
+apx dev logs              # Recent logs (default: last 10m)
+apx dev logs -d 1h        # Logs from last hour
+apx dev logs -f           # Follow/stream logs live
 ```
 
 **Stop servers:**
 ```bash
-uv run apx dev stop
+apx dev stop
 ```
 
 **Build for production:**
 ```bash
-uv run apx build
+apx build
 ```
 
 **Note:** OpenAPI client is automatically regenerated on every code change when dev servers are running. No manual regeneration needed.

@@ -1,12 +1,12 @@
 {
   "mcpServers": {
     "apx": {
-      "command": "uv",
-      "args": ["run", "apx", "mcp"]
+      "command": "apx",
+      "args": ["mcp"]
     },
     "playwright": {
-      "command": "uv",
-      "args": ["run", "apx", "bun", "x", "--bun", "@playwright/mcp@latest"]
+      "command": "apx",
+      "args": ["bun", "x", "--bun", "@playwright/mcp@latest"]
     }
   }
 }

@@ -232,11 +232,11 @@ export const Terminal = ({
     <div
       ref={containerRef}
       className={cn(
-        "border-border bg-background z-0 h-full max-h-[400px] w-full max-w-lg rounded-xl border",
+        "border-border bg-background z-0 flex h-full max-h-[400px] w-full max-w-lg flex-col overflow-hidden rounded-xl border",
         className,
       )}
     >
-      <div className="border-border flex items-center justify-between gap-x-4 border-b p-4">
+      <div className="border-border flex shrink-0 items-center justify-between gap-x-4 border-b p-4">
         <div className="flex flex-row gap-x-2">
           <div className="h-2 w-2 rounded-full bg-red-500"></div>
           <div className="h-2 w-2 rounded-full bg-yellow-500"></div>
@@ -248,9 +248,11 @@ export const Terminal = ({
           </div>
         ) : null}
       </div>
-      <pre className="p-4">
-        <code className="grid gap-y-1 overflow-auto">{wrappedChildren}</code>
-      </pre>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <pre className="p-4">
+          <code className="grid gap-y-1">{wrappedChildren}</code>
+        </pre>
+      </div>
     </div>
   );
 
