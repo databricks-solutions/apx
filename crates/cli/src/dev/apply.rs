@@ -60,7 +60,14 @@ pub(crate) struct PythonEdits {
     #[serde(default)]
     pub imports: Vec<String>,
     #[serde(default)]
-    pub aliases: Vec<String>,
+    pub aliases: Vec<AliasEntry>,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct AliasEntry {
+    pub code: String,
+    #[serde(default)]
+    pub doc: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -183,7 +190,10 @@ enum PythonEdit {
     /// Add import to a file (relative to app's src/{app_slug}/)
     AddImport { file: String, statement: String },
     /// Add TypeAlias member to the Dependencies class in dependencies.py
-    AddAlias { type_alias_code: String },
+    AddAlias {
+        type_alias_code: String,
+        doc: Option<String>,
+    },
 }
 
 /// Convert [`PythonEdits`] from manifest into a list of [`PythonEdit`]s.
@@ -201,9 +211,10 @@ fn metadata_to_edits(edits: &PythonEdits) -> Vec<PythonEdit> {
             statement: stmt.clone(),
         });
     }
-    for code in &edits.aliases {
+    for alias in &edits.aliases {
         result.push(PythonEdit::AddAlias {
-            type_alias_code: code.clone(),
+            type_alias_code: alias.code.clone(),
+            doc: alias.doc.clone(),
         });
     }
     result
@@ -548,7 +559,10 @@ pub(crate) fn apply_python_edits(
                     }
                 }
             }
-            PythonEdit::AddAlias { type_alias_code } => {
+            PythonEdit::AddAlias {
+                type_alias_code,
+                doc,
+            } => {
                 let target = app_dir
                     .join(&src_prefix)
                     .join("backend/core/dependencies.py");
@@ -557,8 +571,14 @@ pub(crate) fn apply_python_edits(
                     continue;
                 }
                 let source = fs::read_to_string(&target).map_err(|e| format!("Read error: {e}"))?;
-                match apx_core::py_edit::add_class_member(&source, "Dependencies", type_alias_code)
-                {
+                let member_code = match doc {
+                    Some(d) => {
+                        let d = d.trim();
+                        format!("{type_alias_code}\n\"\"\"{d}\"\"\"")
+                    }
+                    None => type_alias_code.clone(),
+                };
+                match apx_core::py_edit::add_class_member(&source, "Dependencies", &member_code) {
                     Ok(new_source) => {
                         fs::write(&target, new_source).map_err(|e| format!("Write error: {e}"))?;
                         ast_edits_applied += 1;
@@ -869,6 +889,12 @@ class Dependencies:
         assert!(
             matches!(err, apx_core::py_edit::PyEditError::AlreadyPresent(_)),
             "Dependencies.Sql should already be present, got: {err}"
+        );
+
+        // Verify the docstring was inserted below the alias
+        assert!(
+            source.contains("\"\"\"SQL Warehouse query dependency."),
+            "docstring should be present in dependencies.py, got:\n{source}"
         );
 
         // Also verify the import was added

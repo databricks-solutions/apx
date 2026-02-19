@@ -11,7 +11,6 @@ from ._headers import HeadersDependency
 
 
 class _ConfigDependency(LifespanDependency):
-    REGISTRY_NAME = "Config"
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
@@ -20,7 +19,7 @@ class _ConfigDependency(LifespanDependency):
         yield
 
     @staticmethod
-    def get_instance(request: Request) -> AppConfig:
+    def __call__(request: Request) -> AppConfig:
         return request.app.state.config
 
 
@@ -31,7 +30,7 @@ class _WorkspaceClientDependency(LifespanDependency):
         yield
 
     @staticmethod
-    def get_instance(request: Request) -> WorkspaceClient:
+    def __call__(request: Request) -> WorkspaceClient:
         return request.app.state.workspace_client
 
 
@@ -55,10 +54,10 @@ def _get_user_ws(
     )  # set pat explicitly to avoid issues with SP client
 
 
-ConfigDependency: TypeAlias = Annotated[AppConfig, Depends(_ConfigDependency.get_instance)]
+ConfigDependency: TypeAlias = Annotated[AppConfig, _ConfigDependency.depends()]
 
 ClientDependency: TypeAlias = Annotated[
-    WorkspaceClient, Depends(_WorkspaceClientDependency.get_instance)
+    WorkspaceClient, _WorkspaceClientDependency.depends()
 ]
 
 UserWorkspaceClientDependency: TypeAlias = Annotated[

@@ -8,7 +8,7 @@ from fastapi import APIRouter, FastAPI
 
 from ..._metadata import api_prefix, app_name, dist_dir
 from ._base import LifespanDependency
-
+from ._config import logger
 
 # --- Lifespan ---
 
@@ -49,7 +49,13 @@ def create_app(
     Returns:
         Configured FastAPI application instance.
     """
-    all_deps: list[LifespanDependency] = [cls() for cls in LifespanDependency._registry]
+    all_deps: list[LifespanDependency] = []
+    for dep in LifespanDependency._registry:
+        try:
+            all_deps.append(dep())
+        except Exception as e:
+            logger.error(f"Failed to instantiate dependency {dep.__name__}: {e}")
+            raise e
 
     @asynccontextmanager
     async def _composed_lifespan(app: FastAPI):

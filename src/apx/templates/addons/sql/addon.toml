@@ -7,6 +7,8 @@ group = "backend"
 imports = [
     "from .sql import SqlDependency",
 ]
-aliases = [
-    "Sql: TypeAlias = SqlDependency",
-]
+[[python.edits.aliases]]
+code = "Sql: TypeAlias = SqlDependency"
+doc = """
+SQL Warehouse query dependency.
+Recommended usage: `sql: Dependencies.Sql`"""

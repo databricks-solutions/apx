@@ -250,6 +250,24 @@ mod tests {
     }
 
     #[test]
+    fn test_add_class_member_with_alias_docstring() {
+        let source = r#"class Dependencies:
+    """Dependencies."""
+
+    Client: TypeAlias = ClientDep
+"#;
+        let member = "Sql: TypeAlias = SqlDep\n\"\"\"SQL query dependency.\nRecommended usage: `sql: Dependencies.Sql`\"\"\"";
+        let result = add_class_member(source, "Dependencies", member).unwrap();
+        assert!(result.contains("    Sql: TypeAlias = SqlDep"));
+        assert!(result.contains("    \"\"\"SQL query dependency."));
+        assert!(result.contains("    Recommended usage: `sql: Dependencies.Sql`\"\"\""));
+
+        // Idempotent: adding the same member again should return AlreadyPresent
+        let err = add_class_member(&result, "Dependencies", member).unwrap_err();
+        assert!(matches!(err, PyEditError::AlreadyPresent(_)));
+    }
+
+    #[test]
     fn test_add_class_member_type_alias() {
         let source = r#"class Dependencies:
     Client: TypeAlias = Annotated[WorkspaceClient, Depends(get_ws)]
