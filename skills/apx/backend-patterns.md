@@ -188,7 +188,7 @@ The `Dependency` class in `src/<app>/backend/core.py` provides typed FastAPI dep
 | `Dependency.Client`     | `WorkspaceClient` | Databricks client using app-level service principal credentials                    |
 | `Dependency.UserClient` | `WorkspaceClient` | Databricks client authenticated on behalf of the current user (requires OBO token) |
 | `Dependency.Config`     | `AppConfig`       | Application configuration loaded from environment variables                        |
-| `Dependency.Session`    | `Session`         | SQLModel database session, scoped to request (requires lakebase addon)                  |
+| `Dependency.Session`    | `Session`         | SQLModel database session, scoped to request (requires lakebase addon)             |
 
 ### Usage in Route Handlers
 

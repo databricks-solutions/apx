@@ -122,9 +122,9 @@ def patch_mcp_json(folder: Path) -> None:
     """Rewrite all MCP config files so servers use `uv run apx` instead of bare `apx`."""
     # Known MCP config locations across assistant addons
     mcp_paths = [
-        folder / ".mcp.json",           # claude
-        folder / ".cursor" / "mcp.json", # cursor
-        folder / ".vscode" / "mcp.json", # vscode
+        folder / ".mcp.json",  # claude
+        folder / ".cursor" / "mcp.json",  # cursor
+        folder / ".vscode" / "mcp.json",  # vscode
     ]
 
     patched = 0

@@ -47,14 +47,13 @@ async fn run_inner(args: InstallArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Install skill infrastructure files (skills, .mcp.json, hooks) to a target directory.
+/// Install skill infrastructure files (skills, .mcp.json) to a target directory.
 ///
 /// Reads embedded files from `addons/claude/` and writes:
 /// - `.claude/skills/apx/*` → `{base_dir}/{skill_path}/`
 /// - `.mcp.json` → `{base_dir}/.mcp.json`
-/// - `hooks/*` → `{base_dir}/hooks/`
 ///
-/// Skips addon-specific files (addon.toml, templates, cursor/vscode/github configs).
+/// Skips addon-specific files (addon.toml, templates, hooks, cursor/vscode/github configs).
 pub fn install_skills_to(base_dir: &Path, skill_path: &str) -> Result<Vec<String>, String> {
     let prefix = "addons/claude/";
     let all_files = list_template_files(prefix);
@@ -75,8 +74,6 @@ pub fn install_skills_to(base_dir: &Path, skill_path: &str) -> Result<Vec<String
             format!("{}/{}", skill_path, skill_rel)
         } else if rel == ".mcp.json" {
             ".mcp.json".to_string()
-        } else if rel.starts_with("hooks/") {
-            rel.to_string()
         } else {
             // Skip addon.toml, CLAUDE.md.jinja2, and any other addon-specific files
             continue;

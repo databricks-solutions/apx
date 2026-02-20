@@ -165,6 +165,7 @@ export function useChat() {
 ```
 
 **Key rules:**
+
 - SSE endpoints need manual `fetch()` — do NOT use generated API hooks for streaming.
 - Parse the stream line-by-line, looking for `data: ` prefixed lines.
 - Use `[DONE]` sentinel to detect stream completion.

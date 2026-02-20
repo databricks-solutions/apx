@@ -35,11 +35,11 @@ irm https://databricks-solutions.github.io/apx/install.ps1 | iex
 
 ### What's Included
 
-| Component      | Description                                                    |
-| -------------- | -------------------------------------------------------------- |
-| **MCP Server** | 15 tools for dev servers, components, docs, routes, feedback   |
-| **Skills**     | Quick reference + detailed backend/frontend patterns           |
-| **Hooks**      | SessionStart check for apx CLI availability                    |
+| Component      | Description                                                  |
+| -------------- | ------------------------------------------------------------ |
+| **MCP Server** | 15 tools for dev servers, components, docs, routes, feedback |
+| **Skills**     | Quick reference + detailed backend/frontend patterns         |
+| **Hooks**      | SessionStart check for apx CLI availability                  |
 
 ### MCP Tools
 
@@ -61,7 +61,7 @@ The plugin registers the `apx mcp` server, which provides these tools:
 | `docs`                       | Search Databricks SDK documentation for Python code examples and API references. Always call this before writing any Databricks SDK (ws.\*) call to verify the correct method signature.                                                                        |
 | `databricks_apps_logs`       | Fetch logs from a deployed Databricks App using the Databricks CLI. Use for debugging deployed (not local dev) issues.                                                                                                                                          |
 | `feedback_prepare`           | Prepare a feedback issue for review. Returns formatted title, body, and browser URL.                                                                                                                                                                            |
-| `feedback_submit`            | Submit a prepared feedback issue as a public GitHub issue (requires `gh` CLI).                                                                                                                                                                                   |
+| `feedback_submit`            | Submit a prepared feedback issue as a public GitHub issue (requires `gh` CLI).                                                                                                                                                                                  |
 
 ## Automatic Installation via `apx init`
 

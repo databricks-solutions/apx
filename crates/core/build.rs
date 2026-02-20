@@ -29,10 +29,6 @@ fn main() {
         "cargo:rerun-if-changed={}",
         workspace_root.join("skills/apx").display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        workspace_root.join("hooks/hooks.json").display()
-    );
 }
 
 /// Copy a platform-specific binary from `.bins/<subdir>/` to `OUT_DIR/<dest_name>`.
@@ -61,9 +57,9 @@ fn copy_platform_binary(
     println!("cargo:rerun-if-changed={}", source.display());
 }
 
-/// Copy skill files and hooks from the repo root into the claude addon template
-/// directory so they get embedded by rust-embed. This keeps `skills/apx/` as the
-/// single source of truth while still bundling them into the binary.
+/// Copy skill files from the repo root into the claude addon template directory
+/// so they get embedded by rust-embed. This keeps `skills/apx/` as the single
+/// source of truth while still bundling them into the binary.
 fn copy_skill_files(workspace_root: &std::path::Path) {
     let claude_addon = workspace_root.join("src/apx/templates/addons/claude");
 
@@ -77,7 +73,6 @@ fn copy_skill_files(workspace_root: &std::path::Path) {
             "skills/apx/frontend-patterns.md",
             ".claude/skills/apx/frontend-patterns.md",
         ),
-        ("hooks/hooks.json", "hooks/hooks.json"),
     ];
 
     for (src_rel, dst_rel) in copies {

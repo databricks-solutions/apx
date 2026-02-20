@@ -32,6 +32,11 @@ pub struct StartArgs {
         help = "Maximum time in seconds to wait for dev server to become healthy"
     )]
     pub timeout: u64,
+    #[arg(
+        long = "skip-healthcheck",
+        help = "Skip waiting for the dev server to become healthy before returning"
+    )]
+    pub skip_healthcheck: bool,
 }
 
 pub async fn run(args: StartArgs) -> i32 {
@@ -47,7 +52,7 @@ pub async fn run(args: StartArgs) -> i32 {
 
 async fn run_detached(args: StartArgs) -> Result<(), String> {
     let app_dir = find_app_dir(args.app_path)?;
-    let _ = start_dev_server(&app_dir, OutputMode::Interactive).await?;
+    let _ = start_dev_server(&app_dir, args.skip_healthcheck, OutputMode::Interactive).await?;
     Ok(())
 }
 
@@ -59,6 +64,7 @@ async fn run_attached(args: StartArgs) -> Result<(), String> {
         None,
         args.skip_credentials_validation,
         args.timeout,
+        args.skip_healthcheck,
         OutputMode::Interactive,
     )
     .await?;

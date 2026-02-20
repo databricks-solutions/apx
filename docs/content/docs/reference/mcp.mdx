@@ -152,9 +152,9 @@ Choose your AI assistant to see the configuration:
 
 | Tool                         | Description                                                                                                     |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `search_registry_components` | Semantic search across all registries. Results from project-configured registries are boosted in scoring.        |
+| `search_registry_components` | Semantic search across all registries. Results from project-configured registries are boosted in scoring.       |
 | `list_registry_components`   | List all available components in a registry. Pass `registry` param (e.g. `@ai-elements`) for custom registries. |
-| `add_component`              | Add a component to the project. Accepts `component-name` or `@registry-name/component-name`.                   |
+| `add_component`              | Add a component to the project. Accepts `component-name` or `@registry-name/component-name`.                    |
 
 ### Project Tools
 
@@ -177,10 +177,10 @@ Choose your AI assistant to see the configuration:
 
 ### Feedback Tools
 
-| Tool               | Description                                                                           |
-| ------------------ | ------------------------------------------------------------------------------------- |
-| `feedback_prepare` | Prepare a feedback issue for review. Returns formatted title, body, and browser URL.  |
-| `feedback_submit`  | Submit a prepared feedback issue as a public GitHub issue (requires `gh` CLI).        |
+| Tool               | Description                                                                          |
+| ------------------ | ------------------------------------------------------------------------------------ |
+| `feedback_prepare` | Prepare a feedback issue for review. Returns formatted title, body, and browser URL. |
+| `feedback_submit`  | Submit a prepared feedback issue as a public GitHub issue (requires `gh` CLI).       |
 
 ---
 
@@ -342,10 +342,10 @@ Submit a previously prepared feedback issue as a public GitHub issue.
 
 The MCP server exposes resources that provide project context:
 
-| Resource                        | Description                                                                                     |
-| ------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `apx://info`                    | Information about the apx toolkit, patterns, and workflow                                       |
-| `apx://project/{app_path}`      | Project context: routes, components, Python dependencies, backend files, SDK version, registries |
+| Resource                   | Description                                                                                      |
+| -------------------------- | ------------------------------------------------------------------------------------------------ |
+| `apx://info`               | Information about the apx toolkit, patterns, and workflow                                        |
+| `apx://project/{app_path}` | Project context: routes, components, Python dependencies, backend files, SDK version, registries |
 
 ---
 

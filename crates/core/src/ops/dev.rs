@@ -52,11 +52,15 @@ pub async fn resolve_existing_server(
 /// Start a dev server for the given app directory.
 /// If a server is already running and healthy, returns its port.
 /// Otherwise spawns a new server subprocess.
-pub async fn start_dev_server(app_dir: &Path, mode: OutputMode) -> Result<u16, String> {
+pub async fn start_dev_server(
+    app_dir: &Path,
+    skip_healthcheck: bool,
+    mode: OutputMode,
+) -> Result<u16, String> {
     if let Some(port) = resolve_existing_server(app_dir, mode).await? {
         return Ok(port);
     }
-    spawn_server(app_dir, None, false, 60, mode).await
+    spawn_server(app_dir, None, false, 60, skip_healthcheck, mode).await
 }
 
 /// Run preflight checks and display progress.
@@ -257,6 +261,7 @@ pub async fn spawn_server(
     preferred_port: Option<u16>,
     skip_credentials_validation: bool,
     timeout_secs: u64,
+    skip_healthcheck: bool,
     mode: OutputMode,
 ) -> Result<u16, String> {
     let start_time = Instant::now();
@@ -326,6 +331,21 @@ pub async fn spawn_server(
         .env("APX_APP_DIR", &canonical_app_dir)
         .spawn()
         .map_err(|err| handle_spawn_error("apx", err))?;
+
+    if skip_healthcheck {
+        let pid = child.id().ok_or("Failed to get child process ID")?;
+        let lock = DevLock::new(pid, port, command, app_dir);
+        write_lock(&lock_path, &lock)?;
+
+        emit(
+            mode,
+            &format!(
+                "✅ Dev server started at http://localhost:{port} in {} (healthcheck skipped)\n",
+                format_elapsed_ms(start_time)
+            ),
+        );
+        return Ok(port);
+    }
 
     emit(mode, "⏳ Waiting for dev server to become healthy...\n");
     let config = HealthCheckConfig {
@@ -441,7 +461,11 @@ pub async fn stop_dev_server(app_dir: &Path, mode: OutputMode) -> Result<bool, S
 
 /// Restart the dev server for the given app directory.
 /// Preserves the port if an existing server is found.
-pub async fn restart_dev_server(app_dir: &Path, mode: OutputMode) -> Result<u16, String> {
+pub async fn restart_dev_server(
+    app_dir: &Path,
+    skip_healthcheck: bool,
+    mode: OutputMode,
+) -> Result<u16, String> {
     let lock_path = lock_path(app_dir);
     let preferred_port = if lock_path.exists() {
         let lock = read_lock(&lock_path)?;
@@ -458,7 +482,7 @@ pub async fn restart_dev_server(app_dir: &Path, mode: OutputMode) -> Result<u16,
         None
     };
 
-    let port = spawn_server(app_dir, preferred_port, false, 60, mode).await?;
+    let port = spawn_server(app_dir, preferred_port, false, 60, skip_healthcheck, mode).await?;
     emit(
         mode,
         &format!("✅ Dev server restarted at http://localhost:{port}\n"),

@@ -69,7 +69,7 @@ src/<app>/
 | `apx bun <args>`            | Run bun commands (install, add, etc.)                        |
 | `apx components add <name>` | Add a shadcn/ui component                                    |
 | `apx init --as-member`      | Add apx to an existing project as a uv workspace member      |
-| `apx dev apply <addon>`     | Apply an addon to an existing project                         |
+| `apx dev apply <addon>`     | Apply an addon to an existing project                        |
 
 ## Addons
 
@@ -118,7 +118,7 @@ When the apx MCP server is running, these tools are available:
 | `docs`                       | Search Databricks SDK documentation for Python code examples and API references. Always call this before writing any Databricks SDK (ws.\*) call to verify the correct method signature.                                                                        |
 | `databricks_apps_logs`       | Fetch logs from a deployed Databricks App using the Databricks CLI. Use for debugging deployed (not local dev) issues.                                                                                                                                          |
 | `feedback_prepare`           | Prepare a feedback issue for review. Returns the formatted title, body, and a browser URL. Call `feedback_submit` to create the GitHub issue.                                                                                                                   |
-| `feedback_submit`            | Submit a prepared feedback issue as a public GitHub issue. Pass the exact title and body returned by `feedback_prepare`.                                                                                                                                         |
+| `feedback_submit`            | Submit a prepared feedback issue as a public GitHub issue. Pass the exact title and body returned by `feedback_prepare`.                                                                                                                                        |
 
 ## Recommended Workflow
 
