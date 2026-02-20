@@ -117,6 +117,8 @@ When the apx MCP server is running, these tools are available:
 | `list_registry_components`   | List all available components in a registry. Defaults to shadcn registry if none specified.                                                                                                                                                                     |
 | `docs`                       | Search Databricks SDK documentation for Python code examples and API references. Always call this before writing any Databricks SDK (ws.\*) call to verify the correct method signature.                                                                        |
 | `databricks_apps_logs`       | Fetch logs from a deployed Databricks App using the Databricks CLI. Use for debugging deployed (not local dev) issues.                                                                                                                                          |
+| `feedback_prepare`           | Prepare a feedback issue for review. Returns the formatted title, body, and a browser URL. Call `feedback_submit` to create the GitHub issue.                                                                                                                   |
+| `feedback_submit`            | Submit a prepared feedback issue as a public GitHub issue. Pass the exact title and body returned by `feedback_prepare`.                                                                                                                                         |
 
 ## Recommended Workflow
 
