@@ -13,7 +13,7 @@ Steps:
     2. rm -rf <folder>
     3. uvx --from <wheel> apx init <folder> -p <profile> [extra-args...]
     4. Patch pyproject.toml to use the local wheel from dist/
-    5. Patch .mcp.json to use `uv run apx` instead of bare `apx`
+    5. Patch MCP config files to use `uv run apx` instead of bare `apx`
     6. uv sync
     7. uv run apx dev check
 """
@@ -119,25 +119,35 @@ def patch_pyproject(pyproject_path: Path, wheel_path: Path) -> None:
 
 
 def patch_mcp_json(folder: Path) -> None:
-    """Rewrite .mcp.json so MCP servers use `uv run apx` instead of bare `apx`."""
-    mcp_path = folder / ".mcp.json"
-    if not mcp_path.exists():
-        print(f"  {DIM}No .mcp.json found, skipping{RESET}")
-        return
+    """Rewrite all MCP config files so servers use `uv run apx` instead of bare `apx`."""
+    # Known MCP config locations across assistant addons
+    mcp_paths = [
+        folder / ".mcp.json",           # claude
+        folder / ".cursor" / "mcp.json", # cursor
+        folder / ".vscode" / "mcp.json", # vscode
+    ]
 
-    data = json.loads(mcp_path.read_text())
-    changed = False
-    for name, server in data.get("mcpServers", {}).items():
-        if server.get("command") == "apx":
-            server["command"] = "uv"
-            server["args"] = ["run", "apx"] + server.get("args", [])
-            changed = True
+    patched = 0
+    for mcp_path in mcp_paths:
+        if not mcp_path.exists():
+            continue
 
-    if changed:
-        mcp_path.write_text(json.dumps(data, indent=2) + "\n")
-        print(f"  Patched {mcp_path} -> {YELLOW}uv run apx{RESET}")
-    else:
-        print(f"  {DIM}No apx commands to patch{RESET}")
+        data = json.loads(mcp_path.read_text())
+        changed = False
+        for _name, server in data.get("mcpServers", {}).items():
+            if server.get("command") == "apx":
+                server["command"] = "uv"
+                server["args"] = ["run", "apx"] + server.get("args", [])
+                changed = True
+
+        if changed:
+            mcp_path.write_text(json.dumps(data, indent=2) + "\n")
+            rel = mcp_path.relative_to(folder)
+            print(f"  Patched {rel} -> {YELLOW}uv run apx{RESET}")
+            patched += 1
+
+    if patched == 0:
+        print(f"  {DIM}No MCP config files found to patch{RESET}")
 
 
 def main() -> None:
@@ -201,7 +211,7 @@ def main() -> None:
         with stage("Patching pyproject.toml", 4, total):
             patch_pyproject(folder / "pyproject.toml", wheel)
 
-        with stage("Patching .mcp.json", 5, total):
+        with stage("Patching MCP configs", 5, total):
             patch_mcp_json(folder)
 
         with stage("Syncing dependencies", 6, total):
