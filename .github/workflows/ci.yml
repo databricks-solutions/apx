@@ -10,7 +10,8 @@ jobs:
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      docs-only: ${{ steps.filter.outputs.docs == 'true' && steps.filter.outputs.non-docs == 'false' }}
+      rust: ${{ steps.filter.outputs.non-docs }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -29,7 +30,7 @@ jobs:
   check:
     runs-on: linux-ubuntu-latest
     needs: detect-changes
-    if: needs.detect-changes.outputs.docs-only == 'false'
+    if: needs.detect-changes.outputs.rust == 'true'
 
     steps:
       - name: Checkout code
@@ -99,7 +100,7 @@ jobs:
   docs:
     runs-on: linux-ubuntu-latest
     needs: detect-changes
-    if: needs.detect-changes.outputs.docs-only == 'true'
+    if: needs.detect-changes.outputs.docs == 'true'
 
     steps:
       - name: Checkout code
