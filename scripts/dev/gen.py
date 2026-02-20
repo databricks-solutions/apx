@@ -183,20 +183,28 @@ def main() -> None:
     t_total = time.monotonic()
 
     try:
-        with stage("Building wheel", 1, total):
+
+        with stage("Cleaning up dist directory", 1, total):
+            if dist_dir.exists():
+                shutil.rmtree(dist_dir)
+                print(f"  Removed {dist_dir}")
+            else:
+                print(f"  {DIM}Nothing to remove{RESET}")
+
+        with stage("Building wheel", 2, total):
             run(["maturin", "build", "-j", "6", "-o", "dist"], cwd=project_root)
 
         wheel = find_wheel(dist_dir)
         print(f"  Wheel: {YELLOW}{wheel.name}{RESET}")
 
-        with stage("Cleaning target folder", 2, total):
+        with stage("Cleaning target folder", 3, total):
             if folder.exists():
                 shutil.rmtree(folder)
                 print(f"  Removed {folder}")
             else:
                 print(f"  {DIM}Nothing to remove{RESET}")
 
-        with stage("Initializing project", 3, total):
+        with stage("Initializing project", 4, total):
             cmd = [
                 "uvx",
                 "--no-cache",
@@ -211,16 +219,16 @@ def main() -> None:
             cmd += extra_args
             run(cmd, env={**os.environ, "RUST_LOG": "DEBUG"})
 
-        with stage("Patching pyproject.toml", 4, total):
+        with stage("Patching pyproject.toml", 5, total):
             patch_pyproject(folder / "pyproject.toml", wheel)
 
-        with stage("Patching MCP configs", 5, total):
+        with stage("Patching MCP configs", 6, total):
             patch_mcp_json(folder)
 
-        with stage("Syncing dependencies", 6, total):
+        with stage("Syncing dependencies", 7, total):
             run(["uv", "sync", "--reinstall-package", "apx"], cwd=folder)
 
-        with stage("Running dev check", 7, total):
+        with stage("Running dev check", 8, total):
             run(
                 ["uv", "run", "apx", "dev", "check"],
                 cwd=folder,
