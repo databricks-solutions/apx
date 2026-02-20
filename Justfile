@@ -5,13 +5,13 @@ set script-interpreter := ['uv', 'run', '--script']
 
 fmt:
     uv tool run ruff format .
-    bun x prettier --write .
+    bun x biome format --write .
     cargo fmt --all
-    
+
 
 lint:
     uv tool run ruff check .
-    bun x prettier --check .
+    bun x biome format .
 
 build *args:
     uvx maturin build {{args}}
@@ -24,7 +24,13 @@ types:
 
     
 
-check: lint types
+# Verify docs types and build
+[working-directory: "docs"]
+docs-check:
+    bun run types:check
+    bun run build
+
+check: lint types docs-check
 
 develop:
     uv tool run maturin develop

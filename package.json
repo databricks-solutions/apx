@@ -11,6 +11,7 @@
   ],
   "scripts": {},
   "devDependencies": {
+    "@biomejs/biome": "^2.3.13",
     "@opentelemetry/exporter-logs-otlp-http": "^0.211.0",
     "@opentelemetry/resources": "^2.5.0",
     "@opentelemetry/sdk-logs": "^0.211.0",
