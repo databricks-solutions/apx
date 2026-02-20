@@ -34,6 +34,16 @@ pub enum BinarySource {
     ApxManaged,
 }
 
+impl BinarySource {
+    pub fn source_label(&self) -> &'static str {
+        match self {
+            BinarySource::EnvOverride => "env-override",
+            BinarySource::SystemPath => "system",
+            BinarySource::ApxManaged => "apx-provided",
+        }
+    }
+}
+
 /// A resolved binary path with its source.
 #[derive(Debug, Clone)]
 pub struct ResolvedBinary {

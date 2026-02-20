@@ -8,7 +8,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::api_generator::generate_openapi;
-use crate::download::{resolve_bun, resolve_uv};
+use crate::download::{BinarySource, resolve_bun, resolve_uv};
 use crate::python_logging::{DevConfig, parse_dev_config};
 
 /// Controls how progress output is displayed.
@@ -47,6 +47,7 @@ pub fn list_profiles() -> Result<Vec<String>, String> {
 pub struct UvCommand {
     tool: &'static str,
     uv_path: PathBuf,
+    source: BinarySource,
 }
 
 impl UvCommand {
@@ -62,7 +63,18 @@ impl UvCommand {
         Ok(Self {
             tool,
             uv_path: resolved.path,
+            source: resolved.source,
         })
+    }
+
+    /// Get the path to the resolved uv binary.
+    pub fn path(&self) -> &Path {
+        &self.uv_path
+    }
+
+    /// Get the source of the resolved uv binary.
+    pub fn source(&self) -> &BinarySource {
+        &self.source
     }
 
     /// Create a new tokio::process::Command for spawning the tool via uv.
@@ -112,6 +124,7 @@ impl ApxCommand {
 #[derive(Debug, Clone)]
 pub struct BunCommand {
     bun_path: PathBuf,
+    source: BinarySource,
 }
 
 impl BunCommand {
@@ -126,7 +139,13 @@ impl BunCommand {
         );
         Ok(Self {
             bun_path: resolved.path,
+            source: resolved.source,
         })
+    }
+
+    /// Get the source of the resolved bun binary.
+    pub fn source(&self) -> &BinarySource {
+        &self.source
     }
 
     /// Get the path to the resolved bun binary.

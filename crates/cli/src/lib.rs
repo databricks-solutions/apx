@@ -18,6 +18,7 @@ pub(crate) mod dev;
 pub(crate) mod feedback;
 pub(crate) mod flux;
 pub(crate) mod frontend;
+pub(crate) mod info;
 pub(crate) mod init;
 pub(crate) mod skill;
 pub(crate) mod upgrade;
@@ -62,6 +63,8 @@ enum Commands {
     Skill(SkillCommands),
     /// 💬 Send feedback to the apx team
     Feedback(feedback::FeedbackArgs),
+    /// ℹ️  Show environment and version info
+    Info(info::InfoArgs),
     /// ⬆️  Upgrade apx to the latest version
     Upgrade,
     /// Internal: generate OpenAPI schema and client
@@ -175,6 +178,7 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
                 SkillCommands::Install(args) => skill::install::run(args).await,
             },
             Some(Commands::Feedback(args)) => feedback::run(args).await,
+            Some(Commands::Info(args)) => info::run(args).await,
             Some(Commands::Upgrade) => upgrade::run().await,
             Some(Commands::GenerateOpenapi(args)) => __generate_openapi::run(args).await,
             None => {
