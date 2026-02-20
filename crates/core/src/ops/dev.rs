@@ -261,10 +261,18 @@ async fn wait_for_healthy_with_logs(
         last_overall_status
     );
 
-    Err(format!(
-        "Dev server failed to become healthy after {}s timeout",
-        config.timeout_secs
-    ))
+    let detail = match &last_overall_status {
+        Some(state) => format!(
+            "Dev server failed to become healthy after {}s timeout. Last known state: {state}",
+            config.timeout_secs
+        ),
+        None => format!(
+            "Dev server failed to become healthy after {}s timeout (server never responded to health checks)",
+            config.timeout_secs
+        ),
+    };
+
+    Err(detail)
 }
 
 /// Spawn a new dev server subprocess (does not check for existing server).

@@ -3,13 +3,25 @@
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json;
+use std::sync::LazyLock;
 use std::time::Duration;
 use tracing::{debug, warn};
 
 use crate::dev::common::CLIENT_HOST;
 
-const DEFAULT_TIMEOUT_SECS: u64 = 2;
+const DEFAULT_TIMEOUT_SECS: u64 = 5;
 const STOP_TIMEOUT_SECS: u64 = 10;
+
+/// Shared HTTP client for dev server communication.
+/// Reused across health(), status(), and stop() to avoid creating a new client per call.
+static DEV_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+});
 
 /// Default timeout for health checks (in seconds)
 const HEALTH_TIMEOUT_SECS: u64 = 60;
@@ -108,27 +120,14 @@ pub struct StatusResponse {
     pub failed: bool,
 }
 
-fn build_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .build()
-        .map_err(|err| {
-            warn!(error = %err, "Failed to build dev HTTP client.");
-            format!("Failed to build HTTP client: {err}")
-        })
-}
-
 fn build_url(host: &str, port: u16, path: &str) -> String {
     format!("http://{host}:{port}{path}")
 }
 
 pub async fn health(port: u16) -> Result<bool, String> {
-    let client = build_client()?;
     let url = build_url(CLIENT_HOST, port, "/_apx/health");
     debug!(%url, "Sending dev server health request.");
-    let response = client
+    let response = DEV_CLIENT
         .get(&url)
         .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
         .send()
@@ -145,10 +144,9 @@ pub async fn health(port: u16) -> Result<bool, String> {
 
 /// Get the status of the dev server including frontend and backend statuses.
 pub async fn status(port: u16) -> Result<StatusResponse, HealthError> {
-    let client = build_client().map_err(HealthError::ConnectionFailed)?;
     let url = build_url(CLIENT_HOST, port, "/_apx/health");
     debug!(%url, "Sending dev server status request.");
-    let response = client
+    let response = DEV_CLIENT
         .get(&url)
         .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
         .send()
@@ -204,10 +202,9 @@ pub async fn status(port: u16) -> Result<StatusResponse, HealthError> {
 /// Request the dev server to stop gracefully.
 /// Returns Ok(()) if the server acknowledged the stop request, Err otherwise.
 pub async fn stop(port: u16) -> Result<(), String> {
-    let client = build_client()?;
     let url = build_url(CLIENT_HOST, port, "/_apx/stop");
     debug!(%url, "Sending dev server stop request.");
-    let response = client
+    let response = DEV_CLIENT
         .get(url)
         .timeout(Duration::from_secs(STOP_TIMEOUT_SECS))
         .send()

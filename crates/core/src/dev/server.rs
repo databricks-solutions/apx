@@ -314,7 +314,9 @@ fn start_filesystem_watcher(
 }
 
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthResponse>) {
+    let probe_start = std::time::Instant::now();
     let (frontend_status, backend_status, db_status) = state.process_manager.status().await;
+    let probe_elapsed_ms = probe_start.elapsed().as_millis();
     let has_ui = state.process_manager.has_ui();
 
     // Check if any critical process has permanently failed (crashed/exited)
@@ -332,6 +334,16 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRespon
         backend_status == "healthy"
     };
     let status = if all_healthy { "ok" } else { "starting" };
+
+    debug!(
+        status,
+        frontend = %frontend_status,
+        backend = %backend_status,
+        db = %db_status,
+        failed,
+        elapsed_ms = probe_elapsed_ms,
+        "Health endpoint response"
+    );
 
     (
         StatusCode::OK,

@@ -21,15 +21,33 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
+/// Server-side probe timeout in seconds.
+/// Must be strictly less than the client-side per-request timeout (DEFAULT_TIMEOUT_SECS in client.rs)
+/// to avoid a race where both timeouts fire simultaneously, causing every poll cycle to fail.
+const PROBE_TIMEOUT_SECS: u64 = 1;
+
 /// Shared HTTP client for health probes.
 /// Reused across all health checks to avoid creating a new client per probe.
 static HEALTH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
         .pool_max_idle_per_host(2)
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 });
+
+/// Result of an HTTP health probe against a backend/frontend service.
+/// Fields are used for logging inside `http_health_probe`.
+#[allow(dead_code)]
+enum ProbeResult {
+    /// Service responded with the given HTTP status code — it is up.
+    Responded(u16),
+    /// Connection or timeout error — service is not ready yet.
+    Failed(String),
+}
 
 use crate::common::{ApxCommand, BunCommand, UvCommand, handle_spawn_error, read_project_metadata};
 use crate::dev::common::CLIENT_HOST;
@@ -1238,22 +1256,36 @@ impl ProcessManager {
 
         match http_check {
             None => "healthy".to_string(), // DB: running = healthy
-            Some((host, port)) => {
-                if Self::http_health_probe(host, port).await {
-                    "healthy".to_string()
-                } else {
-                    "starting".to_string()
-                }
-            }
+            Some((host, port)) => match Self::http_health_probe(host, port).await {
+                ProbeResult::Responded(_) => "healthy".to_string(),
+                ProbeResult::Failed(_) => "starting".to_string(),
+            },
         }
     }
 
-    /// Check if a service is healthy by making an HTTP GET request to its root path.
-    /// Any HTTP response (regardless of status code) means the server is up and healthy.
-    /// Only connection failures indicate the server isn't ready yet.
-    async fn http_health_probe(host: &str, port: u16) -> bool {
+    /// Probe a service by making an HTTP GET request to its root path.
+    /// Any HTTP response (regardless of status code) means the server is up.
+    /// Only connection/timeout failures indicate the server isn't ready yet.
+    async fn http_health_probe(host: &str, port: u16) -> ProbeResult {
         let url = format!("http://{host}:{port}/");
-        HEALTH_CLIENT.get(&url).send().await.is_ok()
+        let start = std::time::Instant::now();
+        match HEALTH_CLIENT.get(&url).send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let elapsed_ms = start.elapsed().as_millis();
+                if status == 200 {
+                    debug!(url = %url, status, elapsed_ms, "Health probe OK");
+                } else {
+                    warn!(url = %url, status, elapsed_ms, "Health probe returned non-200");
+                }
+                ProbeResult::Responded(status)
+            }
+            Err(err) => {
+                let elapsed_ms = start.elapsed().as_millis();
+                debug!(url = %url, error = %err, elapsed_ms, "Health probe failed");
+                ProbeResult::Failed(err.to_string())
+            }
+        }
     }
 
     fn generate_dev_token() -> String {
