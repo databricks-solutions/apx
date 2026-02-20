@@ -51,7 +51,7 @@ async fn run_inner(args: StatusArgs) -> Result<(), String> {
             debug!(error = %err, "Failed to get status from dev server.");
             println!("Dev Server: running (but unreachable)");
             println!("Error: {err}");
-            Err(err)
+            Err(err.to_string())
         }
     }
 }

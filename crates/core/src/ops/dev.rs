@@ -7,7 +7,7 @@ use crate::common::{
     ApxCommand, OutputMode, emit, ensure_dir, format_elapsed_ms, handle_spawn_error,
     run_preflight_checks, spinner_for_mode,
 };
-use crate::dev::client::{HealthCheckConfig, health, status, stop as stop_server};
+use crate::dev::client::{HealthCheckConfig, HealthError, health, status, stop as stop_server};
 use crate::dev::common::{
     BIND_HOST, DevLock, is_process_running, lock_path, read_lock, remove_lock, write_lock,
 };
@@ -177,16 +177,18 @@ async fn wait_for_healthy_with_logs(
                         }
 
                         if status_response.failed {
-                            debug!(
-                                "Process failure detected after {}ms - frontend: {}, backend: {}",
+                            warn!(
+                                "Process failure detected after {}ms - frontend: {}, backend: {}, db: {}",
                                 elapsed_ms,
                                 status_response.frontend_status,
-                                status_response.backend_status
+                                status_response.backend_status,
+                                status_response.db_status
                             );
                             return Err(format!(
-                                "Process failed and cannot recover. Frontend: {}, Backend: {}",
+                                "Process failed and cannot recover. Frontend: {}, Backend: {}, DB: {}",
                                 status_response.frontend_status,
-                                status_response.backend_status
+                                status_response.backend_status,
+                                status_response.db_status
                             ));
                         }
 
@@ -230,10 +232,20 @@ async fn wait_for_healthy_with_logs(
                     Err(e) => {
                         let should_log = attempt_count <= 5 || elapsed_ms % 5000 < 250;
                         if should_log {
-                            debug!(
-                                "Health check attempt {} ({}ms) - connection failed: {}",
-                                attempt_count, elapsed_ms, e
-                            );
+                            match &e {
+                                HealthError::ConnectionFailed(msg) => {
+                                    debug!(
+                                        "Health check attempt {} ({}ms) - no connection (server not listening yet): {}",
+                                        attempt_count, elapsed_ms, msg
+                                    );
+                                }
+                                HealthError::ServerError(msg) => {
+                                    warn!(
+                                        "Health check attempt {} ({}ms) - server error (server is up but responded with error): {}",
+                                        attempt_count, elapsed_ms, msg
+                                    );
+                                }
+                            }
                         }
                         last_overall_status = None;
                     }

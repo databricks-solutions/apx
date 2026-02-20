@@ -18,6 +18,24 @@ const HEALTH_RETRY_DELAY_MS: u64 = 200;
 /// Initial delay before starting health checks (give server time to start)
 const HEALTH_INITIAL_DELAY_MS: u64 = 1000;
 
+/// Distinguishes connection-level failures from server-level errors in health checks.
+#[derive(Debug)]
+pub enum HealthError {
+    /// Server is not reachable (connection refused, timeout, no service on port)
+    ConnectionFailed(String),
+    /// Server is up but responded with an error (non-OK HTTP, bad JSON, etc.)
+    ServerError(String),
+}
+
+impl std::fmt::Display for HealthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConnectionFailed(msg) => write!(f, "{msg}"),
+            Self::ServerError(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
 /// Configuration for health check waiting behavior
 #[derive(Debug, Clone)]
 pub struct HealthCheckConfig {
@@ -67,7 +85,8 @@ pub async fn wait_for_healthy(port: u16, config: &HealthCheckConfig) -> Result<(
                 }
                 tokio::time::sleep(Duration::from_millis(config.retry_delay_ms)).await;
             }
-            Err(_) => {
+            Err(e) => {
+                debug!("Health check error: {e}");
                 tokio::time::sleep(Duration::from_millis(config.retry_delay_ms)).await;
             }
         }
@@ -125,8 +144,8 @@ pub async fn health(port: u16) -> Result<bool, String> {
 }
 
 /// Get the status of the dev server including frontend and backend statuses.
-pub async fn status(port: u16) -> Result<StatusResponse, String> {
-    let client = build_client()?;
+pub async fn status(port: u16) -> Result<StatusResponse, HealthError> {
+    let client = build_client().map_err(HealthError::ConnectionFailed)?;
     let url = build_url(CLIENT_HOST, port, "/_apx/health");
     debug!(%url, "Sending dev server status request.");
     let response = client
@@ -136,27 +155,39 @@ pub async fn status(port: u16) -> Result<StatusResponse, String> {
         .await
         .map_err(|err| {
             debug!(error = %err, %url, "Status request failed to connect.");
-            format!("Status request failed: {err}")
+            HealthError::ConnectionFailed(format!("connection failed: {err}"))
         })?;
 
     let http_status = response.status();
     debug!(%url, status = %http_status, "Received HTTP response for status request.");
 
     if http_status != StatusCode::OK {
-        return Err(format!("Status request failed with status {http_status}"));
+        let body = response.text().await.unwrap_or_default();
+        let body_preview = if body.len() > 500 {
+            &body[..500]
+        } else {
+            &body
+        };
+        warn!(
+            %url, status = %http_status, body = %body_preview,
+            "Health endpoint returned non-OK status."
+        );
+        return Err(HealthError::ServerError(format!(
+            "HTTP {http_status}: {body_preview}"
+        )));
     }
 
     // Get response body as text first for debugging
     let body_text = response.text().await.map_err(|err| {
         warn!(error = %err, %url, "Failed to read status response body.");
-        format!("Failed to read status response body: {err}")
+        HealthError::ServerError(format!("failed to read response body: {err}"))
     })?;
 
     debug!(%url, body = %body_text, "Status response body received.");
 
     let status_response: StatusResponse = serde_json::from_str(&body_text).map_err(|err| {
         warn!(error = %err, %url, body = %body_text, "Failed to parse status response JSON.");
-        format!("Failed to parse status response: {err}")
+        HealthError::ServerError(format!("invalid JSON response: {err} (body: {body_text})"))
     })?;
 
     debug!(
