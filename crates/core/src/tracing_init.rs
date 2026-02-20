@@ -52,7 +52,11 @@ fn init_tracing_with_otel(
     use opentelemetry_sdk::Resource;
     use opentelemetry_sdk::logs::SdkLoggerProvider;
 
-    let endpoint = format!("http://127.0.0.1:{}/v1/logs", crate::flux::FLUX_PORT);
+    let endpoint = format!(
+        "http://{}:{}/v1/logs",
+        apx_common::hosts::CLIENT_HOST,
+        crate::flux::FLUX_PORT
+    );
 
     let exporter = opentelemetry_otlp::LogExporter::builder()
         .with_http()

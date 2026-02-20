@@ -3,9 +3,10 @@ use std::process::Command;
 use std::time::Duration;
 use tracing::debug;
 
-use crate::dev::common::{CLIENT_HOST, lock_path, read_lock};
+use crate::dev::common::{lock_path, read_lock};
 use crate::download::try_resolve_uv;
 use crate::resources;
+use apx_common::hosts::CLIENT_HOST;
 
 #[cfg(target_os = "windows")]
 const AGENT_FILENAME: &str = "apx-agent.exe";

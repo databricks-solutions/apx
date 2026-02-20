@@ -379,7 +379,11 @@ async fn browser_logs(
         &state.app_dir,
     );
 
-    let endpoint = format!("http://127.0.0.1:{}/v1/logs", flux::FLUX_PORT);
+    let endpoint = format!(
+        "http://{}:{}/v1/logs",
+        apx_common::hosts::CLIENT_HOST,
+        flux::FLUX_PORT
+    );
     let result = state
         .http_client
         .post(&endpoint)

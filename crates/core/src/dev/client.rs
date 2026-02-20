@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use tracing::{debug, warn};
 
-use crate::dev::common::CLIENT_HOST;
+use apx_common::hosts::CLIENT_HOST;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 5;
 const STOP_TIMEOUT_SECS: u64 = 10;

@@ -24,12 +24,12 @@ impl ApxServer {
             .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
 
         use apx_core::common::OutputMode;
-        use apx_core::dev::common::CLIENT_HOST;
         use apx_core::ops::dev::start_dev_server;
 
         match start_dev_server(&path, false, OutputMode::Quiet).await {
             Ok(port) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Dev server started at http://{CLIENT_HOST}:{port}"
+                "Dev server started at http://{}:{port}",
+                apx_common::hosts::BROWSER_HOST
             ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
@@ -65,7 +65,8 @@ impl ApxServer {
 
         match restart_dev_server(&path, false, OutputMode::Quiet).await {
             Ok(port) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Dev server restarted at http://localhost:{port}"
+                "Dev server restarted at http://{}:{port}",
+                apx_common::hosts::BROWSER_HOST
             ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }

@@ -80,7 +80,7 @@ fn wait_for_ready(timeout_ms: u64) -> Result<(), String> {
     let timeout = Duration::from_millis(timeout_ms);
 
     while start.elapsed() < timeout {
-        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], FLUX_PORT));
+        let addr = std::net::SocketAddr::from((apx_common::hosts::CLIENT_HOST_OCTETS, FLUX_PORT));
         if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
             return Ok(());
         }

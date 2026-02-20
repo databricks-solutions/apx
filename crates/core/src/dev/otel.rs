@@ -7,6 +7,8 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use apx_common::hosts::CLIENT_HOST;
+
 use crate::flux::FLUX_PORT;
 
 /// Shared HTTP client for forwarding logs to flux.
@@ -98,7 +100,7 @@ pub async fn forward_log_to_flux(message: &str, level: &str, service_name: &str,
 
     let timestamp_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
     let payload = build_otlp_log_payload(message, level, timestamp_ns, service_name, app_path);
-    let endpoint = format!("http://127.0.0.1:{FLUX_PORT}/v1/logs");
+    let endpoint = format!("http://{CLIENT_HOST}:{FLUX_PORT}/v1/logs");
 
     let _ = FLUX_CLIENT
         .post(&endpoint)

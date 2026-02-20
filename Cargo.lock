@@ -286,6 +286,7 @@ dependencies = [
 name = "apx-mcp"
 version = "0.3.1"
 dependencies = [
+ "apx-common",
  "apx-core",
  "apx-db",
  "rmcp",

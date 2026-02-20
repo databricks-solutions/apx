@@ -51,13 +51,13 @@ enum ProbeResult {
 }
 
 use crate::common::{ApxCommand, BunCommand, UvCommand, handle_spawn_error, read_project_metadata};
-use crate::dev::common::CLIENT_HOST;
 use crate::dev::otel::forward_log_to_flux;
 use crate::dotenv::DotenvFile;
 use crate::python_logging::{
     DevConfig, LogConfigResult, default_logging_config, resolve_log_config,
     write_logging_config_json,
 };
+use apx_common::hosts::CLIENT_HOST;
 
 #[derive(Debug, Clone, Copy)]
 enum LogSource {
@@ -366,8 +366,9 @@ impl ProcessManager {
         // OpenTelemetry configuration - frontend sends logs directly to flux
         cmd.env(
             "OTEL_EXPORTER_OTLP_ENDPOINT",
-            format!("http://127.0.0.1:{}", crate::flux::FLUX_PORT),
+            format!("http://{}:{}", CLIENT_HOST, crate::flux::FLUX_PORT),
         );
+        cmd.env(apx_common::hosts::ENV_FRONTEND_HOST, CLIENT_HOST);
         cmd.env("OTEL_SERVICE_NAME", format!("{}_ui", self.app_slug));
 
         let child = cmd.spawn().map_err(|err| handle_spawn_error("apx", err))?;

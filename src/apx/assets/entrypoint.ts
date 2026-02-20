@@ -303,16 +303,17 @@ async function runDev() {
   const frontendPort = parseInt(process.env.APX_FRONTEND_PORT!);
   const devServerPort = parseInt(process.env.APX_DEV_SERVER_PORT!);
   const devServerHost = process.env.APX_DEV_SERVER_HOST!;
+  const frontendHost = process.env.APX_FRONTEND_HOST || "127.0.0.1";
 
   log("Starting frontend dev server...");
   log(
-    `Config: port=${frontendPort}, devServerPort=${devServerPort}, devServerHost=${devServerHost}`,
+    `Config: port=${frontendPort}, devServerPort=${devServerPort}, devServerHost=${devServerHost}, frontendHost=${frontendHost}`,
   );
 
   const config: InlineConfig = {
     ...createBaseConfig(),
     server: {
-      host: "localhost",
+      host: frontendHost,
       port: frontendPort,
       strictPort: true,
       hmr: {

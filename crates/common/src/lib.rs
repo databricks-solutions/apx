@@ -14,6 +14,7 @@
 //! This crate contains shared functionality used by both the main `apx` CLI
 //! and the standalone `apx-agent` binary.
 
+pub mod hosts;
 pub mod storage;
 
 use serde::{Deserialize, Serialize};
@@ -113,7 +114,7 @@ pub fn remove_lock() -> Result<(), String> {
 
 /// Check if flux is accepting connections at the given port.
 pub fn is_flux_listening(port: u16) -> bool {
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = std::net::SocketAddr::from((hosts::CLIENT_HOST_OCTETS, port));
     TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
 }
 

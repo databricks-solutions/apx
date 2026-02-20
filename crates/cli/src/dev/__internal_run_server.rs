@@ -4,10 +4,11 @@ use std::path::PathBuf;
 use tracing::{debug, warn};
 
 use crate::run_cli_async_helper;
+use apx_common::hosts::BIND_HOST;
 use apx_core::app_state::set_app_dir;
 use apx_core::common::read_project_metadata;
 use apx_core::dev::common::{
-    BACKEND_PORT_END, BACKEND_PORT_START, BIND_HOST, DB_PORT_END, DB_PORT_START, FRONTEND_PORT_END,
+    BACKEND_PORT_END, BACKEND_PORT_START, DB_PORT_END, DB_PORT_START, FRONTEND_PORT_END,
     FRONTEND_PORT_START, find_random_port_in_range,
 };
 use apx_core::dev::server::run_server;

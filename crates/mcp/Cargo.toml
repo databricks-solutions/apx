@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+apx-common.workspace = true
 apx-core = { path = "../core" , version = "0.3.1" }
 apx-db.workspace = true
 serde.workspace = true

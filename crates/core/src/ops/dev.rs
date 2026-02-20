@@ -9,12 +9,13 @@ use crate::common::{
 };
 use crate::dev::client::{HealthCheckConfig, health, stop as stop_server};
 use crate::dev::common::{
-    BIND_HOST, DevLock, is_process_running, lock_path, read_lock, remove_lock, write_lock,
+    DevLock, is_process_running, lock_path, read_lock, remove_lock, write_lock,
 };
 use crate::dev::process::ProcessManager;
 use crate::flux;
 use crate::ops::healthcheck::wait_for_healthy_with_logs;
 use crate::registry::Registry;
+use apx_common::hosts::{BIND_HOST, BROWSER_HOST};
 use tracing::{debug, warn};
 
 /// Prepare the app directory for dev server startup.
@@ -218,7 +219,7 @@ pub async fn spawn_server(
         emit(
             mode,
             &format!(
-                "✅ Dev server started at http://localhost:{port} in {} (healthcheck skipped)\n",
+                "✅ Dev server started at http://{BROWSER_HOST}:{port} in {} (healthcheck skipped)\n",
                 format_elapsed_ms(start_time)
             ),
         );
@@ -267,7 +268,7 @@ pub async fn spawn_server(
     emit(
         mode,
         &format!(
-            "✅ Dev server started at http://localhost:{port} in {}\n",
+            "✅ Dev server started at http://{BROWSER_HOST}:{port} in {}\n",
             format_elapsed_ms(start_time)
         ),
     );
@@ -350,7 +351,7 @@ pub async fn restart_dev_server(
         emit(
             mode,
             &format!(
-                "Found existing dev server at http://localhost:{port}",
+                "Found existing dev server at http://{BROWSER_HOST}:{port}",
                 port = lock.port
             ),
         );
@@ -363,7 +364,7 @@ pub async fn restart_dev_server(
     let port = spawn_server(app_dir, preferred_port, false, 60, skip_healthcheck, mode).await?;
     emit(
         mode,
-        &format!("✅ Dev server restarted at http://localhost:{port}\n"),
+        &format!("✅ Dev server restarted at http://{BROWSER_HOST}:{port}\n"),
     );
     Ok(port)
 }

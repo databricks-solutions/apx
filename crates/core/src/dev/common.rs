@@ -22,10 +22,6 @@ pub const BACKEND_PORT_END: u16 = 8999;
 pub const DEV_PORT_START: u16 = 9000;
 pub const DB_PORT_START: u16 = 4000;
 pub const DB_PORT_END: u16 = 4999;
-/// Host used for binding the server (all interfaces)
-pub const BIND_HOST: &str = "0.0.0.0";
-/// Host used for client connections (localhost)
-pub const CLIENT_HOST: &str = "127.0.0.1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevLock {

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-apx-common = { path = "../common" , version = "0.3.1" }
+apx-common.workspace = true
 apx-core = { path = "../core" , version = "0.3.1" }
 apx-db.workspace = true
 apx-databricks-sdk = { path = "../databricks_sdk" , version = "0.3.1" }

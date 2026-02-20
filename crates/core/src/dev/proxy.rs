@@ -16,6 +16,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame as TungsteniteCloseFram
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tracing::{debug, info, warn};
 
+use apx_common::hosts::CLIENT_HOST;
 use apx_databricks_sdk::DatabricksClient;
 
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -132,7 +133,7 @@ pub fn api_router(
 ) -> Result<Router, String> {
     let state = ApiProxyState {
         client: build_proxy_client()?,
-        host: "0.0.0.0".to_string(),
+        host: CLIENT_HOST.to_string(),
         port: backend_port,
         token_manager,
         forwarded_user_header,
@@ -147,7 +148,7 @@ pub fn api_router(
 pub fn ui_router(frontend_port: u16, dev_token: &str) -> Result<Router, String> {
     let state = UiProxyState {
         client: build_proxy_client()?,
-        host: "localhost".to_string(),
+        host: CLIENT_HOST.to_string(),
         port: frontend_port,
         dev_token: dev_token.to_string(),
     };
@@ -166,7 +167,7 @@ pub fn api_utils_router(
 ) -> Result<Router, String> {
     let state = ApiProxyState {
         client: build_proxy_client()?,
-        host: "0.0.0.0".to_string(),
+        host: CLIENT_HOST.to_string(),
         port: backend_port,
         token_manager,
         forwarded_user_header,

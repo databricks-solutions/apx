@@ -91,7 +91,7 @@ async fn run_http_server(storage: LogsDb) -> Result<(), String> {
         .route("/health", get(health_check))
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{FLUX_PORT}");
+    let addr = format!("{}:{FLUX_PORT}", apx_common::hosts::BIND_HOST);
     info!("Starting flux OTLP receiver on {}", addr);
 
     let listener = TcpListener::bind(&addr)
