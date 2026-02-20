@@ -10,7 +10,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::dev::apply::{Addon, ApplyArgs};
+    use crate::dev::apply::ApplyArgs;
     use crate::dev::check::CheckArgs;
     use crate::init::InitArgs;
 
@@ -38,14 +38,14 @@ mod tests {
     }
 
     /// Run `apx dev apply <addon>` on the given path, asserting exit code 0.
-    async fn apx_apply(app_path: &Path, addon: Addon) {
+    async fn apx_apply(app_path: &Path, addon: &str) {
         let code = crate::dev::apply::run(ApplyArgs {
-            addon,
+            addon: addon.to_string(),
             app_path: Some(app_path.to_path_buf()),
             yes: true,
         })
         .await;
-        assert_eq!(code, 0, "apx dev apply {addon:?} failed (exit code {code})");
+        assert_eq!(code, 0, "apx dev apply {addon} failed (exit code {code})");
     }
 
     #[tokio::test]
@@ -81,7 +81,7 @@ mod tests {
 
         // Step 3: Apply each backend addon, checking after each.
         // Addon configs are validated during lifespan (not import), so no env vars needed.
-        for addon in [Addon::Sql] {
+        for addon in ["sql"] {
             apx_apply(&app_path, addon).await;
             apx_check(&app_path).await;
         }

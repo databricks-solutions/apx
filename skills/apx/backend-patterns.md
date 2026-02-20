@@ -4,7 +4,7 @@
 
 - **Framework:** FastAPI + Pydantic
 - **Package manager:** uv (never pip)
-- **Database ORM:** SQLModel (stateful apps only)
+- **Database ORM:** SQLModel (requires lakebase addon)
 - **Auth:** Databricks WorkspaceClient (service principal or OBO)
 
 ## 3-Model Pattern
@@ -188,7 +188,7 @@ The `Dependency` class in `src/<app>/backend/core.py` provides typed FastAPI dep
 | `Dependency.Client`     | `WorkspaceClient` | Databricks client using app-level service principal credentials                    |
 | `Dependency.UserClient` | `WorkspaceClient` | Databricks client authenticated on behalf of the current user (requires OBO token) |
 | `Dependency.Config`     | `AppConfig`       | Application configuration loaded from environment variables                        |
-| `Dependency.Session`    | `Session`         | SQLModel database session, scoped to request (stateful apps only)                  |
+| `Dependency.Session`    | `Session`         | SQLModel database session, scoped to request (requires lakebase addon)                  |
 
 ### Usage in Route Handlers
 
@@ -212,7 +212,7 @@ def me(user_ws: Dependency.UserClient):
 def get_settings(config: Dependency.Config):
     return AppSettingsOut(app_name=config.app_name)
 
-# Database session (stateful apps only)
+# Database session (requires lakebase addon)
 @router.get("/orders", response_model=list[OrderOut], operation_id="getOrders")
 def get_orders(session: Dependency.Session):
     return session.exec(select(Order)).all()

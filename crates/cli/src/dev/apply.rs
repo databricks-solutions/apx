@@ -1,4 +1,4 @@
-use clap::{Args, ValueEnum};
+use clap::Args;
 use dialoguer::Confirm;
 use similar::{ChangeTag, TextDiff};
 use std::fs;
@@ -128,49 +128,25 @@ pub(crate) fn discover_all_addons() -> Vec<(String, AddonManifest)> {
     addons
 }
 
-// ─── Addon enum ─────────────────────────────────────────
-
-/// Available addons that can be applied
-#[derive(ValueEnum, Clone, Debug, Copy)]
-#[value(rename_all = "lower")]
-pub enum Addon {
-    /// Frontend UI with React, Vite, and TanStack Router
-    Ui,
-
-    /// Cursor AI assistant rules
-    Cursor,
-    /// VSCode AI assistant rules
-    Vscode,
-    /// Claude AI assistant rules
-    Claude,
-    /// Codex AI assistant rules
-    Codex,
-
-    // Backend addons
-    /// SQL Warehouse connection
-    Sql,
-    /// Lakebase (Databricks Database) integration
-    Lakebase,
-
-    // Layout addons (from common::Layout)
-    /// Sidebar layout addon
-    Sidebar,
-}
-
-impl Addon {
-    /// Get the directory name for this addon in the templates folder
-    fn directory_name(&self) -> &str {
-        match self {
-            Addon::Ui => "ui",
-            Addon::Cursor => "cursor",
-            Addon::Vscode => "vscode",
-            Addon::Claude => "claude",
-            Addon::Codex => "codex",
-            Addon::Sql => "sql",
-            Addon::Lakebase => "lakebase",
-            Addon::Sidebar => "sidebar",
+/// Validate an addon name against discovered addons.
+/// Returns the addon name if valid, or an error listing available addons.
+fn parse_addon_name(s: &str) -> Result<String, String> {
+    let all = discover_all_addons();
+    if all.iter().any(|(name, _)| name == s) {
+        return Ok(s.to_string());
+    }
+    let mut lines = vec![format!("unknown addon '{s}'")];
+    lines.push(String::new());
+    lines.push("Available addons:".to_string());
+    for (name, manifest) in &all {
+        let desc = &manifest.addon.description;
+        if desc.is_empty() {
+            lines.push(format!("  {name}"));
+        } else {
+            lines.push(format!("  {name:12} {desc}"));
         }
     }
+    Err(lines.join("\n"))
 }
 
 /// Check if an addon's manifest has non-empty Python edits.
@@ -236,8 +212,8 @@ fn metadata_to_edits(edits: &PythonEdits) -> Vec<PythonEdit> {
 #[derive(Args, Debug, Clone)]
 pub struct ApplyArgs {
     /// The addon to apply
-    #[arg(value_enum)]
-    pub addon: Addon,
+    #[arg(value_parser = parse_addon_name)]
+    pub addon: String,
 
     #[arg(
         value_name = "APP_PATH",
@@ -326,7 +302,6 @@ impl FileChange {
 // ─── Main apply flow ────────────────────────────────────
 
 async fn run_inner(args: ApplyArgs) -> Result<(), String> {
-    let addon = args.addon;
     let yes = args.yes;
     let app_dir = find_app_dir(args.app_path)?;
 
@@ -334,7 +309,7 @@ async fn run_inner(args: ApplyArgs) -> Result<(), String> {
     let (app_name, app_slug) = read_project_context(&app_dir)?;
 
     // Apply addon (and its dependencies recursively)
-    apply_single_addon(addon.directory_name(), yes, &app_dir, &app_name, &app_slug).await
+    apply_single_addon(&args.addon, yes, &app_dir, &app_name, &app_slug).await
 }
 
 /// Apply a single addon by name, auto-resolving any `depends_on` first.

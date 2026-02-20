@@ -69,6 +69,14 @@ src/<app>/
 | `apx bun <args>`            | Run bun commands (install, add, etc.)                        |
 | `apx components add <name>` | Add a shadcn/ui component                                    |
 | `apx init --as-member`      | Add apx to an existing project as a uv workspace member      |
+| `apx dev apply <addon>`     | Apply an addon to an existing project                         |
+
+## Addons
+
+Addons extend the base project with additional capabilities (UI, assistant rules, database integrations, etc.).
+To list available addons, run `apx dev apply --help`.
+To apply an addon to an existing project: `apx dev apply <addon>` (e.g. `apx dev apply lakebase`).
+During `apx init`, addons are selected interactively or via `--addons=ui,claude,sidebar`.
 
 ## Adding to an Existing Project
 
