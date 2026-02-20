@@ -114,6 +114,11 @@ SDK listing methods (`ws.jobs.list()`, etc.) return lazy iterators that auto-pag
 SDK dataclasses are Pydantic-compatible — use them directly in `response_model` or compose into custom models.
 Use the `docs` tool to verify method signatures before writing SDK code.
 
+### Streaming Endpoints
+For SSE/streaming (e.g. chat, agent): use `StreamingResponse` with `text/event-stream` on the backend.
+On the frontend, use manual `fetch()` + `ReadableStream` — not generated React Query hooks.
+See backend-patterns.md and frontend-patterns.md for complete examples.
+
 ## Workflow
 
 1. **routes** — List all API routes to understand the project's API surface
@@ -140,6 +145,7 @@ mod tests {
         assert!(APX_INFO_CONTENT.contains("Frontend Patterns"));
         assert!(APX_INFO_CONTENT.contains("Backend Patterns"));
         assert!(APX_INFO_CONTENT.contains("SDK-First Rule"));
+        assert!(APX_INFO_CONTENT.contains("Streaming Endpoints"));
         assert!(APX_INFO_CONTENT.contains("Workflow"));
     }
 }

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::indexing::{rebuild_search_index, wait_for_index_ready};
 use crate::server::ApxServer;
 use crate::tools::ToolResultExt;
@@ -64,10 +66,12 @@ impl ApxServer {
             return Ok(CallToolResult::error(vec![Content::text(e)]));
         }
 
-        // Check if registry indexes need refresh
-        if let Ok(metadata) = apx_core::common::read_project_metadata(&path) {
-            let cfg = apx_core::components::UiConfig::from_metadata(&metadata, &path)
-                .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        // Check if registry indexes need refresh and collect configured registry names
+        let mut configured_registries: Option<HashSet<String>> = None;
+        if let Ok(metadata) = apx_core::common::read_project_metadata(&path)
+            && let Ok(cfg) = apx_core::components::UiConfig::from_metadata(&metadata, &path)
+        {
+            configured_registries = Some(cfg.registries.keys().cloned().collect());
             if needs_registry_refresh(&cfg.registries) {
                 tracing::info!("Registry indexes stale, refreshing...");
                 if let Ok(true) = sync_registry_indexes(&path, false).await {
@@ -82,7 +86,10 @@ impl ApxServer {
         // Search using async DB layer
         let pool = self.ctx.dev_db.pool().clone();
         let index = ComponentIndex::new(pool);
-        let search_results = match index.search(&args.query, args.limit).await {
+        let search_results = match index
+            .search(&args.query, args.limit, configured_registries.as_ref())
+            .await
+        {
             Ok(results) => results,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -94,6 +101,7 @@ impl ApxServer {
         #[derive(serde::Serialize)]
         struct SearchResponse {
             query: String,
+            configured_registries: Vec<String>,
             results: Vec<SearchResultItem>,
         }
 
@@ -107,6 +115,9 @@ impl ApxServer {
 
         let response = SearchResponse {
             query: args.query,
+            configured_registries: configured_registries
+                .map(|cr| cr.into_iter().collect::<Vec<_>>())
+                .unwrap_or_default(),
             results: search_results
                 .into_iter()
                 .map(|r| SearchResultItem {

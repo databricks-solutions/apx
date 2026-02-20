@@ -106,12 +106,76 @@ const { data } = useListItemsSuspense({
 
 Routes live in `src/<app>/ui/routes/` and use `@tanstack/react-router` file-based routing.
 
+## SSE Streaming (Chat/Agent)
+
+For SSE endpoints (e.g. `/api/chat`), generated React Query hooks **do not work**. Use manual `fetch()` + `ReadableStream`:
+
+```tsx
+import { useCallback, useState } from "react";
+
+interface Message {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export function useChat() {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [isStreaming, setIsStreaming] = useState(false);
+
+  const sendMessage = useCallback(async (content: string) => {
+    const userMsg: Message = { role: "user", content };
+    setMessages((prev) => [...prev, userMsg]);
+    setIsStreaming(true);
+
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: content }),
+    });
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let assistantContent = "";
+
+    setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const text = decoder.decode(value, { stream: true });
+      for (const line of text.split("\n")) {
+        if (line.startsWith("data: ")) {
+          const data = line.slice(6);
+          if (data === "[DONE]") break;
+          assistantContent += data;
+          setMessages((prev) => [
+            ...prev.slice(0, -1),
+            { role: "assistant", content: assistantContent },
+          ]);
+        }
+      }
+    }
+
+    setIsStreaming(false);
+  }, []);
+
+  return { messages, sendMessage, isStreaming };
+}
+```
+
+**Key rules:**
+- SSE endpoints need manual `fetch()` — do NOT use generated API hooks for streaming.
+- Parse the stream line-by-line, looking for `data: ` prefixed lines.
+- Use `[DONE]` sentinel to detect stream completion.
+- Check configured registries for chat UI components (e.g. `@ai-elements/message`, `@ai-elements/prompt-input`) before building custom ones.
+
 ## Data Fetching Rules
 
 - **Always** use `useXSuspense` hooks (not `useX` hooks) for page-level data loading
 - **Always** wrap suspense queries in `Suspense` + `ErrorBoundary`
 - **Always** provide a `Skeleton` fallback
-- **Never** manually call `fetch()` or `axios` — use the generated API hooks
+- **Never** manually call `fetch()` or `axios` — use the generated API hooks (**exception:** SSE streaming endpoints, see above)
 
 ## Project Layout
 

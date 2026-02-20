@@ -171,6 +171,10 @@ app = create_app(routers=[router], lifespan=custom_lifespan)
 - Call the `docs` MCP tool to verify exact method signatures before writing SDK code.
 - For paginated list endpoints, see [Backend Patterns](backend-patterns.md) — SDK Listing with Pagination section.
 
+### Component Registries
+
+Check `[tool.apx.ui.registries]` in `pyproject.toml` for domain-specific registries (e.g. `@ai-elements` for chat/AI, `@animate-ui` for animations) before building custom components. Use `list_registry_components` with the registry name to browse available components.
+
 ## 🔗 Resources
 
 - OpenAPI client: `src/{{app_name}}/ui/lib/api/` (auto-generated)

@@ -145,10 +145,11 @@ When the apx MCP server is running, these tools are available:
 
 ### Component Management
 
-- **Finding components:** Use MCP `search_registry_components` to search for available shadcn/ui components.
-- **Adding components:** Use MCP `add_component` or CLI `apx components add <component> --yes` to add components.
-- **Component location:** If component was added to a wrong location (e.g. stored into `src/components` instead of `src/<app>/ui/components`), move it to the proper folder.
-- **Component organization:** Prefer grouping components by functionality rather than by file type (e.g. `src/<app>/ui/components/chat/`).
+- **Check configured registries first:** Before creating custom components, check `[tool.apx.ui.registries]` in `pyproject.toml` for domain-specific registries (e.g. `@ai-elements` for chat/AI components, `@animate-ui` for animations). Use `list_registry_components` with the registry name to browse all available components.
+- **Finding components:** Use MCP `search_registry_components` to search across all registries. Results from project-configured registries are boosted in scoring.
+- **Adding components:** Use MCP `add_component` or CLI `apx components add <component> --yes`. For custom registries: `@registry-name/component-name`.
+- **Component location:** If a component was added to a wrong location (e.g. `src/components/` instead of `src/<app>/ui/components/`), move it to the proper folder.
+- **Component organization:** Group components by functionality (e.g. `src/<app>/ui/components/chat/`).
 
 ## Reference Files
 

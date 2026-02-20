@@ -55,6 +55,7 @@ struct ProjectContext {
     backend_files: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sdk_version: Option<String>,
+    configured_registries: Vec<String>,
 }
 
 pub async fn read_project_resource(app_path: &str) -> Result<ReadResourceResult, String> {
@@ -80,6 +81,13 @@ pub async fn read_project_resource(app_path: &str) -> Result<ReadResourceResult,
     // Best-effort: detect installed SDK version
     let sdk_version = get_databricks_sdk_version_for_project(&path).unwrap_or(None);
 
+    // Configured UI component registries
+    let configured_registries = metadata
+        .ui_registries
+        .as_ref()
+        .map(|r| r.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+
     let has_ui = metadata.ui_root.is_some();
     let context = ProjectContext {
         app_name: metadata.app_name,
@@ -91,6 +99,7 @@ pub async fn read_project_resource(app_path: &str) -> Result<ReadResourceResult,
         python_dependencies,
         backend_files,
         sdk_version,
+        configured_registries,
     };
 
     let json = serde_json::to_string_pretty(&context)

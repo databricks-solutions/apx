@@ -2,6 +2,7 @@
 
 use sqlx::Row;
 use sqlx::sqlite::SqlitePool;
+use std::collections::HashSet;
 
 use crate::components::cache::get_all_registry_indexes;
 use apx_db::dev::{sanitize_fts5_query, table_exists};
@@ -148,8 +149,15 @@ impl ComponentIndex {
         Ok(())
     }
 
-    /// Search for components using FTS5
-    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, String> {
+    /// Search for components using FTS5.
+    /// When `configured_registries` is provided, components from those registries
+    /// receive a scoring boost to improve discoverability of project-relevant components.
+    pub async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        configured_registries: Option<&HashSet<String>>,
+    ) -> Result<Vec<SearchResult>, String> {
         tracing::debug!("search: Starting search for query '{}'", query);
 
         if !table_exists(&self.pool, TABLE_NAME).await? {
@@ -191,8 +199,14 @@ impl ComponentIndex {
             // Base score from result position (higher rank = lower base score)
             let base_score = 1.0 / (1.0 + rank as f32);
 
-            // Registry boost: strongly prefer default (shadcn) components
-            let registry_boost = if registry.is_empty() { 0.5 } else { 0.0 };
+            // Registry boost: prefer project-configured registries, then default
+            let registry_boost = if registry.is_empty() {
+                0.5 // default shadcn/ui
+            } else if configured_registries.is_some_and(|cr| cr.contains(&registry)) {
+                1.0 // project-configured custom registry
+            } else {
+                0.0 // unconfigured custom registry
+            };
 
             // Name match boost
             let name_match_boost = if query_terms.iter().any(|term| *term == name_lower) {
@@ -250,7 +264,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_no_index() {
         let index = test_index().await;
-        let result = index.search("button", 10).await;
+        let result = index.search("button", 10, None).await;
         assert!(result.is_err());
     }
 
@@ -302,7 +316,7 @@ mod tests {
         .await
         .unwrap();
 
-        let results = index.search("button", 10).await.unwrap();
+        let results = index.search("button", 10, None).await.unwrap();
         assert!(!results.is_empty());
 
         // Both buttons should be in results, card should not
@@ -364,7 +378,7 @@ mod tests {
         .unwrap();
 
         // Single-term query should find the component
-        let results = index.search("animate", 10).await.unwrap();
+        let results = index.search("animate", 10, None).await.unwrap();
         assert!(
             results.iter().any(|r| r.id == "@animate-ui/number-ticker"),
             "Single-term 'animate' should match. Got: {results:?}"
@@ -373,7 +387,7 @@ mod tests {
         // Multi-term query with a term NOT in the document ("ticker") should
         // still return partial matches, not empty.
         let results = index
-            .search("@animate-ui number counter ticker", 10)
+            .search("@animate-ui number counter ticker", 10, None)
             .await
             .unwrap();
         assert!(
@@ -383,6 +397,66 @@ mod tests {
         assert!(
             results.iter().any(|r| r.id == "@animate-ui/number-ticker"),
             "Should find number-ticker component. Got: {results:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configured_registry_boost() {
+        let index = test_index().await;
+
+        sqlx::query(&format!(
+            "CREATE VIRTUAL TABLE {TABLE_NAME} USING fts5(\
+                id UNINDEXED, name, registry UNINDEXED, text, \
+                tokenize='porter unicode61'\
+            )"
+        ))
+        .execute(&index.pool)
+        .await
+        .unwrap();
+
+        // Default registry component
+        sqlx::query(&format!(
+            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
+        ))
+        .bind("textarea")
+        .bind("textarea")
+        .bind("")
+        .bind("textarea A text input area component shadcn")
+        .execute(&index.pool)
+        .await
+        .unwrap();
+
+        // Custom registry component
+        sqlx::query(&format!(
+            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
+        ))
+        .bind("@ai-elements/message")
+        .bind("message")
+        .bind("ai-elements")
+        .bind("message chat message bubble ai component")
+        .execute(&index.pool)
+        .await
+        .unwrap();
+
+        // Without configured registries: default gets boosted
+        let results = index.search("message", 10, None).await.unwrap();
+        let ai_msg = results.iter().find(|r| r.id == "@ai-elements/message");
+        assert!(ai_msg.is_some(), "Should find ai-elements message");
+
+        // With configured registries: ai-elements gets 1.0 boost
+        let configured: HashSet<String> = ["ai-elements".to_string()].into();
+        let results = index
+            .search("message", 10, Some(&configured))
+            .await
+            .unwrap();
+        let ai_msg = results
+            .iter()
+            .find(|r| r.id == "@ai-elements/message")
+            .unwrap();
+        assert!(
+            ai_msg.score >= 1.0,
+            "Configured registry component should have score >= 1.0, got {}",
+            ai_msg.score
         );
     }
 }

@@ -140,6 +140,45 @@ def list_jobs(
   ```
 - Use the `docs` MCP tool to look up the exact SDK method signature before writing code.
 
+## SSE Streaming Endpoint
+
+For chat, agent, or real-time features, use Server-Sent Events (SSE) with FastAPI's `StreamingResponse`.
+
+### Streaming Response Model
+
+```python
+from fastapi.responses import StreamingResponse
+
+@router.post("/chat", operation_id="chat")
+async def chat(
+    request: ChatRequest,
+    ws: Dependency.Client,
+) -> StreamingResponse:
+    """Stream chat responses as Server-Sent Events."""
+
+    async def event_stream():
+        # Replace with your LLM/agent streaming call
+        async for chunk in my_agent.run_stream(request.message):
+            yield f"data: {chunk}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+```
+
+### Key Rules
+
+- Use `StreamingResponse` with `media_type="text/event-stream"` — not a regular JSON response.
+- Each SSE event must be formatted as `data: <payload>\n\n` (double newline).
+- Send `data: [DONE]\n\n` as the final event to signal stream completion.
+- Set `Cache-Control: no-cache` and `X-Accel-Buffering: no` headers to prevent buffering.
+- SSE endpoints use `POST` (not `GET`) when they accept a request body.
+- Generated React Query hooks **do not work** for SSE — the frontend must use manual `fetch()` + `ReadableStream` (see [Frontend Patterns](frontend-patterns.md#sse-streaming-chatagent)).
+- Always include `operation_id` for OpenAPI documentation even though the generated hook won't be used for streaming.
+
 ## Dependencies and Dependency Injection
 
 The `Dependency` class in `src/<app>/backend/core.py` provides typed FastAPI dependencies. **Always use these instead of manually creating clients or accessing `request.app.state`.**
