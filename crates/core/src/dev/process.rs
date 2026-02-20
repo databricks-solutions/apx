@@ -31,6 +31,7 @@ const PROBE_TIMEOUT_SECS: u64 = 1;
 static HEALTH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::none())
         .pool_max_idle_per_host(2)
         .no_gzip()
         .no_brotli()
@@ -177,7 +178,9 @@ impl ProcessManager {
             host: host.to_string(),
             dev_token,
             db_password,
-            app_dir: app_dir.to_path_buf(),
+            app_dir: app_dir
+                .canonicalize()
+                .unwrap_or_else(|_| app_dir.to_path_buf()),
             app_slug,
             app_entrypoint,
             dotenv_vars,
