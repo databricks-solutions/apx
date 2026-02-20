@@ -11,14 +11,12 @@ Install apx using the install script:
 
 <Tabs items={["macOS/Linux", "Windows"]}>
   <Tab value="macOS/Linux">
-    ```bash
-    curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh
-    ```
+    ```bash curl -fsSL https://databricks-solutions.github.io/apx/install.sh |
+    sh ```
   </Tab>
   <Tab value="Windows">
-    ```powershell
-    irm https://databricks-solutions.github.io/apx/install.ps1 | iex
-    ```
+    ```powershell irm https://databricks-solutions.github.io/apx/install.ps1 |
+    iex ```
   </Tab>
 </Tabs>
 
@@ -30,17 +28,17 @@ apx <command>
 
 ## Commands Overview
 
-| Command      | Description                      |
-| ------------ | -------------------------------- |
-| `init`       | Initialize a new project         |
-| `build`      | Build the project for deployment |
-| `dev`        | Development server management    |
-| `components` | UI components commands           |
-| `frontend`   | Frontend-specific commands       |
-| `skill`      | Install apx skill files          |
-| `mcp`        | Start the MCP server             |
-| `bun`        | Run a command using bun          |
-| `flux`       | Flux OTEL collector commands     |
+| Command      | Description                       |
+| ------------ | --------------------------------- |
+| `init`       | Initialize a new project          |
+| `build`      | Build the project for deployment  |
+| `dev`        | Development server management     |
+| `components` | UI components commands            |
+| `frontend`   | Frontend-specific commands        |
+| `skill`      | Install apx skill files           |
+| `mcp`        | Start the MCP server              |
+| `bun`        | Run a command using bun           |
+| `flux`       | Flux OTEL collector commands      |
 | `upgrade`    | Self-update to the latest version |
 
 ---
@@ -59,13 +57,13 @@ apx init [OPTIONS] [APP_PATH]
 
 ### Options
 
-| Option                              | Description                                                                                                                                                   |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-n, --name <APP_NAME>`             | The name of the project                                                                                                                                       |
-| `--addons <ADDONS>`                 | Addons to enable (comma-separated). Use `none` for backend-only                                                                                               |
-| `--no-addons`                       | Backend-only project (no addons)                                                                                                                              |
-| `-p, --profile <PROFILE>`           | Databricks profile to use                                                                                                                                     |
-| `--as-member [MEMBER_PATH]`         | Initialize as a uv workspace member (default: `packages/app`). Auto-detected when a `pyproject.toml` without `[tool.apx]` exists in the current directory    |
+| Option                      | Description                                                                                                                                               |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-n, --name <APP_NAME>`     | The name of the project                                                                                                                                   |
+| `--addons <ADDONS>`         | Addons to enable (comma-separated). Use `none` for backend-only                                                                                           |
+| `--no-addons`               | Backend-only project (no addons)                                                                                                                          |
+| `-p, --profile <PROFILE>`   | Databricks profile to use                                                                                                                                 |
+| `--as-member [MEMBER_PATH]` | Initialize as a uv workspace member (default: `packages/app`). Auto-detected when a `pyproject.toml` without `[tool.apx]` exists in the current directory |
 
 <Callout type="info">
   **Note:** The `init` command only creates project files and configures
@@ -137,11 +135,11 @@ apx dev start [OPTIONS] [APP_PATH]
 
 #### Options
 
-| Option                          | Description                                                        |
-| ------------------------------- | ------------------------------------------------------------------ |
-| `-a, --attached`                | Follow logs and stop server on Ctrl+C                              |
-| `--skip-credentials-validation` | Skip credentials validation on startup                             |
-| `--timeout <SECONDS>`           | Maximum time to wait for dev server health check (default: `60`)   |
+| Option                          | Description                                                      |
+| ------------------------------- | ---------------------------------------------------------------- |
+| `-a, --attached`                | Follow logs and stop server on Ctrl+C                            |
+| `--skip-credentials-validation` | Skip credentials validation on startup                           |
+| `--timeout <SECONDS>`           | Maximum time to wait for dev server health check (default: `60`) |
 
 ### dev status
 
@@ -350,10 +348,10 @@ apx skill install [OPTIONS]
 
 ### Options
 
-| Option       | Description                                                       |
-| ------------ | ----------------------------------------------------------------- |
-| `--global`   | Install to home directory (`~/`) instead of current directory     |
-| `--path`     | Skill files directory (default: `.claude/skills/apx`)             |
+| Option     | Description                                                   |
+| ---------- | ------------------------------------------------------------- |
+| `--global` | Install to home directory (`~/`) instead of current directory |
+| `--path`   | Skill files directory (default: `.claude/skills/apx`)         |
 
 ### Examples
 
@@ -369,9 +367,10 @@ apx skill install --path .agents/skills/apx
 ```
 
 <Callout type="info">
-  **Note:** When using `apx init` with assistant addons (`claude`, `cursor`, `vscode`, `codex`),
-  skill files are installed automatically. The `skill install` command is useful for
-  adding skills to existing projects without running the full addon setup.
+  **Note:** When using `apx init` with assistant addons (`claude`, `cursor`,
+  `vscode`, `codex`), skill files are installed automatically. The `skill
+  install` command is useful for adding skills to existing projects without
+  running the full addon setup.
 </Callout>
 
 ---

@@ -30,12 +30,15 @@ export function ItemsPage() {
   return (
     <QueryErrorResetBoundary>
       {({ reset }) => (
-        <ErrorBoundary onReset={reset} fallbackRender={({ resetErrorBoundary }) => (
-          <div>
-            <p>Something went wrong</p>
-            <button onClick={resetErrorBoundary}>Try again</button>
-          </div>
-        )}>
+        <ErrorBoundary
+          onReset={reset}
+          fallbackRender={({ resetErrorBoundary }) => (
+            <div>
+              <p>Something went wrong</p>
+              <button onClick={resetErrorBoundary}>Try again</button>
+            </div>
+          )}
+        >
           <Suspense fallback={<Skeleton className="h-48 w-full" />}>
             <ItemsContent />
           </Suspense>
@@ -65,7 +68,10 @@ function CreateItemButton() {
   });
 
   return (
-    <button onClick={() => mutate({ data: { name: "New item" } })} disabled={isPending}>
+    <button
+      onClick={() => mutate({ data: { name: "New item" } })}
+      disabled={isPending}
+    >
       {isPending ? "Creating..." : "Create"}
     </button>
   );
