@@ -160,7 +160,16 @@ For detailed patterns and code examples, see:
 
 ## Resources
 
-- OpenAPI client: `src/<app>/ui/lib/api/` (auto-generated)
+- OpenAPI client: `src/<app>/ui/lib/api.ts` (auto-generated).
+  Example:
+  ```ts
+  import { api } from "@/lib/api";
+  ```
+- Selector: `src/<app>/ui/lib/selector.ts`
+  Example:
+  ```ts
+  import { selector } from "@/lib/selector";
+  ```
 - Routes: `src/<app>/ui/routes/`
 - Components: `src/<app>/ui/components/`
 - Backend: `src/<app>/backend/`
