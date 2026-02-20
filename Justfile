@@ -49,8 +49,8 @@ pm message:
     git push
 
 
-gen folder profile *args:
-    uv run --script scripts/dev/gen.py /tmp/{{folder}} {{profile}} {{args}}
+gen folder *args:
+    uv run --script scripts/dev/gen.py /tmp/{{folder}} {{args}}
 
 [working-directory: "docs"]
 docs *args:

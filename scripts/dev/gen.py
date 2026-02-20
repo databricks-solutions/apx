@@ -6,7 +6,7 @@
 """Generate a test project using a local apx build.
 
 Usage:
-    uv run --script scripts/dev/gen.py <folder> <profile> [extra-args...]
+    uv run --script scripts/dev/gen.py <folder> [profile] [extra-args...]
 
 Steps:
     1. maturin build -j 6 -o dist
@@ -155,23 +155,24 @@ def patch_mcp_json(folder: Path) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 2:
         print(
-            f"{RED}Usage: uv run --script scripts/dev/gen.py <folder> <profile> [extra-args...]{RESET}",
+            f"{RED}Usage: uv run --script scripts/dev/gen.py <folder> [profile] [extra-args...]{RESET}",
             file=sys.stderr,
         )
         sys.exit(1)
 
     folder = Path(sys.argv[1])
-    profile = sys.argv[2]
-    extra_args = sys.argv[3:]
+    profile = sys.argv[2] if len(sys.argv) >= 3 else None
+    extra_args = sys.argv[3:] if profile else sys.argv[2:]
 
     project_root = Path(__file__).resolve().parent.parent.parent
     dist_dir = project_root / "dist"
     total = 7
 
+    profile_label = profile or "interactive"
     print(
-        f"{BOLD}apx gen{RESET} — folder={YELLOW}{folder}{RESET} profile={YELLOW}{profile}{RESET}",
+        f"{BOLD}apx gen{RESET} — folder={YELLOW}{folder}{RESET} profile={YELLOW}{profile_label}{RESET}",
         end="",
     )
     if extra_args:
@@ -196,21 +197,19 @@ def main() -> None:
                 print(f"  {DIM}Nothing to remove{RESET}")
 
         with stage("Initializing project", 3, total):
-            run(
-                [
-                    "uvx",
-                    "--no-cache",
-                    "--from",
-                    str(wheel),
-                    "apx",
-                    "init",
-                    str(folder),
-                    "-p",
-                    profile,
-                ]
-                + extra_args,
-                env={**os.environ, "RUST_LOG": "DEBUG"},
-            )
+            cmd = [
+                "uvx",
+                "--no-cache",
+                "--from",
+                str(wheel),
+                "apx",
+                "init",
+                str(folder),
+            ]
+            if profile:
+                cmd += ["-p", profile]
+            cmd += extra_args
+            run(cmd, env={**os.environ, "RUST_LOG": "DEBUG"})
 
         with stage("Patching pyproject.toml", 4, total):
             patch_pyproject(folder / "pyproject.toml", wheel)
