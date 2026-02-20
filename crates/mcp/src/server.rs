@@ -5,6 +5,7 @@ use crate::tools::AppPathArgs;
 use crate::tools::databricks::DatabricksAppsLogsArgs;
 use crate::tools::devserver::LogsToolArgs;
 use crate::tools::docs::DocsArgs;
+use crate::tools::feedback::{FeedbackPrepareArgs, FeedbackSubmitArgs};
 use crate::tools::project::GetRouteInfoArgs;
 use crate::tools::registry::{
     AddComponentArgs, ListRegistryComponentsArgs, SearchRegistryComponentsArgs,
@@ -200,6 +201,32 @@ impl ApxServer {
         Parameters(args): Parameters<ListRegistryComponentsArgs>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         self.handle_list_registry_components(args).await
+    }
+
+    // --- Feedback tools ---
+
+    #[tool(
+        name = "feedback_prepare",
+        description = "Prepare a feedback issue for review. Returns the formatted title, body, and browser URL. Call feedback_submit to actually create the public GitHub issue.",
+        annotations(read_only_hint = true)
+    )]
+    async fn feedback_prepare(
+        &self,
+        Parameters(args): Parameters<FeedbackPrepareArgs>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.handle_feedback_prepare(args).await
+    }
+
+    #[tool(
+        name = "feedback_submit",
+        description = "Submit a prepared feedback issue as a public GitHub issue. Pass the exact title and body from feedback_prepare.",
+        annotations(read_only_hint = false)
+    )]
+    async fn feedback_submit(
+        &self,
+        Parameters(args): Parameters<FeedbackSubmitArgs>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.handle_feedback_submit(args).await
     }
 
     // --- Docs tools ---

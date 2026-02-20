@@ -1,6 +1,7 @@
 pub mod databricks;
 pub mod devserver;
 pub mod docs;
+pub mod feedback;
 pub mod project;
 pub mod registry;
 

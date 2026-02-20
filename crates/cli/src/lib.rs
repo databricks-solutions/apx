@@ -15,6 +15,7 @@ pub(crate) mod bun;
 pub(crate) mod common;
 pub(crate) mod components;
 pub(crate) mod dev;
+pub(crate) mod feedback;
 pub(crate) mod flux;
 pub(crate) mod frontend;
 pub(crate) mod init;
@@ -59,6 +60,8 @@ enum Commands {
     /// 🧠 Skill commands (Claude Code integration)
     #[command(subcommand)]
     Skill(SkillCommands),
+    /// 💬 Send feedback to the apx team
+    Feedback(feedback::FeedbackArgs),
     /// ⬆️  Upgrade apx to the latest version
     Upgrade,
     /// Internal: generate OpenAPI schema and client
@@ -171,6 +174,7 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
             Some(Commands::Skill(skill_cmd)) => match skill_cmd {
                 SkillCommands::Install(args) => skill::install::run(args).await,
             },
+            Some(Commands::Feedback(args)) => feedback::run(args).await,
             Some(Commands::Upgrade) => upgrade::run().await,
             Some(Commands::GenerateOpenapi(args)) => __generate_openapi::run(args).await,
             None => {
