@@ -51,12 +51,17 @@ struct ProjectContext {
     has_ui: bool,
     routes: Vec<RouteSummary>,
     ui_components: Vec<String>,
+    python_dependencies: Vec<String>,
+    backend_files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sdk_version: Option<String>,
 }
 
 pub async fn read_project_resource(app_path: &str) -> Result<ReadResourceResult, String> {
     let path = validate_app_path(app_path)?;
 
-    use apx_core::common::read_project_metadata;
+    use apx_core::common::{read_project_metadata, read_python_dependencies};
+    use apx_core::interop::get_databricks_sdk_version_for_project;
 
     let metadata = read_project_metadata(&path)?;
 
@@ -66,6 +71,15 @@ pub async fn read_project_resource(app_path: &str) -> Result<ReadResourceResult,
     // Scan for installed UI components
     let ui_components = scan_ui_components(&path);
 
+    // Read Python dependencies from pyproject.toml
+    let python_dependencies = read_python_dependencies(&path);
+
+    // Scan backend .py files (paths relative to project root)
+    let backend_files = scan_backend_files(&path, &metadata.app_slug);
+
+    // Best-effort: detect installed SDK version
+    let sdk_version = get_databricks_sdk_version_for_project(&path).unwrap_or(None);
+
     let has_ui = metadata.ui_root.is_some();
     let context = ProjectContext {
         app_name: metadata.app_name,
@@ -74,6 +88,9 @@ pub async fn read_project_resource(app_path: &str) -> Result<ReadResourceResult,
         has_ui,
         routes,
         ui_components,
+        python_dependencies,
+        backend_files,
+        sdk_version,
     };
 
     let json = serde_json::to_string_pretty(&context)
@@ -133,6 +150,31 @@ fn scan_ui_components(project_root: &std::path::Path) -> Vec<String> {
     components
 }
 
+/// Scan for Python files in the backend source directory.
+/// Returns paths relative to project root (e.g. "src/my_app/backend/router.py").
+fn scan_backend_files(project_root: &std::path::Path, app_slug: &str) -> Vec<String> {
+    let rel_prefix = std::path::Path::new("src").join(app_slug).join("backend");
+    let backend_dir = project_root.join(&rel_prefix);
+    let Ok(entries) = std::fs::read_dir(&backend_dir) else {
+        return Vec::new();
+    };
+
+    let mut files: Vec<String> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".py") && !name.starts_with("__") {
+                Some(rel_prefix.join(&name).to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    files.sort();
+    files
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -162,5 +204,35 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("does not exist"), "got: {err}");
+    }
+
+    #[test]
+    fn scan_backend_files_returns_relative_py_paths() {
+        let tmp = std::env::temp_dir().join("apx_test_scan_backend");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let backend_dir = tmp.join("src").join("test_app").join("backend");
+        std::fs::create_dir_all(&backend_dir).unwrap();
+        std::fs::write(backend_dir.join("app.py"), "").unwrap();
+        std::fs::write(backend_dir.join("router.py"), "").unwrap();
+        std::fs::write(backend_dir.join("__init__.py"), "").unwrap();
+        let files = scan_backend_files(&tmp, "test_app");
+        assert_eq!(
+            files,
+            vec![
+                "src/test_app/backend/app.py",
+                "src/test_app/backend/router.py"
+            ]
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn scan_backend_files_empty_on_missing_dir() {
+        let tmp = std::env::temp_dir().join("apx_test_scan_backend_missing");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let files = scan_backend_files(&tmp, "nonexistent");
+        assert!(files.is_empty());
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

@@ -108,6 +108,12 @@ async def create_item(item: ItemCreate):
 
 The `operation_id` is used to generate TypeScript hooks (e.g., `useListItems`, `useCreateItem`).
 
+### SDK-First Rule
+Always use `databricks-sdk` (`WorkspaceClient`) for Databricks operations — never raw HTTP calls.
+SDK listing methods (`ws.jobs.list()`, etc.) return lazy iterators that auto-paginate.
+SDK dataclasses are Pydantic-compatible — use them directly in `response_model` or compose into custom models.
+Use the `docs` tool to verify method signatures before writing SDK code.
+
 ## Workflow
 
 1. **routes** — List all API routes to understand the project's API surface
@@ -133,6 +139,7 @@ mod tests {
         assert!(APX_INFO_CONTENT.contains("Project Structure"));
         assert!(APX_INFO_CONTENT.contains("Frontend Patterns"));
         assert!(APX_INFO_CONTENT.contains("Backend Patterns"));
+        assert!(APX_INFO_CONTENT.contains("SDK-First Rule"));
         assert!(APX_INFO_CONTENT.contains("Workflow"));
     }
 }

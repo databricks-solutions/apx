@@ -11,11 +11,11 @@
 
 Every API entity uses three Pydantic models:
 
-| Model | Purpose | Example |
-|-------|---------|---------|
-| `Entity` | Internal/database model | `Item` |
-| `EntityIn` | Input/request body | `ItemIn` |
-| `EntityOut` | Output/response model | `ItemOut` |
+| Model       | Purpose                 | Example   |
+| ----------- | ----------------------- | --------- |
+| `Entity`    | Internal/database model | `Item`    |
+| `EntityIn`  | Input/request body      | `ItemIn`  |
+| `EntityOut` | Output/response model   | `ItemOut` |
 
 ```python
 from pydantic import BaseModel
@@ -45,6 +45,7 @@ class ItemOut(BaseModel):
 API routes **must** include `response_model` and `operation_id` for correct client generation.
 
 The `operation_id` maps directly to the generated TypeScript hook name:
+
 - `operation_id="listItems"` → `useListItems()` / `useListItemsSuspense()`
 - `operation_id="createItem"` → `useCreateItem()`
 - `operation_id="getItem"` → `useGetItem()` / `useGetItemSuspense()`
@@ -77,16 +78,78 @@ async def delete_item(item_id: str):
     ...
 ```
 
+## SDK Listing with Pagination
+
+Databricks SDK listing methods (`ws.jobs.list()`, `ws.clusters.list()`, etc.) return **lazy iterators** that handle pagination internally. To expose paginated REST endpoints, collect items into a page-sized slice on the backend.
+
+### Paginated Response Model
+
+```python
+from pydantic import BaseModel
+
+class PaginatedResponse[T](BaseModel):
+    """Generic paginated response wrapper."""
+    items: list[T]
+    next_page_token: str | None = None
+```
+
+### Paginated SDK List Endpoint
+
+```python
+from itertools import islice
+from databricks.sdk.service.jobs import BaseJob
+from .core import Dependency, create_router
+from .models import PaginatedResponse
+
+router = create_router()
+
+@router.get(
+    "/jobs",
+    response_model=PaginatedResponse[BaseJob],
+    operation_id="listJobs",
+)
+def list_jobs(
+    ws: Dependency.Client,
+    page_size: int = 20,
+    page_token: str | None = None,
+):
+    """List jobs with cursor-based pagination wrapping the SDK iterator."""
+    iterator = ws.jobs.list()
+
+    # If resuming from a cursor, skip past it
+    if page_token:
+        for job in iterator:
+            if str(job.job_id) == page_token:
+                break
+
+    items = list(islice(iterator, page_size))
+    next_token = str(items[-1].job_id) if len(items) == page_size else None
+    return PaginatedResponse(items=items, next_page_token=next_token)
+```
+
+### Key Rules
+
+- **Always use SDK methods** (`ws.jobs.list()`, `ws.clusters.list()`) — never call the REST API directly via `requests`, `httpx`, or `ws.api_client.do()`.
+- SDK listing methods return **iterators** that auto-paginate. You do not need to pass `page_token` to the SDK — only to your own FastAPI endpoint.
+- Use `itertools.islice` to take a page of results from the SDK iterator.
+- The `page_token` is an opaque cursor the frontend passes back. Use an item's unique ID (e.g. `job_id`).
+- **SDK dataclasses are Pydantic-compatible** — use them directly in `response_model` (e.g. `PaginatedResponse[BaseJob]`) or compose them into custom models:
+  ```python
+  class MyResponse(BaseModel):
+      payload: BaseJob
+  ```
+- Use the `docs` MCP tool to look up the exact SDK method signature before writing code.
+
 ## Dependencies and Dependency Injection
 
 The `Dependency` class in `src/<app>/backend/core.py` provides typed FastAPI dependencies. **Always use these instead of manually creating clients or accessing `request.app.state`.**
 
-| Dependency | Type | Description |
-|---|---|---|
-| `Dependency.Client` | `WorkspaceClient` | Databricks client using app-level service principal credentials |
+| Dependency              | Type              | Description                                                                        |
+| ----------------------- | ----------------- | ---------------------------------------------------------------------------------- |
+| `Dependency.Client`     | `WorkspaceClient` | Databricks client using app-level service principal credentials                    |
 | `Dependency.UserClient` | `WorkspaceClient` | Databricks client authenticated on behalf of the current user (requires OBO token) |
-| `Dependency.Config` | `AppConfig` | Application configuration loaded from environment variables |
-| `Dependency.Session` | `Session` | SQLModel database session, scoped to request (stateful apps only) |
+| `Dependency.Config`     | `AppConfig`       | Application configuration loaded from environment variables                        |
+| `Dependency.Session`    | `Session`         | SQLModel database session, scoped to request (stateful apps only)                  |
 
 ### Usage in Route Handlers
 

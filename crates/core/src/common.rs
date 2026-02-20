@@ -293,6 +293,29 @@ pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, Str
     })
 }
 
+/// Read Python project dependencies from pyproject.toml `[project].dependencies` array.
+/// Returns an empty vec if the section is missing or unparseable.
+pub fn read_python_dependencies(project_root: &Path) -> Vec<String> {
+    let pyproject_path = project_root.join(PYPROJECT_FILENAME);
+    let Ok(contents) = fs::read_to_string(&pyproject_path) else {
+        return Vec::new();
+    };
+    let Ok(pyproject_value) = contents.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+
+    pyproject_value
+        .get("project")
+        .and_then(|p| p.get("dependencies"))
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn write_metadata_file(project_root: &Path, metadata: &ProjectMetadata) -> Result<(), String> {
     let target_path = project_root.join(&metadata.metadata_path);
     tracing::debug!("Writing metadata file to {}", target_path.display());
@@ -801,5 +824,54 @@ impl Timer {
             elapsed.as_secs_f64()
         );
         ms
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_python_dependencies_basic() {
+        let tmp = std::env::temp_dir().join("apx_test_deps_basic");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(
+            tmp.join("pyproject.toml"),
+            r#"
+[project]
+name = "test"
+dependencies = [
+    "fastapi>=0.119.0",
+    "databricks-sdk>=0.74.0",
+]
+"#,
+        )
+        .unwrap();
+        let deps = read_python_dependencies(&tmp);
+        assert_eq!(deps, vec!["fastapi>=0.119.0", "databricks-sdk>=0.74.0"]);
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn read_python_dependencies_missing_section() {
+        let tmp = std::env::temp_dir().join("apx_test_deps_missing");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("pyproject.toml"), "[project]\nname = \"test\"\n").unwrap();
+        let deps = read_python_dependencies(&tmp);
+        assert!(deps.is_empty());
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn read_python_dependencies_no_pyproject() {
+        let tmp = std::env::temp_dir().join("apx_test_deps_nofile");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let deps = read_python_dependencies(&tmp);
+        assert!(deps.is_empty());
+        fs::remove_dir_all(&tmp).unwrap();
     }
 }

@@ -163,6 +163,14 @@ async def custom_lifespan(app: FastAPI):
 app = create_app(routers=[router], lifespan=custom_lifespan)
 ```
 
+### Databricks SDK
+
+- **SDK first:** Always use `databricks-sdk` (`WorkspaceClient`) methods — never raw REST calls via `requests`, `httpx`, or `ws.api_client.do()`.
+- SDK listing methods (e.g. `ws.jobs.list()`, `ws.clusters.list()`) return **lazy iterators** that auto-paginate internally.
+- **SDK dataclasses are Pydantic-compatible** — use them directly in `response_model` or compose into custom models.
+- Call the `docs` MCP tool to verify exact method signatures before writing SDK code.
+- For paginated list endpoints, see [Backend Patterns](backend-patterns.md) — SDK Listing with Pagination section.
+
 ## 🔗 Resources
 
 - OpenAPI client: `src/{{app_name}}/ui/lib/api/` (auto-generated)
