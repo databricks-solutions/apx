@@ -13,10 +13,12 @@ Steps:
     2. rm -rf <folder>
     3. uvx --from <wheel> apx init <folder> -p <profile> [extra-args...]
     4. Patch pyproject.toml to use the local wheel from dist/
-    5. uv sync
-    6. uv run apx dev check
+    5. Patch .mcp.json to use `uv run apx` instead of bare `apx`
+    6. uv sync
+    7. uv run apx dev check
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -116,6 +118,28 @@ def patch_pyproject(pyproject_path: Path, wheel_path: Path) -> None:
     print(f"  Patched {pyproject_path} -> {YELLOW}{wheel_path.name}{RESET}")
 
 
+def patch_mcp_json(folder: Path) -> None:
+    """Rewrite .mcp.json so MCP servers use `uv run apx` instead of bare `apx`."""
+    mcp_path = folder / ".mcp.json"
+    if not mcp_path.exists():
+        print(f"  {DIM}No .mcp.json found, skipping{RESET}")
+        return
+
+    data = json.loads(mcp_path.read_text())
+    changed = False
+    for name, server in data.get("mcpServers", {}).items():
+        if server.get("command") == "apx":
+            server["command"] = "uv"
+            server["args"] = ["run", "apx"] + server.get("args", [])
+            changed = True
+
+    if changed:
+        mcp_path.write_text(json.dumps(data, indent=2) + "\n")
+        print(f"  Patched {mcp_path} -> {YELLOW}uv run apx{RESET}")
+    else:
+        print(f"  {DIM}No apx commands to patch{RESET}")
+
+
 def main() -> None:
     if len(sys.argv) < 3:
         print(
@@ -130,7 +154,7 @@ def main() -> None:
 
     project_root = Path(__file__).resolve().parent.parent.parent
     dist_dir = project_root / "dist"
-    total = 6
+    total = 7
 
     print(
         f"{BOLD}apx gen{RESET} — folder={YELLOW}{folder}{RESET} profile={YELLOW}{profile}{RESET}",
@@ -177,10 +201,13 @@ def main() -> None:
         with stage("Patching pyproject.toml", 4, total):
             patch_pyproject(folder / "pyproject.toml", wheel)
 
-        with stage("Syncing dependencies", 5, total):
+        with stage("Patching .mcp.json", 5, total):
+            patch_mcp_json(folder)
+
+        with stage("Syncing dependencies", 6, total):
             run(["uv", "sync", "--reinstall-package", "apx"], cwd=folder)
 
-        with stage("Running dev check", 6, total):
+        with stage("Running dev check", 7, total):
             run(
                 ["uv", "run", "apx", "dev", "check"],
                 cwd=folder,
