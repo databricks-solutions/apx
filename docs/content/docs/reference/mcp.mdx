@@ -11,10 +11,12 @@ The MCP server provides tools for:
 
 - **Development Server Management** - Start, stop, restart, and monitor dev servers
 - **Code Quality** - Check project code for errors
-- **Component Management** - Search and add UI components
+- **Component Management** - Search and add UI components (with scoring boost for project-configured registries)
 - **SDK Documentation** - Search Databricks SDK documentation
 - **API Routes** - Get route information and code examples
 - **Deployment Logs** - Fetch logs from deployed Databricks Apps
+- **Feedback** - Submit feedback as GitHub issues
+- **Project Context** - Rich project metadata including routes, dependencies, backend files, and configured registries
 
 ## Starting the MCP Server
 
@@ -148,11 +150,11 @@ Choose your AI assistant to see the configuration:
 
 ### Component Tools
 
-| Tool                         | Description                                             |
-| ---------------------------- | ------------------------------------------------------- |
-| `search_registry_components` | Search shadcn registry components using semantic search |
-| `list_registry_components`   | List all available components in a registry             |
-| `add_component`              | Add a component to the project                          |
+| Tool                         | Description                                                                                                     |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `search_registry_components` | Semantic search across all registries. Results from project-configured registries are boosted in scoring.        |
+| `list_registry_components`   | List all available components in a registry. Pass `registry` param (e.g. `@ai-elements`) for custom registries. |
+| `add_component`              | Add a component to the project. Accepts `component-name` or `@registry-name/component-name`.                   |
 
 ### Project Tools
 
@@ -172,6 +174,13 @@ Choose your AI assistant to see the configuration:
 | Tool                   | Description                                    |
 | ---------------------- | ---------------------------------------------- |
 | `databricks_apps_logs` | Fetch Databricks Apps logs from a deployed app |
+
+### Feedback Tools
+
+| Tool               | Description                                                                           |
+| ------------------ | ------------------------------------------------------------------------------------- |
+| `feedback_prepare` | Prepare a feedback issue for review. Returns formatted title, body, and browser URL.  |
+| `feedback_submit`  | Submit a prepared feedback issue as a public GitHub issue (requires `gh` CLI).        |
 
 ---
 
@@ -219,14 +228,16 @@ Regenerate the OpenAPI schema and TypeScript API client from your Python models.
 
 ### search_registry_components
 
-Search for UI components using semantic search across configured registries.
+Search for UI components using semantic search across all cached registries.
+
+Components from registries configured in `[tool.apx.ui.registries]` (pyproject.toml) receive a scoring boost, improving discoverability of project-relevant components.
 
 **Parameters:**
 
-- `query`: Search query (e.g., "button", "data table", "chart")
+- `query`: Search query (e.g., "button", "data table", "chat message")
 - `limit` (optional): Maximum results (default: `10`)
 
-**Returns:** List of matching components with registry and relevance score
+**Returns:** List of matching components with registry, relevance score, and the project's configured registries
 
 ### list_registry_components
 
@@ -302,13 +313,39 @@ Fetch logs from a deployed Databricks App.
 
 ---
 
+### feedback_prepare
+
+Prepare a feedback issue for review before submission.
+
+**Parameters:**
+
+- `title`: Issue title
+- `body`: Issue description (markdown)
+- `labels` (optional): Issue labels
+
+**Returns:** Formatted title, body, and browser URL for review
+
+### feedback_submit
+
+Submit a previously prepared feedback issue as a public GitHub issue.
+
+**Parameters:**
+
+- `title`: Issue title (from `feedback_prepare`)
+- `body`: Issue body (from `feedback_prepare`)
+
+**Returns:** GitHub issue URL or browser fallback URL
+
+---
+
 ## Resources
 
-The MCP server also exposes resources that provide project information:
+The MCP server exposes resources that provide project context:
 
-| Resource     | Description                                         |
-| ------------ | --------------------------------------------------- |
-| `apx://info` | Information about the apx toolkit and project stack |
+| Resource                        | Description                                                                                     |
+| ------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `apx://info`                    | Information about the apx toolkit, patterns, and workflow                                       |
+| `apx://project/{app_path}`      | Project context: routes, components, Python dependencies, backend files, SDK version, registries |
 
 ---
 
@@ -333,6 +370,8 @@ The AI assistant will:
 ### Best Practices
 
 1. **Let the AI manage servers** - AI assistants can start/stop servers as needed
-2. **Use component search** - Find the right components with semantic search
-3. **Leverage SDK docs** - Search for Databricks APIs when building integrations
-4. **Check code regularly** - Use the `check` tool to catch errors early
+2. **Check configured registries first** - Components from project-configured registries (in `pyproject.toml`) are boosted in search results. Use `list_registry_components` to browse specific registries before building custom components.
+3. **Leverage SDK docs** - Always use the `docs` tool to verify Databricks SDK method signatures before writing `ws.*` calls
+4. **Use SDK methods, not raw HTTP** - Prefer `ws.jobs.list()` over `ws.api_client.do()`. SDK methods handle pagination, retries, and type safety.
+5. **Check code regularly** - Use the `check` tool to catch errors early
+6. **Use `get_route_info` for frontend** - Get ready-to-use Suspense + ErrorBoundary scaffolding for any API route
