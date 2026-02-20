@@ -105,11 +105,15 @@ def patch_pyproject(pyproject_path: Path, wheel_path: Path) -> None:
     # Replace apx dependency in [dependency-groups].dev with local wheel path
     dev_deps = doc.get("dependency-groups", {}).get("dev", [])
     new_deps = []
+    found_apx = False
     for dep in dev_deps:
         if isinstance(dep, str) and dep.startswith("apx"):
             new_deps.append(f"apx @ {wheel_path.as_uri()}")
+            found_apx = True
         else:
             new_deps.append(dep)
+    if not found_apx:
+        new_deps.append(f"apx @ {wheel_path.as_uri()}")
 
     dep_groups = doc.get("dependency-groups", {})
     dep_groups["dev"] = new_deps

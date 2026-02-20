@@ -1,7 +1,7 @@
 use clap::Args;
 use console::style;
 use dialoguer::theme::{ColorfulTheme, Theme};
-use dialoguer::{Confirm, Input, MultiSelect};
+use dialoguer::{Confirm, Input, MultiSelect, Select};
 use rand::seq::SliceRandom;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -314,21 +314,29 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     if args.profile.is_none() {
         let available_profiles = list_profiles()?;
         if !available_profiles.is_empty() {
-            println!(
-                "Available Databricks profiles: {}",
-                available_profiles.join(", ")
-            );
-            let profile_input = Input::<String>::new()
-                .with_prompt(
-                    "Which Databricks profile would you like to use? (leave empty to skip)",
-                )
-                .allow_empty(true)
-                .interact_text()
+            let mut items: Vec<String> = available_profiles.clone();
+            items.push("Enter manually".into());
+            items.push("Skip".into());
+
+            let selection = Select::with_theme(&ColorfulTheme::default())
+                .with_prompt("Which Databricks profile would you like to use?")
+                .items(&items)
+                .default(0)
+                .interact()
                 .map_err(|err| format!("Failed to read profile: {err}"))?;
-            if profile_input.trim().is_empty() {
+
+            if selection == items.len() - 1 {
+                // "Skip"
                 args.profile = None;
+            } else if selection == items.len() - 2 {
+                // "Enter manually"
+                let profile = Input::<String>::new()
+                    .with_prompt("Enter profile name")
+                    .interact_text()
+                    .map_err(|err| format!("Failed to read profile: {err}"))?;
+                args.profile = Some(profile);
             } else {
-                args.profile = Some(profile_input);
+                args.profile = Some(available_profiles[selection].clone());
             }
         } else {
             println!("No Databricks profiles found in ~/.databrickscfg");
@@ -380,11 +388,6 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
             fs::write(build_dir.join(".gitignore"), "*\n")
                 .map_err(|err| format!("Failed to write .build .gitignore: {err}"))?;
 
-            if let Some(profile) = args.profile.as_deref() {
-                let mut dotenv = DotenvFile::read(&app_path.join(".env"))?;
-                dotenv.update("DATABRICKS_CONFIG_PROFILE", profile)?;
-            }
-
             // Apply all selected addon files
             for addon_name in &selected_addons {
                 let prefix = format!("addons/{}/", addon_name);
@@ -402,6 +405,12 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
                 if addon_name == "ui" {
                     merge_ui_pyproject_config(&app_path, &app_slug)?;
                 }
+            }
+
+            // Set profile AFTER addon templates, since addons may overwrite .env
+            if let Some(profile) = args.profile.as_deref() {
+                let mut dotenv = DotenvFile::read(&app_path.join(".env"))?;
+                dotenv.update("DATABRICKS_CONFIG_PROFILE", profile)?;
             }
 
             Ok(())
