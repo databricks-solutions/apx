@@ -1249,32 +1249,11 @@ impl ProcessManager {
     }
 
     /// Check if a service is healthy by making an HTTP GET request to its root path.
-    /// Returns true if the service responds with any HTTP status code (even 5xx).
+    /// Any HTTP response (regardless of status code) means the server is up and healthy.
     /// Only connection failures indicate the server isn't ready yet.
     async fn http_health_probe(host: &str, port: u16) -> bool {
         let url = format!("http://{host}:{port}/");
-        match HEALTH_CLIENT.get(&url).send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                if !status.is_success() {
-                    let body = resp.text().await.unwrap_or_default();
-                    let body_preview = if body.len() > 500 {
-                        &body[..500]
-                    } else {
-                        &body
-                    };
-                    debug!(
-                        %url, %status, body = %body_preview,
-                        "Health probe got non-success response (server is up but returned error)."
-                    );
-                }
-                true
-            }
-            Err(err) => {
-                debug!(%url, error = %err, "Health probe connection failed.");
-                false
-            }
-        }
+        HEALTH_CLIENT.get(&url).send().await.is_ok()
     }
 
     fn generate_dev_token() -> String {

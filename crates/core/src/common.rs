@@ -361,7 +361,17 @@ pub fn write_metadata_file(project_root: &Path, metadata: &ProjectMetadata) -> R
             .map_err(|err| format!("Failed to write __dist__ .gitignore: {err}"))?;
     }
 
-    tracing::debug!("Dist directory and .gitignore created successfully");
+    // Create a placeholder index.html so static file mounting works even before a real build
+    let index_path = dist_dir.join("index.html");
+    if !index_path.exists() {
+        fs::write(
+            &index_path,
+            "<!doctype html><html><body><p>Run <code>apx build</code> to generate the frontend.</p></body></html>\n",
+        )
+        .map_err(|err| format!("Failed to write __dist__ index.html: {err}"))?;
+    }
+
+    tracing::debug!("Dist directory initialized successfully");
 
     Ok(())
 }

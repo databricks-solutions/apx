@@ -47,7 +47,7 @@ def add_not_found_handler(app: FastAPI) -> None:
     """Register a handler that serves the SPA index.html for non-API 404s."""
 
     async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-        logger.info(
+        logger.debug(
             f"HTTP exception handler called for request {request.url.path} with status code {exc.status_code}"
         )
         if exc.status_code == 404:
