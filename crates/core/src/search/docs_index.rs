@@ -366,10 +366,21 @@ impl SDKDocsIndex {
                     return Ok(Vec::new());
                 }
 
-                tracing::debug!("search: Executing FTS5 query for '{}'", query);
+                // Enhance query: if it contains a PascalCase term, boost entity column
+                let sanitized = enhance_fts5_query(&sanitized);
 
+                tracing::debug!(
+                    "search: Executing FTS5 query '{}' (original: '{}')",
+                    sanitized,
+                    query
+                );
+
+                // bm25() weights: entity(5.0), text(1.0), operation(1.0),
+                // symbols(3.0), service(1.0), chunk_index(0.0)
+                // Column order in FTS5 table: text, service, entity, operation, symbols
                 let rows = sqlx::query(&format!(
-                    "SELECT text, source_file, rank FROM \"{table_name}\" \
+                    "SELECT text, source_file, bm25(\"{table_name}\", 1.0, 1.0, 5.0, 1.0, 3.0) AS rank \
+                     FROM \"{table_name}\" \
                      WHERE \"{table_name}\" MATCH ?1 \
                      ORDER BY rank \
                      LIMIT ?2"
@@ -399,6 +410,59 @@ impl SDKDocsIndex {
             }
         }
     }
+}
+
+/// Enhance an FTS5 query to boost entity/class matches.
+///
+/// - If query contains a PascalCase token (e.g. `GenieAttachment`), adds
+///   `{entity}:token` to boost entity column matches.
+/// - Strips hint words like "fields" or "attributes" and uses them to
+///   filter toward dataclass documentation.
+fn enhance_fts5_query(sanitized: &str) -> String {
+    let hint_words: &[&str] = &["fields", "attributes", "members", "properties"];
+
+    let tokens: Vec<&str> = sanitized.split_whitespace().collect();
+    if tokens.is_empty() {
+        return sanitized.to_string();
+    }
+
+    let mut entity_terms = Vec::new();
+    let mut regular_terms = Vec::new();
+
+    for token in &tokens {
+        let clean = token.trim_matches('"');
+        if hint_words.contains(&clean.to_lowercase().as_str()) {
+            // Don't add hint words to the query — they just guide boosting
+            continue;
+        }
+        if is_pascal_case(clean) {
+            // Add both as regular term and as entity-boosted term
+            entity_terms.push(format!("entity:{token}"));
+            regular_terms.push(token.to_string());
+        } else {
+            regular_terms.push(token.to_string());
+        }
+    }
+
+    if entity_terms.is_empty() {
+        return regular_terms.join(" OR ");
+    }
+
+    // Combine: entity-boosted terms + regular terms
+    let mut parts = entity_terms;
+    parts.extend(regular_terms);
+    parts.join(" OR ")
+}
+
+/// Check if a string looks like PascalCase (starts with uppercase, contains lowercase).
+fn is_pascal_case(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_uppercase() => {}
+        _ => return false,
+    }
+    // Must contain at least one lowercase letter (to distinguish from ALL_CAPS)
+    s.chars().any(|c| c.is_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -506,5 +570,38 @@ mod tests {
         assert_eq!(results.len(), 1);
         let text: String = results[0].get("text");
         assert!(text.contains("clusters"));
+    }
+
+    #[test]
+    fn test_is_pascal_case() {
+        assert!(is_pascal_case("GenieAttachment"));
+        assert!(is_pascal_case("ClustersAPI"));
+        assert!(is_pascal_case("Abc"));
+        assert!(!is_pascal_case("abc"));
+        assert!(!is_pascal_case("ABC")); // ALL_CAPS, not PascalCase
+        assert!(!is_pascal_case("create"));
+        assert!(!is_pascal_case("123"));
+    }
+
+    #[test]
+    fn test_enhance_fts5_query_pascal_case() {
+        let result = enhance_fts5_query("\"GenieAttachment\"");
+        assert!(result.contains("entity:\"GenieAttachment\""));
+        assert!(result.contains("\"GenieAttachment\""));
+    }
+
+    #[test]
+    fn test_enhance_fts5_query_with_fields_hint() {
+        let result = enhance_fts5_query("\"GenieAttachment\" \"fields\"");
+        assert!(result.contains("entity:\"GenieAttachment\""));
+        // "fields" is a hint word and should be stripped
+        assert!(!result.contains("\"fields\""));
+    }
+
+    #[test]
+    fn test_enhance_fts5_query_plain() {
+        let result = enhance_fts5_query("\"create\" \"clusters\"");
+        // No PascalCase terms, should just join with OR
+        assert_eq!(result, "\"create\" OR \"clusters\"");
     }
 }

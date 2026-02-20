@@ -17,7 +17,8 @@ Full-stack Databricks App built with apx (React + Vite frontend, FastAPI backend
 - **Python:** Always use `uv` (never `pip`)
 
 ## Component Management
-- **Finding components:** Use MCP `search_registry_components` to search for available shadcn/ui components
+- **Check configured registries first:** Before building custom components, check `[tool.apx.ui.registries]` in `pyproject.toml` for domain-specific registries (e.g. `@ai-elements` for chat/AI, `@animate-ui` for animations). Use `list_registry_components` with the registry name to browse available components.
+- **Finding components:** Use MCP `search_registry_components` to search across all configured registries. Results from project-configured registries are boosted.
 - **Adding components:** Use MCP `add_component` or CLI `apx components add <component> --yes` to add components
 - **Component location:** If component was added to a wrong location (e.g. stored into `src/components` instead of `src/{{app_name}}/ui/components`), move it to the proper folder
 - **Component organization:** Prefer grouping components by functionality rather than by file type (e.g. `src/{{app_name}}/ui/components/chat/`)
@@ -60,7 +61,9 @@ This project is configured with the **apx MCP server** (see `.mcp.json`). Always
 | `check` | Check project code for errors (runs tsc and ty checks in parallel) |
 | `refresh_openapi` | Regenerate OpenAPI schema and API client |
 | `search_registry_components` | Search shadcn registry components using semantic search |
+| `list_registry_components` | List all available components in a specific registry |
 | `add_component` | Add a component to the project |
+| `routes` | List all API routes with parameters, schemas, and generated hook names |
 | `docs` | Search Databricks SDK documentation for code examples and API references |
 | `databricks_apps_logs` | Fetch logs from deployed Databricks app using Databricks CLI |
 | `get_route_info` | Get code example for using a specific API route |

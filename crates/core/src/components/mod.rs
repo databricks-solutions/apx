@@ -26,6 +26,121 @@ use url::Url;
 use crate::components::css_updater::{CssMutation, CssUpdater};
 use crate::components::models::TailwindConfig;
 
+/// Scan planned component files for 3rd-party npm imports that may not be listed
+/// in the registry spec's `dependencies` array.
+///
+/// Returns a deduplicated, sorted list of bare package names (e.g. `"ai"`, `"streamdown"`).
+///
+/// Filters out:
+/// - Relative imports (`./`, `../`)
+/// - Alias/path imports (`@/`)
+/// - Common always-present packages (`react`, `react-dom`, `next`)
+pub fn detect_external_imports(files: &[PlannedFile]) -> Vec<String> {
+    let always_present: HashSet<&str> = ["react", "react-dom", "next"].into_iter().collect();
+
+    let mut packages: BTreeSet<String> = BTreeSet::new();
+
+    for file in files {
+        // Only scan .ts/.tsx/.js/.jsx files
+        let ext = file
+            .relative_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        if !matches!(ext, "ts" | "tsx" | "js" | "jsx") {
+            continue;
+        }
+
+        for specifier in extract_import_specifiers(&file.content) {
+            // Skip relative imports
+            if specifier.starts_with('.') {
+                continue;
+            }
+
+            // Skip project alias imports (@/ is a path alias, not an npm scope)
+            if specifier.starts_with("@/") {
+                continue;
+            }
+
+            // Extract bare package name:
+            // - "ai" → "ai"
+            // - "streamdown/react" → "streamdown"
+            // - "@scope/pkg" → "@scope/pkg"
+            // - "@scope/pkg/sub" → "@scope/pkg"
+            let package_name = if specifier.starts_with('@') {
+                // Scoped package: @scope/name or @scope/name/subpath
+                let parts: Vec<&str> = specifier.splitn(3, '/').collect();
+                if parts.len() >= 2 {
+                    format!("{}/{}", parts[0], parts[1])
+                } else {
+                    continue; // malformed
+                }
+            } else {
+                // Unscoped: name or name/subpath
+                specifier
+                    .split('/')
+                    .next()
+                    .unwrap_or(&specifier)
+                    .to_string()
+            };
+
+            if always_present.contains(package_name.as_str()) {
+                continue;
+            }
+
+            packages.insert(package_name);
+        }
+    }
+
+    packages.into_iter().collect()
+}
+
+/// Extract import specifiers from TypeScript/JavaScript content.
+///
+/// Finds patterns like:
+/// - `from "module"`  / `from 'module'`
+/// - `import "module"` / `import 'module'` (side-effect imports)
+fn extract_import_specifiers(content: &str) -> Vec<String> {
+    let mut specifiers = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Look for `from "..."` or `from '...'` patterns
+        if let Some(pos) = trimmed.find("from ") {
+            let after_from = &trimmed[pos + 5..].trim_start();
+            if let Some(spec) = extract_quoted_string(after_from) {
+                specifiers.push(spec);
+                continue;
+            }
+        }
+
+        // Look for side-effect imports: `import "..."` or `import '...'`
+        if let Some(after_import_kw) = trimmed.strip_prefix("import ") {
+            let after_import = after_import_kw.trim_start();
+            // Only match if the next thing is a quote (side-effect import)
+            if (after_import.starts_with('"') || after_import.starts_with('\''))
+                && let Some(spec) = extract_quoted_string(after_import)
+            {
+                specifiers.push(spec);
+            }
+        }
+    }
+
+    specifiers
+}
+
+/// Extract a quoted string value from text starting with a quote character.
+fn extract_quoted_string(s: &str) -> Option<String> {
+    let quote = s.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let rest = &s[1..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
 /// Default shadcn/ui registry item template.
 ///
 /// IMPORTANT: /r/{name}.json is 404.
@@ -1287,6 +1402,69 @@ mod tests {
             map.get("@/hooks/use-is-in-view"),
             Some(&"@/hooks/hooks-use-is-in-view".to_string())
         );
+    }
+
+    #[test]
+    fn test_detect_external_imports() {
+        let files = vec![PlannedFile {
+            relative_path: PathBuf::from("ui/message.tsx"),
+            absolute_path: PathBuf::from("/tmp/test/src/components/ui/message.tsx"),
+            content: r#"
+import { useState } from "react";
+import { streamText } from "ai";
+import { Markdown } from "streamdown/react";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { localHelper } from "./helper";
+import { otherHelper } from "../shared/utils";
+import "highlight.js/styles/github.css";
+import { SomeScoped } from "@radix-ui/react-dialog";
+"#
+            .to_string(),
+            source_component: "message".to_string(),
+        }];
+
+        let result = detect_external_imports(&files);
+
+        assert!(result.contains(&"ai".to_string()));
+        assert!(result.contains(&"streamdown".to_string()));
+        assert!(result.contains(&"highlight.js".to_string()));
+        assert!(result.contains(&"@radix-ui/react-dialog".to_string()));
+        // Should NOT contain:
+        assert!(!result.contains(&"react".to_string()));
+        assert!(!result.iter().any(|s| s.starts_with("@/")));
+        assert!(!result.iter().any(|s| s.starts_with('.')));
+    }
+
+    #[test]
+    fn test_detect_external_imports_skips_non_ts_files() {
+        let files = vec![PlannedFile {
+            relative_path: PathBuf::from("readme.md"),
+            absolute_path: PathBuf::from("/tmp/test/readme.md"),
+            content: r#"import { foo } from "some-package""#.to_string(),
+            source_component: "readme".to_string(),
+        }];
+
+        let result = detect_external_imports(&files);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extract_import_specifiers() {
+        let content = r#"
+import { useState } from "react";
+import { streamText } from 'ai';
+import "side-effect-pkg";
+import type { Foo } from "type-pkg";
+const x = require("not-matched");
+"#;
+        let specs = extract_import_specifiers(content);
+        assert!(specs.contains(&"react".to_string()));
+        assert!(specs.contains(&"ai".to_string()));
+        assert!(specs.contains(&"side-effect-pkg".to_string()));
+        assert!(specs.contains(&"type-pkg".to_string()));
+        // require() is not matched
+        assert!(!specs.contains(&"not-matched".to_string()));
     }
 
     #[test]

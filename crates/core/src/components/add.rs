@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::common::{BunCommand, read_project_metadata};
@@ -76,6 +76,7 @@ pub struct AddComponentsResult {
     pub written_paths: Vec<PathBuf>,
     pub unchanged_paths: Vec<PathBuf>,
     pub dependencies_installed: Vec<String>,
+    pub auto_detected_deps: Vec<String>,
     pub css_updated_path: Option<String>,
     pub warnings: Vec<String>,
 }
@@ -158,6 +159,20 @@ pub async fn add_components(
         }
     }
 
+    // Auto-detect 3rd-party imports not covered by registry specs
+    let detected_imports = super::detect_external_imports(&all_files);
+    if !detected_imports.is_empty() {
+        // Read package.json to find already-installed deps
+        let existing_deps = read_package_json_deps(app_dir);
+
+        for pkg in &detected_imports {
+            if !existing_deps.contains(pkg) && !all_deps.contains(pkg) {
+                all_deps.insert(pkg.clone());
+                result.auto_detected_deps.push(pkg.clone());
+            }
+        }
+    }
+
     // Install all dependencies at once
     if !all_deps.is_empty() {
         let deps: Vec<String> = all_deps.iter().cloned().collect();
@@ -185,6 +200,32 @@ pub async fn add_components(
     let _ = sync_registry_indexes(app_dir, false).await;
 
     Ok(result)
+}
+
+/// Read `dependencies` and `devDependencies` from package.json, returning all package names.
+fn read_package_json_deps(app_dir: &Path) -> HashSet<String> {
+    let pkg_path = app_dir.join("package.json");
+    let mut deps = HashSet::new();
+
+    let content = match std::fs::read_to_string(&pkg_path) {
+        Ok(c) => c,
+        Err(_) => return deps,
+    };
+
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return deps,
+    };
+
+    for section in ["dependencies", "devDependencies"] {
+        if let Some(obj) = value.get(section).and_then(|v| v.as_object()) {
+            for key in obj.keys() {
+                deps.insert(key.clone());
+            }
+        }
+    }
+
+    deps
 }
 
 pub async fn bun_add(app_dir: &Path, deps: &[String]) -> Result<(), String> {

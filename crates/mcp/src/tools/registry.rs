@@ -155,12 +155,39 @@ impl ApxServer {
         };
 
         match add_components(&path, &[input], args.force).await {
-            Ok(_result) => {
+            Ok(result) => {
                 tracing::info!("Component {} added successfully", args.component_id);
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Successfully added component: {}",
-                    args.component_id
-                ))]))
+
+                #[derive(serde::Serialize)]
+                struct AddResponse {
+                    component_id: String,
+                    written_files: Vec<String>,
+                    unchanged_files: Vec<String>,
+                    dependencies_installed: Vec<String>,
+                    auto_detected_deps: Vec<String>,
+                    css_updated: Option<String>,
+                    warnings: Vec<String>,
+                }
+
+                let response = AddResponse {
+                    component_id: args.component_id,
+                    written_files: result
+                        .written_paths
+                        .iter()
+                        .map(|p| apx_core::components::utils::format_relative_path(p, &path))
+                        .collect(),
+                    unchanged_files: result
+                        .unchanged_paths
+                        .iter()
+                        .map(|p| apx_core::components::utils::format_relative_path(p, &path))
+                        .collect(),
+                    dependencies_installed: result.dependencies_installed,
+                    auto_detected_deps: result.auto_detected_deps,
+                    css_updated: result.css_updated_path,
+                    warnings: result.warnings,
+                };
+
+                Ok(CallToolResult::from_serializable(&response))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to add component: {e}"
