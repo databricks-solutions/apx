@@ -56,7 +56,7 @@ impl ApxServer {
         // If app_path is provided, detect that project's SDK version and switch if different
         if let Some(ref app_path) = args.app_path {
             let project_dir = std::path::Path::new(app_path);
-            match get_databricks_sdk_version(Some(project_dir)) {
+            match get_databricks_sdk_version(Some(project_dir)).await {
                 Ok(Some(project_version)) => {
                     if let Err(e) = index.ensure_version(&args.source, &project_version).await {
                         tracing::warn!(

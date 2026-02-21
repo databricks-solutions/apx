@@ -8,7 +8,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::api_generator::generate_openapi;
-use crate::external::{Bun, ExternalTool, Uv, run_command as run_ext_command};
+use crate::external::{Bun, Uv};
 use crate::python_logging::{DevConfig, parse_dev_config};
 
 // Re-exports for ergonomic access from other crates.
@@ -245,18 +245,8 @@ pub fn ensure_dir(path: &Path) -> Result<(), String> {
 
 pub async fn bun_install(app_dir: &Path) -> Result<(), String> {
     let bun = Bun::resolve().await?;
-    tracing::debug!(
-        bun_path = %bun.binary_path().display(),
-        app_dir = %app_dir.display(),
-        "Running bun install"
-    );
-    let mut cmd = bun.tokio_command();
-    cmd.arg("install");
-    if let Ok(cache_dir) = std::env::var("BUN_CACHE_DIR") {
-        cmd.arg("--cache-dir").arg(cache_dir);
-    }
-    cmd.current_dir(app_dir);
-    run_ext_command(cmd, "bun")
+    tracing::debug!(app_dir = %app_dir.display(), "Running bun install");
+    bun.install(app_dir)
         .await?
         .check("bun")
         .map_err(String::from)?;
@@ -272,16 +262,8 @@ pub async fn ensure_entrypoint_deps(app_dir: &Path) -> Result<(), String> {
         "Ensuring frontend dependencies"
     );
 
-    // Run bun add --dev for all dependencies (idempotent operation)
     let bun = Bun::resolve().await?;
-    tracing::debug!(bun_path = %bun.binary_path().display(), "Running bun add --dev");
-    let mut cmd = bun.tokio_command();
-    cmd.arg("add").arg("--dev");
-    for dep in ENTRYPOINT_DEV_DEPS {
-        cmd.arg(*dep);
-    }
-    cmd.current_dir(app_dir);
-    run_ext_command(cmd, "bun")
+    bun.add_dev(app_dir, ENTRYPOINT_DEV_DEPS)
         .await?
         .check("bun")
         .map_err(String::from)?;
@@ -295,12 +277,7 @@ pub async fn uv_sync(app_dir: &Path) -> Result<(), String> {
     tracing::debug!("Running uv sync in {}", app_dir.display());
 
     let uv = Uv::resolve().await?;
-    let mut cmd = uv.tokio_command();
-    cmd.arg("sync").current_dir(app_dir);
-    run_ext_command(cmd, "uv")
-        .await?
-        .check("uv")
-        .map_err(String::from)?;
+    uv.sync(app_dir).await?.check("uv").map_err(String::from)?;
 
     tracing::debug!("uv sync completed successfully");
     Ok(())
@@ -324,26 +301,22 @@ pub async fn generate_version_file(
 
     // Try running uv-dynamic-versioning (outputs version string to stdout)
     let uv = Uv::resolve().await?;
-    let mut cmd = uv.tokio_command();
-    cmd.args(["tool", "run", "uv-dynamic-versioning"])
-        .current_dir(app_dir);
-    let output = cmd.output().await;
-
-    let version = match output {
-        Ok(result) if result.status.success() => {
-            let stdout = String::from_utf8_lossy(&result.stdout);
-            let version = stdout.trim();
-            if !version.is_empty() {
-                tracing::debug!("uv-dynamic-versioning returned version: {}", version);
-                version.to_string()
+    let version = match uv.tool_run(app_dir, "uv-dynamic-versioning").await {
+        Ok(output) if output.exit_code == Some(0) => {
+            let v = output.stdout.trim().to_string();
+            if !v.is_empty() {
+                tracing::debug!("uv-dynamic-versioning returned version: {}", v);
+                v
             } else {
                 tracing::warn!("uv-dynamic-versioning returned empty output, using fallback");
                 "0.0.0".to_string()
             }
         }
-        Ok(result) => {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            tracing::warn!("uv-dynamic-versioning failed: {stderr}, using fallback version");
+        Ok(output) => {
+            tracing::warn!(
+                "uv-dynamic-versioning failed: {}, using fallback version",
+                output.stderr
+            );
             "0.0.0".to_string()
         }
         Err(err) => {

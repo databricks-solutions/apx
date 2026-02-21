@@ -2,8 +2,8 @@
 //!
 //! Provides [`CommandOutput`] / [`CommandError`] value types, the [`ExternalTool`]
 //! trait for resolved-binary tools, the [`Resolvable`] trait for tools that support
-//! automatic resolution and optional download, and [`run_command`] / [`run_command_sync`]
-//! free functions that replace the repeated `.output().await + status-check` pattern.
+//! automatic resolution and optional download, and [`run_command`]
+//! free function that replaces the repeated `.output().await + status-check` pattern.
 
 pub mod bun;
 pub mod databricks;
@@ -155,20 +155,12 @@ impl From<CommandError> for String {
 
 /// Marker trait for a resolved external binary.
 ///
-/// Provides `tokio_command()` / `std_command()` builders. Callers customise
-/// args/env/cwd then pass the command to [`run_command`].
+/// Provides identity (name, path, source) for a resolved tool. Concrete types
+/// expose `pub(crate) tokio_command()` and public domain methods instead.
 pub trait ExternalTool: std::fmt::Debug + Send + Sync {
     const NAME: &'static str;
     fn binary_path(&self) -> &Path;
     fn source(&self) -> &BinarySource;
-
-    fn tokio_command(&self) -> tokio::process::Command {
-        tokio::process::Command::new(self.binary_path())
-    }
-
-    fn std_command(&self) -> std::process::Command {
-        std::process::Command::new(self.binary_path())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -306,13 +298,35 @@ pub async fn run_command(
     Ok(CommandOutput::from_output(output))
 }
 
-/// Synchronous variant of [`run_command`] for blocking contexts.
-pub fn run_command_sync(
-    mut cmd: std::process::Command,
-    tool: &'static str,
-) -> Result<CommandOutput, CommandError> {
-    let output = cmd.output().map_err(|e| {
-        CommandError::from_io(tool, "make sure it is installed and available in PATH", e)
-    })?;
-    Ok(CommandOutput::from_output(output))
+// ---------------------------------------------------------------------------
+// ToolInfo trait — for `apx info` display
+// ---------------------------------------------------------------------------
+
+/// A single entry for `apx info` output.
+#[derive(Debug)]
+pub struct ToolInfoEntry {
+    pub emoji: &'static str,
+    pub name: &'static str,
+    pub version: Option<String>,
+    pub path: Option<String>,
+    pub source: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Trait for tools that can report their info for `apx info`.
+pub trait ToolInfo {
+    fn info() -> impl std::future::Future<Output = ToolInfoEntry> + Send;
+}
+
+/// Run `<binary> --version` and return the trimmed stdout, or `"unknown"`.
+pub(crate) async fn get_version(path: &Path) -> String {
+    tokio::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }

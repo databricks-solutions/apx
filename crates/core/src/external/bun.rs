@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 
 use tokio::sync::OnceCell;
 
-use super::{BinarySource, ExternalTool, Resolvable, ResolvedBinary, resolve_with_download};
+use super::{
+    BinarySource, CommandError, CommandOutput, ExternalTool, Resolvable, ResolvedBinary, ToolInfo,
+    ToolInfoEntry, get_version, resolve_local, resolve_with_download, run_command,
+};
 
 #[cfg(target_os = "windows")]
 const BUN_EXE: &str = "bun.exe";
@@ -47,15 +50,8 @@ impl Bun {
     }
 
     /// Create a `tokio::process::Command` for spawning bun (with patched PATH).
-    pub fn tokio_command(&self) -> tokio::process::Command {
+    pub(crate) fn tokio_command(&self) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new(&self.path);
-        cmd.env("PATH", self.patched_path());
-        cmd
-    }
-
-    /// Create a `std::process::Command` for spawning bun (with patched PATH).
-    pub fn std_command(&self) -> std::process::Command {
-        let mut cmd = std::process::Command::new(&self.path);
         cmd.env("PATH", self.patched_path());
         cmd
     }
@@ -67,9 +63,115 @@ impl Bun {
     /// bun resolves transitive dependencies relative to the script's location
     /// or its global cache, which fails to find packages installed in the
     /// project's node_modules.
-    pub fn tokio_command_with_node_path(&self, app_dir: &Path) -> tokio::process::Command {
+    pub(crate) fn tokio_command_with_node_path(&self, app_dir: &Path) -> tokio::process::Command {
         let mut cmd = self.tokio_command();
         cmd.env("NODE_PATH", app_dir.join("node_modules"));
+        cmd
+    }
+
+    // -----------------------------------------------------------------------
+    // Domain methods
+    // -----------------------------------------------------------------------
+
+    /// Run `bun install` in the given directory.
+    pub async fn install(&self, cwd: &Path) -> Result<CommandOutput, CommandError> {
+        let mut cmd = self.tokio_command();
+        cmd.arg("install");
+        if let Ok(cache_dir) = std::env::var("BUN_CACHE_DIR") {
+            cmd.arg("--cache-dir").arg(cache_dir);
+        }
+        cmd.current_dir(cwd);
+        run_command(cmd, "bun").await
+    }
+
+    /// Run `bun add <deps>` in the given directory.
+    pub async fn add(&self, cwd: &Path, deps: &[String]) -> Result<CommandOutput, CommandError> {
+        let mut cmd = self.tokio_command();
+        cmd.arg("add").args(deps).current_dir(cwd);
+        run_command(cmd, "bun").await
+    }
+
+    /// Run `bun add --dev <deps>` in the given directory.
+    pub async fn add_dev(&self, cwd: &Path, deps: &[&str]) -> Result<CommandOutput, CommandError> {
+        let mut cmd = self.tokio_command();
+        cmd.arg("add").arg("--dev").args(deps).current_dir(cwd);
+        run_command(cmd, "bun").await
+    }
+
+    /// Run `bun run <script> [args]` in the given directory.
+    pub async fn run_script(
+        &self,
+        cwd: &Path,
+        script: &str,
+        args: &[&str],
+    ) -> Result<CommandOutput, CommandError> {
+        let mut cmd = self.tokio_command();
+        cmd.arg("run").arg(script).args(args).current_dir(cwd);
+        run_command(cmd, "bun").await
+    }
+
+    /// Run `bun run <entrypoint> [args]` with `NODE_PATH` and `APX_APP_NAME`.
+    pub async fn run_entrypoint(
+        &self,
+        app_dir: &Path,
+        entrypoint: &Path,
+        args: &[String],
+        app_name: &str,
+    ) -> Result<CommandOutput, CommandError> {
+        let mut cmd = self.tokio_command_with_node_path(app_dir);
+        cmd.arg("run")
+            .arg(entrypoint)
+            .args(args)
+            .env("APX_APP_NAME", app_name)
+            .current_dir(app_dir);
+        run_command(cmd, "bun").await
+    }
+
+    /// Spawn `bun run <entrypoint> [args]` with `NODE_PATH` and `APX_APP_NAME`.
+    /// Returns the child process for the caller to manage.
+    pub fn spawn_entrypoint(
+        &self,
+        app_dir: &Path,
+        entrypoint: &Path,
+        args: &[String],
+        app_name: &str,
+    ) -> Result<tokio::process::Child, CommandError> {
+        let mut cmd = self.tokio_command_with_node_path(app_dir);
+        cmd.arg("run")
+            .arg(entrypoint)
+            .args(args)
+            .env("APX_APP_NAME", app_name)
+            .current_dir(app_dir);
+        cmd.spawn().map_err(|e| {
+            CommandError::from_io("bun", "make sure bun is installed and available in PATH", e)
+        })
+    }
+
+    /// Spawn `bun <args>` for passthrough execution.
+    /// Returns the child process for the caller to manage.
+    pub fn passthrough(&self, args: &[String]) -> Result<tokio::process::Child, CommandError> {
+        let mut cmd = self.tokio_command();
+        cmd.args(args);
+        cmd.spawn().map_err(|e| {
+            CommandError::from_io("bun", "make sure bun is installed and available in PATH", e)
+        })
+    }
+
+    /// Build a tokio command for `bun run <entrypoint>` with `NODE_PATH` and `APX_APP_NAME`.
+    /// Returns the command for the caller to configure streaming output.
+    pub fn entrypoint_command(
+        &self,
+        app_dir: &Path,
+        entrypoint: &Path,
+        args: &[String],
+        app_name: &str,
+    ) -> tokio::process::Command {
+        let mut cmd = self.tokio_command_with_node_path(app_dir);
+        cmd.arg("run")
+            .arg(entrypoint)
+            .args(args)
+            .env("APX_APP_NAME", app_name)
+            .current_dir(app_dir);
         cmd
     }
 }
@@ -113,5 +215,31 @@ impl Resolvable for Bun {
             path,
             source: BinarySource::ApxManaged,
         })
+    }
+}
+
+impl ToolInfo for Bun {
+    async fn info() -> ToolInfoEntry {
+        match resolve_local::<Self>() {
+            Ok(resolved) => {
+                let version = get_version(&resolved.path).await;
+                ToolInfoEntry {
+                    emoji: "\u{1f35e}",
+                    name: "bun",
+                    version: Some(version),
+                    path: Some(resolved.path.display().to_string()),
+                    source: Some(resolved.source.source_label().to_string()),
+                    error: None,
+                }
+            }
+            Err(e) => ToolInfoEntry {
+                emoji: "\u{1f35e}",
+                name: "bun",
+                version: None,
+                path: None,
+                source: None,
+                error: Some(e),
+            },
+        }
     }
 }

@@ -3,8 +3,8 @@ use std::time::Duration;
 use tracing::debug;
 
 use crate::dev::common::{lock_path, read_lock};
+use crate::external::run_command;
 use crate::external::uv::Uv;
-use crate::external::{ExternalTool, run_command, run_command_sync};
 use crate::resources;
 use apx_common::hosts::CLIENT_HOST;
 
@@ -156,11 +156,9 @@ print(json.dumps(app.openapi(), indent=2))
     );
 
     let uv = Uv::try_resolve()?;
-    let mut cmd = uv.tokio_command();
-    cmd.args(["run", "--no-sync", "python", "-c", &script])
-        .arg(project_root.to_string_lossy().as_ref())
-        .current_dir(project_root);
-    let spec_json = run_command(cmd, "uv")
+    let project_root_str = project_root.to_string_lossy();
+    let spec_json = uv
+        .run_python_code(project_root, &script, &[&project_root_str])
         .await?
         .into_stdout("uv")
         .map_err(|e| format!("Failed to generate OpenAPI schema: {e}"))?;
@@ -172,7 +170,9 @@ print(json.dumps(app.openapi(), indent=2))
 ///
 /// When `project_dir` is `Some`, uses `uv run --directory <dir>` to run
 /// in the project's venv context. When `None`, runs in the current context.
-pub fn get_databricks_sdk_version(project_dir: Option<&Path>) -> Result<Option<String>, String> {
+pub async fn get_databricks_sdk_version(
+    project_dir: Option<&Path>,
+) -> Result<Option<String>, String> {
     let label = project_dir
         .map(|d| d.display().to_string())
         .unwrap_or_else(|| "default".to_string());
@@ -186,7 +186,7 @@ pub fn get_databricks_sdk_version(project_dir: Option<&Path>) -> Result<Option<S
         }
     };
 
-    let mut cmd = uv.std_command();
+    let mut cmd = uv.tokio_command();
     cmd.arg("run");
     if let Some(dir) = project_dir {
         let dir_str = dir.to_str().unwrap_or(".");
@@ -199,7 +199,7 @@ pub fn get_databricks_sdk_version(project_dir: Option<&Path>) -> Result<Option<S
         "import importlib.metadata; print(importlib.metadata.version('databricks-sdk'))",
     ]);
 
-    match run_command_sync(cmd, "uv") {
+    match run_command(cmd, "uv").await {
         Ok(output) if output.exit_code == Some(0) => {
             let version = output.stdout.trim().to_string();
             if version.is_empty() {

@@ -83,13 +83,7 @@ pub async fn run_dev(app_dir: &Path) -> Result<Child, String> {
     let bun = Bun::resolve().await?;
 
     let child = bun
-        .tokio_command_with_node_path(app_dir)
-        .arg("run")
-        .arg(&entrypoint)
-        .args(&args)
-        .current_dir(app_dir)
-        .env("APX_APP_NAME", &app_name)
-        .spawn()
+        .spawn_entrypoint(app_dir, &entrypoint, &args, &app_name)
         .map_err(|err| format!("Failed to spawn frontend dev server: {err}"))?;
 
     Ok(child)

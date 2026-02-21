@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use super::{BinarySource, CommandError, CommandOutput, ExternalTool, Resolvable, ResolvedBinary};
+use super::{
+    BinarySource, CommandError, CommandOutput, ExternalTool, Resolvable, ResolvedBinary, ToolInfo,
+    ToolInfoEntry, get_version, resolve_local,
+};
 
 #[cfg(target_os = "windows")]
 const DATABRICKS_EXE: &str = "databricks.exe";
@@ -149,6 +152,32 @@ impl Resolvable for DatabricksCli {
         Self {
             path: resolved.path,
             source: resolved.source,
+        }
+    }
+}
+
+impl ToolInfo for DatabricksCli {
+    async fn info() -> ToolInfoEntry {
+        match resolve_local::<Self>() {
+            Ok(resolved) => {
+                let version = get_version(&resolved.path).await;
+                ToolInfoEntry {
+                    emoji: "\u{1f9f1}",
+                    name: "databricks",
+                    version: Some(version),
+                    path: Some(resolved.path.display().to_string()),
+                    source: Some(resolved.source.source_label().to_string()),
+                    error: None,
+                }
+            }
+            Err(e) => ToolInfoEntry {
+                emoji: "\u{1f9f1}",
+                name: "databricks",
+                version: None,
+                path: None,
+                source: None,
+                error: Some(e),
+            },
         }
     }
 }

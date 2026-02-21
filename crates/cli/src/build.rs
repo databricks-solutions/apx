@@ -10,7 +10,6 @@ use apx_core::api_generator::generate_openapi;
 use apx_core::common::{
     ensure_dir, format_elapsed_ms, run_command_streaming_with_output, run_preflight_checks, spinner,
 };
-use apx_core::external::ExternalTool;
 use apx_core::external::uv::Uv;
 
 const DEFAULT_BUILD_DIR: &str = ".build";
@@ -89,13 +88,8 @@ async fn build_wheel(app_path: &Path, build_path: &Path) -> Result<(), String> {
     let build_version = generate_build_version(&base_version);
 
     let uv = Uv::resolve().await?;
-    let mut cmd = uv.tokio_command();
-    cmd.arg("build")
-        .arg("--wheel")
-        .arg("--out-dir")
-        .arg(build_path)
-        .current_dir(app_path)
-        .env("UV_DYNAMIC_VERSIONING_BYPASS", build_version);
+    let mut cmd = uv.build_wheel_command(app_path, build_path);
+    cmd.env("UV_DYNAMIC_VERSIONING_BYPASS", build_version);
 
     let result =
         run_command_streaming_with_output(cmd, &sp, "🐍 Wheel:", "Failed to build Python wheel")
@@ -154,20 +148,10 @@ async fn get_base_version(app_path: &Path) -> String {
         Ok(uv) => uv,
         Err(_) => return DEFAULT_FALLBACK_VERSION.to_string(),
     };
-    let mut cmd = uv.tokio_command();
-    cmd.args(["run", "hatch", "version"]).current_dir(app_path);
-    let output = cmd.output().await;
-
-    if let Ok(result) = output
-        && result.status.success()
-    {
-        let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
-        if !stdout.is_empty() {
-            return stdout;
-        }
+    match uv.run_hatch_version(app_path).await {
+        Ok(version) if !version.is_empty() => version,
+        _ => DEFAULT_FALLBACK_VERSION.to_string(),
     }
-
-    DEFAULT_FALLBACK_VERSION.to_string()
 }
 
 fn generate_build_version(base_version: &str) -> String {

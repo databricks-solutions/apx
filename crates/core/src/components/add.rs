@@ -235,21 +235,11 @@ pub async fn bun_add(app_dir: &Path, deps: &[String]) -> Result<(), String> {
     }
 
     let bun = Bun::resolve().await?;
-    let output = bun
-        .tokio_command()
-        .arg("add")
-        .args(deps)
-        .current_dir(app_dir)
-        .output()
+    bun.add(app_dir, deps)
         .await
+        .map_err(|e| format!("Failed to install dependencies: {e}"))?
+        .check("bun")
         .map_err(|e| format!("Failed to install dependencies: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Failed to install dependencies. Stdout: {} Stderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
 
     Ok(())
 }

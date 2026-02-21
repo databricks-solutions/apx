@@ -11,7 +11,6 @@ use walkdir::WalkDir;
 
 use crate::common::{read_project_metadata, write_metadata_file};
 use crate::dev::common::Shutdown;
-use crate::external::ExternalTool;
 use crate::external::uv::Uv;
 use crate::interop::generate_openapi_spec;
 use crate::openapi;

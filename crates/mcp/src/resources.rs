@@ -79,7 +79,9 @@ pub async fn read_project_resource(app_path: &str) -> Result<ReadResourceResult,
     let backend_files = scan_backend_files(&path, &metadata.app_slug);
 
     // Best-effort: detect installed SDK version
-    let sdk_version = get_databricks_sdk_version(Some(&path)).unwrap_or(None);
+    let sdk_version = get_databricks_sdk_version(Some(&path))
+        .await
+        .unwrap_or(None);
 
     // Configured UI component registries
     let configured_registries = metadata

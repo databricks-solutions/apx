@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use crate::common::{OutputMode, emit, ensure_entrypoint_deps, run_preflight_checks, spinner};
-use crate::external::ExternalTool;
 use crate::external::bun::Bun;
 use crate::external::uv::UvTool;
 use crate::frontend::prepare_frontend_args;
@@ -32,22 +31,16 @@ pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
         let bun = Bun::resolve().await?;
         let app_dir_clone = app_dir.to_path_buf();
         Some(tokio::spawn(async move {
-            debug!(bun_path = %bun.binary_path().display(), "Running tsc -b --incremental.");
+            debug!("Running tsc -b --incremental.");
             let output = bun
-                .tokio_command()
-                .arg("run")
-                .arg("tsc")
-                .arg("-b")
-                .arg("--incremental")
-                .current_dir(&app_dir_clone)
-                .output()
+                .run_script(&app_dir_clone, "tsc", &["-b", "--incremental"])
                 .await
                 .map_err(|err| format!("Failed to run tsc: {err}"))?;
 
             Ok::<(bool, String, String), String>((
-                output.status.success(),
-                String::from_utf8_lossy(&output.stdout).to_string(),
-                String::from_utf8_lossy(&output.stderr).to_string(),
+                output.exit_code == Some(0),
+                output.stdout,
+                output.stderr,
             ))
         }))
     } else {
@@ -60,18 +53,14 @@ pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
     let ty_task = tokio::spawn(async move {
         debug!("Running ty check.");
         let output = ty
-            .tokio_command()
-            .arg("check")
-            .arg(".")
-            .current_dir(&app_dir_clone)
-            .output()
+            .run(&app_dir_clone, &["check", "."])
             .await
             .map_err(|err| format!("Failed to run ty check: {err}"))?;
 
         Ok::<(bool, String, String), String>((
-            output.status.success(),
-            String::from_utf8_lossy(&output.stdout).to_string(),
-            String::from_utf8_lossy(&output.stderr).to_string(),
+            output.exit_code == Some(0),
+            output.stdout,
+            output.stderr,
         ))
     });
 
@@ -177,45 +166,43 @@ async fn generate_route_tree(app_dir: &Path, mode: OutputMode) -> Result<(), Str
 
     let bun = Bun::resolve().await?;
     debug!(
-        bun_path = %bun.binary_path().display(),
         entrypoint = %entrypoint.display(),
         ?args,
         app_dir = %app_dir.display(),
         "Running route tree generation"
     );
     let output = bun
-        .tokio_command_with_node_path(app_dir)
-        .arg("run")
-        .arg(&entrypoint)
-        .args(&args)
-        .env("APX_APP_NAME", &app_name)
-        .current_dir(app_dir)
-        .output()
-        .await
-        .map_err(|err| format!("Failed to run route tree generation: {err}"))?;
+        .run_entrypoint(app_dir, &entrypoint, &args, &app_name)
+        .await;
 
-    if !output.status.success() {
-        if let Some(sp) = route_spinner {
-            sp.finish_and_clear();
+    match output {
+        Ok(out) if out.exit_code == Some(0) => {}
+        Ok(out) => {
+            if let Some(sp) = route_spinner {
+                sp.finish_and_clear();
+            }
+            let exit_code = out
+                .exit_code
+                .map_or("signal".into(), |c: i32| c.to_string());
+            return Err(format!(
+                "Route tree generation failed (exit {exit_code}):\n\
+                 entrypoint: {entrypoint}\n\
+                 args: {args:?}\n\
+                 app_dir: {app_dir}\n\
+                 stdout:\n{stdout}\n\
+                 stderr:\n{stderr}",
+                entrypoint = entrypoint.display(),
+                app_dir = app_dir.display(),
+                stdout = out.stdout,
+                stderr = out.stderr,
+            ));
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let exit_code = output
-            .status
-            .code()
-            .map_or("signal".into(), |c| c.to_string());
-        return Err(format!(
-            "Route tree generation failed (exit {exit_code}):\n\
-             bun: {bun_path}\n\
-             entrypoint: {entrypoint}\n\
-             args: {args:?}\n\
-             app_dir: {app_dir}\n\
-             stdout:\n{stdout}\n\
-             stderr:\n{stderr}",
-            bun_path = bun.binary_path().display(),
-            entrypoint = entrypoint.display(),
-            app_dir = app_dir.display(),
-        ));
+        Err(err) => {
+            if let Some(sp) = route_spinner {
+                sp.finish_and_clear();
+            }
+            return Err(format!("Failed to run route tree generation: {err}"));
+        }
     }
 
     if let Some(sp) = route_spinner {

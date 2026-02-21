@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use super::{CommandError, run_command};
+use super::{CommandError, ToolInfo, ToolInfoEntry, get_version, run_command};
 
 /// A resolved `gh` (GitHub CLI) binary.
 #[derive(Debug, Clone)]
@@ -37,5 +37,33 @@ impl Gh {
         }
         let output = run_command(cmd, "gh").await?.check("gh")?;
         Ok(output.stdout.trim().to_string())
+    }
+}
+
+impl ToolInfo for Gh {
+    async fn info() -> ToolInfoEntry {
+        match which::which("gh") {
+            Ok(path) => {
+                let version = get_version(&path).await;
+                ToolInfoEntry {
+                    emoji: "\u{1f419}",
+                    name: "gh",
+                    version: Some(version),
+                    path: Some(path.display().to_string()),
+                    source: None,
+                    error: None,
+                }
+            }
+            Err(_) => ToolInfoEntry {
+                emoji: "\u{1f419}",
+                name: "gh",
+                version: None,
+                path: None,
+                source: None,
+                error: Some(
+                    "gh not found — install GitHub CLI: https://cli.github.com".to_string(),
+                ),
+            },
+        }
     }
 }

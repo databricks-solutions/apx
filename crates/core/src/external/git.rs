@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{CommandError, CommandOutput, run_command};
+use super::{CommandError, CommandOutput, ToolInfo, ToolInfoEntry, get_version, run_command};
 
 /// A resolved `git` binary.
 #[derive(Debug, Clone)]
@@ -58,5 +58,33 @@ impl Git {
             .current_dir(dir);
         let output = run_command(cmd, "git").await?;
         Ok(output.exit_code == Some(0) && output.stdout.trim() == "true")
+    }
+}
+
+impl ToolInfo for Git {
+    async fn info() -> ToolInfoEntry {
+        match which::which("git") {
+            Ok(path) => {
+                let version = get_version(&path).await;
+                ToolInfoEntry {
+                    emoji: "\u{1f500}",
+                    name: "git",
+                    version: Some(version),
+                    path: Some(path.display().to_string()),
+                    source: None,
+                    error: None,
+                }
+            }
+            Err(_) => ToolInfoEntry {
+                emoji: "\u{1f500}",
+                name: "git",
+                version: None,
+                path: None,
+                source: None,
+                error: Some(
+                    "git not found — install git and make sure it is available in PATH".to_string(),
+                ),
+            },
+        }
     }
 }
