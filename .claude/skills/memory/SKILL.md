@@ -25,7 +25,7 @@ Saves a memo of the current conversation to a memory file.
 
 2. **Generate a memory ID** based on the topic (lowercase, hyphens, e.g., `auth-flow-decision`, `api-refactor-plan`)
 
-3. **Create the memory file** at `.cursor/skills/memory/memories/<memory-id>.md`
+3. **Create the memory file** at `.claude/skills/memory/memories/<memory-id>.md`
 
 4. **Confirm** the memory was saved with the file path
 

@@ -60,6 +60,10 @@ pub async fn start_dev_server(
     mode: OutputMode,
 ) -> Result<u16, String> {
     if let Some(port) = resolve_existing_server(app_dir, mode).await? {
+        emit(
+            mode,
+            &format!("Dev server is already running at http://{BROWSER_HOST}:{port}\n"),
+        );
         return Ok(port);
     }
     spawn_server(app_dir, None, false, 60, skip_healthcheck, mode).await

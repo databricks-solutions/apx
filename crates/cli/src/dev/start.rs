@@ -5,7 +5,7 @@ use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
 use apx_core::common::OutputMode;
 use apx_core::ops::dev::stop_dev_server;
-use apx_core::ops::dev::{spawn_server, start_dev_server};
+use apx_core::ops::dev::{resolve_existing_server, spawn_server, start_dev_server};
 
 #[derive(Args, Debug, Clone)]
 pub struct StartArgs {
@@ -58,16 +58,22 @@ async fn run_detached(args: StartArgs) -> Result<(), String> {
 
 async fn run_attached(args: StartArgs) -> Result<(), String> {
     let app_dir = find_app_dir(args.app_path)?;
+    let mode = OutputMode::Interactive;
 
-    let _port = spawn_server(
-        &app_dir,
-        None,
-        args.skip_credentials_validation,
-        args.timeout,
-        args.skip_healthcheck,
-        OutputMode::Interactive,
-    )
-    .await?;
+    // If server is already running, skip spawn and go straight to log following
+    let already_running = resolve_existing_server(&app_dir, mode).await?.is_some();
+
+    if !already_running {
+        let _port = spawn_server(
+            &app_dir,
+            None,
+            args.skip_credentials_validation,
+            args.timeout,
+            args.skip_healthcheck,
+            mode,
+        )
+        .await?;
+    }
 
     // Use the SQLite-based log following (reads from flux storage)
     let logs_args = super::logs::LogsArgs {
