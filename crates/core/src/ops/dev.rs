@@ -205,7 +205,6 @@ pub async fn spawn_server(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .env("APX_COLLECT_LOGS", "1")
         .env("APX_OTEL_LOGS", "1")
         .env("APX_APP_DIR", &canonical_app_dir)
         .spawn()

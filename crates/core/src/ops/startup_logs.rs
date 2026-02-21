@@ -2,10 +2,10 @@
 //!
 //! Prints real-time logs line-by-line during server startup.
 
-use chrono::{Local, TimeZone, Utc};
 use std::path::Path;
 
-use apx_common::{LogRecord, should_skip_log};
+use apx_common::format::format_startup_log;
+use apx_common::should_skip_log;
 use apx_db::LogsDb;
 
 use crate::common::{OutputMode, emit};
@@ -87,57 +87,4 @@ impl StartupLogStreamer {
     }
 }
 
-/// Format a log record for startup display (compact timestamp, always colorized, with channel).
-fn format_startup_log(record: &LogRecord) -> String {
-    let effective_timestamp_ns = if record.timestamp_ns == 0 {
-        record.observed_timestamp_ns
-    } else {
-        record.timestamp_ns
-    };
-    let timestamp_ms = effective_timestamp_ns / 1_000_000;
-    let timestamp = format_short_timestamp(timestamp_ms);
-
-    // Determine source from service name
-    let service_name = record.service_name.as_deref().unwrap_or("unknown");
-    let source = if service_name.ends_with("_app") {
-        "app"
-    } else if service_name.ends_with("_ui") {
-        " ui"
-    } else if service_name.ends_with("_db") {
-        " db"
-    } else {
-        "apx"
-    };
-
-    // Severity to channel
-    let severity = record.severity_text.as_deref().unwrap_or("INFO");
-    let channel = match severity.to_uppercase().as_str() {
-        "ERROR" | "FATAL" | "CRITICAL" => "err",
-        _ => "out",
-    };
-
-    let message = record.body.as_deref().unwrap_or("");
-
-    // Colorize output
-    let color_code = match source {
-        "app" => "\x1b[36m", // cyan
-        " ui" => "\x1b[35m", // magenta
-        " db" => "\x1b[32m", // green
-        _ => "\x1b[33m",     // yellow
-    };
-    let reset = "\x1b[0m";
-
-    format!("{color_code}{timestamp} | {source} | {channel} | {message}{reset}")
-}
-
-/// Format a timestamp in milliseconds to `HH:MM:SS.mmm` format in local timezone.
-fn format_short_timestamp(timestamp_ms: i64) -> String {
-    let datetime = Utc.timestamp_millis_opt(timestamp_ms).single();
-    match datetime {
-        Some(dt) => {
-            let local_dt = dt.with_timezone(&Local);
-            local_dt.format("%H:%M:%S%.3f").to_string()
-        }
-        None => "??:??:??.???".to_string(),
-    }
-}
+// format_startup_log and format_short_timestamp are provided by apx_common::format.

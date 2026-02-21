@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use apx_common::format::severity_to_number;
 use apx_common::hosts::CLIENT_HOST;
 
 use crate::flux::FLUX_PORT;
@@ -20,19 +21,6 @@ static FLUX_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 });
-
-/// Convert severity level string to OTLP severity number.
-fn severity_to_number(level: &str) -> u8 {
-    match level.to_uppercase().as_str() {
-        "TRACE" => 1,
-        "DEBUG" => 5,
-        "INFO" | "LOG" => 9,
-        "WARN" | "WARNING" => 13,
-        "ERROR" => 17,
-        "FATAL" | "CRITICAL" => 21,
-        _ => 9, // default to INFO
-    }
-}
 
 /// Build an OTLP JSON log payload with nanosecond timestamp.
 pub fn build_otlp_log_payload(
@@ -94,7 +82,7 @@ pub fn build_otlp_log_payload_from_ms(
 /// This is fire-and-forget; errors are silently ignored to avoid log loops.
 pub async fn forward_log_to_flux(message: &str, level: &str, service_name: &str, app_path: &str) {
     // Skip noisy internal logs
-    if should_skip_log(message) {
+    if apx_common::should_skip_log_message(message) {
         return;
     }
 
@@ -108,34 +96,4 @@ pub async fn forward_log_to_flux(message: &str, level: &str, service_name: &str,
         .json(&payload)
         .send()
         .await;
-}
-
-/// Check if a log message should be skipped (internal/noisy logs).
-/// This filters out verbose debug output that would clutter the log stream.
-pub fn should_skip_log(message: &str) -> bool {
-    // HTTP connection pooling logs (hyper/reqwest)
-    if message.starts_with("starting new connection:")
-        || message.starts_with("connecting to ")
-        || message.starts_with("connected to ")
-        || message.starts_with("reuse idle connection")
-        || message.starts_with("pooling idle connection")
-    {
-        return true;
-    }
-
-    // Tokio-postgres internal debug logs (may contain passwords)
-    if message.starts_with("preparing query ")
-        || message.starts_with("DEBUG: parse ")
-        || message.starts_with("DEBUG: bind ")
-        || message.starts_with("executing statement ")
-    {
-        return true;
-    }
-
-    // Skip messages containing sensitive data patterns
-    if message.contains("WITH PASSWORD") || message.contains("PASSWORD '") {
-        return true;
-    }
-
-    false
 }

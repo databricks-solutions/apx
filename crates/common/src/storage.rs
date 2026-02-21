@@ -67,16 +67,13 @@ const AGGREGATION_WINDOW_MS: i64 = 2000;
 /// Minimum severity level for apx internal logs (DEBUG = 5, skipping TRACE = 1-4).
 const APX_MIN_SEVERITY: i32 = 5;
 
-/// Check if a log record should be skipped (internal/noisy logs).
-pub fn should_skip_log(record: &LogRecord) -> bool {
-    let message = record.body.as_deref().unwrap_or("");
-    let service_name = record.service_name.as_deref().unwrap_or("");
-    let severity_number = record.severity_number.unwrap_or(9);
-
-    if service_name == "_core" && severity_number < APX_MIN_SEVERITY {
-        return true;
-    }
-
+/// Check if a log message (raw string) should be skipped.
+///
+/// This is used by OTEL forwarding in `process.rs` where only the message string
+/// is available. The full `should_skip_log(&LogRecord)` delegates to this function
+/// for message-based filtering.
+pub fn should_skip_log_message(message: &str) -> bool {
+    // OTEL batch processor internals
     if message.starts_with("BatchLogProcessor.")
         || message.starts_with("ReqwestBlockingClient.")
         || message.starts_with("HttpLogsClient.")
@@ -86,6 +83,7 @@ pub fn should_skip_log(record: &LogRecord) -> bool {
         return true;
     }
 
+    // HTTP connection pooling logs (hyper/reqwest)
     if message.starts_with("starting new connection:")
         || message.starts_with("connecting to ")
         || message.starts_with("connected to ")
@@ -95,6 +93,7 @@ pub fn should_skip_log(record: &LogRecord) -> bool {
         return true;
     }
 
+    // Tokio-postgres internal debug logs
     if message.starts_with("preparing query ")
         || message.starts_with("DEBUG: parse ")
         || message.starts_with("DEBUG: bind ")
@@ -103,6 +102,7 @@ pub fn should_skip_log(record: &LogRecord) -> bool {
         return true;
     }
 
+    // Connection pool noise
     if message.starts_with("take? (")
         || message.starts_with("wait at most")
         || message.starts_with("connection ")
@@ -112,7 +112,26 @@ pub fn should_skip_log(record: &LogRecord) -> bool {
         return true;
     }
 
+    // Sensitive data patterns (may contain passwords)
+    if message.contains("WITH PASSWORD") || message.contains("PASSWORD '") {
+        return true;
+    }
+
     false
+}
+
+/// Check if a log record should be skipped (internal/noisy logs).
+pub fn should_skip_log(record: &LogRecord) -> bool {
+    let service_name = record.service_name.as_deref().unwrap_or("");
+    let severity_number = record.severity_number.unwrap_or(9);
+
+    // Filter low-severity _core service logs (TRACE level)
+    if service_name == "_core" && severity_number < APX_MIN_SEVERITY {
+        return true;
+    }
+
+    let message = record.body.as_deref().unwrap_or("");
+    should_skip_log_message(message)
 }
 
 /// Get aggregation key for a message if it should be aggregated.

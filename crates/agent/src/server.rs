@@ -30,15 +30,13 @@ struct AppState {
 /// This function initializes storage, starts the cleanup scheduler,
 /// and runs the HTTP server. It blocks forever (or until error).
 pub async fn run_server() -> Result<(), String> {
-    // Log startup
-    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
-    eprintln!("[{now}] Flux daemon starting...");
+    info!("Flux daemon starting...");
 
     // Open storage
     let storage = LogsDb::open()
         .await
         .map_err(|e| format!("Storage error: {e}"))?;
-    eprintln!("[{now}] Storage initialized");
+    info!("Storage initialized");
 
     // Start cleanup scheduler as a background task
     let storage_for_cleanup = storage.clone();

@@ -194,6 +194,7 @@ dependencies = [
 name = "apx-common"
 version = "0.3.1"
 dependencies = [
+ "chrono",
  "dirs 5.0.1",
  "serde",
  "serde_json",

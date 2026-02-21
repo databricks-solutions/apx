@@ -21,13 +21,19 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing
+    // Initialize tracing — use APX_LOG env var (same as main binary)
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
+            tracing_subscriber::EnvFilter::try_from_env("APX_LOG")
                 .unwrap_or_else(|_| "apx_agent=info".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_target(true)
+                .with_line_number(true)
+                .with_file(true),
+        )
         .init();
 
     let _args = Args::parse();

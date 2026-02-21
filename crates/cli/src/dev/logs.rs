@@ -9,12 +9,10 @@ use tracing::debug;
 
 use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
+use apx_common::format::{format_aggregated_record, format_log_record};
 use apx_common::{LogAggregator, should_skip_log};
 use apx_core::dev::common::{lock_path, read_lock};
-use apx_core::ops::logs::{
-    DEFAULT_LOG_DURATION, format_aggregated_record, format_log_record, parse_duration,
-    since_timestamp_nanos,
-};
+use apx_core::ops::logs::{DEFAULT_LOG_DURATION, parse_duration, since_timestamp_nanos};
 use apx_db::LogsDb;
 
 #[derive(Args, Debug, Clone)]

@@ -1,8 +1,9 @@
-use chrono::{Local, TimeZone, Utc};
+use chrono::Utc;
 use serde::Serialize;
 use std::path::Path;
 use std::time::Duration;
 
+use apx_common::format::{format_aggregated_record, format_log_record, format_timestamp};
 use apx_common::{AggregatedRecord, LogAggregator, LogRecord, should_skip_log, source_label};
 use apx_db::LogsDb;
 
@@ -137,58 +138,8 @@ fn aggregated_record_to_entry(agg: &AggregatedRecord) -> LogEntry {
     }
 }
 
-/// Format a log record for terminal display.
-pub fn format_log_record(record: &LogRecord, colorize: bool) -> String {
-    let timestamp = format_timestamp(record.effective_timestamp_ms());
-    let src = record.source_label();
-    let padded_src = format!("{src:>3}");
-    let message = record.body.as_deref().unwrap_or("");
-
-    if colorize {
-        let color_code = source_color(src);
-        let reset = "\x1b[0m";
-        format!("{color_code}{timestamp} | {padded_src} | {message}{reset}")
-    } else {
-        format!("{timestamp} | {padded_src} | {message}")
-    }
-}
-
-/// Format an aggregated record for terminal display.
-pub fn format_aggregated_record(agg: &AggregatedRecord, colorize: bool) -> String {
-    let timestamp = format_timestamp(agg.timestamp_ms);
-    let src = source_label(&agg.service_name);
-    let padded_src = format!("{src:>3}");
-    let message = format!("[{}] {}", agg.count, agg.template);
-
-    if colorize {
-        let color_code = source_color(src);
-        let reset = "\x1b[0m";
-        format!("{color_code}{timestamp} | {padded_src} | {message}{reset}")
-    } else {
-        format!("{timestamp} | {padded_src} | {message}")
-    }
-}
-
-fn source_color(src: &str) -> &'static str {
-    match src {
-        "app" => "\x1b[36m",
-        "ui" => "\x1b[35m",
-        "db" => "\x1b[32m",
-        _ => "\x1b[33m",
-    }
-}
-
-/// Format a timestamp in milliseconds to `YYYY-MM-DD HH:MM:SS.mmm` format in local timezone.
-pub fn format_timestamp(timestamp_ms: i64) -> String {
-    let datetime = Utc.timestamp_millis_opt(timestamp_ms).single();
-    match datetime {
-        Some(dt) => {
-            let local_dt = dt.with_timezone(&Local);
-            local_dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
-        }
-        None => "????-??-?? ??:??:??.???".to_string(),
-    }
-}
+// format_log_record, format_aggregated_record, and format_timestamp are
+// re-exported from apx_common::format (imported above).
 
 pub fn parse_duration(input: &str) -> Result<Duration, String> {
     let trimmed = input.trim();

@@ -80,12 +80,10 @@ impl fmt::Display for LogSource {
     }
 }
 
-/// Format a log line with timestamp and source prefix.
-/// Output: `2026-01-28 14:09:02.413 |  app | <message>`
+/// Format a log line with local timestamp and source prefix.
+/// Delegates to the centralized formatter in `apx_common::format`.
 fn format_log_line(source: LogSource, message: &str) -> String {
-    let now = chrono::Utc::now();
-    let timestamp = now.format("%Y-%m-%d %H:%M:%S%.3f");
-    format!("{timestamp} | {source:>4} | {message}")
+    apx_common::format::format_process_log_line(source.as_str(), message)
 }
 
 /// Setup sitecustomize.py for Databricks SDK user-agent tracking.
@@ -470,7 +468,8 @@ impl ProcessManager {
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     eprintln!("{}", format_log_line(LogSource::App, &line));
-                    forward_log_to_flux(&line, "ERROR", &service_name, &app_path).await;
+                    let severity = apx_common::format::parse_python_severity(&line);
+                    forward_log_to_flux(&line, severity, &service_name, &app_path).await;
                 }
             });
         }
@@ -809,7 +808,8 @@ impl ProcessManager {
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     eprintln!("{}", format_log_line(source, &line));
-                    forward_log_to_flux(&line, "ERROR", &service_name, &app_path).await;
+                    let severity = apx_common::format::parse_python_severity(&line);
+                    forward_log_to_flux(&line, severity, &service_name, &app_path).await;
                 }
             });
         }
@@ -981,7 +981,8 @@ impl ProcessManager {
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     eprintln!("{}", format_log_line(LogSource::App, &line));
-                    forward_log_to_flux(&line, "ERROR", &service_name, &app_path).await;
+                    let severity = apx_common::format::parse_python_severity(&line);
+                    forward_log_to_flux(&line, severity, &service_name, &app_path).await;
                 }
             });
         }
