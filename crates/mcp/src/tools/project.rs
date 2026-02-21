@@ -882,6 +882,33 @@ mod tests {
     }
 
     #[test]
+    fn from_serializable_vec_wraps_in_object() {
+        // MCP spec requires structuredContent to be a JSON object, not an array.
+        // Reproduces: "expected record, received array" when `routes` tool
+        // returns Vec<RouteInfo> directly.
+        let routes = parse_openapi_operations(&serde_json::json!({
+            "paths": {
+                "/items": {
+                    "get": {
+                        "operationId": "listItems",
+                        "summary": "List all items"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let result = CallToolResult::from_serializable(&routes);
+        let sc = result
+            .structured_content
+            .expect("structured_content should be set");
+        assert!(
+            sc.is_object(),
+            "structuredContent must be a JSON object, got: {sc}"
+        );
+    }
+
+    #[test]
     fn generate_query_example_no_params() {
         let example = generate_query_example("listItems", "/api/items", &[], None);
         assert!(example.contains("Suspense"));

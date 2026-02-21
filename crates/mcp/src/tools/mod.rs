@@ -26,9 +26,16 @@ impl ToolResultExt for CallToolResult {
         match serde_json::to_value(value) {
             Ok(v) => {
                 let text_fallback = serde_json::to_string_pretty(&v).unwrap_or_default();
+                // MCP spec requires structuredContent to be a JSON object.
+                // Wrap arrays so the protocol doesn't reject them.
+                let structured = if v.is_array() {
+                    serde_json::json!({ "items": v })
+                } else {
+                    v
+                };
                 CallToolResult {
                     content: vec![Content::text(text_fallback)],
-                    structured_content: Some(v),
+                    structured_content: Some(structured),
                     is_error: Some(false),
                     meta: None,
                 }
