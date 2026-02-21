@@ -131,7 +131,7 @@ pub async fn run(args: InitArgs) -> i32 {
 
 async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     // Eagerly resolve uv (always needed)
-    let _uv = apx_core::download::resolve_uv().await?;
+    let _uv = apx_core::external::Uv::resolve().await?;
 
     let workspace_root = resolve_app_dir(args.app_path.take());
 

@@ -2,9 +2,18 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::download::{BinarySource, ResolvedBinary, resolve_bun};
+use tokio::sync::OnceCell;
 
-use super::ExternalTool;
+use super::{BinarySource, ExternalTool, Resolvable, ResolvedBinary, resolve_with_download};
+
+#[cfg(target_os = "windows")]
+const BUN_EXE: &str = "bun.exe";
+#[cfg(not(target_os = "windows"))]
+const BUN_EXE: &str = "bun";
+
+const BUN_VERSION: &str = "1.3.8";
+
+static BUN_CELL: OnceCell<ResolvedBinary> = OnceCell::const_new();
 
 /// A resolved `bun` binary.
 #[derive(Debug, Clone)]
@@ -14,22 +23,17 @@ pub struct Bun {
 }
 
 impl Bun {
-    /// Resolve bun binary (downloads if needed).
+    /// Resolve bun binary (downloads if needed). Cached after first call.
     pub async fn resolve() -> Result<Self, String> {
-        let resolved = resolve_bun().await?;
+        let resolved = BUN_CELL
+            .get_or_try_init(resolve_with_download::<Self>)
+            .await?;
         tracing::debug!(
             "using {} bun: {}",
             resolved.source_label(),
             resolved.path.display()
         );
-        Ok(Self::from_resolved(resolved))
-    }
-
-    fn from_resolved(resolved: ResolvedBinary) -> Self {
-        Self {
-            path: resolved.path,
-            source: resolved.source,
-        }
+        Ok(Self::from_resolved(resolved.clone()))
     }
 
     /// Build a PATH with the apx bin directory prepended.
@@ -79,5 +83,35 @@ impl ExternalTool for Bun {
 
     fn source(&self) -> &BinarySource {
         &self.source
+    }
+}
+
+impl Resolvable for Bun {
+    const EXE_NAME: &'static str = BUN_EXE;
+    const ENV_VAR: Option<&'static str> = Some("APX_BUN_PATH");
+    const PINNED_VERSION: Option<&'static str> = Some(BUN_VERSION);
+    const VERSION_MARKER: Option<&'static str> = Some(".bun-version");
+    const INSTALL_HINT: &'static str = "Install bun (https://bun.sh) or set APX_BUN_PATH.";
+
+    fn from_resolved(resolved: ResolvedBinary) -> Self {
+        Self {
+            path: resolved.path,
+            source: resolved.source,
+        }
+    }
+
+    async fn download() -> Result<ResolvedBinary, String> {
+        eprintln!("bun not found on PATH — downloading v{BUN_VERSION}...");
+        let path = crate::download::download_bun().await.map_err(|e| {
+            format!(
+                "Failed to auto-install bun v{BUN_VERSION}: {e}\n  \
+                 Install bun manually (https://bun.sh) or set APX_BUN_PATH."
+            )
+        })?;
+        eprintln!("bun v{BUN_VERSION} installed to {}", path.display());
+        Ok(ResolvedBinary {
+            path,
+            source: BinarySource::ApxManaged,
+        })
     }
 }

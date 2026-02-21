@@ -1,207 +1,14 @@
-//! Runtime resolution and auto-download of bun and uv binaries.
+//! Download mechanics for auto-installing bun and uv binaries.
 //!
-//! Resolution order (same for both tools):
-//! 1. Environment variable override (`APX_BUN_PATH` / `APX_UV_PATH`)
-//! 2. System PATH via `which::which()`
-//! 3. `~/.apx/bin/{bun,uv}` — only if version marker matches pinned version
-//! 4. Download from GitHub releases → `~/.apx/bin/`, write version marker
+//! Resolution logic lives in [`crate::external`] (the [`Resolvable`](crate::external::Resolvable)
+//! trait). This module provides the platform-specific download, extraction, and
+//! verification helpers called from each tool's `Resolvable::download` implementation.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use tokio::sync::OnceCell;
 use tracing::debug;
-
-const BUN_VERSION: &str = "1.3.8";
-const UV_VERSION: &str = "0.10.3";
-
-#[cfg(target_os = "windows")]
-const BUN_EXE: &str = "bun.exe";
-#[cfg(not(target_os = "windows"))]
-const BUN_EXE: &str = "bun";
-
-#[cfg(target_os = "windows")]
-const UV_EXE: &str = "uv.exe";
-#[cfg(not(target_os = "windows"))]
-const UV_EXE: &str = "uv";
-
-/// Where a binary was found.
-#[derive(Debug, Clone)]
-pub enum BinarySource {
-    EnvOverride,
-    SystemPath,
-    ApxManaged,
-}
-
-impl BinarySource {
-    pub fn source_label(&self) -> &'static str {
-        match self {
-            BinarySource::EnvOverride => "env-override",
-            BinarySource::SystemPath => "system",
-            BinarySource::ApxManaged => "apx-provided",
-        }
-    }
-}
-
-/// A resolved binary path with its source.
-#[derive(Debug, Clone)]
-pub struct ResolvedBinary {
-    pub path: PathBuf,
-    pub source: BinarySource,
-}
-
-impl ResolvedBinary {
-    pub fn source_label(&self) -> &'static str {
-        match self.source {
-            BinarySource::EnvOverride => "env-override",
-            BinarySource::SystemPath => "system",
-            BinarySource::ApxManaged => "apx-provided",
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Caches — resolved at most once per process
-// ---------------------------------------------------------------------------
-
-static BUN_CELL: OnceCell<ResolvedBinary> = OnceCell::const_new();
-static UV_CELL: OnceCell<ResolvedBinary> = OnceCell::const_new();
-
-// ---------------------------------------------------------------------------
-// Public async API (resolves + downloads if needed)
-// ---------------------------------------------------------------------------
-
-/// Resolve bun binary. Downloads if not found on PATH or in `~/.apx/bin/`.
-pub async fn resolve_bun() -> Result<ResolvedBinary, String> {
-    BUN_CELL.get_or_try_init(resolve_bun_inner).await.cloned()
-}
-
-/// Resolve uv binary. Downloads if not found on PATH or in `~/.apx/bin/`.
-pub async fn resolve_uv() -> Result<ResolvedBinary, String> {
-    UV_CELL.get_or_try_init(resolve_uv_inner).await.cloned()
-}
-
-// ---------------------------------------------------------------------------
-// Public sync API (no download — env / PATH / cached only)
-// ---------------------------------------------------------------------------
-
-/// Sync resolve for bun. Checks OnceCell cache, then env/PATH/filesystem.
-/// Does NOT download. Used by sync callers.
-pub fn try_resolve_bun() -> Result<ResolvedBinary, String> {
-    if let Some(cached) = BUN_CELL.get() {
-        return Ok(cached.clone());
-    }
-    resolve_local(BUN_EXE, "APX_BUN_PATH", BUN_VERSION, ".bun-version")
-}
-
-/// Sync resolve for uv. Checks OnceCell cache, then env/PATH/filesystem.
-/// Does NOT download. Used by sync callers.
-pub fn try_resolve_uv() -> Result<ResolvedBinary, String> {
-    if let Some(cached) = UV_CELL.get() {
-        return Ok(cached.clone());
-    }
-    resolve_local(UV_EXE, "APX_UV_PATH", UV_VERSION, ".uv-version")
-}
-
-// ---------------------------------------------------------------------------
-// Internal: async resolution (with download fallback)
-// ---------------------------------------------------------------------------
-
-async fn resolve_bun_inner() -> Result<ResolvedBinary, String> {
-    // 1-3: try local resolution
-    if let Ok(resolved) = resolve_local(BUN_EXE, "APX_BUN_PATH", BUN_VERSION, ".bun-version") {
-        return Ok(resolved);
-    }
-
-    // 4: download
-    eprintln!("bun not found on PATH — downloading v{BUN_VERSION}...");
-    let path = download_bun().await.map_err(|e| {
-        format!("Failed to auto-install bun v{BUN_VERSION}: {e}\n  Install bun manually (https://bun.sh) or set APX_BUN_PATH.")
-    })?;
-    eprintln!("bun v{BUN_VERSION} installed to {}", path.display());
-    Ok(ResolvedBinary {
-        path,
-        source: BinarySource::ApxManaged,
-    })
-}
-
-async fn resolve_uv_inner() -> Result<ResolvedBinary, String> {
-    if let Ok(resolved) = resolve_local(UV_EXE, "APX_UV_PATH", UV_VERSION, ".uv-version") {
-        return Ok(resolved);
-    }
-
-    eprintln!("uv not found on PATH — downloading v{UV_VERSION}...");
-    let path = download_uv().await.map_err(|e| {
-        format!("Failed to auto-install uv v{UV_VERSION}: {e}\n  Install uv manually (https://docs.astral.sh/uv/) or set APX_UV_PATH.")
-    })?;
-    eprintln!("uv v{UV_VERSION} installed to {}", path.display());
-    Ok(ResolvedBinary {
-        path,
-        source: BinarySource::ApxManaged,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Internal: local resolution (env → PATH → ~/.apx/bin/)
-// ---------------------------------------------------------------------------
-
-fn resolve_local(
-    exe_name: &str,
-    env_var: &str,
-    pinned_version: &str,
-    version_file: &str,
-) -> Result<ResolvedBinary, String> {
-    // 1. Env var override
-    if let Ok(path) = std::env::var(env_var) {
-        let p = PathBuf::from(&path);
-        if p.is_file() {
-            debug!("{env_var}={} — using env override", p.display());
-            return Ok(ResolvedBinary {
-                path: p,
-                source: BinarySource::EnvOverride,
-            });
-        }
-        return Err(format!("{env_var}={path} does not exist"));
-    }
-
-    // 2. System PATH
-    if let Ok(path) = which::which(exe_name) {
-        debug!("{exe_name} found on PATH at {}", path.display());
-        return Ok(ResolvedBinary {
-            path,
-            source: BinarySource::SystemPath,
-        });
-    }
-
-    // 3. ~/.apx/bin/ with version marker
-    if let Some(bin_dir) = apx_bin_dir() {
-        let candidate = bin_dir.join(exe_name);
-        let marker = bin_dir.join(version_file);
-        if candidate.is_file()
-            && let Ok(contents) = std::fs::read_to_string(&marker)
-        {
-            if contents.trim() == pinned_version {
-                debug!(
-                    "{exe_name} found in ~/.apx/bin/ (v{pinned_version}): {}",
-                    candidate.display()
-                );
-                return Ok(ResolvedBinary {
-                    path: candidate,
-                    source: BinarySource::ApxManaged,
-                });
-            }
-            debug!(
-                "{exe_name} in ~/.apx/bin/ has version '{}', need '{pinned_version}' — will re-download",
-                contents.trim()
-            );
-        }
-    }
-
-    Err(format!(
-        "Could not find {exe_name}. Install it or set {env_var}."
-    ))
-}
 
 // ---------------------------------------------------------------------------
 // Download: bun
@@ -219,7 +26,14 @@ fn bun_platform_tag() -> Result<&'static str, String> {
     Ok(tag)
 }
 
-async fn download_bun() -> Result<PathBuf, String> {
+#[cfg(target_os = "windows")]
+const BUN_EXE: &str = "bun.exe";
+#[cfg(not(target_os = "windows"))]
+const BUN_EXE: &str = "bun";
+
+const BUN_VERSION: &str = "1.3.8";
+
+pub(crate) async fn download_bun() -> Result<PathBuf, String> {
     let platform = bun_platform_tag()?;
     let url = format!(
         "https://github.com/oven-sh/bun/releases/download/bun-v{BUN_VERSION}/bun-{platform}.zip"
@@ -293,7 +107,14 @@ fn uv_target_triple() -> Result<&'static str, String> {
     Ok(triple)
 }
 
-async fn download_uv() -> Result<PathBuf, String> {
+#[cfg(target_os = "windows")]
+const UV_EXE: &str = "uv.exe";
+#[cfg(not(target_os = "windows"))]
+const UV_EXE: &str = "uv";
+
+const UV_VERSION: &str = "0.10.3";
+
+pub(crate) async fn download_uv() -> Result<PathBuf, String> {
     let target = uv_target_triple()?;
     let bin_dir = ensure_apx_bin_dir()?;
     let dest = bin_dir.join(UV_EXE);
@@ -426,7 +247,7 @@ fn parse_sha256_for_file(checksums_text: &str, target_filename: &str) -> Result<
     ))
 }
 
-fn apx_bin_dir() -> Option<PathBuf> {
+pub(crate) fn apx_bin_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".apx").join("bin"))
 }
 

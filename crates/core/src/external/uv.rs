@@ -2,13 +2,22 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::download::{BinarySource, ResolvedBinary, resolve_uv, try_resolve_uv};
+use tokio::sync::OnceCell;
 
-use super::ExternalTool;
+use super::{BinarySource, ExternalTool, Resolvable, ResolvedBinary, resolve_with_download};
 
 // ---------------------------------------------------------------------------
 // Uv — resolved uv binary
 // ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+const UV_EXE: &str = "uv.exe";
+#[cfg(not(target_os = "windows"))]
+const UV_EXE: &str = "uv";
+
+const UV_VERSION: &str = "0.10.3";
+
+static UV_CELL: OnceCell<ResolvedBinary> = OnceCell::const_new();
 
 /// A resolved `uv` binary.
 #[derive(Debug, Clone)]
@@ -18,28 +27,25 @@ pub struct Uv {
 }
 
 impl Uv {
-    /// Resolve uv binary (downloads if needed).
+    /// Resolve uv binary (downloads if needed). Cached after first call.
     pub async fn resolve() -> Result<Self, String> {
-        let resolved = resolve_uv().await?;
+        let resolved = UV_CELL
+            .get_or_try_init(resolve_with_download::<Self>)
+            .await?;
         tracing::debug!(
             "using {} uv: {}",
             resolved.source_label(),
             resolved.path.display()
         );
-        Ok(Self::from_resolved(resolved))
+        Ok(Self::from_resolved(resolved.clone()))
     }
 
-    /// Sync resolve (no download).
+    /// Sync resolve (no download). Returns cached result if available.
     pub fn try_resolve() -> Result<Self, String> {
-        let resolved = try_resolve_uv()?;
-        Ok(Self::from_resolved(resolved))
-    }
-
-    fn from_resolved(resolved: ResolvedBinary) -> Self {
-        Self {
-            path: resolved.path,
-            source: resolved.source,
+        if let Some(cached) = UV_CELL.get() {
+            return Ok(Self::from_resolved(cached.clone()));
         }
+        super::resolve_local::<Self>().map(Self::from_resolved)
     }
 }
 
@@ -52,6 +58,37 @@ impl ExternalTool for Uv {
 
     fn source(&self) -> &BinarySource {
         &self.source
+    }
+}
+
+impl Resolvable for Uv {
+    const EXE_NAME: &'static str = UV_EXE;
+    const ENV_VAR: Option<&'static str> = Some("APX_UV_PATH");
+    const PINNED_VERSION: Option<&'static str> = Some(UV_VERSION);
+    const VERSION_MARKER: Option<&'static str> = Some(".uv-version");
+    const INSTALL_HINT: &'static str =
+        "Install uv (https://docs.astral.sh/uv/) or set APX_UV_PATH.";
+
+    fn from_resolved(resolved: ResolvedBinary) -> Self {
+        Self {
+            path: resolved.path,
+            source: resolved.source,
+        }
+    }
+
+    async fn download() -> Result<ResolvedBinary, String> {
+        eprintln!("uv not found on PATH — downloading v{UV_VERSION}...");
+        let path = crate::download::download_uv().await.map_err(|e| {
+            format!(
+                "Failed to auto-install uv v{UV_VERSION}: {e}\n  \
+                 Install uv manually (https://docs.astral.sh/uv/) or set APX_UV_PATH."
+            )
+        })?;
+        eprintln!("uv v{UV_VERSION} installed to {}", path.display());
+        Ok(ResolvedBinary {
+            path,
+            source: BinarySource::ApxManaged,
+        })
     }
 }
 

@@ -5,12 +5,18 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use super::{CommandError, CommandOutput};
+use super::{BinarySource, CommandError, CommandOutput, ExternalTool, Resolvable, ResolvedBinary};
+
+#[cfg(target_os = "windows")]
+const DATABRICKS_EXE: &str = "databricks.exe";
+#[cfg(not(target_os = "windows"))]
+const DATABRICKS_EXE: &str = "databricks";
 
 /// A resolved `databricks` CLI binary.
 #[derive(Debug, Clone)]
 pub struct DatabricksCli {
     path: PathBuf,
+    source: BinarySource,
 }
 
 /// Result of a `databricks apps logs` invocation.
@@ -37,13 +43,14 @@ pub struct AppsLogsArgs<'a> {
 }
 
 impl DatabricksCli {
-    /// Resolve `databricks` from PATH.
+    /// Resolve `databricks` from PATH via the [`Resolvable`] trait.
     pub fn resolve() -> Result<Self, CommandError> {
-        let path = which::which("databricks").map_err(|_| CommandError::NotFound {
-            tool: "databricks",
-            hint: "install Databricks CLI v0.280.0+ and ensure it's on PATH",
-        })?;
-        Ok(Self { path })
+        super::resolve_local::<Self>()
+            .map(Self::from_resolved)
+            .map_err(|_| CommandError::NotFound {
+                tool: "databricks",
+                hint: "install Databricks CLI v0.280.0+ and ensure it's on PATH",
+            })
     }
 
     /// Run `databricks apps logs <app_name>` with the given arguments.
@@ -115,6 +122,33 @@ impl DatabricksCli {
                 tool: "databricks",
                 timeout_secs: args.timeout_secs,
             }),
+        }
+    }
+}
+
+impl ExternalTool for DatabricksCli {
+    const NAME: &'static str = "databricks";
+
+    fn binary_path(&self) -> &Path {
+        &self.path
+    }
+
+    fn source(&self) -> &BinarySource {
+        &self.source
+    }
+}
+
+impl Resolvable for DatabricksCli {
+    const EXE_NAME: &'static str = DATABRICKS_EXE;
+    const ENV_VAR: Option<&'static str> = None;
+    const PINNED_VERSION: Option<&'static str> = None;
+    const VERSION_MARKER: Option<&'static str> = None;
+    const INSTALL_HINT: &'static str = "Install Databricks CLI v0.280.0+ and ensure it's on PATH.";
+
+    fn from_resolved(resolved: ResolvedBinary) -> Self {
+        Self {
+            path: resolved.path,
+            source: resolved.source,
         }
     }
 }

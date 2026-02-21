@@ -1,7 +1,8 @@
 //! Shared abstraction for external tool invocations (uv, bun, git, gh, databricks).
 //!
 //! Provides [`CommandOutput`] / [`CommandError`] value types, the [`ExternalTool`]
-//! trait for resolved-binary tools, and [`run_command`] / [`run_command_sync`]
+//! trait for resolved-binary tools, the [`Resolvable`] trait for tools that support
+//! automatic resolution and optional download, and [`run_command`] / [`run_command_sync`]
 //! free functions that replace the repeated `.output().await + status-check` pattern.
 
 pub mod bun;
@@ -10,9 +11,9 @@ pub mod gh;
 pub mod git;
 pub mod uv;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::download::BinarySource;
+use tracing::debug;
 
 // Re-export the per-tool types at the `external` level for ergonomic imports.
 pub use bun::Bun;
@@ -20,6 +21,41 @@ pub use databricks::DatabricksCli;
 pub use gh::Gh;
 pub use git::Git;
 pub use uv::{Uv, UvTool};
+
+// ---------------------------------------------------------------------------
+// BinarySource / ResolvedBinary
+// ---------------------------------------------------------------------------
+
+/// Where a binary was found.
+#[derive(Debug, Clone)]
+pub enum BinarySource {
+    EnvOverride,
+    SystemPath,
+    ApxManaged,
+}
+
+impl BinarySource {
+    pub fn source_label(&self) -> &'static str {
+        match self {
+            BinarySource::EnvOverride => "env-override",
+            BinarySource::SystemPath => "system",
+            BinarySource::ApxManaged => "apx-provided",
+        }
+    }
+}
+
+/// A resolved binary path with its source.
+#[derive(Debug, Clone)]
+pub struct ResolvedBinary {
+    pub path: PathBuf,
+    pub source: BinarySource,
+}
+
+impl ResolvedBinary {
+    pub fn source_label(&self) -> &'static str {
+        self.source.source_label()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CommandOutput
@@ -133,6 +169,123 @@ pub trait ExternalTool: std::fmt::Debug + Send + Sync {
     fn std_command(&self) -> std::process::Command {
         std::process::Command::new(self.binary_path())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Resolvable trait
+// ---------------------------------------------------------------------------
+
+/// Trait for external tools that support resolution with optional auto-download.
+///
+/// Resolution order (implemented by [`resolve_local`]):
+/// 1. Environment variable override (`ENV_VAR`)
+/// 2. System PATH via `which::which()`
+/// 3. `~/.apx/bin/` with version marker (only when `PINNED_VERSION` is set)
+/// 4. Auto-download via [`Resolvable::download`] (only when implemented)
+pub trait Resolvable: ExternalTool + Sized {
+    /// Platform-specific executable filename (e.g. `"bun"` or `"bun.exe"` on Windows).
+    const EXE_NAME: &'static str;
+
+    /// Environment variable for explicit path override (e.g. `"APX_BUN_PATH"`).
+    /// `None` for tools that don't support env override.
+    const ENV_VAR: Option<&'static str>;
+
+    /// Pinned version for managed installs. `None` for tools not auto-downloaded.
+    const PINNED_VERSION: Option<&'static str>;
+
+    /// Version marker filename in `~/.apx/bin/` (e.g. `".bun-version"`).
+    /// `None` for tools not auto-downloaded.
+    const VERSION_MARKER: Option<&'static str>;
+
+    /// Human-readable install hint shown when the tool cannot be found.
+    const INSTALL_HINT: &'static str;
+
+    /// Construct `Self` from a resolved binary.
+    fn from_resolved(resolved: ResolvedBinary) -> Self;
+
+    /// Auto-download and install the tool. Returns the resolved binary on success.
+    ///
+    /// Default implementation returns an error (for tools that are not auto-downloaded).
+    fn download() -> impl std::future::Future<Output = Result<ResolvedBinary, String>> + Send {
+        async {
+            Err(format!(
+                "Cannot auto-download {}. {}",
+                Self::NAME,
+                Self::INSTALL_HINT
+            ))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generic resolution functions
+// ---------------------------------------------------------------------------
+
+/// Try to resolve a [`Resolvable`] tool locally (env var → PATH → `~/.apx/bin/`).
+///
+/// Does **not** download. Use [`resolve_with_download`] for the full resolution flow.
+pub fn resolve_local<T: Resolvable>() -> Result<ResolvedBinary, String> {
+    // 1. Env var override
+    if let Some(env_var) = T::ENV_VAR
+        && let Ok(path) = std::env::var(env_var)
+    {
+        let p = PathBuf::from(&path);
+        if p.is_file() {
+            debug!("{env_var}={} — using env override", p.display());
+            return Ok(ResolvedBinary {
+                path: p,
+                source: BinarySource::EnvOverride,
+            });
+        }
+        return Err(format!("{env_var}={path} does not exist"));
+    }
+
+    // 2. System PATH
+    if let Ok(path) = which::which(T::EXE_NAME) {
+        debug!("{} found on PATH at {}", T::EXE_NAME, path.display());
+        return Ok(ResolvedBinary {
+            path,
+            source: BinarySource::SystemPath,
+        });
+    }
+
+    // 3. ~/.apx/bin/ with version marker
+    if let (Some(version), Some(marker)) = (T::PINNED_VERSION, T::VERSION_MARKER)
+        && let Some(bin_dir) = crate::download::apx_bin_dir()
+    {
+        let candidate = bin_dir.join(T::EXE_NAME);
+        let marker_path = bin_dir.join(marker);
+        if candidate.is_file()
+            && let Ok(contents) = std::fs::read_to_string(&marker_path)
+        {
+            if contents.trim() == version {
+                debug!(
+                    "{} found in ~/.apx/bin/ (v{version}): {}",
+                    T::EXE_NAME,
+                    candidate.display()
+                );
+                return Ok(ResolvedBinary {
+                    path: candidate,
+                    source: BinarySource::ApxManaged,
+                });
+            }
+            debug!(
+                "{} in ~/.apx/bin/ has version '{}', need '{version}' — will re-download",
+                T::EXE_NAME,
+                contents.trim()
+            );
+        }
+    }
+
+    Err(format!("Could not find {}. {}", T::NAME, T::INSTALL_HINT))
+}
+
+/// Resolve a [`Resolvable`] tool: try local, then download as fallback.
+pub async fn resolve_with_download<T: Resolvable>() -> Result<ResolvedBinary, String> {
+    if let Ok(resolved) = resolve_local::<T>() {
+        return Ok(resolved);
+    }
+    T::download().await
 }
 
 // ---------------------------------------------------------------------------
