@@ -282,17 +282,17 @@ class Order(SQLModel, table=True):
 
 ```python
 from sqlmodel import select
-from .core import Dependency, create_router
+from .core import Dependencies, create_router
 from .models import Order
 
 router = create_router()
 
 @router.get("/orders", response_model=list[Order], operation_id="getOrders")
-def get_orders(session: Dependency.Session):
+def get_orders(session: Dependencies.Session):
     return session.exec(select(Order)).all()
 
 @router.post("/orders", response_model=Order, operation_id="createOrder")
-def create_order(order: Order, session: Dependency.Session):
+def create_order(order: Order, session: Dependencies.Session):
     session.add(order)
     session.commit()
     session.refresh(order)
@@ -316,36 +316,36 @@ apx provides a clean, type-safe dependency injection pattern through the `Depend
 
 ### Available Dependencies
 
-All dependencies are accessed via the `Dependency` class:
+All dependencies are accessed via the `Dependencies` class:
 
 | Dependency              | Type              | Description                                     | Recommended Usage                |
 | ----------------------- | ----------------- | ----------------------------------------------- | -------------------------------- |
-| `Dependency.Client`     | `WorkspaceClient` | App-level Databricks client (service principal) | `ws: Dependency.Client`          |
-| `Dependency.UserClient` | `WorkspaceClient` | User-scoped Databricks client (OBO token)       | `user_ws: Dependency.UserClient` |
-| `Dependency.Config`     | `AppConfig`       | Application configuration                       | `config: Dependency.Config`      |
-| `Dependency.Session`    | `Session`         | Database session (lakebase addon only)          | `session: Dependency.Session`    |
+| `Dependencies.Client`     | `WorkspaceClient` | App-level Databricks client (service principal) | `ws: Dependencies.Client`          |
+| `Dependencies.UserClient` | `WorkspaceClient` | User-scoped Databricks client (OBO token)       | `user_ws: Dependencies.UserClient` |
+| `Dependencies.Config`     | `AppConfig`       | Application configuration                       | `config: Dependencies.Config`      |
+| `Dependencies.Session`    | `Session`         | Database session (lakebase addon only)          | `session: Dependencies.Session`    |
 
 ### Basic Usage
 
-Import `Dependency` and `create_router` from `.core` and use them in your route handlers:
+Import `Dependencies` and `create_router` from `.core` and use them in your route handlers:
 
 ```python
-from .core import Dependency, create_router
+from .core import Dependencies, create_router
 
 router = create_router()
 
 @router.get("/clusters", response_model=list[ClusterOut], operation_id="listClusters")
-def list_clusters(ws: Dependency.Client):
+def list_clusters(ws: Dependencies.Client):
     """List clusters using app-level credentials."""
     return ws.clusters.list()
 
 @router.get("/current-user", response_model=UserOut, operation_id="currentUser")
-def get_current_user(user_ws: Dependency.UserClient):
+def get_current_user(user_ws: Dependencies.UserClient):
     """Get current user info using their token."""
     return user_ws.current_user.me()
 
 @router.get("/config", response_model=AppSettingsOut, operation_id="getAppConfig")
-def get_app_config(config: Dependency.Config):
+def get_app_config(config: Dependencies.Config):
     """Access application configuration."""
     return AppSettingsOut(app_name=config.app_name)
 ```
@@ -357,17 +357,17 @@ def get_app_config(config: Dependency.Config):
 
 ### User-Scoped Operations (OBO)
 
-The `Dependency.UserClient` provides on-behalf-of (OBO) authentication, allowing you to perform operations as the authenticated user. This requires the `X-Forwarded-Access-Token` header (automatically provided by Databricks Apps):
+The `Dependencies.UserClient` provides on-behalf-of (OBO) authentication, allowing you to perform operations as the authenticated user. This requires the `X-Forwarded-Access-Token` header (automatically provided by Databricks Apps):
 
 ```python
 @router.get("/my-jobs", response_model=list[JobOut], operation_id="getMyJobs")
-def get_my_jobs(user_ws: Dependency.UserClient):
+def get_my_jobs(user_ws: Dependencies.UserClient):
     """List jobs visible to the current user."""
     jobs = user_ws.jobs.list(name="my-job-prefix")
     return [{"id": j.job_id, "name": j.settings.name} for j in jobs]
 
 @router.post("/create-notebook", response_model=NotebookOut, operation_id="createNotebook")
-def create_notebook(user_ws: Dependency.UserClient):
+def create_notebook(user_ws: Dependencies.UserClient):
     """Create a notebook in the user's workspace."""
     result = user_ws.workspace.import_(
         path="/Users/me/my-notebook",
@@ -385,12 +385,13 @@ You can combine multiple dependencies in a single route handler:
 ```python
 from sqlmodel import select
 from .models import Order
+from .core import Dependencies
 
 @router.get("/orders/stats", response_model=OrderStatsOut, operation_id="getOrderStats")
 def get_order_stats(
-    session: Dependency.Session,
-    user_ws: Dependency.UserClient,
-    config: Dependency.Config
+    session: Dependencies.Session,
+    user_ws: Dependencies.UserClient,
+    config: Dependencies.Config
 ):
     """Get order statistics for the current user."""
     orders = session.exec(select(Order)).all()
@@ -423,11 +424,11 @@ class AppConfig(BaseSettings):
     max_results: int = Field(default=100)
 ```
 
-Then access via `Dependency.Config`:
+Then access via `Dependencies.Config`:
 
 ```python
 @router.get("/search", response_model=list[SearchResult], operation_id="search")
-def search(query: str, config: Dependency.Config):
+def search(query: str, config: Dependencies.Config):
     return external_api.search(query, api_key=config.my_api_key, limit=config.max_results)
 ```
 
@@ -437,7 +438,7 @@ Use the `lifespan` parameter in `create_app` for custom startup/shutdown logic. 
 
 ```python
 from contextlib import asynccontextmanager
-from .core import create_app, create_router, Dependency
+from .core import create_app, create_router, Dependencies
 
 router = create_router()
 
@@ -459,7 +460,7 @@ app = create_app(routers=[router], lifespan=custom_lifespan)
 
 ### Type Safety
 
-The `Dependency` class provides full type safety and IDE autocomplete. When you hover over a dependency in your IDE, you'll see:
+The `Dependencies` class provides full type safety and IDE autocomplete. When you hover over a dependency in your IDE, you'll see:
 
 - The actual type (e.g., `WorkspaceClient`, `AppConfig`, `Session`)
 - Documentation about what the dependency provides

@@ -98,7 +98,7 @@ class PaginatedResponse[T](BaseModel):
 ```python
 from itertools import islice
 from databricks.sdk.service.jobs import BaseJob
-from .core import Dependency, create_router
+from .core import Dependencies, create_router
 from .models import PaginatedResponse
 
 router = create_router()
@@ -109,7 +109,7 @@ router = create_router()
     operation_id="listJobs",
 )
 def list_jobs(
-    ws: Dependency.Client,
+    ws: Dependencies.Client,
     page_size: int = 20,
     page_token: str | None = None,
 ):
@@ -152,7 +152,7 @@ from fastapi.responses import StreamingResponse
 @router.post("/chat", operation_id="chat")
 async def chat(
     request: ChatRequest,
-    ws: Dependency.Client,
+    ws: Dependencies.Client,
 ) -> StreamingResponse:
     """Stream chat responses as Server-Sent Events."""
 
@@ -181,40 +181,40 @@ async def chat(
 
 ## Dependencies and Dependency Injection
 
-The `Dependency` class in `src/<app>/backend/core.py` provides typed FastAPI dependencies. **Always use these instead of manually creating clients or accessing `request.app.state`.**
+The `Dependencies` class in `src/<app>/backend/core.py` provides typed FastAPI dependencies. **Always use these instead of manually creating clients or accessing `request.app.state`.**
 
 | Dependency              | Type              | Description                                                                        |
 | ----------------------- | ----------------- | ---------------------------------------------------------------------------------- |
-| `Dependency.Client`     | `WorkspaceClient` | Databricks client using app-level service principal credentials                    |
-| `Dependency.UserClient` | `WorkspaceClient` | Databricks client authenticated on behalf of the current user (requires OBO token) |
-| `Dependency.Config`     | `AppConfig`       | Application configuration loaded from environment variables                        |
-| `Dependency.Session`    | `Session`         | SQLModel database session, scoped to request (requires lakebase addon)             |
+| `Dependencies.Client`     | `WorkspaceClient` | Databricks client using app-level service principal credentials                    |
+| `Dependencies.UserClient` | `WorkspaceClient` | Databricks client authenticated on behalf of the current user (requires OBO token) |
+| `Dependencies.Config`     | `AppConfig`       | Application configuration loaded from environment variables                        |
+| `Dependencies.Session`    | `Session`         | SQLModel database session, scoped to request (requires lakebase addon)             |
 
 ### Usage in Route Handlers
 
 ```python
-from .core import Dependency, create_router
+from .core import Dependencies, create_router
 
 router = create_router()
 
 # Service principal client
 @router.get("/clusters", response_model=list[ClusterOut], operation_id="listClusters")
-def list_clusters(ws: Dependency.Client):
+def list_clusters(ws: Dependencies.Client):
     return ws.clusters.list()
 
 # User-scoped client (OBO)
 @router.get("/me", response_model=UserOut, operation_id="currentUser")
-def me(user_ws: Dependency.UserClient):
+def me(user_ws: Dependencies.UserClient):
     return user_ws.current_user.me()
 
 # Application config
 @router.get("/settings", response_model=AppSettingsOut, operation_id="getSettings")
-def get_settings(config: Dependency.Config):
+def get_settings(config: Dependencies.Config):
     return AppSettingsOut(app_name=config.app_name)
 
 # Database session (requires lakebase addon)
 @router.get("/orders", response_model=list[OrderOut], operation_id="getOrders")
-def get_orders(session: Dependency.Session):
+def get_orders(session: Dependencies.Session):
     return session.exec(select(Order)).all()
 ```
 

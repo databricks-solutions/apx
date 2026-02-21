@@ -26,27 +26,27 @@ The `Dependency` class in `src/{{app_name}}/backend/core.py` provides typed Fast
 
 | Dependency | Type | Description |
 |---|---|---|
-| `Dependency.Client` | `WorkspaceClient` | Databricks client using app-level service principal credentials |
-| `Dependency.UserClient` | `WorkspaceClient` | Databricks client authenticated on behalf of the current user (requires OBO token) |
-| `Dependency.Config` | `AppConfig` | Application configuration loaded from environment variables |
-| `Dependency.Session` | `Session` | SQLModel database session, scoped to request (requires lakebase addon) |
+| `Dependencies.Client` | `WorkspaceClient` | Databricks client using app-level service principal credentials |
+| `Dependencies.UserClient` | `WorkspaceClient` | Databricks client authenticated on behalf of the current user (requires OBO token) |
+| `Dependencies.Config` | `AppConfig` | Application configuration loaded from environment variables |
+| `Dependencies.Session` | `Session` | SQLModel database session, scoped to request (requires lakebase addon) |
 
 **Usage in route handlers:**
 ```python
-from .core import Dependency, create_router
+from .core import Dependencies, create_router
 
 router = create_router()
 
 @router.get("/clusters", response_model=list[ClusterOut], operation_id="listClusters")
-def list_clusters(ws: Dependency.Client):
+def list_clusters(ws: Dependencies.Client):
     return ws.clusters.list()
 
 @router.get("/me", response_model=UserOut, operation_id="currentUser")
-def me(user_ws: Dependency.UserClient):
+def me(user_ws: Dependencies.UserClient):
     return user_ws.current_user.me()
 
 @router.get("/settings", response_model=AppSettingsOut, operation_id="getSettings")
-def get_settings(config: Dependency.Config):
+def get_settings(config: Dependencies.Config):
     return AppSettingsOut(app_name=config.app_name)
 ```
 

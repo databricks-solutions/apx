@@ -32,10 +32,10 @@ The `Dependency` class in `src/{{app_name}}/backend/core.py` provides typed Fast
 
 | Dependency | Type | Description |
 |---|---|---|
-| `Dependency.Client` | `WorkspaceClient` | Databricks client using app-level service principal credentials |
-| `Dependency.UserClient` | `WorkspaceClient` | Databricks client authenticated on behalf of the current user (requires OBO token) |
-| `Dependency.Config` | `AppConfig` | Application configuration loaded from environment variables |
-| `Dependency.Session` | `Session` | SQLModel database session, scoped to request (requires lakebase addon) |
+| `Dependencies.Client` | `WorkspaceClient` | Databricks client using app-level service principal credentials |
+| `Dependencies.UserClient` | `WorkspaceClient` | Databricks client authenticated on behalf of the current user (requires OBO token) |
+| `Dependencies.Config` | `AppConfig` | Application configuration loaded from environment variables |
+| `Dependencies.Session` | `Session` | SQLModel database session, scoped to request (requires lakebase addon) |
 
 ## Models & API
 - **3-model pattern:** `Entity` (DB), `EntityIn` (input), `EntityOut` (output)

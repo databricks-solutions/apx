@@ -145,7 +145,7 @@ When the apx MCP server is running, these tools are available:
 - **Verify signatures:** Call the `docs` MCP tool before writing any `ws.*` call to confirm the exact method name, parameters, and return type.
 - SDK listing methods (e.g. `ws.jobs.list()`, `ws.clusters.list()`) return **lazy iterators** that auto-paginate — do NOT manually manage API pagination tokens when calling SDK methods.
 - **SDK dataclasses are Pydantic-compatible** — use them directly in `response_model` or compose into custom models: `class MyResponse(BaseModel): payload: SdkDataclass`.
-- Inject the WorkspaceClient via `Dependency.Client` (service principal) or `Dependency.UserClient` (OBO) — never construct it manually.
+- Inject the WorkspaceClient via `Dependencies.Client` (service principal) or `Dependencies.UserClient` (OBO) — never construct it manually.
 - For paginated list endpoints, see [Backend Patterns — SDK Listing with Pagination](backend-patterns.md#sdk-listing-with-pagination).
 
 ### Package Management
