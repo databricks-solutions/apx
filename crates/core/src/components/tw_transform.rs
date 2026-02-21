@@ -1,13 +1,510 @@
 //! Tailwind CSS v3 to v4 class syntax transformation utilities.
 //!
-//! This module handles the automatic transformation of Tailwind CSS v3 class syntax
-//! to v4 syntax when adding components from registries that still use v3 format.
-//!
 //! Architecture: source is tokenized into Code/StringContent regions, then only
 //! StringContent regions have per-token class transforms applied. Each transform
-//! is a pure `fn(&str) -> Cow<str>` operating on a single whitespace-delimited token.
+//! is a domain type implementing `Parse` + `Display` — parsing validates the v3
+//! pattern and `Display` renders the v4 output.
+//!
+//! Key abstractions:
+//! - `ByteScanner` / `ReverseByteScanner` — zero-copy byte cursors replacing raw indexing
+//! - `ClassCheck` enum + `TailwindClassDetector` — composable class validation
+//! - `AttrBoundary` — domain type for `]]`-terminated attribute scanning
+//! - `TransformedRegion` — value type for the functional transform pipeline
 
-use std::borrow::Cow;
+use std::fmt;
+
+// ─── CSS syntax tokens ──────────────────────────────────────────────────────
+
+/// Single-byte tokens that carry meaning in CSS class / Tailwind syntax.
+///
+/// Every byte literal used in scanning or matching logic lives here.
+/// No bare `b'…'` or `'…'` literals should appear outside this enum.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CssSyntax {
+    /// `[` — opens an arbitrary value or attribute selector.
+    OpenBracket,
+    /// `]` — closes an arbitrary value or attribute selector.
+    CloseBracket,
+    /// `(` — opens a function call or grouping (e.g. `calc(…)`).
+    OpenParen,
+    /// `)` — closes a function call or grouping.
+    CloseParen,
+    /// `:` — Tailwind variant separator (e.g. `hover:`, `dark:`).
+    Colon,
+    /// `!` — Tailwind v3 important modifier prefix.
+    Important,
+    /// `-` — hyphen, separates Tailwind utility segments (e.g. `p-2`).
+    Hyphen,
+    /// `\` — escape character inside JS/TS string literals.
+    Escape,
+    /// `>` — CSS child combinator.
+    ChildCombinator,
+    /// `+` — CSS adjacent sibling combinator.
+    AdjacentSibling,
+    /// `~` — CSS general sibling combinator.
+    GeneralSibling,
+    /// ` ` — space, both a token separator and a CSS descendant combinator.
+    Space,
+}
+
+impl CssSyntax {
+    /// The raw byte value of this syntax token.
+    const fn byte(self) -> u8 {
+        match self {
+            Self::OpenBracket => b'[',
+            Self::CloseBracket => b']',
+            Self::OpenParen => b'(',
+            Self::CloseParen => b')',
+            Self::Colon => b':',
+            Self::Important => b'!',
+            Self::Hyphen => b'-',
+            Self::Escape => b'\\',
+            Self::ChildCombinator => b'>',
+            Self::AdjacentSibling => b'+',
+            Self::GeneralSibling => b'~',
+            Self::Space => b' ',
+        }
+    }
+
+    /// The `char` value, for use with `str` methods like `contains` and `strip_prefix`.
+    const fn char(self) -> char {
+        self.byte() as char
+    }
+
+    /// Identify a byte as a known CSS syntax token.
+    const fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            b'[' => Some(Self::OpenBracket),
+            b']' => Some(Self::CloseBracket),
+            b'(' => Some(Self::OpenParen),
+            b')' => Some(Self::CloseParen),
+            b':' => Some(Self::Colon),
+            b'!' => Some(Self::Important),
+            b'-' => Some(Self::Hyphen),
+            b'\\' => Some(Self::Escape),
+            b'>' => Some(Self::ChildCombinator),
+            b'+' => Some(Self::AdjacentSibling),
+            b'~' => Some(Self::GeneralSibling),
+            b' ' => Some(Self::Space),
+            _ => None,
+        }
+    }
+}
+
+// ─── Named constants ─────────────────────────────────────────────────────────
+
+/// Byte values recognized as string delimiters in JS/TS/JSX source.
+const QUOTE_BYTES: [u8; 3] = [b'"', b'\'', b'`'];
+
+/// ASCII whitespace bytes that separate Tailwind class tokens.
+const WHITESPACE_BYTES: [u8; 4] = [CssSyntax::Space.byte(), b'\t', b'\n', b'\r'];
+
+/// Bytes that indicate a complex CSS selector inside `has-[...]`,
+/// meaning the content is NOT a simple v3 data-attribute shorthand.
+const COMPLEX_SELECTOR_BYTES: [u8; 8] = [
+    CssSyntax::OpenBracket.byte(),
+    CssSyntax::Colon.byte(),
+    CssSyntax::Space.byte(),
+    CssSyntax::ChildCombinator.byte(),
+    CssSyntax::AdjacentSibling.byte(),
+    CssSyntax::GeneralSibling.byte(),
+    CssSyntax::OpenParen.byte(),
+    CssSyntax::CloseParen.byte(),
+];
+
+/// Byte length of the `]]` closing pair in data attribute shorthands.
+const DOUBLE_CLOSE_BRACKET_LEN: usize = 2;
+
+/// Prefix inside a bracket that signals a CSS custom property: `[--`.
+const CSS_VAR_BRACKET_PREFIX: &str = "[--";
+
+/// CSS custom property double-dash prefix inside bracket content.
+const CSS_VAR_DOUBLE_DASH: &str = "--";
+
+/// Pre-computed search needles for `DataShorthand`, avoiding per-iteration `format!`.
+/// Each entry is `(needle, prefix)` where needle = `"{prefix}[[data-"`.
+const DATA_SHORTHAND_NEEDLES: [(&str, &str); 3] = [
+    ("has-[[data-", "has-"),
+    ("group-has-[[data-", "group-has-"),
+    ("peer-has-[[data-", "peer-has-"),
+];
+
+// ─── ByteScanner ────────────────────────────────────────────────────────────
+
+/// Zero-copy forward cursor over a byte slice.
+///
+/// Replaces all manual `bytes[i]` / `i += 1` patterns with domain-level
+/// scanning operations. Each method is a single-purpose, stateless query
+/// or a minimal position advance.
+struct ByteScanner<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ByteScanner<'a> {
+    /// Create a scanner starting at byte 0.
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    /// Create a scanner starting at a specific byte offset.
+    fn at(bytes: &'a [u8], pos: usize) -> Self {
+        Self { bytes, pos }
+    }
+
+    /// Look at the current byte without advancing.
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    /// Move forward one byte.
+    fn advance(&mut self) {
+        self.pos += 1;
+    }
+
+    /// Current byte offset.
+    fn position(&self) -> usize {
+        self.pos
+    }
+
+    /// True when the cursor is past the last byte.
+    fn is_exhausted(&self) -> bool {
+        self.pos >= self.bytes.len()
+    }
+
+    /// Advance while `predicate` holds. Does not consume the first
+    /// byte that fails the predicate.
+    fn skip_while(&mut self, predicate: impl Fn(u8) -> bool) {
+        while self.pos < self.bytes.len() && predicate(self.bytes[self.pos]) {
+            self.pos += 1;
+        }
+    }
+
+    /// Extract a substring from `source` spanning `[from, current position)`.
+    fn slice_from<'s>(&self, source: &'s str, from: usize) -> &'s str {
+        &source[from..self.pos]
+    }
+}
+
+// ─── ReverseByteScanner ─────────────────────────────────────────────────────
+
+/// Zero-copy right-to-left cursor over a byte slice.
+///
+/// Used for bracket-aware reverse scanning (e.g. finding the rightmost
+/// variant colon separator in a Tailwind token).
+struct ReverseByteScanner<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ReverseByteScanner<'a> {
+    /// Create a reverse scanner starting past the last byte.
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            pos: bytes.len(),
+        }
+    }
+
+    /// Yield the next `(index, byte)` pair moving right-to-left.
+    /// Returns `None` when the beginning is reached.
+    fn next(&mut self) -> Option<(usize, u8)> {
+        if self.pos == 0 {
+            return None;
+        }
+        self.pos -= 1;
+        Some((self.pos, self.bytes[self.pos]))
+    }
+}
+
+// ─── TailwindClassDetector ──────────────────────────────────────────────────
+
+/// Individual validation rules for identifying a Tailwind class token.
+/// Each variant is a named, self-documenting check.
+#[derive(Clone, Copy)]
+enum ClassCheck {
+    /// Token must be non-empty.
+    NonEmpty,
+    /// First byte must be an ASCII letter (a-z, A-Z).
+    StartsWithLetter,
+    /// Token must contain at least one hyphen (Tailwind utilities are hyphenated).
+    ContainsHyphen,
+}
+
+impl ClassCheck {
+    fn passes(self, token: &str) -> bool {
+        match self {
+            Self::NonEmpty => !token.is_empty(),
+            Self::StartsWithLetter => token
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic()),
+            Self::ContainsHyphen => token.contains(CssSyntax::Hyphen.char()),
+        }
+    }
+}
+
+/// Ordered set of checks that identify a likely Tailwind class token.
+const TAILWIND_CLASS_CHECKS: &[ClassCheck] = &[
+    ClassCheck::NonEmpty,
+    ClassCheck::StartsWithLetter,
+    ClassCheck::ContainsHyphen,
+];
+
+/// Composite detector: all `TAILWIND_CLASS_CHECKS` must pass.
+struct TailwindClassDetector;
+
+impl TailwindClassDetector {
+    fn is_match(token: &str) -> bool {
+        TAILWIND_CLASS_CHECKS
+            .iter()
+            .all(|check| check.passes(token))
+    }
+}
+
+// ─── AttrBoundary ───────────────────────────────────────────────────────────
+
+/// Result of scanning for a simple `]]`-terminated data attribute.
+///
+/// Produced by scanning the content after `has-[[data-` for a simple
+/// `WORD` or `WORD=VALUE` pattern that ends with `]]`.
+struct AttrBoundary {
+    /// Byte offset of the first `]` in the closing `]]`.
+    end_offset: usize,
+}
+
+impl AttrBoundary {
+    /// The attribute name/value portion before the closing `]]`.
+    fn attr_content<'a>(&self, content: &'a str) -> &'a str {
+        &content[..self.end_offset]
+    }
+
+    /// Everything after the closing `]]`.
+    fn after_double_close<'a>(&self, content: &'a str) -> &'a str {
+        &content[self.end_offset + DOUBLE_CLOSE_BRACKET_LEN..]
+    }
+
+    /// Scan `content` for a simple data attribute ending with `]]`.
+    ///
+    /// Returns `None` if the content is empty, contains complex selector bytes
+    /// (`[`, `:`, ` `, `>`, `+`, `~`, `(`, `)`), or has no `]]` terminator.
+    fn scan(content: &str) -> Option<Self> {
+        let mut scanner = ByteScanner::new(content.as_bytes());
+        while let Some(b) = scanner.peek() {
+            if b == CssSyntax::CloseBracket.byte() {
+                return Self::validate_double_close(&scanner);
+            }
+            if COMPLEX_SELECTOR_BYTES.contains(&b) {
+                return None;
+            }
+            scanner.advance();
+        }
+        None
+    }
+
+    /// Check that the scanner is at a `]]` pair and that the attribute name is non-empty.
+    fn validate_double_close(scanner: &ByteScanner<'_>) -> Option<Self> {
+        let pos = scanner.position();
+        // Empty attribute name (e.g. `has-[[data-]]`)
+        if pos == 0 {
+            return None;
+        }
+        // Must be followed by another `]` to form `]]`
+        let next_is_close =
+            scanner.bytes.get(pos + 1).copied() == Some(CssSyntax::CloseBracket.byte());
+        if next_is_close {
+            Some(AttrBoundary { end_offset: pos })
+        } else {
+            None
+        }
+    }
+}
+
+// ─── Parse trait ─────────────────────────────────────────────────────────────
+
+/// A domain type that can be parsed from a Tailwind class token and displayed
+/// in v4 syntax. `parse` returns `Some(Self)` if the token matches the v3
+/// pattern, `None` otherwise.
+trait Parse<'a>: Sized + fmt::Display {
+    fn parse(token: &'a str) -> Option<Self>;
+}
+
+// ─── TransformedRegion ──────────────────────────────────────────────────────
+
+/// A region (or token) after transformation — either unchanged or rewritten.
+///
+/// Explicit domain type (not `Cow`) to distinguish "no transform needed"
+/// from "transform produced identical text".
+enum TransformedRegion<'a> {
+    /// Region passed through without modification.
+    Unchanged(&'a str),
+    /// Region was rewritten by a v3→v4 transform.
+    Rewritten(String),
+}
+
+impl TransformedRegion<'_> {
+    fn as_str(&self) -> &str {
+        match self {
+            TransformedRegion::Unchanged(s) => s,
+            TransformedRegion::Rewritten(s) => s.as_str(),
+        }
+    }
+}
+
+// ─── BracketPair ────────────────────────────────────────────────────────────
+
+/// Matched `[`…`]` pair found by depth-tracking scan.
+struct BracketPair {
+    open: usize,
+    close: usize,
+}
+
+impl BracketPair {
+    /// The text between the brackets, exclusive of `[` and `]`.
+    fn content<'a>(&self, source: &'a str) -> &'a str {
+        &source[self.open + 1..self.close]
+    }
+
+    /// Everything before the opening `[`.
+    fn prefix<'a>(&self, source: &'a str) -> &'a str {
+        &source[..self.open]
+    }
+
+    /// Everything after the closing `]`.
+    fn suffix<'a>(&self, source: &'a str) -> &'a str {
+        &source[self.close + 1..]
+    }
+}
+
+// ─── CssVar ──────────────────────────────────────────────────────────────────
+
+/// CSS custom property bracket syntax: `w-[--sidebar-width]` → `w-(--sidebar-width)`
+struct CssVar<'a> {
+    prefix: &'a str,
+    var_name: &'a str,
+    suffix: &'a str,
+}
+
+impl<'a> Parse<'a> for CssVar<'a> {
+    fn parse(token: &'a str) -> Option<Self> {
+        let open = token.find(CSS_VAR_BRACKET_PREFIX)?;
+        let brackets = find_matching_close_bracket(token, open)?;
+        let var_name = brackets.content(token);
+        if var_name.starts_with(CSS_VAR_DOUBLE_DASH)
+            && !var_name.contains(CssSyntax::OpenParen.char())
+        {
+            Some(CssVar {
+                prefix: brackets.prefix(token),
+                var_name,
+                suffix: brackets.suffix(token),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl fmt::Display for CssVar<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}({}){}", self.prefix, self.var_name, self.suffix)
+    }
+}
+
+// ─── DataShorthand ───────────────────────────────────────────────────────────
+
+/// V3 has-data attribute shorthand: `has-[[data-variant=inset]]` → `has-data-[variant=inset]`
+struct DataShorthand<'a> {
+    before: &'a str,
+    has_variant: &'a str,
+    attr: &'a str,
+    suffix: &'a str,
+}
+
+impl<'a> Parse<'a> for DataShorthand<'a> {
+    fn parse(token: &'a str) -> Option<Self> {
+        for &(needle, has_variant) in &DATA_SHORTHAND_NEEDLES {
+            let Some((before, after)) = token.split_once(needle) else {
+                continue;
+            };
+            let Some(boundary) = AttrBoundary::scan(after) else {
+                continue;
+            };
+            return Some(DataShorthand {
+                before,
+                has_variant,
+                attr: boundary.attr_content(after),
+                suffix: boundary.after_double_close(after),
+            });
+        }
+        None
+    }
+}
+
+impl fmt::Display for DataShorthand<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}data-[{}]{}",
+            self.before, self.has_variant, self.attr, self.suffix
+        )
+    }
+}
+
+// ─── VariantSplit ────────────────────────────────────────────────────────────
+
+/// Result of splitting a Tailwind token at the rightmost variant colon.
+///
+/// E.g. `"hover:bg-red"` → prefix `"hover:"`, after_colon `"bg-red"`.
+struct VariantSplit<'a> {
+    /// Everything up to and including the colon (e.g. `"group-data-[x]:"`).
+    prefix: &'a str,
+    /// Everything after the colon (e.g. `"!p-2"`).
+    after_colon: &'a str,
+}
+
+// ─── ImportantModifier ───────────────────────────────────────────────────────
+
+/// Important modifier from prefix to suffix: `!p-2` → `p-2!`
+struct ImportantModifier<'a> {
+    variant_prefix: &'a str,
+    class_name: &'a str,
+}
+
+impl<'a> ImportantModifier<'a> {
+    /// Try `!class-name` at the start of the token (no variant prefix).
+    fn parse_bare(token: &'a str) -> Option<Self> {
+        let class = token.strip_prefix(CssSyntax::Important.char())?;
+        TailwindClassDetector::is_match(class).then_some(ImportantModifier {
+            variant_prefix: "",
+            class_name: class,
+        })
+    }
+
+    /// Try `variant:!class-name` — important after the rightmost variant colon.
+    fn parse_after_variant(token: &'a str) -> Option<Self> {
+        let split = rfind_variant_colon(token)?;
+        let class = split
+            .after_colon
+            .strip_prefix(CssSyntax::Important.char())
+            .filter(|c| TailwindClassDetector::is_match(c))?;
+        Some(ImportantModifier {
+            variant_prefix: split.prefix,
+            class_name: class,
+        })
+    }
+}
+
+impl<'a> Parse<'a> for ImportantModifier<'a> {
+    fn parse(token: &'a str) -> Option<Self> {
+        Self::parse_bare(token).or_else(|| Self::parse_after_variant(token))
+    }
+}
+
+impl fmt::Display for ImportantModifier<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}!", self.variant_prefix, self.class_name)
+    }
+}
 
 // ─── Region types ────────────────────────────────────────────────────────────
 
@@ -23,87 +520,112 @@ struct Region<'a> {
     kind: RegionKind,
 }
 
-/// A class-level transform: takes a single whitespace-delimited token,
-/// returns `Cow::Borrowed` if unchanged, `Cow::Owned` if transformed.
-type ClassTransformFn = for<'a> fn(&'a str) -> Cow<'a, str>;
-
-/// Ordered list of per-token transforms applied to every class token inside strings.
-const CLASS_TRANSFORMS: &[ClassTransformFn] =
-    &[css_var_syntax, has_data_shorthand, important_modifier];
-
 // ─── Region tokenizer ────────────────────────────────────────────────────────
 
-/// Split source into alternating Code / StringContent regions.
-///
-/// Recognizes `"`, `'`, and `` ` `` as string delimiters (handling `\` escapes).
-/// The delimiter characters themselves belong to Code regions so that transforms
-/// never see (or corrupt) quotes.
-fn tokenize_regions(input: &str) -> Vec<Region<'_>> {
-    let mut regions = Vec::new();
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    // Start of the current region being accumulated
-    let mut region_start = 0;
+/// A byte range within a source string, paired with a region kind.
+struct Span {
+    start: usize,
+    end: usize,
+    kind: RegionKind,
+}
 
-    while i < len {
-        let b = bytes[i];
-        if b == b'"' || b == b'\'' || b == b'`' {
-            let quote = b;
-            // Emit any Code region accumulated before this quote
-            if i > region_start {
-                regions.push(Region {
-                    text: &input[region_start..i],
-                    kind: RegionKind::Code,
-                });
-            }
-            // The opening quote itself is Code
-            regions.push(Region {
-                text: &input[i..i + 1],
-                kind: RegionKind::Code,
-            });
-            i += 1; // move past opening quote
-
-            let string_start = i;
-            // Scan for closing quote
-            while i < len {
-                if bytes[i] == b'\\' {
-                    i += 2; // skip escaped char
-                    continue;
-                }
-                if bytes[i] == quote {
-                    break;
-                }
-                i += 1;
-            }
-            // Emit the string content (possibly empty)
-            if i > string_start {
-                regions.push(Region {
-                    text: &input[string_start..i],
-                    kind: RegionKind::StringContent,
-                });
-            }
-            // Emit the closing quote as Code (if we found one)
-            if i < len {
-                regions.push(Region {
-                    text: &input[i..i + 1],
-                    kind: RegionKind::Code,
-                });
-                i += 1;
-            }
-            region_start = i;
+impl Span {
+    /// Convert this span into a `Region` borrowing from `source`.
+    /// Returns `None` if the span is empty (start == end).
+    fn into_region<'a>(self, source: &'a str) -> Option<Region<'a>> {
+        if self.end > self.start {
+            Some(Region {
+                text: &source[self.start..self.end],
+                kind: self.kind,
+            })
         } else {
-            i += 1;
+            None
         }
     }
-    // Emit trailing Code region
-    if region_start < len {
-        regions.push(Region {
-            text: &input[region_start..len],
-            kind: RegionKind::Code,
-        });
+}
+
+/// Splits JS/TS source into Code and StringContent regions.
+///
+/// Recognizes `"`, `'`, and `` ` `` as string delimiters (handling `\` escapes).
+/// Delimiter characters belong to Code regions so transforms never see quotes.
+struct RegionTokenizer<'a> {
+    input: &'a str,
+    scanner: ByteScanner<'a>,
+    regions: Vec<Region<'a>>,
+    region_start: usize,
+}
+
+impl<'a> RegionTokenizer<'a> {
+    fn new(input: &'a str) -> Self {
+        Self {
+            input,
+            scanner: ByteScanner::new(input.as_bytes()),
+            regions: Vec::new(),
+            region_start: 0,
+        }
     }
-    regions
+
+    fn tokenize(mut self) -> Vec<Region<'a>> {
+        while let Some(b) = self.scanner.peek() {
+            if QUOTE_BYTES.contains(&b) {
+                self.process_quoted_string(b);
+            } else {
+                self.scanner.advance();
+            }
+        }
+        self.emit_span(self.input.len(), RegionKind::Code);
+        self.regions
+    }
+
+    fn process_quoted_string(&mut self, quote: u8) {
+        let quote_pos = self.scanner.position();
+        self.emit_span(quote_pos, RegionKind::Code);
+
+        // Opening quote as Code
+        self.region_start = quote_pos;
+        self.scanner.advance();
+        self.emit_span(self.scanner.position(), RegionKind::Code);
+
+        // String content until closing quote
+        self.scan_to_closing_quote(quote);
+        self.emit_span(self.scanner.position(), RegionKind::StringContent);
+
+        // Closing quote as Code (if found)
+        if !self.scanner.is_exhausted() {
+            self.scanner.advance();
+            self.emit_span(self.scanner.position(), RegionKind::Code);
+        }
+    }
+
+    fn scan_to_closing_quote(&mut self, quote: u8) {
+        while let Some(b) = self.scanner.peek() {
+            if b == CssSyntax::Escape.byte() {
+                self.scanner.advance();
+                self.scanner.advance();
+                continue;
+            }
+            if b == quote {
+                return;
+            }
+            self.scanner.advance();
+        }
+    }
+
+    /// Emit a region from `region_start` to `end`, then advance `region_start`.
+    fn emit_span(&mut self, end: usize, kind: RegionKind) {
+        let span = Span {
+            start: self.region_start,
+            end,
+            kind,
+        };
+        self.regions.extend(span.into_region(self.input));
+        self.region_start = end;
+    }
+}
+
+/// Split source into alternating Code / StringContent regions.
+fn tokenize_regions(input: &str) -> Vec<Region<'_>> {
+    RegionTokenizer::new(input).tokenize()
 }
 
 // ─── Pipeline orchestrator ───────────────────────────────────────────────────
@@ -119,241 +641,121 @@ fn tokenize_regions(input: &str) -> Vec<Region<'_>> {
 /// - `group-data-[x]:!p-4` → `group-data-[x]:p-4!`
 pub fn transform_tailwind_v3_to_v4(content: &str) -> String {
     let regions = tokenize_regions(content);
-    let mut out = String::with_capacity(content.len());
-    for region in &regions {
-        match region.kind {
-            RegionKind::Code => out.push_str(region.text),
-            RegionKind::StringContent => {
-                transform_string_classes(region.text, &mut out);
-            }
-        }
-    }
-    out
+    let capacity = content.len();
+    regions
+        .iter()
+        .map(|region| match region.kind {
+            RegionKind::Code => TransformedRegion::Unchanged(region.text),
+            RegionKind::StringContent => transform_string_region(region.text),
+        })
+        .fold(String::with_capacity(capacity), |mut acc, region| {
+            acc.push_str(region.as_str());
+            acc
+        })
 }
 
-/// Iterate whitespace-separated tokens in a string region, applying class
-/// transforms to each token while preserving the original whitespace.
-fn transform_string_classes(s: &str, out: &mut String) {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
+/// Transform all whitespace-separated class tokens in a string region.
+///
+/// Preserves original whitespace between tokens. Returns `Unchanged` if
+/// no token was rewritten, avoiding unnecessary allocation.
+fn transform_string_region(s: &str) -> TransformedRegion<'_> {
+    let mut scanner = ByteScanner::new(s.as_bytes());
+    let mut parts: Vec<TransformedRegion<'_>> = Vec::new();
+    let mut any_rewritten = false;
 
-    while i < len {
-        // Accumulate whitespace
-        let ws_start = i;
-        while i < len
-            && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b'\n' || bytes[i] == b'\r')
-        {
-            i += 1;
+    while !scanner.is_exhausted() {
+        // Consume whitespace
+        let ws_start = scanner.position();
+        scanner.skip_while(|b| WHITESPACE_BYTES.contains(&b));
+        let ws = scanner.slice_from(s, ws_start);
+        if !ws.is_empty() {
+            parts.push(TransformedRegion::Unchanged(ws));
         }
-        if i > ws_start {
-            out.push_str(&s[ws_start..i]);
-        }
-        if i >= len {
+        if scanner.is_exhausted() {
             break;
         }
-        // Accumulate non-whitespace token
-        let tok_start = i;
-        while i < len
-            && bytes[i] != b' '
-            && bytes[i] != b'\t'
-            && bytes[i] != b'\n'
-            && bytes[i] != b'\r'
-        {
-            i += 1;
+
+        // Consume non-whitespace token
+        let tok_start = scanner.position();
+        scanner.skip_while(|b| !WHITESPACE_BYTES.contains(&b));
+        let token = scanner.slice_from(s, tok_start);
+
+        let transformed = transform_token(token);
+        if matches!(&transformed, TransformedRegion::Rewritten(_)) {
+            any_rewritten = true;
         }
-        let token = &s[tok_start..i];
-        let transformed = transform_class_token(token);
-        out.push_str(&transformed);
+        parts.push(transformed);
     }
+
+    if !any_rewritten {
+        return TransformedRegion::Unchanged(s);
+    }
+    let assembled = parts.iter().map(|p| p.as_str()).collect::<String>();
+    TransformedRegion::Rewritten(assembled)
 }
 
-/// Apply all `CLASS_TRANSFORMS` to a single class token, chaining results.
-fn transform_class_token(token: &str) -> Cow<'_, str> {
-    let mut current: Cow<'_, str> = Cow::Borrowed(token);
-    for transform in CLASS_TRANSFORMS {
-        match current {
-            Cow::Borrowed(s) => {
-                current = transform(s);
-            }
-            Cow::Owned(ref s) => {
-                let result = transform(s.as_str());
-                if let Cow::Owned(new) = result {
-                    current = Cow::Owned(new);
-                }
-                // If Borrowed, it borrowed from the Owned string — keep current as-is
-            }
-        }
-    }
-    current
-}
-
-// ─── Per-token transforms ────────────────────────────────────────────────────
-
-/// Transform CSS custom property syntax: `[--var-name]` → `(--var-name)`
+/// Apply v3→v4 transforms to a single class token.
 ///
-/// Only transforms when bracket content starts with `--` (CSS custom property)
-/// and doesn't contain `(` (not a calc expression).
-fn css_var_syntax(token: &str) -> Cow<'_, str> {
-    // Find `[--` in the token
-    let Some(open) = token.find("[--") else {
-        return Cow::Borrowed(token);
-    };
-
-    // Track bracket depth to find the matching `]`
-    let bytes = token.as_bytes();
-    let mut depth = 0;
-    let mut close = None;
-    for (j, &b) in bytes.iter().enumerate().skip(open) {
-        match b {
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(j);
-                    break;
-                }
-            }
-            _ => {}
-        }
+/// Tries each domain parser in priority order — transforms are
+/// mutually exclusive for real Tailwind tokens.
+fn transform_token(token: &str) -> TransformedRegion<'_> {
+    if let Some(v) = CssVar::parse(token) {
+        return TransformedRegion::Rewritten(v.to_string());
     }
-
-    let Some(close) = close else {
-        // Unclosed bracket — return as-is
-        return Cow::Borrowed(token);
-    };
-
-    let bracket_content = &token[open + 1..close]; // content between [ and ]
-    // Only transform if it starts with -- and doesn't contain ( (calc)
-    if bracket_content.starts_with("--") && !bracket_content.contains('(') {
-        let mut result = String::with_capacity(token.len());
-        result.push_str(&token[..open]);
-        result.push('(');
-        result.push_str(bracket_content);
-        result.push(')');
-        result.push_str(&token[close + 1..]);
-        Cow::Owned(result)
-    } else {
-        Cow::Borrowed(token)
+    if let Some(v) = DataShorthand::parse(token) {
+        return TransformedRegion::Rewritten(v.to_string());
     }
-}
-
-/// Transform v3 data shorthand: `has-[[data-attr=val]]` → `has-data-[attr=val]`
-///
-/// Also handles `group-has-` and `peer-has-` prefixes.
-/// Does NOT transform complex CSS selectors inside `has-[...]`.
-fn has_data_shorthand(token: &str) -> Cow<'_, str> {
-    // Look for any of the prefix patterns in the token
-    for prefix in ["has-", "group-has-", "peer-has-"] {
-        let search = format!("{prefix}[[data-");
-        if let Some(pos) = token.find(&search) {
-            let after = &token[pos + search.len()..];
-            if let Some(end) = find_simple_data_attr_end(after) {
-                let attr_content = &after[..end];
-                let mut result = String::with_capacity(token.len());
-                result.push_str(&token[..pos]);
-                result.push_str(prefix);
-                result.push_str("data-[");
-                result.push_str(attr_content);
-                result.push(']');
-                result.push_str(&after[end + 2..]); // skip past ]]
-                return Cow::Owned(result);
-            }
-        }
+    if let Some(v) = ImportantModifier::parse(token) {
+        return TransformedRegion::Rewritten(v.to_string());
     }
-    Cow::Borrowed(token)
-}
-
-/// Transform important modifier from prefix to suffix.
-///
-/// - `!class-name` → `class-name!`
-/// - `variant:!class-name` → `variant:class-name!`
-fn important_modifier(token: &str) -> Cow<'_, str> {
-    if let Some(class) = token.strip_prefix('!') {
-        // Token form: !class-name → class-name!
-        if is_likely_tailwind_class(class) {
-            let mut result = String::with_capacity(token.len());
-            result.push_str(class);
-            result.push('!');
-            return Cow::Owned(result);
-        }
-    } else if let Some(colon_pos) = rfind_variant_colon(token) {
-        // Check for variant:!class pattern
-        let after_colon = &token[colon_pos + 1..];
-        if let Some(class) = after_colon
-            .strip_prefix('!')
-            .filter(|c| is_likely_tailwind_class(c))
-        {
-            let mut result = String::with_capacity(token.len());
-            result.push_str(&token[..colon_pos + 1]); // variant:
-            result.push_str(class);
-            result.push('!');
-            return Cow::Owned(result);
-        }
-    }
-    Cow::Borrowed(token)
-}
-
-/// Check if a string looks like a Tailwind class name.
-/// Must start with a letter and contain a hyphen.
-fn is_likely_tailwind_class(s: &str) -> bool {
-    !s.is_empty() && s.as_bytes()[0].is_ascii_alphabetic() && s.contains('-')
+    TransformedRegion::Unchanged(token)
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Check if the text after `has-[[data-` is a simple attribute value ending with `]]`.
-///
-/// Returns `Some(end_offset)` pointing to the first `]` of the closing `]]` if the
-/// content is a simple `WORD` or `WORD=VALUE` (no brackets, colons, spaces, or other
-/// selector syntax). Returns `None` if it's a complex selector.
-fn find_simple_data_attr_end(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b']' => {
-                // Must be followed by another ] to form ]]
-                if i + 1 < bytes.len() && bytes[i + 1] == b']' {
-                    // Verify we consumed at least something (not empty)
-                    if i == 0 {
-                        return None;
-                    }
-                    return Some(i);
-                }
-                // Single ] means there's more complex selector content
-                return None;
-            }
-            // These characters indicate a complex selector, not simple shorthand
-            b'[' | b':' | b' ' | b'>' | b'+' | b'~' | b'(' | b')' => return None,
-            _ => continue,
+/// Find the matching `]` for the `[` at `open_pos`, tracking bracket depth.
+fn find_matching_close_bracket(source: &str, open_pos: usize) -> Option<BracketPair> {
+    let mut scanner = ByteScanner::at(source.as_bytes(), open_pos);
+    let mut depth: i32 = 0;
+    while let Some(b) = scanner.peek() {
+        match CssSyntax::from_byte(b) {
+            Some(CssSyntax::OpenBracket) => depth += 1,
+            Some(CssSyntax::CloseBracket) => depth -= 1,
+            _ => {}
         }
+        if depth == 0 {
+            return Some(BracketPair {
+                open: open_pos,
+                close: scanner.position(),
+            });
+        }
+        scanner.advance();
     }
-    None // No closing ]] found
+    None
 }
 
-/// Bracket-aware right-to-left scan for the last variant colon separator.
+/// Bracket-aware right-to-left scan for the rightmost variant colon.
 ///
-/// Returns `Some(byte_offset)` of the rightmost `:` that is at bracket depth 0,
+/// Returns the split at the rightmost `:` at bracket depth 0,
 /// i.e. a true Tailwind variant separator (not inside `[...]` or `(...)`).
-fn rfind_variant_colon(token: &str) -> Option<usize> {
-    let bytes = token.as_bytes();
+fn rfind_variant_colon(token: &str) -> Option<VariantSplit<'_>> {
+    let mut scanner = ReverseByteScanner::new(token.as_bytes());
     let mut depth: i32 = 0;
-    let mut last_colon = None;
 
-    // Scan right-to-left
-    for i in (0..bytes.len()).rev() {
-        match bytes[i] {
-            b']' | b')' => depth += 1,
-            b'[' | b'(' => depth -= 1,
-            b':' if depth == 0 => {
-                last_colon = Some(i);
-                // We want the rightmost, so return immediately
-                return last_colon;
+    while let Some((pos, b)) = scanner.next() {
+        match CssSyntax::from_byte(b) {
+            Some(CssSyntax::CloseBracket | CssSyntax::CloseParen) => depth += 1,
+            Some(CssSyntax::OpenBracket | CssSyntax::OpenParen) => depth -= 1,
+            Some(CssSyntax::Colon) if depth == 0 => {
+                return Some(VariantSplit {
+                    prefix: &token[..pos + 1],
+                    after_colon: &token[pos + 1..],
+                });
             }
             _ => {}
         }
     }
-    last_colon
+    None
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -855,26 +1257,32 @@ mod tests {
     }
 
     // =========================================================================
-    // Unit tests for find_simple_data_attr_end
+    // Unit tests for AttrBoundary::scan
     // =========================================================================
 
     #[test]
     fn test_find_simple_attr_with_value() {
         // "variant=inset]]..." → Some(13) pointing to first ]
-        assert_eq!(find_simple_data_attr_end("variant=inset]]"), Some(13));
+        assert_eq!(
+            AttrBoundary::scan("variant=inset]]").map(|b| b.end_offset),
+            Some(13)
+        );
     }
 
     #[test]
     fn test_find_simple_attr_no_value() {
         // "active]]" → Some(6)
-        assert_eq!(find_simple_data_attr_end("active]]"), Some(6));
+        assert_eq!(
+            AttrBoundary::scan("active]]").map(|b| b.end_offset),
+            Some(6)
+        );
     }
 
     #[test]
     fn test_find_complex_attr_with_pseudo() {
         // "slot=input-group-control]:focus-visible]" — has single ] then more content
         assert_eq!(
-            find_simple_data_attr_end("slot=input-group-control]:focus-visible]"),
+            AttrBoundary::scan("slot=input-group-control]:focus-visible]").map(|b| b.end_offset),
             None
         );
     }
@@ -882,25 +1290,34 @@ mod tests {
     #[test]
     fn test_find_compound_attrs() {
         // "slot][aria-invalid=true]]" — has inner [ which is complex
-        assert_eq!(find_simple_data_attr_end("slot][aria-invalid=true]]"), None);
+        assert_eq!(
+            AttrBoundary::scan("slot][aria-invalid=true]]").map(|b| b.end_offset),
+            None
+        );
     }
 
     #[test]
     fn test_find_empty() {
         // "]]" → None (empty attribute name)
-        assert_eq!(find_simple_data_attr_end("]]"), None);
+        assert_eq!(AttrBoundary::scan("]]").map(|b| b.end_offset), None);
     }
 
     #[test]
     fn test_find_no_closing() {
         // "variant=inset" → None (no ]])
-        assert_eq!(find_simple_data_attr_end("variant=inset"), None);
+        assert_eq!(
+            AttrBoundary::scan("variant=inset").map(|b| b.end_offset),
+            None
+        );
     }
 
     #[test]
     fn test_find_single_bracket_only() {
         // "variant=inset]" → None (only single ])
-        assert_eq!(find_simple_data_attr_end("variant=inset]"), None);
+        assert_eq!(
+            AttrBoundary::scan("variant=inset]").map(|b| b.end_offset),
+            None
+        );
     }
 
     // =========================================================================
@@ -911,7 +1328,7 @@ mod tests {
     fn test_has_data_truncated_no_closing_brackets() {
         // Malformed: has-[[data-variant=inset without closing ]]
         // With region tokenizer, the string content is processed per-token.
-        // The token has-[[data-variant=inset has no ]] so find_simple_data_attr_end returns None.
+        // The token has-[[data-variant=inset has no ]] so AttrBoundary::scan returns None.
         let input = r#""has-[[data-variant=inset""#;
         let result = transform_tailwind_v3_to_v4(input);
         assert!(!result.is_empty(), "truncated input must not panic");
@@ -930,7 +1347,7 @@ mod tests {
         // has-[[data-]] — empty attribute name after data-
         let input = r#""has-[[data-]]:bg-red""#;
         let result = transform_tailwind_v3_to_v4(input);
-        // find_simple_data_attr_end sees "]" at position 0 → checks for ]] → i=0 guard returns None
+        // AttrBoundary::scan sees "]" at position 0 → validate_double_close → pos==0 returns None
         // So this falls through as non-simple. The original text is preserved.
         assert_eq!(result, input, "empty attr name must not transform");
     }
@@ -1005,7 +1422,7 @@ mod tests {
         // Attribute value containing hyphens (common in data attributes)
         // "slot=item-description" is 21 chars (0..=20), ] is at index 21
         assert_eq!(
-            find_simple_data_attr_end("slot=item-description]]"),
+            AttrBoundary::scan("slot=item-description]]").map(|b| b.end_offset),
             Some(21)
         );
     }
@@ -1013,7 +1430,10 @@ mod tests {
     #[test]
     fn test_find_attr_with_dots_and_numbers() {
         // Values can contain dots, numbers, etc.
-        assert_eq!(find_simple_data_attr_end("size=1.5]]"), Some(8));
+        assert_eq!(
+            AttrBoundary::scan("size=1.5]]").map(|b| b.end_offset),
+            Some(8)
+        );
     }
 
     #[test]
@@ -1042,7 +1462,7 @@ mod tests {
         let input = r#""w-[--foo""#;
         let result = transform_tailwind_v3_to_v4(input);
         // With per-token transform, the token is "w-[--foo" (no closing bracket)
-        // css_var_syntax finds [-- but no matching ] → returns Borrowed
+        // CssVar::parse finds [-- but no matching ] → returns None
         // So the token passes through unchanged
         assert_eq!(result, input, "unclosed bracket passes through unchanged");
     }
@@ -1067,7 +1487,7 @@ foo]]""#;
     }
 
     // =========================================================================
-    // New: tokenize_regions unit tests
+    // tokenize_regions unit tests
     // =========================================================================
 
     #[test]
@@ -1171,63 +1591,61 @@ foo]]""#;
     }
 
     // =========================================================================
-    // New: rfind_variant_colon unit tests
+    // rfind_variant_colon unit tests
     // =========================================================================
 
     #[test]
     fn test_rfind_variant_colon_simple() {
-        assert_eq!(rfind_variant_colon("hover:bg-red"), Some(5));
+        let result = rfind_variant_colon("hover:bg-red");
+        assert_eq!(result.as_ref().map(|s| s.prefix), Some("hover:"));
+        assert_eq!(result.as_ref().map(|s| s.after_colon), Some("bg-red"));
     }
 
     #[test]
     fn test_rfind_variant_colon_nested_brackets() {
         // group-data-[collapsible=icon]:!p-2
         // The colon inside [collapsible=icon] is at depth > 0
-        let token = "group-data-[collapsible=icon]:!p-2";
-        let result = rfind_variant_colon(token);
-        assert_eq!(result, Some(29)); // the colon after ]
+        let result = rfind_variant_colon("group-data-[collapsible=icon]:!p-2");
+        assert_eq!(
+            result.as_ref().map(|s| s.prefix),
+            Some("group-data-[collapsible=icon]:")
+        );
+        assert_eq!(result.as_ref().map(|s| s.after_colon), Some("!p-2"));
     }
 
     #[test]
     fn test_rfind_variant_colon_none() {
-        assert_eq!(rfind_variant_colon("bg-red"), None);
+        assert!(rfind_variant_colon("bg-red").is_none());
     }
 
     #[test]
     fn test_rfind_variant_colon_multiple() {
         // dark:hover:bg-red → rightmost colon at depth 0
-        let token = "dark:hover:bg-red";
-        assert_eq!(rfind_variant_colon(token), Some(10));
+        let result = rfind_variant_colon("dark:hover:bg-red");
+        assert_eq!(result.as_ref().map(|s| s.prefix), Some("dark:hover:"));
+        assert_eq!(result.as_ref().map(|s| s.after_colon), Some("bg-red"));
     }
 
     // =========================================================================
-    // New: transform_class_token Cow::Borrowed fast path
+    // transform_token unit tests
     // =========================================================================
 
     #[test]
-    fn test_transform_class_token_borrowed_fast_path() {
-        // A plain class like "flex" should return Cow::Borrowed (no allocation)
-        let result = transform_class_token("flex");
-        assert!(
-            matches!(result, Cow::Borrowed(_)),
-            "plain class should be Borrowed"
-        );
-        assert_eq!(&*result, "flex");
+    fn test_transform_token_passthrough() {
+        // A plain class like "flex" should pass through unchanged
+        let result = transform_token("flex");
+        assert_eq!(result.as_str(), "flex");
     }
 
     #[test]
-    fn test_transform_class_token_owned_on_transform() {
-        // A class that triggers css_var_syntax should return Cow::Owned
-        let result = transform_class_token("w-[--sidebar-width]");
-        assert!(
-            matches!(result, Cow::Owned(_)),
-            "transformed class should be Owned"
-        );
-        assert_eq!(&*result, "w-(--sidebar-width)");
+    fn test_transform_token_css_var() {
+        // A class that triggers CssVar should be transformed
+        let result = transform_token("w-[--sidebar-width]");
+        assert_eq!(result.as_str(), "w-(--sidebar-width)");
     }
 
     // =========================================================================
-    // New: code outside strings is never transformed
+    // Code outside strings is never transformed
     // =========================================================================
 
     #[test]
