@@ -67,7 +67,7 @@ pub fn format_aggregated_record(agg: &AggregatedRecord, colorize: bool) -> Strin
 
 /// Format a log record for startup display (compact timestamp, always colorized, with channel).
 pub fn format_startup_log(record: &LogRecord) -> String {
-    let timestamp = format_short_timestamp(record.effective_timestamp_ms());
+    let timestamp = format_timestamp(record.effective_timestamp_ms());
 
     let service_name = record.service_name.as_deref().unwrap_or("unknown");
     let source = if service_name.ends_with("_app") {
