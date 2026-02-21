@@ -86,7 +86,7 @@ pub fn start_openapi_watcher(
         let _watcher = watcher;
 
         // Resolve uv once for the lifetime of this watcher task
-        let uv = match Uv::resolve().await {
+        let uv = match Uv::new().await {
             Ok(uv) => uv,
             Err(e) => {
                 warn!("Failed to resolve uv for OpenAPI watcher: {e}");
@@ -183,10 +183,11 @@ pub fn start_openapi_watcher(
                             info!("Running OpenAPI regeneration...");
                         }
 
-                        let mut cmd = uv.tokio_command();
-                        cmd.args(["run", "apx", "__generate_openapi", "--app-dir"])
+                        let mut cmd = uv.cmd()
+                            .args(["run", "apx", "__generate_openapi", "--app-dir"])
                             .arg(&app_dir)
-                            .current_dir(&app_dir);
+                            .cwd(&app_dir)
+                            .into_command();
                         let output = cmd.output();
                         let output = tokio::time::timeout(Duration::from_secs(30), output).await;
                         match output {

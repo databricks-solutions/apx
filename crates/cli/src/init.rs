@@ -131,7 +131,7 @@ pub async fn run(args: InitArgs) -> i32 {
 
 async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     // Eagerly resolve uv (always needed)
-    let _uv = apx_core::external::Uv::resolve().await?;
+    let _uv = apx_core::external::Uv::new().await?;
 
     let workspace_root = resolve_app_dir(args.app_path.take());
 
@@ -358,7 +358,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
     // Resolve bun only for UI-enabled projects
     if ui_enabled {
-        let _bun = Bun::resolve().await?;
+        let _bun = Bun::new().await?;
     }
 
     println!(
@@ -425,7 +425,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     if !Git::is_available().await {
         println!("⚠️  Git is not available - skipping git initialization");
     } else {
-        let git = Git::resolve().map_err(|e| e.to_string())?;
+        let git = Git::new().map_err(|e| e.to_string())?;
         let inside =
             git.is_inside_work_tree(git_dir).await.unwrap_or(false) || has_git_dir(git_dir);
         if inside {

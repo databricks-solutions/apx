@@ -338,7 +338,7 @@ async fn apply_single_addon(
 
         // Resolve bun if needed
         if manifest.config.requires_bun {
-            let _bun = Bun::resolve().await?;
+            let _bun = Bun::new().await?;
         }
     }
 

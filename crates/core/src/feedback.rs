@@ -115,7 +115,7 @@ pub fn format_issue_body(
 
 /// Submit feedback via the `gh` CLI. Returns the issue URL on success.
 pub async fn submit_via_gh_cli(title: &str, body: &str) -> Result<String, FeedbackError> {
-    let gh = Gh::resolve()?;
+    let gh = Gh::new()?;
     let url = gh
         .create_issue(GITHUB_REPO, title, body, &["feedback"])
         .await?;

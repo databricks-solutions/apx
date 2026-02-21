@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use tokio::sync::OnceCell;
 
 use super::{
-    BinarySource, CommandError, CommandOutput, ExternalTool, Resolvable, ResolvedBinary, ToolInfo,
-    ToolInfoEntry, get_version, resolve_local, resolve_with_download, run_command,
+    BinarySource, CommandError, CommandOutput, ExternalTool, Resolvable, ResolvedBinary,
+    ToolCommand, ToolInfo, ToolInfoEntry, get_version, resolve_local, resolve_with_download,
 };
 
 #[cfg(target_os = "windows")]
@@ -27,7 +27,7 @@ pub struct Bun {
 
 impl Bun {
     /// Resolve bun binary (downloads if needed). Cached after first call.
-    pub async fn resolve() -> Result<Self, String> {
+    pub async fn new() -> Result<Self, String> {
         let resolved = BUN_CELL
             .get_or_try_init(resolve_with_download::<Self>)
             .await?;
@@ -49,24 +49,20 @@ impl Bun {
         std::env::join_paths(paths).unwrap_or(current_path)
     }
 
-    /// Create a `tokio::process::Command` for spawning bun (with patched PATH).
-    pub(crate) fn tokio_command(&self) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new(&self.path);
-        cmd.env("PATH", self.patched_path());
-        cmd
+    /// Create a `ToolCommand` for bun (with patched PATH).
+    pub fn cmd(&self) -> ToolCommand {
+        ToolCommand::new(self.path.clone(), "bun").env("PATH", self.patched_path())
     }
 
-    /// Create a tokio command with `NODE_PATH` set to `<app_dir>/node_modules`.
+    /// Create a `ToolCommand` with `NODE_PATH` set to `<app_dir>/node_modules`.
     ///
     /// Use this when running scripts that live outside the project directory
     /// (e.g. the bundled entrypoint.ts at ~/.apx/files/). Without NODE_PATH,
     /// bun resolves transitive dependencies relative to the script's location
     /// or its global cache, which fails to find packages installed in the
     /// project's node_modules.
-    pub(crate) fn tokio_command_with_node_path(&self, app_dir: &Path) -> tokio::process::Command {
-        let mut cmd = self.tokio_command();
-        cmd.env("NODE_PATH", app_dir.join("node_modules"));
-        cmd
+    pub fn cmd_with_node_path(&self, app_dir: &Path) -> ToolCommand {
+        self.cmd().env("NODE_PATH", app_dir.join("node_modules"))
     }
 
     // -----------------------------------------------------------------------
@@ -75,27 +71,27 @@ impl Bun {
 
     /// Run `bun install` in the given directory.
     pub async fn install(&self, cwd: &Path) -> Result<CommandOutput, CommandError> {
-        let mut cmd = self.tokio_command();
-        cmd.arg("install");
+        let mut cmd = self.cmd().arg("install");
         if let Ok(cache_dir) = std::env::var("BUN_CACHE_DIR") {
-            cmd.arg("--cache-dir").arg(cache_dir);
+            cmd = cmd.arg("--cache-dir").arg(cache_dir);
         }
-        cmd.current_dir(cwd);
-        run_command(cmd, "bun").await
+        cmd.cwd(cwd).exec().await
     }
 
     /// Run `bun add <deps>` in the given directory.
     pub async fn add(&self, cwd: &Path, deps: &[String]) -> Result<CommandOutput, CommandError> {
-        let mut cmd = self.tokio_command();
-        cmd.arg("add").args(deps).current_dir(cwd);
-        run_command(cmd, "bun").await
+        self.cmd().arg("add").args(deps).cwd(cwd).exec().await
     }
 
     /// Run `bun add --dev <deps>` in the given directory.
     pub async fn add_dev(&self, cwd: &Path, deps: &[&str]) -> Result<CommandOutput, CommandError> {
-        let mut cmd = self.tokio_command();
-        cmd.arg("add").arg("--dev").args(deps).current_dir(cwd);
-        run_command(cmd, "bun").await
+        self.cmd()
+            .arg("add")
+            .arg("--dev")
+            .args(deps)
+            .cwd(cwd)
+            .exec()
+            .await
     }
 
     /// Run `bun run <script> [args]` in the given directory.
@@ -105,9 +101,13 @@ impl Bun {
         script: &str,
         args: &[&str],
     ) -> Result<CommandOutput, CommandError> {
-        let mut cmd = self.tokio_command();
-        cmd.arg("run").arg(script).args(args).current_dir(cwd);
-        run_command(cmd, "bun").await
+        self.cmd()
+            .arg("run")
+            .arg(script)
+            .args(args)
+            .cwd(cwd)
+            .exec()
+            .await
     }
 
     /// Run `bun run <entrypoint> [args]` with `NODE_PATH` and `APX_APP_NAME`.
@@ -118,13 +118,14 @@ impl Bun {
         args: &[String],
         app_name: &str,
     ) -> Result<CommandOutput, CommandError> {
-        let mut cmd = self.tokio_command_with_node_path(app_dir);
-        cmd.arg("run")
+        self.cmd_with_node_path(app_dir)
+            .arg("run")
             .arg(entrypoint)
             .args(args)
             .env("APX_APP_NAME", app_name)
-            .current_dir(app_dir);
-        run_command(cmd, "bun").await
+            .cwd(app_dir)
+            .exec()
+            .await
     }
 
     /// Spawn `bun run <entrypoint> [args]` with `NODE_PATH` and `APX_APP_NAME`.
@@ -136,43 +137,36 @@ impl Bun {
         args: &[String],
         app_name: &str,
     ) -> Result<tokio::process::Child, CommandError> {
-        let mut cmd = self.tokio_command_with_node_path(app_dir);
-        cmd.arg("run")
+        self.cmd_with_node_path(app_dir)
+            .arg("run")
             .arg(entrypoint)
             .args(args)
             .env("APX_APP_NAME", app_name)
-            .current_dir(app_dir);
-        cmd.spawn().map_err(|e| {
-            CommandError::from_io("bun", "make sure bun is installed and available in PATH", e)
-        })
+            .cwd(app_dir)
+            .spawn()
     }
 
     /// Spawn `bun <args>` for passthrough execution.
     /// Returns the child process for the caller to manage.
     pub fn passthrough(&self, args: &[String]) -> Result<tokio::process::Child, CommandError> {
-        let mut cmd = self.tokio_command();
-        cmd.args(args);
-        cmd.spawn().map_err(|e| {
-            CommandError::from_io("bun", "make sure bun is installed and available in PATH", e)
-        })
+        self.cmd().args(args).spawn()
     }
 
-    /// Build a tokio command for `bun run <entrypoint>` with `NODE_PATH` and `APX_APP_NAME`.
-    /// Returns the command for the caller to configure streaming output.
+    /// Build a `ToolCommand` for `bun run <entrypoint>` with `NODE_PATH` and `APX_APP_NAME`.
+    /// Returns the command for the caller to configure streaming output via `.into_command()`.
     pub fn entrypoint_command(
         &self,
         app_dir: &Path,
         entrypoint: &Path,
         args: &[String],
         app_name: &str,
-    ) -> tokio::process::Command {
-        let mut cmd = self.tokio_command_with_node_path(app_dir);
-        cmd.arg("run")
+    ) -> ToolCommand {
+        self.cmd_with_node_path(app_dir)
+            .arg("run")
             .arg(entrypoint)
             .args(args)
             .env("APX_APP_NAME", app_name)
-            .current_dir(app_dir);
-        cmd
+            .cwd(app_dir)
     }
 }
 

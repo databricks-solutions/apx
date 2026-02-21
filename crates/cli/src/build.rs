@@ -87,8 +87,8 @@ async fn build_wheel(app_path: &Path, build_path: &Path) -> Result<(), String> {
     let base_version = get_base_version(app_path).await;
     let build_version = generate_build_version(&base_version);
 
-    let uv = Uv::resolve().await?;
-    let mut cmd = uv.build_wheel_command(app_path, build_path);
+    let uv = Uv::new().await?;
+    let mut cmd = uv.build_wheel_command(app_path, build_path).into_command();
     cmd.env("UV_DYNAMIC_VERSIONING_BYPASS", build_version);
 
     let result =
@@ -144,7 +144,7 @@ fn find_wheel_file(build_dir: &Path) -> Result<String, String> {
 }
 
 async fn get_base_version(app_path: &Path) -> String {
-    let uv = match Uv::resolve().await {
+    let uv = match Uv::new().await {
         Ok(uv) => uv,
         Err(_) => return DEFAULT_FALLBACK_VERSION.to_string(),
     };

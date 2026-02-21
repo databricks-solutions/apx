@@ -80,7 +80,7 @@ pub async fn run_dev(app_dir: &Path) -> Result<Child, String> {
     ensure_entrypoint_deps(app_dir).await?;
 
     let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "dev")?;
-    let bun = Bun::resolve().await?;
+    let bun = Bun::new().await?;
 
     let child = bun
         .spawn_entrypoint(app_dir, &entrypoint, &args, &app_name)

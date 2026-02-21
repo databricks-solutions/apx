@@ -6,8 +6,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use super::{
-    BinarySource, CommandError, CommandOutput, ExternalTool, Resolvable, ResolvedBinary, ToolInfo,
-    ToolInfoEntry, get_version, resolve_local,
+    BinarySource, CommandError, CommandOutput, ExternalTool, Resolvable, ResolvedBinary,
+    ToolCommand, ToolInfo, ToolInfoEntry, get_version, resolve_local,
 };
 
 #[cfg(target_os = "windows")]
@@ -47,13 +47,18 @@ pub struct AppsLogsArgs<'a> {
 
 impl DatabricksCli {
     /// Resolve `databricks` from PATH via the [`Resolvable`] trait.
-    pub fn resolve() -> Result<Self, CommandError> {
+    pub fn new() -> Result<Self, CommandError> {
         super::resolve_local::<Self>()
             .map(Self::from_resolved)
             .map_err(|_| CommandError::NotFound {
                 tool: "databricks",
                 hint: "install Databricks CLI v0.280.0+ and ensure it's on PATH",
             })
+    }
+
+    /// Create a `ToolCommand` for the databricks binary.
+    pub fn cmd(&self) -> ToolCommand {
+        ToolCommand::new(self.path.clone(), "databricks")
     }
 
     /// Run `databricks apps logs <app_name>` with the given arguments.

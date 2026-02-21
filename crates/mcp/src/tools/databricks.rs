@@ -175,7 +175,7 @@ impl ApxServer {
         };
 
         // Resolve databricks CLI
-        let cli = match DatabricksCli::resolve() {
+        let cli = match DatabricksCli::new() {
             Ok(cli) => cli,
             Err(CommandError::NotFound { .. }) => {
                 return Ok(CallToolResult::error(vec![Content::text(

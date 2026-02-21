@@ -3,7 +3,6 @@ use std::time::Duration;
 use tracing::debug;
 
 use crate::dev::common::{lock_path, read_lock};
-use crate::external::run_command;
 use crate::external::uv::Uv;
 use crate::resources;
 use apx_common::hosts::CLIENT_HOST;
@@ -155,7 +154,7 @@ print(json.dumps(app.openapi(), indent=2))
 "#
     );
 
-    let uv = Uv::try_resolve()?;
+    let uv = Uv::try_new()?;
     let project_root_str = project_root.to_string_lossy();
     let spec_json = uv
         .run_python_code(project_root, &script, &[&project_root_str])
@@ -178,7 +177,7 @@ pub async fn get_databricks_sdk_version(
         .unwrap_or_else(|| "default".to_string());
     debug!("get_databricks_sdk_version: checking (context: {label})");
 
-    let uv = match Uv::try_resolve() {
+    let uv = match Uv::try_new() {
         Ok(uv) => uv,
         Err(e) => {
             debug!("get_databricks_sdk_version: failed to resolve uv: {e}");
@@ -186,20 +185,19 @@ pub async fn get_databricks_sdk_version(
         }
     };
 
-    let mut cmd = uv.tokio_command();
-    cmd.arg("run");
+    let mut cmd = uv.cmd().arg("run");
     if let Some(dir) = project_dir {
         let dir_str = dir.to_str().unwrap_or(".");
-        cmd.args(["--directory", dir_str]);
+        cmd = cmd.args(["--directory", dir_str]);
     }
-    cmd.args([
+    cmd = cmd.args([
         "--no-sync",
         "python",
         "-c",
         "import importlib.metadata; print(importlib.metadata.version('databricks-sdk'))",
     ]);
 
-    match run_command(cmd, "uv").await {
+    match cmd.exec().await {
         Ok(output) if output.exit_code == Some(0) => {
             let version = output.stdout.trim().to_string();
             if version.is_empty() {

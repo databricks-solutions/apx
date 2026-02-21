@@ -78,9 +78,11 @@ pub async fn run_build_with_spinner(
     ensure_entrypoint_deps(app_dir).await?;
 
     let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "build")?;
-    let bun = Bun::resolve().await?;
+    let bun = Bun::new().await?;
 
-    let cmd = bun.entrypoint_command(app_dir, &entrypoint, &args, &app_name);
+    let cmd = bun
+        .entrypoint_command(app_dir, &entrypoint, &args, &app_name)
+        .into_command();
 
     // Use streaming if a spinner is provided
     if let Some(sp) = spinner {

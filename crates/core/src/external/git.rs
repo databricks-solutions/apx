@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{CommandError, CommandOutput, ToolInfo, ToolInfoEntry, get_version, run_command};
+use super::{CommandError, CommandOutput, ToolCommand, ToolInfo, ToolInfoEntry, get_version};
 
 /// A resolved `git` binary.
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ impl Git {
     }
 
     /// Resolve git from PATH. Returns an error if git is not installed.
-    pub fn resolve() -> Result<Self, CommandError> {
+    pub fn new() -> Result<Self, CommandError> {
         let path = which::which("git").map_err(|_| CommandError::NotFound {
             tool: "git",
             hint: "install git and make sure it is available in PATH",
@@ -30,33 +30,43 @@ impl Git {
         Ok(Self { path })
     }
 
+    /// Create a `ToolCommand` for the git binary.
+    pub fn cmd(&self) -> ToolCommand {
+        ToolCommand::new(self.path.clone(), "git")
+    }
+
     /// `git init` in the given directory.
     pub async fn init(&self, dir: &Path) -> Result<CommandOutput, CommandError> {
-        let mut cmd = tokio::process::Command::new(&self.path);
-        cmd.arg("init").current_dir(dir);
-        run_command(cmd, "git").await?.check("git")
+        self.cmd().arg("init").cwd(dir).exec_checked().await
     }
 
     /// `git add <paths>` in the given directory.
     pub async fn add(&self, dir: &Path, paths: &[&str]) -> Result<CommandOutput, CommandError> {
-        let mut cmd = tokio::process::Command::new(&self.path);
-        cmd.arg("add").args(paths).current_dir(dir);
-        run_command(cmd, "git").await?.check("git")
+        self.cmd()
+            .arg("add")
+            .args(paths)
+            .cwd(dir)
+            .exec_checked()
+            .await
     }
 
     /// `git commit -m <message>` in the given directory.
     pub async fn commit(&self, dir: &Path, message: &str) -> Result<CommandOutput, CommandError> {
-        let mut cmd = tokio::process::Command::new(&self.path);
-        cmd.args(["commit", "-m", message]).current_dir(dir);
-        run_command(cmd, "git").await?.check("git")
+        self.cmd()
+            .args(["commit", "-m", message])
+            .cwd(dir)
+            .exec_checked()
+            .await
     }
 
     /// Check if `dir` is inside a git work tree.
     pub async fn is_inside_work_tree(&self, dir: &Path) -> Result<bool, CommandError> {
-        let mut cmd = tokio::process::Command::new(&self.path);
-        cmd.args(["rev-parse", "--is-inside-work-tree"])
-            .current_dir(dir);
-        let output = run_command(cmd, "git").await?;
+        let output = self
+            .cmd()
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .cwd(dir)
+            .exec()
+            .await?;
         Ok(output.exit_code == Some(0) && output.stdout.trim() == "true")
     }
 }

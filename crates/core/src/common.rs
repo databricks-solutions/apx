@@ -42,27 +42,6 @@ pub fn list_profiles() -> Result<Vec<String>, String> {
     apx_databricks_sdk::list_profile_names().map_err(|e| e.to_string())
 }
 
-/// Handle spawn errors with user-friendly messages.
-/// Call this when a Command::spawn() fails to provide actionable feedback.
-pub fn handle_spawn_error(tool: &str, error: std::io::Error) -> String {
-    let msg = if error.kind() == std::io::ErrorKind::NotFound {
-        format!(
-            "Failed to spawn '{}': executable not found. \
-             Make sure '{}' is installed and available in PATH.",
-            tool,
-            if tool == "apx" || tool == "uvicorn" {
-                "uv"
-            } else {
-                tool
-            }
-        )
-    } else {
-        format!("Failed to spawn '{tool}': {error}")
-    };
-    eprintln!("{msg}");
-    msg
-}
-
 const DEFAULT_API_PREFIX: &str = "/api";
 const PYPROJECT_FILENAME: &str = "pyproject.toml";
 
@@ -244,7 +223,7 @@ pub fn ensure_dir(path: &Path) -> Result<(), String> {
 }
 
 pub async fn bun_install(app_dir: &Path) -> Result<(), String> {
-    let bun = Bun::resolve().await?;
+    let bun = Bun::new().await?;
     tracing::debug!(app_dir = %app_dir.display(), "Running bun install");
     bun.install(app_dir)
         .await?
@@ -262,7 +241,7 @@ pub async fn ensure_entrypoint_deps(app_dir: &Path) -> Result<(), String> {
         "Ensuring frontend dependencies"
     );
 
-    let bun = Bun::resolve().await?;
+    let bun = Bun::new().await?;
     bun.add_dev(app_dir, ENTRYPOINT_DEV_DEPS)
         .await?
         .check("bun")
@@ -276,7 +255,7 @@ pub async fn ensure_entrypoint_deps(app_dir: &Path) -> Result<(), String> {
 pub async fn uv_sync(app_dir: &Path) -> Result<(), String> {
     tracing::debug!("Running uv sync in {}", app_dir.display());
 
-    let uv = Uv::resolve().await?;
+    let uv = Uv::new().await?;
     uv.sync(app_dir).await?.check("uv").map_err(String::from)?;
 
     tracing::debug!("uv sync completed successfully");
@@ -300,7 +279,7 @@ pub async fn generate_version_file(
         .ok_or("Failed to determine version file path")?;
 
     // Try running uv-dynamic-versioning (outputs version string to stdout)
-    let uv = Uv::resolve().await?;
+    let uv = Uv::new().await?;
     let version = match uv.tool_run(app_dir, "uv-dynamic-versioning").await {
         Ok(output) if output.exit_code == Some(0) => {
             let v = output.stdout.trim().to_string();

@@ -234,7 +234,7 @@ pub async fn bun_add(app_dir: &Path, deps: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let bun = Bun::resolve().await?;
+    let bun = Bun::new().await?;
     bun.add(app_dir, deps)
         .await
         .map_err(|e| format!("Failed to install dependencies: {e}"))?

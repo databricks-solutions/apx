@@ -17,7 +17,7 @@ pub async fn run(args: BunArgs) -> i32 {
 }
 
 pub async fn run_inner(args: BunArgs) -> Result<(), String> {
-    let bun = Bun::resolve().await?;
+    let bun = Bun::new().await?;
 
     debug!(
         args = ?args.args,

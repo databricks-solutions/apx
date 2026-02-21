@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use super::{CommandError, ToolInfo, ToolInfoEntry, get_version, run_command};
+use super::{CommandError, ToolCommand, ToolInfo, ToolInfoEntry, get_version};
 
 /// A resolved `gh` (GitHub CLI) binary.
 #[derive(Debug, Clone)]
@@ -12,12 +12,17 @@ pub struct Gh {
 
 impl Gh {
     /// Resolve `gh` from PATH. Returns `CommandError::NotFound` if missing.
-    pub fn resolve() -> Result<Self, CommandError> {
+    pub fn new() -> Result<Self, CommandError> {
         let path = which::which("gh").map_err(|_| CommandError::NotFound {
             tool: "gh",
             hint: "install GitHub CLI: https://cli.github.com",
         })?;
         Ok(Self { path })
+    }
+
+    /// Create a `ToolCommand` for the gh binary.
+    pub fn cmd(&self) -> ToolCommand {
+        ToolCommand::new(self.path.clone(), "gh")
     }
 
     /// Create a GitHub issue via `gh issue create`.
@@ -28,15 +33,13 @@ impl Gh {
         body: &str,
         labels: &[&str],
     ) -> Result<String, CommandError> {
-        let mut cmd = tokio::process::Command::new(&self.path);
-        cmd.args([
+        let mut cmd = self.cmd().args([
             "issue", "create", "--repo", repo, "--title", title, "--body", body,
         ]);
         for label in labels {
-            cmd.args(["--label", label]);
+            cmd = cmd.args(["--label", *label]);
         }
-        let output = run_command(cmd, "gh").await?.check("gh")?;
-        Ok(output.stdout.trim().to_string())
+        cmd.exec_stdout().await
     }
 }
 

@@ -28,7 +28,7 @@ pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
 
     // Run tsc -b --incremental in one tokio thread — only for UI projects
     let tsc_task = if has_ui {
-        let bun = Bun::resolve().await?;
+        let bun = Bun::new().await?;
         let app_dir_clone = app_dir.to_path_buf();
         Some(tokio::spawn(async move {
             debug!("Running tsc -b --incremental.");
@@ -49,7 +49,7 @@ pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
 
     // Run ty check in another thread — always
     let app_dir_clone = app_dir.to_path_buf();
-    let ty = UvTool::resolve("ty").await?;
+    let ty = UvTool::new("ty").await?;
     let ty_task = tokio::spawn(async move {
         debug!("Running ty check.");
         let output = ty
@@ -164,7 +164,7 @@ async fn generate_route_tree(app_dir: &Path, mode: OutputMode) -> Result<(), Str
 
     let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "generate")?;
 
-    let bun = Bun::resolve().await?;
+    let bun = Bun::new().await?;
     debug!(
         entrypoint = %entrypoint.display(),
         ?args,

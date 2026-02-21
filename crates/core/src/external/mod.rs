@@ -2,8 +2,8 @@
 //!
 //! Provides [`CommandOutput`] / [`CommandError`] value types, the [`ExternalTool`]
 //! trait for resolved-binary tools, the [`Resolvable`] trait for tools that support
-//! automatic resolution and optional download, and [`run_command`]
-//! free function that replaces the repeated `.output().await + status-check` pattern.
+//! automatic resolution and optional download, and [`ToolCommand`] which wraps
+//! `tokio::process::Command` with tool-name context and ergonomic terminal methods.
 
 pub mod bun;
 pub mod databricks;
@@ -11,7 +11,9 @@ pub mod gh;
 pub mod git;
 pub mod uv;
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use tracing::debug;
 
@@ -54,6 +56,108 @@ pub struct ResolvedBinary {
 impl ResolvedBinary {
     pub fn source_label(&self) -> &'static str {
         self.source.source_label()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ToolCommand — fluent builder for external tool invocations
+// ---------------------------------------------------------------------------
+
+/// Fluent builder for constructing and executing external tool commands.
+///
+/// Wraps `tokio::process::Command` with tool-name context for error messages.
+/// Callers obtain a `ToolCommand` via `<Tool>::cmd()` and chain `.arg()`,
+/// `.args()`, `.env()`, `.cwd()` before finishing with `.exec()`,
+/// `.exec_checked()`, `.exec_stdout()`, `.spawn()`, or `.into_command()`.
+#[derive(Debug)]
+pub struct ToolCommand {
+    inner: tokio::process::Command,
+    tool_name: &'static str,
+}
+
+impl ToolCommand {
+    pub(crate) fn new(binary: PathBuf, tool_name: &'static str) -> Self {
+        Self {
+            inner: tokio::process::Command::new(binary),
+            tool_name,
+        }
+    }
+
+    pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
+        self.inner.arg(arg);
+        self
+    }
+
+    pub fn args(mut self, args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Self {
+        self.inner.args(args);
+        self
+    }
+
+    pub fn env(mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> Self {
+        self.inner.env(key, val);
+        self
+    }
+
+    pub fn envs(
+        mut self,
+        vars: impl IntoIterator<Item = (impl AsRef<OsStr>, impl AsRef<OsStr>)>,
+    ) -> Self {
+        self.inner.envs(vars);
+        self
+    }
+
+    pub fn cwd(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.inner.current_dir(dir.into());
+        self
+    }
+
+    pub fn stdin(mut self, cfg: Stdio) -> Self {
+        self.inner.stdin(cfg);
+        self
+    }
+
+    pub fn stdout(mut self, cfg: Stdio) -> Self {
+        self.inner.stdout(cfg);
+        self
+    }
+
+    pub fn stderr(mut self, cfg: Stdio) -> Self {
+        self.inner.stderr(cfg);
+        self
+    }
+
+    /// Convert to a raw `tokio::process::Command` for streaming / custom handling.
+    pub fn into_command(self) -> tokio::process::Command {
+        self.inner
+    }
+
+    /// Run and capture output (does NOT check exit code).
+    pub async fn exec(mut self) -> Result<CommandOutput, CommandError> {
+        let tool = self.tool_name;
+        let output = self.inner.output().await.map_err(|e| {
+            CommandError::from_io(tool, "make sure it is installed and available in PATH", e)
+        })?;
+        Ok(CommandOutput::from_output(output))
+    }
+
+    /// Run, check exit code == 0.
+    pub async fn exec_checked(self) -> Result<CommandOutput, CommandError> {
+        let tool = self.tool_name;
+        self.exec().await?.check(tool)
+    }
+
+    /// Run, check exit code, return trimmed stdout.
+    pub async fn exec_stdout(self) -> Result<String, CommandError> {
+        let tool = self.tool_name;
+        self.exec().await?.into_stdout(tool)
+    }
+
+    /// Spawn without waiting (for long-running processes).
+    pub fn spawn(mut self) -> Result<tokio::process::Child, CommandError> {
+        let tool = self.tool_name;
+        self.inner.spawn().map_err(|e| {
+            CommandError::from_io(tool, "make sure it is installed and available in PATH", e)
+        })
     }
 }
 
@@ -156,7 +260,7 @@ impl From<CommandError> for String {
 /// Marker trait for a resolved external binary.
 ///
 /// Provides identity (name, path, source) for a resolved tool. Concrete types
-/// expose `pub(crate) tokio_command()` and public domain methods instead.
+/// expose `cmd() -> ToolCommand` and public domain methods instead.
 pub trait ExternalTool: std::fmt::Debug + Send + Sync {
     const NAME: &'static str;
     fn binary_path(&self) -> &Path;
@@ -278,24 +382,6 @@ pub async fn resolve_with_download<T: Resolvable>() -> Result<ResolvedBinary, St
         return Ok(resolved);
     }
     T::download().await
-}
-
-// ---------------------------------------------------------------------------
-// run helpers
-// ---------------------------------------------------------------------------
-
-/// Execute a tokio command, capture output, and convert to [`CommandOutput`].
-///
-/// Does **not** check the exit code — call `.check(tool)` or `.into_stdout(tool)`
-/// on the result if you need success verification.
-pub async fn run_command(
-    mut cmd: tokio::process::Command,
-    tool: &'static str,
-) -> Result<CommandOutput, CommandError> {
-    let output = cmd.output().await.map_err(|e| {
-        CommandError::from_io(tool, "make sure it is installed and available in PATH", e)
-    })?;
-    Ok(CommandOutput::from_output(output))
 }
 
 // ---------------------------------------------------------------------------
