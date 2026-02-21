@@ -60,33 +60,55 @@ pub async fn table_exists(pool: &SqlitePool, table_name: &str) -> Result<bool, S
     Ok(row.0)
 }
 
-/// Sanitize a query string for FTS5 MATCH syntax.
-/// Wraps each whitespace-separated term in double quotes for safe literal matching.
-/// Terms are joined with OR so that partial matches are returned — FTS5 ranking
-/// naturally scores documents with more matching terms higher.
-pub fn sanitize_fts5_query(query: &str) -> String {
+/// Sanitize a query into individually quoted FTS5 terms (no joining).
+///
+/// Each whitespace-separated token is stripped of non-alphanumeric characters
+/// (except `_`, `-`, `.`) and wrapped in double quotes.  Empty tokens are
+/// dropped.  The caller is responsible for joining the terms (e.g. with
+/// ` OR `).
+pub fn sanitize_fts5_terms(query: &str) -> Vec<String> {
     query
         .split_whitespace()
-        .map(|term| {
+        .filter_map(|term| {
             let clean: String = term
                 .chars()
                 .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '.')
                 .collect();
             if clean.is_empty() {
-                String::new()
+                None
             } else {
-                format!("\"{clean}\"")
+                Some(format!("\"{clean}\""))
             }
         })
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" OR ")
+        .collect()
+}
+
+/// Sanitize a query string for FTS5 MATCH syntax.
+/// Wraps each whitespace-separated term in double quotes for safe literal matching.
+/// Terms are joined with OR so that partial matches are returned — FTS5 ranking
+/// naturally scores documents with more matching terms higher.
+pub fn sanitize_fts5_query(query: &str) -> String {
+    sanitize_fts5_terms(query).join(" OR ")
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sanitize_fts5_terms() {
+        assert_eq!(
+            sanitize_fts5_terms("serving endpoints"),
+            vec!["\"serving\"", "\"endpoints\""]
+        );
+        assert_eq!(
+            sanitize_fts5_terms("hello* OR world"),
+            vec!["\"hello\"", "\"OR\"", "\"world\""]
+        );
+        assert!(sanitize_fts5_terms("").is_empty());
+        assert!(sanitize_fts5_terms("   ").is_empty());
+    }
 
     #[test]
     fn test_sanitize_fts5_query_basic() {

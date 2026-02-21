@@ -7,7 +7,7 @@ use sqlx::sqlite::SqlitePool;
 
 use crate::common::Timer;
 use crate::databricks_sdk_doc::{SDKSource, download_and_extract_sdk, load_doc_files};
-use apx_db::dev::{sanitize_fts5_query, table_exists};
+use apx_db::dev::{sanitize_fts5_terms, table_exists};
 
 const CHUNK_SIZE: usize = 2000; // characters (no tokenizer needed for FTS)
 const CHUNK_OVERLAP: usize = 200; // characters overlap
@@ -361,13 +361,13 @@ impl SDKDocsIndex {
                     ));
                 }
 
-                let sanitized = sanitize_fts5_query(query);
-                if sanitized.is_empty() {
+                let terms = sanitize_fts5_terms(query);
+                if terms.is_empty() {
                     return Ok(Vec::new());
                 }
 
                 // Enhance query: if it contains a PascalCase term, boost entity column
-                let sanitized = enhance_fts5_query(&sanitized);
+                let sanitized = enhance_fts5_query(&terms);
 
                 tracing::debug!(
                     "search: Executing FTS5 query '{}' (original: '{}')",
@@ -412,43 +412,33 @@ impl SDKDocsIndex {
     }
 }
 
-/// Enhance an FTS5 query to boost entity/class matches.
+/// Enhance pre-sanitized FTS5 terms to boost entity/class matches.
 ///
-/// - If query contains a PascalCase token (e.g. `GenieAttachment`), adds
-///   `{entity}:token` to boost entity column matches.
-/// - Strips hint words like "fields" or "attributes" and uses them to
-///   filter toward dataclass documentation.
-fn enhance_fts5_query(sanitized: &str) -> String {
+/// Accepts individually quoted terms (e.g. `['"GenieAttachment"', '"fields"']`)
+/// and returns a single FTS5 MATCH expression joined with `OR`.
+///
+/// - If a term is PascalCase, an extra `entity:<term>` clause is added.
+/// - Hint words like "fields" / "attributes" are stripped (they only guide
+///   boosting).
+fn enhance_fts5_query(terms: &[String]) -> String {
     let hint_words: &[&str] = &["fields", "attributes", "members", "properties"];
-
-    let tokens: Vec<&str> = sanitized.split_whitespace().collect();
-    if tokens.is_empty() {
-        return sanitized.to_string();
-    }
 
     let mut entity_terms = Vec::new();
     let mut regular_terms = Vec::new();
 
-    for token in &tokens {
+    for token in terms {
         let clean = token.trim_matches('"');
         if hint_words.contains(&clean.to_lowercase().as_str()) {
-            // Don't add hint words to the query — they just guide boosting
             continue;
         }
         if is_pascal_case(clean) {
-            // Add both as regular term and as entity-boosted term
             entity_terms.push(format!("entity:{token}"));
-            regular_terms.push(token.to_string());
+            regular_terms.push(token.clone());
         } else {
-            regular_terms.push(token.to_string());
+            regular_terms.push(token.clone());
         }
     }
 
-    if entity_terms.is_empty() {
-        return regular_terms.join(" OR ");
-    }
-
-    // Combine: entity-boosted terms + regular terms
     let mut parts = entity_terms;
     parts.extend(regular_terms);
     parts.join(" OR ")
@@ -585,14 +575,16 @@ mod tests {
 
     #[test]
     fn test_enhance_fts5_query_pascal_case() {
-        let result = enhance_fts5_query("\"GenieAttachment\"");
+        let terms = vec!["\"GenieAttachment\"".to_string()];
+        let result = enhance_fts5_query(&terms);
         assert!(result.contains("entity:\"GenieAttachment\""));
         assert!(result.contains("\"GenieAttachment\""));
     }
 
     #[test]
     fn test_enhance_fts5_query_with_fields_hint() {
-        let result = enhance_fts5_query("\"GenieAttachment\" \"fields\"");
+        let terms = vec!["\"GenieAttachment\"".to_string(), "\"fields\"".to_string()];
+        let result = enhance_fts5_query(&terms);
         assert!(result.contains("entity:\"GenieAttachment\""));
         // "fields" is a hint word and should be stripped
         assert!(!result.contains("\"fields\""));
@@ -600,8 +592,70 @@ mod tests {
 
     #[test]
     fn test_enhance_fts5_query_plain() {
-        let result = enhance_fts5_query("\"create\" \"clusters\"");
+        let terms = vec!["\"create\"".to_string(), "\"clusters\"".to_string()];
+        let result = enhance_fts5_query(&terms);
         // No PascalCase terms, should just join with OR
         assert_eq!(result, "\"create\" OR \"clusters\"");
+    }
+
+    /// Regression: multi-word queries must not produce `OR OR`.
+    #[test]
+    fn test_enhance_fts5_query_no_double_or() {
+        let terms = vec!["\"serving\"".to_string(), "\"endpoints\"".to_string()];
+        let result = enhance_fts5_query(&terms);
+        assert!(
+            !result.contains("OR OR"),
+            "must not contain double OR: {result}"
+        );
+        assert_eq!(result, "\"serving\" OR \"endpoints\"");
+    }
+
+    /// End-to-end: insert a doc row, search with a multi-word query, verify no FTS5 error.
+    #[tokio::test]
+    async fn test_fts5_search_multiword_no_error() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let table_name = "sdk_docs_fts_multiword_v1";
+
+        sqlx::query(&format!(
+            "CREATE VIRTUAL TABLE \"{table_name}\" USING fts5(\
+                id UNINDEXED, text, source_file UNINDEXED, \
+                chunk_index UNINDEXED, service, entity, operation, symbols, \
+                tokenize='porter unicode61'\
+            )"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(&format!(
+            "INSERT INTO \"{table_name}\" \
+             (id, text, source_file, chunk_index, service, entity, operation, symbols) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        ))
+        .bind("serving.rst:0")
+        .bind("Guide to serving endpoints and model serving")
+        .bind("serving.rst")
+        .bind(0i64)
+        .bind("serving")
+        .bind("")
+        .bind("")
+        .bind("serving endpoints")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Build the query exactly as the search method does
+        let terms = apx_db::dev::sanitize_fts5_terms("serving endpoints");
+        let query = enhance_fts5_query(&terms);
+
+        let rows = sqlx::query(&format!(
+            "SELECT text FROM \"{table_name}\" WHERE \"{table_name}\" MATCH ?1 LIMIT 5"
+        ))
+        .bind(&query)
+        .fetch_all(&pool)
+        .await
+        .expect("multi-word FTS5 query must not fail");
+
+        assert_eq!(rows.len(), 1);
     }
 }
