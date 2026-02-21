@@ -2,7 +2,6 @@ use clap::Args;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tokio::process::Command;
 use tracing::debug;
 
 use crate::common::find_app_dir;
@@ -11,7 +10,8 @@ use apx_core::api_generator::generate_openapi;
 use apx_core::common::{
     ensure_dir, format_elapsed_ms, run_command_streaming_with_output, run_preflight_checks, spinner,
 };
-use apx_core::download::resolve_uv;
+use apx_core::external::ExternalTool;
+use apx_core::external::uv::Uv;
 
 const DEFAULT_BUILD_DIR: &str = ".build";
 const DEFAULT_FALLBACK_VERSION: &str = "0.0.0";
@@ -88,8 +88,8 @@ async fn build_wheel(app_path: &Path, build_path: &Path) -> Result<(), String> {
     let base_version = get_base_version(app_path).await;
     let build_version = generate_build_version(&base_version);
 
-    let uv_path = resolve_uv().await?.path;
-    let mut cmd = Command::new(&uv_path);
+    let uv = Uv::resolve().await?;
+    let mut cmd = uv.tokio_command();
     cmd.arg("build")
         .arg("--wheel")
         .arg("--out-dir")
@@ -150,17 +150,13 @@ fn find_wheel_file(build_dir: &Path) -> Result<String, String> {
 }
 
 async fn get_base_version(app_path: &Path) -> String {
-    let uv_path = match resolve_uv().await {
-        Ok(resolved) => resolved.path,
+    let uv = match Uv::resolve().await {
+        Ok(uv) => uv,
         Err(_) => return DEFAULT_FALLBACK_VERSION.to_string(),
     };
-    let output = Command::new(&uv_path)
-        .arg("run")
-        .arg("hatch")
-        .arg("version")
-        .current_dir(app_path)
-        .output()
-        .await;
+    let mut cmd = uv.tokio_command();
+    cmd.args(["run", "hatch", "version"]).current_dir(app_path);
+    let output = cmd.output().await;
 
     if let Ok(result) = output
         && result.status.success()

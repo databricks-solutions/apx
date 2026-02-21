@@ -4,14 +4,15 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::common::{
-    ApxCommand, OutputMode, emit, ensure_dir, format_elapsed_ms, handle_spawn_error,
-    run_preflight_checks, spinner_for_mode,
+    OutputMode, emit, ensure_dir, format_elapsed_ms, handle_spawn_error, run_preflight_checks,
+    spinner_for_mode,
 };
 use crate::dev::client::{HealthCheckConfig, health, stop as stop_server};
 use crate::dev::common::{
     DevLock, is_process_running, lock_path, read_lock, remove_lock, write_lock,
 };
 use crate::dev::process::ProcessManager;
+use crate::external::uv::ApxTool;
 use crate::flux;
 use crate::ops::healthcheck::wait_for_healthy_with_logs;
 use crate::registry::Registry;
@@ -171,7 +172,7 @@ pub async fn spawn_server(
 
     wait_for_port_available(port, mode).await?;
 
-    let apx_cmd = ApxCommand::new().await?;
+    let apx_cmd = ApxTool::resolve_apx().await?;
 
     let command = format!(
         "{} dev __internal__run_server --app-dir {} --host {} --port {}{}",

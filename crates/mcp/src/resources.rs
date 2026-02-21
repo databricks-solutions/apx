@@ -62,7 +62,7 @@ pub async fn read_project_resource(app_path: &str) -> Result<ReadResourceResult,
     let path = validate_app_path(app_path)?;
 
     use apx_core::common::{read_project_metadata, read_python_dependencies};
-    use apx_core::interop::get_databricks_sdk_version_for_project;
+    use apx_core::interop::get_databricks_sdk_version;
 
     let metadata = read_project_metadata(&path)?;
 
@@ -79,7 +79,7 @@ pub async fn read_project_resource(app_path: &str) -> Result<ReadResourceResult,
     let backend_files = scan_backend_files(&path, &metadata.app_slug);
 
     // Best-effort: detect installed SDK version
-    let sdk_version = get_databricks_sdk_version_for_project(&path).unwrap_or(None);
+    let sdk_version = get_databricks_sdk_version(Some(&path)).unwrap_or(None);
 
     // Configured UI component registries
     let configured_registries = metadata

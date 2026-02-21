@@ -50,9 +50,12 @@ enum ProbeResult {
     Failed(String),
 }
 
-use crate::common::{ApxCommand, BunCommand, UvCommand, handle_spawn_error, read_project_metadata};
+use crate::common::{handle_spawn_error, read_project_metadata};
 use crate::dev::otel::forward_log_to_flux;
 use crate::dotenv::DotenvFile;
+use crate::external::ExternalTool;
+use crate::external::bun::Bun;
+use crate::external::uv::{ApxTool, UvTool};
 use crate::python_logging::{
     DevConfig, LogConfigResult, default_logging_config, resolve_log_config,
     write_logging_config_json,
@@ -339,8 +342,8 @@ impl ProcessManager {
         // See entrypoint.ts for OTEL initialization.
         // ============================================================================
 
-        // Use ApxCommand to invoke `apx frontend dev` via uv
-        let mut cmd = ApxCommand::new().await?.tokio_command();
+        // Use ApxTool to invoke `apx frontend dev` via uv
+        let mut cmd = ApxTool::resolve_apx().await?.tokio_command();
         cmd.args(["frontend", "dev"])
             .current_dir(app_dir)
             .stdin(Stdio::null())
@@ -393,7 +396,7 @@ impl ProcessManager {
         let sitecustomize_dir = setup_sitecustomize();
 
         // Run uvicorn via uv to ensure correct Python environment
-        let mut cmd = UvCommand::new("uvicorn").await?.tokio_command();
+        let mut cmd = UvTool::resolve("uvicorn").await?.tokio_command();
         cmd.args([
             &app_entrypoint,
             "--host",
@@ -479,11 +482,11 @@ impl ProcessManager {
         Ok(())
     }
 
-    async fn spawn_pglite(&self, bun: &BunCommand) -> Result<(), String> {
+    async fn spawn_pglite(&self, bun: &Bun) -> Result<(), String> {
         let child = self
             .spawn_process(
                 &self.app_dir,
-                bun.path().to_path_buf(),
+                bun.binary_path().to_path_buf(),
                 vec![
                     "x".to_string(),
                     "@electric-sql/pglite-socket".to_string(),
@@ -880,7 +883,7 @@ impl ProcessManager {
                     config_path.display()
                 );
 
-                let mut validation_cmd = UvCommand::new("python").await?.tokio_command();
+                let mut validation_cmd = UvTool::resolve("python").await?.tokio_command();
                 validation_cmd
                     .args(["-c", &validation_script])
                     .current_dir(app_dir)
@@ -918,7 +921,7 @@ impl ProcessManager {
         };
 
         // Run uvicorn via uv to ensure correct Python environment
-        let mut cmd = UvCommand::new("uvicorn").await?.tokio_command();
+        let mut cmd = UvTool::resolve("uvicorn").await?.tokio_command();
         cmd.args([
             app_entrypoint,
             "--host",
@@ -1012,8 +1015,8 @@ impl ProcessManager {
         }
     }
 
-    async fn ensure_bun() -> Result<BunCommand, String> {
-        BunCommand::new().await
+    async fn ensure_bun() -> Result<Bun, String> {
+        Bun::resolve().await
     }
 
     /// Send SIGTERM to a child process tree (polite shutdown request).

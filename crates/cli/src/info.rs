@@ -1,6 +1,8 @@
 use clap::Args;
 
-use apx_core::common::{BunCommand, UvCommand};
+use apx_core::external::ExternalTool;
+use apx_core::external::bun::Bun;
+use apx_core::external::uv::Uv;
 
 use crate::run_cli_async_helper;
 
@@ -45,13 +47,13 @@ async fn run_inner() -> Result<(), String> {
     // --- uv section ---
     println!();
     println!("{BOLD}{YELLOW}\u{1f40d} uv{RESET}");
-    match UvCommand::new("uv").await {
+    match Uv::resolve().await {
         Ok(uv) => {
-            let ver = get_version(uv.path()).await;
+            let ver = get_version(uv.binary_path()).await;
             println!("   {DIM}Version:{RESET}  {GREEN}{ver}{RESET}");
             println!(
                 "   {DIM}Path:{RESET}     {CYAN}{}{RESET}",
-                uv.path().display()
+                uv.binary_path().display()
             );
             println!("   {DIM}Source:{RESET}   {}", uv.source().source_label());
         }
@@ -63,13 +65,13 @@ async fn run_inner() -> Result<(), String> {
     // --- bun section ---
     println!();
     println!("{BOLD}{YELLOW}\u{1f35e} bun{RESET}");
-    match BunCommand::new().await {
+    match Bun::resolve().await {
         Ok(bun) => {
-            let ver = get_version(bun.path()).await;
+            let ver = get_version(bun.binary_path()).await;
             println!("   {DIM}Version:{RESET}  {GREEN}{ver}{RESET}");
             println!(
                 "   {DIM}Path:{RESET}     {CYAN}{}{RESET}",
-                bun.path().display()
+                bun.binary_path().display()
             );
             println!("   {DIM}Source:{RESET}   {}", bun.source().source_label());
         }

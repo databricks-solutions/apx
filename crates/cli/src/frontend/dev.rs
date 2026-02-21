@@ -5,9 +5,8 @@ use tracing::debug;
 
 use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
-use apx_core::common::{
-    BunCommand, ensure_entrypoint_deps, read_project_metadata, write_metadata_file,
-};
+use apx_core::common::{ensure_entrypoint_deps, read_project_metadata, write_metadata_file};
+use apx_core::external::bun::Bun;
 
 use apx_core::frontend::prepare_frontend_args;
 
@@ -81,7 +80,7 @@ pub async fn run_dev(app_dir: &Path) -> Result<Child, String> {
     ensure_entrypoint_deps(app_dir).await?;
 
     let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "dev")?;
-    let bun = BunCommand::new().await?;
+    let bun = Bun::resolve().await?;
 
     let child = bun
         .tokio_command_with_node_path(app_dir)

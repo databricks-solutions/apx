@@ -6,9 +6,10 @@ use std::time::Instant;
 use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
 use apx_core::common::{
-    BunCommand, ensure_entrypoint_deps, format_elapsed_ms, run_command_streaming_with_output,
+    ensure_entrypoint_deps, format_elapsed_ms, run_command_streaming_with_output,
     run_preflight_checks, spinner,
 };
+use apx_core::external::bun::Bun;
 
 use apx_core::frontend::prepare_frontend_args;
 
@@ -77,7 +78,7 @@ pub async fn run_build_with_spinner(
     ensure_entrypoint_deps(app_dir).await?;
 
     let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "build")?;
-    let bun = BunCommand::new().await?;
+    let bun = Bun::resolve().await?;
 
     let mut cmd = bun.tokio_command_with_node_path(app_dir);
     cmd.arg("run")

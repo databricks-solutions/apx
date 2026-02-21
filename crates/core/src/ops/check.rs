@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use crate::common::{
-    BunCommand, OutputMode, emit, ensure_entrypoint_deps, run_preflight_checks, spinner,
-};
-use crate::download::resolve_uv;
+use crate::common::{OutputMode, emit, ensure_entrypoint_deps, run_preflight_checks, spinner};
+use crate::external::ExternalTool;
+use crate::external::bun::Bun;
+use crate::external::uv::UvTool;
 use crate::frontend::prepare_frontend_args;
 use tracing::debug;
 
@@ -29,10 +29,10 @@ pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
 
     // Run tsc -b --incremental in one tokio thread — only for UI projects
     let tsc_task = if has_ui {
-        let bun = BunCommand::new().await?;
+        let bun = Bun::resolve().await?;
         let app_dir_clone = app_dir.to_path_buf();
         Some(tokio::spawn(async move {
-            debug!(bun_path = %bun.path().display(), "Running tsc -b --incremental.");
+            debug!(bun_path = %bun.binary_path().display(), "Running tsc -b --incremental.");
             let output = bun
                 .tokio_command()
                 .arg("run")
@@ -56,12 +56,11 @@ pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
 
     // Run ty check in another thread — always
     let app_dir_clone = app_dir.to_path_buf();
-    let uv_path = resolve_uv().await?.path;
+    let ty = UvTool::resolve("ty").await?;
     let ty_task = tokio::spawn(async move {
         debug!("Running ty check.");
-        let output = tokio::process::Command::new(&uv_path)
-            .arg("run")
-            .arg("ty")
+        let output = ty
+            .tokio_command()
             .arg("check")
             .arg(".")
             .current_dir(&app_dir_clone)
@@ -176,9 +175,9 @@ async fn generate_route_tree(app_dir: &Path, mode: OutputMode) -> Result<(), Str
 
     let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "generate")?;
 
-    let bun = BunCommand::new().await?;
+    let bun = Bun::resolve().await?;
     debug!(
-        bun_path = %bun.path().display(),
+        bun_path = %bun.binary_path().display(),
         entrypoint = %entrypoint.display(),
         ?args,
         app_dir = %app_dir.display(),
@@ -213,7 +212,7 @@ async fn generate_route_tree(app_dir: &Path, mode: OutputMode) -> Result<(), Str
              app_dir: {app_dir}\n\
              stdout:\n{stdout}\n\
              stderr:\n{stderr}",
-            bun_path = bun.path().display(),
+            bun_path = bun.binary_path().display(),
             entrypoint = entrypoint.display(),
             app_dir = app_dir.display(),
         ));

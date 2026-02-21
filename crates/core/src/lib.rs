@@ -19,6 +19,7 @@ pub mod databricks_sdk_doc;
 pub mod dev;
 pub mod dotenv;
 pub mod download;
+pub mod external;
 pub mod feedback;
 pub mod flux;
 pub mod frontend;

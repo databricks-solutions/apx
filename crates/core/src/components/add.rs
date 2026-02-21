@@ -1,7 +1,8 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::common::{BunCommand, read_project_metadata};
+use crate::common::read_project_metadata;
+use crate::external::bun::Bun;
 
 use super::cache::sync_registry_indexes;
 use super::{
@@ -233,7 +234,7 @@ pub async fn bun_add(app_dir: &Path, deps: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let bun = BunCommand::new().await?;
+    let bun = Bun::resolve().await?;
     let output = bun
         .tokio_command()
         .arg("add")

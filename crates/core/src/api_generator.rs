@@ -11,7 +11,8 @@ use walkdir::WalkDir;
 
 use crate::common::{read_project_metadata, write_metadata_file};
 use crate::dev::common::Shutdown;
-use crate::download::resolve_uv;
+use crate::external::ExternalTool;
+use crate::external::uv::Uv;
 use crate::interop::generate_openapi_spec;
 use crate::openapi;
 
@@ -85,9 +86,9 @@ pub fn start_openapi_watcher(
     tokio::spawn(async move {
         let _watcher = watcher;
 
-        // Resolve uv path once for the lifetime of this watcher task
-        let uv_path = match resolve_uv().await {
-            Ok(resolved) => resolved.path,
+        // Resolve uv once for the lifetime of this watcher task
+        let uv = match Uv::resolve().await {
+            Ok(uv) => uv,
             Err(e) => {
                 warn!("Failed to resolve uv for OpenAPI watcher: {e}");
                 return;
@@ -183,14 +184,11 @@ pub fn start_openapi_watcher(
                             info!("Running OpenAPI regeneration...");
                         }
 
-                        let output = tokio::process::Command::new(&uv_path)
-                            .arg("run")
-                            .arg("apx")
-                            .arg("__generate_openapi")
-                            .arg("--app-dir")
+                        let mut cmd = uv.tokio_command();
+                        cmd.args(["run", "apx", "__generate_openapi", "--app-dir"])
                             .arg(&app_dir)
-                            .current_dir(&app_dir)
-                            .output();
+                            .current_dir(&app_dir);
+                        let output = cmd.output();
                         let output = tokio::time::timeout(Duration::from_secs(30), output).await;
                         match output {
                             Ok(Ok(result)) if result.status.success() => {

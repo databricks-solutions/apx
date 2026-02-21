@@ -1,5 +1,6 @@
 use crate::run_cli_async_helper;
-use apx_core::common::BunCommand;
+use apx_core::external::ExternalTool;
+use apx_core::external::bun::Bun;
 use clap::Args;
 use tokio::select;
 use tokio::signal;
@@ -17,10 +18,10 @@ pub async fn run(args: BunArgs) -> i32 {
 }
 
 pub async fn run_inner(args: BunArgs) -> Result<(), String> {
-    let bun = BunCommand::new().await?;
+    let bun = Bun::resolve().await?;
 
     debug!(
-        bun_path = %bun.path().display(),
+        bun_path = %bun.binary_path().display(),
         args = ?args.args,
         "Running bun with passthrough args"
     );
