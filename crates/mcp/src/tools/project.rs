@@ -1,5 +1,5 @@
 use crate::server::ApxServer;
-use crate::tools::{AppPathArgs, ToolResultExt};
+use crate::tools::{AppPathArgs, StructuredObject, ToolResultExt};
 use crate::validation::validate_app_path;
 use rmcp::model::*;
 use rmcp::schemars;
@@ -384,6 +384,7 @@ impl ApxServer {
             #[serde(skip_serializing_if = "Option::is_none")]
             errors: Option<String>,
         }
+        impl StructuredObject for CheckResponse {}
 
         let response = match run_check(&path, OutputMode::Quiet).await {
             Ok(()) => CheckResponse {
@@ -542,6 +543,7 @@ impl ApxServer {
             response_schema: Option<Value>,
             example: String,
         }
+        impl StructuredObject for RouteInfoResponse {}
 
         let response = RouteInfoResponse {
             operation_id: args.operation_id,
@@ -596,7 +598,16 @@ impl ApxServer {
         };
 
         match parse_openapi_operations(&openapi) {
-            Ok(routes) => Ok(CallToolResult::from_serializable(&routes)),
+            Ok(routes) => {
+                #[derive(Serialize)]
+                struct RoutesResponse {
+                    routes: Vec<RouteInfo>,
+                }
+                impl StructuredObject for RoutesResponse {}
+                Ok(CallToolResult::from_serializable(&RoutesResponse {
+                    routes,
+                }))
+            }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }
@@ -882,10 +893,19 @@ mod tests {
     }
 
     #[test]
-    fn from_serializable_vec_wraps_in_object() {
+    fn routes_response_structured_content_is_object() {
         // MCP spec requires structuredContent to be a JSON object, not an array.
-        // Reproduces: "expected record, received array" when `routes` tool
-        // returns Vec<RouteInfo> directly.
+        // Vec<RouteInfo> doesn't implement StructuredObject, so it can't be
+        // passed to from_serializable — this is enforced at compile time.
+        // The RoutesResponse wrapper ensures the output is always an object.
+        use crate::tools::StructuredObject;
+
+        #[derive(serde::Serialize)]
+        struct RoutesResponse {
+            routes: Vec<RouteInfo>,
+        }
+        impl StructuredObject for RoutesResponse {}
+
         let routes = parse_openapi_operations(&serde_json::json!({
             "paths": {
                 "/items": {
@@ -898,7 +918,7 @@ mod tests {
         }))
         .unwrap();
 
-        let result = CallToolResult::from_serializable(&routes);
+        let result = CallToolResult::from_serializable(&RoutesResponse { routes });
         let sc = result
             .structured_content
             .expect("structured_content should be set");
@@ -906,6 +926,8 @@ mod tests {
             sc.is_object(),
             "structuredContent must be a JSON object, got: {sc}"
         );
+        // Verify the routes are nested under "routes" key
+        assert!(sc.get("routes").unwrap().is_array());
     }
 
     #[test]

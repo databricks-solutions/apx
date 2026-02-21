@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::indexing::{rebuild_search_index, wait_for_index_ready};
 use crate::server::ApxServer;
-use crate::tools::ToolResultExt;
+use crate::tools::{StructuredObject, ToolResultExt};
 use crate::validation::validate_app_path;
 use apx_core::components::{
     get_all_registry_indexes, needs_registry_refresh, sync_registry_indexes,
@@ -104,6 +104,7 @@ impl ApxServer {
             configured_registries: Vec<String>,
             results: Vec<SearchResultItem>,
         }
+        impl StructuredObject for SearchResponse {}
 
         #[derive(serde::Serialize)]
         struct SearchResultItem {
@@ -168,6 +169,7 @@ impl ApxServer {
                     css_updated: Option<String>,
                     warnings: Vec<String>,
                 }
+                impl StructuredObject for AddResponse {}
 
                 let response = AddResponse {
                     component_id: args.component_id,
@@ -249,6 +251,7 @@ impl ApxServer {
             total: usize,
             items: Vec<ListItem>,
         }
+        impl StructuredObject for ListResponse {}
 
         #[derive(serde::Serialize)]
         struct ListItem {

@@ -1,5 +1,5 @@
 use crate::server::ApxServer;
-use crate::tools::ToolResultExt;
+use crate::tools::{StructuredObject, ToolResultExt};
 use rmcp::model::*;
 use rmcp::schemars;
 use serde::Serialize;
@@ -67,6 +67,7 @@ impl ApxServer {
             browser_url: String,
             note: &'static str,
         }
+        impl StructuredObject for PrepareResponse {}
 
         Ok(CallToolResult::from_serializable(&PrepareResponse {
             title: prepared.title,
@@ -102,6 +103,7 @@ impl ApxServer {
                     status: &'static str,
                     issue_url: String,
                 }
+                impl StructuredObject for SubmittedResponse {}
                 Ok(CallToolResult::from_serializable(&SubmittedResponse {
                     status: "submitted",
                     issue_url: url,
@@ -114,6 +116,7 @@ impl ApxServer {
                     message: &'static str,
                     browser_url: String,
                 }
+                impl StructuredObject for FallbackResponse {}
                 Ok(CallToolResult::from_serializable(&FallbackResponse {
                     status: "fallback",
                     message: "Could not submit automatically (gh CLI not found or not authenticated). Share the browser_url with the user to submit manually.",

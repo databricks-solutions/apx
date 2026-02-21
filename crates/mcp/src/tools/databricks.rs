@@ -1,5 +1,5 @@
 use crate::server::ApxServer;
-use crate::tools::ToolResultExt;
+use crate::tools::{StructuredObject, ToolResultExt};
 use crate::validation::validate_app_path;
 use apx_core::dotenv::DotenvFile;
 use rmcp::model::*;
@@ -294,6 +294,7 @@ impl ApxServer {
             stderr: String,
             duration_ms: i64,
         }
+        impl StructuredObject for DatabricksAppsLogsResponse {}
 
         let response = DatabricksAppsLogsResponse {
             app_name,

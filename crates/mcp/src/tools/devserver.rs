@@ -1,5 +1,5 @@
 use crate::server::ApxServer;
-use crate::tools::{AppPathArgs, ToolResultExt};
+use crate::tools::{AppPathArgs, StructuredObject, ToolResultExt};
 use crate::validation::validate_app_path;
 use rmcp::model::*;
 use rmcp::schemars;
@@ -86,6 +86,7 @@ impl ApxServer {
                     count: usize,
                     entries: Vec<apx_core::ops::logs::LogEntry>,
                 }
+                impl StructuredObject for LogsResponse {}
 
                 let response = LogsResponse {
                     duration: args.duration,
