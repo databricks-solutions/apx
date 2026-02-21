@@ -1,10 +1,9 @@
 use crate::server::ApxServer;
-use crate::tools::{StructuredObject, ToolResultExt};
+use crate::tools::ToolResultExt;
 use crate::validation::validate_app_path;
 use apx_core::dotenv::DotenvFile;
 use rmcp::model::*;
 use rmcp::schemars;
-use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -283,18 +282,18 @@ impl ApxServer {
             ))]));
         }
 
-        #[derive(Serialize)]
-        struct DatabricksAppsLogsResponse {
-            app_name: String,
-            resolved_from_databricks_yml: bool,
-            command: Vec<String>,
-            cwd: String,
-            returncode: i32,
-            stdout: String,
-            stderr: String,
-            duration_ms: i64,
+        tool_response! {
+            struct DatabricksAppsLogsResponse {
+                app_name: String,
+                resolved_from_databricks_yml: bool,
+                command: Vec<String>,
+                cwd: String,
+                returncode: i32,
+                stdout: String,
+                stderr: String,
+                duration_ms: i64,
+            }
         }
-        impl StructuredObject for DatabricksAppsLogsResponse {}
 
         let response = DatabricksAppsLogsResponse {
             app_name,

@@ -1,5 +1,5 @@
 use crate::server::ApxServer;
-use crate::tools::{AppPathArgs, StructuredObject, ToolResultExt};
+use crate::tools::{AppPathArgs, ToolResultExt};
 use crate::validation::validate_app_path;
 use rmcp::model::*;
 use rmcp::schemars;
@@ -378,13 +378,13 @@ impl ApxServer {
         use apx_core::common::OutputMode;
         use apx_core::ops::check::run_check;
 
-        #[derive(Serialize)]
-        struct CheckResponse {
-            status: String,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            errors: Option<String>,
+        tool_response! {
+            struct CheckResponse {
+                status: String,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                errors: Option<String>,
+            }
         }
-        impl StructuredObject for CheckResponse {}
 
         let response = match run_check(&path, OutputMode::Quiet).await {
             Ok(()) => CheckResponse {
@@ -398,12 +398,7 @@ impl ApxServer {
         };
 
         if response.errors.is_some() {
-            match serde_json::to_value(&response) {
-                Ok(value) => Ok(CallToolResult::structured_error(value)),
-                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to serialize response: {e}"
-                ))])),
-            }
+            Ok(CallToolResult::from_serializable_error(&response))
         } else {
             Ok(CallToolResult::from_serializable(&response))
         }
@@ -531,19 +526,19 @@ impl ApxServer {
             )
         };
 
-        #[derive(Serialize)]
-        struct RouteInfoResponse {
-            operation_id: String,
-            method: String,
-            path: String,
-            parameters: Vec<ParamInfo>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            request_body_schema: Option<Value>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            response_schema: Option<Value>,
-            example: String,
+        tool_response! {
+            struct RouteInfoResponse {
+                operation_id: String,
+                method: String,
+                path: String,
+                parameters: Vec<ParamInfo>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                request_body_schema: Option<Value>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                response_schema: Option<Value>,
+                example: String,
+            }
         }
-        impl StructuredObject for RouteInfoResponse {}
 
         let response = RouteInfoResponse {
             operation_id: args.operation_id,
@@ -599,11 +594,11 @@ impl ApxServer {
 
         match parse_openapi_operations(&openapi) {
             Ok(routes) => {
-                #[derive(Serialize)]
-                struct RoutesResponse {
-                    routes: Vec<RouteInfo>,
+                tool_response! {
+                    struct RoutesResponse {
+                        routes: Vec<RouteInfo>,
+                    }
                 }
-                impl StructuredObject for RoutesResponse {}
                 Ok(CallToolResult::from_serializable(&RoutesResponse {
                     routes,
                 }))
@@ -898,13 +893,11 @@ mod tests {
         // Vec<RouteInfo> doesn't implement StructuredObject, so it can't be
         // passed to from_serializable — this is enforced at compile time.
         // The RoutesResponse wrapper ensures the output is always an object.
-        use crate::tools::StructuredObject;
-
-        #[derive(serde::Serialize)]
-        struct RoutesResponse {
-            routes: Vec<RouteInfo>,
+        tool_response! {
+            struct RoutesResponse {
+                routes: Vec<RouteInfo>,
+            }
         }
-        impl StructuredObject for RoutesResponse {}
 
         let routes = parse_openapi_operations(&serde_json::json!({
             "paths": {

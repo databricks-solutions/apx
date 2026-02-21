@@ -1,6 +1,6 @@
 use crate::indexing::wait_for_index_ready;
 use crate::server::ApxServer;
-use crate::tools::{StructuredObject, ToolResultExt};
+use crate::tools::ToolResultExt;
 use apx_core::databricks_sdk_doc::SDKSource;
 use apx_core::interop::get_databricks_sdk_version_for_project;
 use rmcp::model::*;
@@ -89,15 +89,15 @@ impl ApxServer {
             Ok(results) => {
                 drop(index_guard);
 
-                #[derive(Serialize)]
-                struct DocsResponse {
-                    source: String,
-                    query: String,
-                    results: Vec<DocsResult>,
-                    #[serde(skip_serializing_if = "Option::is_none")]
-                    note: Option<String>,
+                tool_response! {
+                    struct DocsResponse {
+                        source: String,
+                        query: String,
+                        results: Vec<DocsResult>,
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                        note: Option<String>,
+                    }
                 }
-                impl StructuredObject for DocsResponse {}
 
                 #[derive(Serialize)]
                 struct DocsResult {

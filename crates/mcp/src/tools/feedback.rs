@@ -1,8 +1,7 @@
 use crate::server::ApxServer;
-use crate::tools::{StructuredObject, ToolResultExt};
+use crate::tools::ToolResultExt;
 use rmcp::model::*;
 use rmcp::schemars;
-use serde::Serialize;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct FeedbackPrepareArgs {
@@ -60,14 +59,14 @@ impl ApxServer {
             args.include_metadata,
         );
 
-        #[derive(Serialize)]
-        struct PrepareResponse {
-            title: String,
-            body: String,
-            browser_url: String,
-            note: &'static str,
+        tool_response! {
+            struct PrepareResponse {
+                title: String,
+                body: String,
+                browser_url: String,
+                note: &'static str,
+            }
         }
-        impl StructuredObject for PrepareResponse {}
 
         Ok(CallToolResult::from_serializable(&PrepareResponse {
             title: prepared.title,
@@ -98,25 +97,25 @@ impl ApxServer {
 
         match result {
             apx_core::feedback::FeedbackResult::Submitted { url } => {
-                #[derive(Serialize)]
-                struct SubmittedResponse {
-                    status: &'static str,
-                    issue_url: String,
+                tool_response! {
+                    struct SubmittedResponse {
+                        status: &'static str,
+                        issue_url: String,
+                    }
                 }
-                impl StructuredObject for SubmittedResponse {}
                 Ok(CallToolResult::from_serializable(&SubmittedResponse {
                     status: "submitted",
                     issue_url: url,
                 }))
             }
             apx_core::feedback::FeedbackResult::Fallback { url, .. } => {
-                #[derive(Serialize)]
-                struct FallbackResponse {
-                    status: &'static str,
-                    message: &'static str,
-                    browser_url: String,
+                tool_response! {
+                    struct FallbackResponse {
+                        status: &'static str,
+                        message: &'static str,
+                        browser_url: String,
+                    }
                 }
-                impl StructuredObject for FallbackResponse {}
                 Ok(CallToolResult::from_serializable(&FallbackResponse {
                     status: "fallback",
                     message: "Could not submit automatically (gh CLI not found or not authenticated). Share the browser_url with the user to submit manually.",

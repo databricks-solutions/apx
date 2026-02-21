@@ -1,9 +1,8 @@
 use crate::server::ApxServer;
-use crate::tools::{AppPathArgs, StructuredObject, ToolResultExt};
+use crate::tools::{AppPathArgs, ToolResultExt};
 use crate::validation::validate_app_path;
 use rmcp::model::*;
 use rmcp::schemars;
-use serde::Serialize;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct LogsToolArgs {
@@ -80,13 +79,13 @@ impl ApxServer {
 
         match fetch_logs_structured(&path, &args.duration).await {
             Ok(entries) => {
-                #[derive(Serialize)]
-                struct LogsResponse {
-                    duration: String,
-                    count: usize,
-                    entries: Vec<apx_core::ops::logs::LogEntry>,
+                tool_response! {
+                    struct LogsResponse {
+                        duration: String,
+                        count: usize,
+                        entries: Vec<apx_core::ops::logs::LogEntry>,
+                    }
                 }
-                impl StructuredObject for LogsResponse {}
 
                 let response = LogsResponse {
                     duration: args.duration,

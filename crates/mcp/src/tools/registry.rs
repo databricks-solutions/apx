@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::indexing::{rebuild_search_index, wait_for_index_ready};
 use crate::server::ApxServer;
-use crate::tools::{StructuredObject, ToolResultExt};
+use crate::tools::ToolResultExt;
 use crate::validation::validate_app_path;
 use apx_core::components::{
     get_all_registry_indexes, needs_registry_refresh, sync_registry_indexes,
@@ -98,13 +98,13 @@ impl ApxServer {
             }
         };
 
-        #[derive(serde::Serialize)]
-        struct SearchResponse {
-            query: String,
-            configured_registries: Vec<String>,
-            results: Vec<SearchResultItem>,
+        tool_response! {
+            struct SearchResponse {
+                query: String,
+                configured_registries: Vec<String>,
+                results: Vec<SearchResultItem>,
+            }
         }
-        impl StructuredObject for SearchResponse {}
 
         #[derive(serde::Serialize)]
         struct SearchResultItem {
@@ -159,17 +159,17 @@ impl ApxServer {
             Ok(result) => {
                 tracing::info!("Component {} added successfully", args.component_id);
 
-                #[derive(serde::Serialize)]
-                struct AddResponse {
-                    component_id: String,
-                    written_files: Vec<String>,
-                    unchanged_files: Vec<String>,
-                    dependencies_installed: Vec<String>,
-                    auto_detected_deps: Vec<String>,
-                    css_updated: Option<String>,
-                    warnings: Vec<String>,
+                tool_response! {
+                    struct AddResponse {
+                        component_id: String,
+                        written_files: Vec<String>,
+                        unchanged_files: Vec<String>,
+                        dependencies_installed: Vec<String>,
+                        auto_detected_deps: Vec<String>,
+                        css_updated: Option<String>,
+                        warnings: Vec<String>,
+                    }
                 }
-                impl StructuredObject for AddResponse {}
 
                 let response = AddResponse {
                     component_id: args.component_id,
@@ -245,13 +245,13 @@ impl ApxServer {
             }
         };
 
-        #[derive(serde::Serialize)]
-        struct ListResponse {
-            registry: String,
-            total: usize,
-            items: Vec<ListItem>,
+        tool_response! {
+            struct ListResponse {
+                registry: String,
+                total: usize,
+                items: Vec<ListItem>,
+            }
         }
-        impl StructuredObject for ListResponse {}
 
         #[derive(serde::Serialize)]
         struct ListItem {
