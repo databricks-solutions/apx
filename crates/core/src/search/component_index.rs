@@ -5,7 +5,7 @@ use sqlx::sqlite::SqlitePool;
 use std::collections::HashSet;
 
 use crate::components::cache::get_all_registry_indexes;
-use apx_db::dev::{sanitize_fts5_query, table_exists};
+use apx_db::fts::{Fts5Column, Fts5Table, sanitize_fts5_query};
 
 const TABLE_NAME: &str = "components_fts_v1";
 
@@ -31,22 +31,45 @@ pub struct SearchResult {
     pub score: f32,
 }
 
+/// FTS5 column layout for component tables.
+fn component_fts_columns() -> Vec<Fts5Column> {
+    vec![
+        Fts5Column {
+            name: "id",
+            indexed: false,
+        },
+        Fts5Column {
+            name: "name",
+            indexed: true,
+        },
+        Fts5Column {
+            name: "registry",
+            indexed: false,
+        },
+        Fts5Column {
+            name: "text",
+            indexed: true,
+        },
+    ]
+}
+
 /// Component search index using SQLite FTS5
 #[derive(Debug, Clone)]
 pub struct ComponentIndex {
-    pool: SqlitePool,
+    fts: Fts5Table,
 }
 
 impl ComponentIndex {
     /// Create a new component index using the provided pool
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(pool: SqlitePool) -> Result<Self, String> {
+        let fts = Fts5Table::new(pool, TABLE_NAME, component_fts_columns())?;
+        Ok(Self { fts })
     }
 
     /// Create with a specific pool (for testing or custom setups)
     #[allow(dead_code)]
-    pub fn with_pool(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn with_pool(pool: SqlitePool) -> Result<Self, String> {
+        Self::new(pool)
     }
 
     /// Get the FTS table name
@@ -56,7 +79,7 @@ impl ComponentIndex {
 
     /// Validate that the index exists
     pub async fn validate_index(&self) -> Result<bool, String> {
-        table_exists(&self.pool, TABLE_NAME).await
+        self.fts.exists().await
     }
 
     /// Build index from registry.json files
@@ -104,41 +127,18 @@ impl ComponentIndex {
 
         tracing::info!("Indexing {} components", records.len());
 
-        // Drop existing table if it exists
-        sqlx::query(&format!("DROP TABLE IF EXISTS {TABLE_NAME}"))
-            .execute(&self.pool)
-            .await
-            .map_err(|e| format!("Failed to drop existing table: {e}"))?;
-
-        // Create FTS5 virtual table
-        sqlx::query(&format!(
-            "CREATE VIRTUAL TABLE {TABLE_NAME} USING fts5(\
-                id UNINDEXED, name, registry UNINDEXED, text, \
-                tokenize='porter unicode61'\
-            )"
-        ))
-        .execute(&self.pool)
-        .await
-        .map_err(|e| format!("Failed to create FTS5 table: {e}"))?;
+        self.fts.create_or_replace().await?;
 
         // Insert all records in a transaction
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| format!("Transaction error: {e}"))?;
+        let mut tx = self.fts.begin().await?;
 
         for record in &records {
-            sqlx::query(&format!(
-                "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
-            ))
-            .bind(&record.id)
-            .bind(&record.name)
-            .bind(&record.registry)
-            .bind(&record.text)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| format!("Insert error: {e}"))?;
+            self.fts
+                .insert_str(
+                    &mut tx,
+                    &[&record.id, &record.name, &record.registry, &record.text],
+                )
+                .await?;
         }
 
         tx.commit()
@@ -160,7 +160,7 @@ impl ComponentIndex {
     ) -> Result<Vec<SearchResult>, String> {
         tracing::debug!("search: Starting search for query '{}'", query);
 
-        if !table_exists(&self.pool, TABLE_NAME).await? {
+        if !self.fts.exists().await? {
             return Err("Index not built. Please ensure components are indexed.".to_string());
         }
 
@@ -175,17 +175,10 @@ impl ComponentIndex {
         // Fetch more results for reranking
         let fts_limit = (limit * 3).max(30);
 
-        let rows = sqlx::query(&format!(
-            "SELECT id, name, registry, rank FROM {TABLE_NAME} \
-             WHERE {TABLE_NAME} MATCH ?1 \
-             ORDER BY rank \
-             LIMIT ?2"
-        ))
-        .bind(&sanitized)
-        .bind(fts_limit as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| format!("Query error: {e}"))?;
+        let rows = self
+            .fts
+            .search(&sanitized, fts_limit, &["id", "name", "registry", "rank"])
+            .await?;
 
         let mut results = Vec::new();
 
@@ -252,7 +245,19 @@ mod tests {
 
     async fn test_index() -> ComponentIndex {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        ComponentIndex::with_pool(pool)
+        ComponentIndex::with_pool(pool).unwrap()
+    }
+
+    /// Helper: create the FTS table and insert test data via the Fts5Table API.
+    async fn seed_test_data(fts: &Fts5Table, rows: &[(&str, &str, &str, &str)]) {
+        fts.create_or_replace().await.unwrap();
+        let mut tx = fts.begin().await.unwrap();
+        for (id, name, registry, text) in rows {
+            fts.insert_str(&mut tx, &[id, name, registry, text])
+                .await
+                .unwrap();
+        }
+        tx.commit().await.map_err(|e| format!("{e}")).unwrap();
     }
 
     #[tokio::test]
@@ -272,49 +277,25 @@ mod tests {
     async fn test_build_and_search() {
         let index = test_index().await;
 
-        // Create the FTS table manually and insert test data
-        sqlx::query(&format!(
-            "CREATE VIRTUAL TABLE {TABLE_NAME} USING fts5(\
-                id UNINDEXED, name, registry UNINDEXED, text, \
-                tokenize='porter unicode61'\
-            )"
-        ))
-        .execute(&index.pool)
-        .await
-        .unwrap();
-
-        sqlx::query(&format!(
-            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
-        ))
-        .bind("button")
-        .bind("button")
-        .bind("")
-        .bind("button A styled button component shadcn")
-        .execute(&index.pool)
-        .await
-        .unwrap();
-
-        sqlx::query(&format!(
-            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
-        ))
-        .bind("card")
-        .bind("card")
-        .bind("")
-        .bind("card A card container component shadcn")
-        .execute(&index.pool)
-        .await
-        .unwrap();
-
-        sqlx::query(&format!(
-            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
-        ))
-        .bind("@custom/button")
-        .bind("button")
-        .bind("custom")
-        .bind("button A custom button component")
-        .execute(&index.pool)
-        .await
-        .unwrap();
+        seed_test_data(
+            &index.fts,
+            &[
+                (
+                    "button",
+                    "button",
+                    "",
+                    "button A styled button component shadcn",
+                ),
+                ("card", "card", "", "card A card container component shadcn"),
+                (
+                    "@custom/button",
+                    "button",
+                    "custom",
+                    "button A custom button component",
+                ),
+            ],
+        )
+        .await;
 
         let results = index.search("button", 10, None).await.unwrap();
         assert!(!results.is_empty());
@@ -341,41 +322,24 @@ mod tests {
     async fn test_multiterm_query_returns_partial_matches() {
         let index = test_index().await;
 
-        sqlx::query(&format!(
-            "CREATE VIRTUAL TABLE {TABLE_NAME} USING fts5(\
-                id UNINDEXED, name, registry UNINDEXED, text, \
-                tokenize='porter unicode61'\
-            )"
-        ))
-        .execute(&index.pool)
-        .await
-        .unwrap();
-
-        // "animate" in name + "ui component" in text → phrase "animate-ui" matches
-        // via FTS5 cross-column phrase matching (animate in name, ui in text).
-        // Also has "number", "counter" but NOT "ticker".
-        sqlx::query(&format!(
-            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
-        ))
-        .bind("@animate-ui/number-ticker")
-        .bind("animate")
-        .bind("animate-ui")
-        .bind("animate number counter ui component")
-        .execute(&index.pool)
-        .await
-        .unwrap();
-
-        // Unrelated component
-        sqlx::query(&format!(
-            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
-        ))
-        .bind("button")
-        .bind("button")
-        .bind("")
-        .bind("button A styled button component shadcn")
-        .execute(&index.pool)
-        .await
-        .unwrap();
+        seed_test_data(
+            &index.fts,
+            &[
+                (
+                    "@animate-ui/number-ticker",
+                    "animate",
+                    "animate-ui",
+                    "animate number counter ui component",
+                ),
+                (
+                    "button",
+                    "button",
+                    "",
+                    "button A styled button component shadcn",
+                ),
+            ],
+        )
+        .await;
 
         // Single-term query should find the component
         let results = index.search("animate", 10, None).await.unwrap();
@@ -404,39 +368,24 @@ mod tests {
     async fn test_configured_registry_boost() {
         let index = test_index().await;
 
-        sqlx::query(&format!(
-            "CREATE VIRTUAL TABLE {TABLE_NAME} USING fts5(\
-                id UNINDEXED, name, registry UNINDEXED, text, \
-                tokenize='porter unicode61'\
-            )"
-        ))
-        .execute(&index.pool)
-        .await
-        .unwrap();
-
-        // Default registry component
-        sqlx::query(&format!(
-            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
-        ))
-        .bind("textarea")
-        .bind("textarea")
-        .bind("")
-        .bind("textarea A text input area component shadcn")
-        .execute(&index.pool)
-        .await
-        .unwrap();
-
-        // Custom registry component
-        sqlx::query(&format!(
-            "INSERT INTO {TABLE_NAME} (id, name, registry, text) VALUES (?1, ?2, ?3, ?4)"
-        ))
-        .bind("@ai-elements/message")
-        .bind("message")
-        .bind("ai-elements")
-        .bind("message chat message bubble ai component")
-        .execute(&index.pool)
-        .await
-        .unwrap();
+        seed_test_data(
+            &index.fts,
+            &[
+                (
+                    "textarea",
+                    "textarea",
+                    "",
+                    "textarea A text input area component shadcn",
+                ),
+                (
+                    "@ai-elements/message",
+                    "message",
+                    "ai-elements",
+                    "message chat message bubble ai component",
+                ),
+            ],
+        )
+        .await;
 
         // Without configured registries: default gets boosted
         let results = index.search("message", 10, None).await.unwrap();

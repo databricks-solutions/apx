@@ -85,7 +85,9 @@ impl ApxServer {
 
         // Search using async DB layer
         let pool = self.ctx.dev_db.pool().clone();
-        let index = ComponentIndex::new(pool);
+        let index = ComponentIndex::new(pool).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("Failed to create index: {e}"), None)
+        })?;
         let search_results = match index
             .search(&args.query, args.limit, configured_registries.as_ref())
             .await

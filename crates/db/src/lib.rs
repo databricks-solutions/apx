@@ -16,9 +16,11 @@
 //! - **Dev DB** (`~/.apx/dev/db`) — search indexes and future dev-related tables
 
 pub mod dev;
+pub mod fts;
 pub mod logs;
 
 pub use dev::DevDb;
+pub use fts::{Fts5Column, Fts5Table};
 pub use logs::LogsDb;
 pub use sqlx::sqlite::SqlitePool;
 

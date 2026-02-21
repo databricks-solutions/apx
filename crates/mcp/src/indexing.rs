@@ -120,13 +120,13 @@ pub fn init_all_indexes(
 
 /// Rebuild the search index from registry.json files (async)
 pub async fn rebuild_search_index(pool: SqlitePool) -> Result<(), String> {
-    let index = ComponentIndex::new(pool);
+    let index = ComponentIndex::new(pool)?;
     index.build_index_from_registries().await
 }
 
 /// Ensure search index exists and is valid, build/rebuild if needed (async)
 async fn ensure_search_index(pool: SqlitePool) -> Result<(), String> {
-    let index = ComponentIndex::new(pool);
+    let index = ComponentIndex::new(pool)?;
 
     match index.validate_index().await {
         Ok(true) => {

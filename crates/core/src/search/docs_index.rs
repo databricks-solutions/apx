@@ -7,7 +7,7 @@ use sqlx::sqlite::SqlitePool;
 
 use crate::common::Timer;
 use crate::databricks_sdk_doc::{SDKSource, download_and_extract_sdk, load_doc_files};
-use apx_db::dev::{sanitize_fts5_terms, table_exists};
+use apx_db::fts::{Fts5Column, Fts5Table, enhance_fts5_query, sanitize_fts5_terms};
 
 const CHUNK_SIZE: usize = 2000; // characters (no tokenizer needed for FTS)
 const CHUNK_OVERLAP: usize = 200; // characters overlap
@@ -40,6 +40,44 @@ pub struct DocSearchResult {
     pub text: String,
     pub source_file: String,
     pub score: f32,
+}
+
+/// FTS5 column layout for SDK docs tables.
+fn docs_fts_columns() -> Vec<Fts5Column> {
+    vec![
+        Fts5Column {
+            name: "id",
+            indexed: false,
+        },
+        Fts5Column {
+            name: "text",
+            indexed: true,
+        },
+        Fts5Column {
+            name: "source_file",
+            indexed: false,
+        },
+        Fts5Column {
+            name: "chunk_index",
+            indexed: false,
+        },
+        Fts5Column {
+            name: "service",
+            indexed: true,
+        },
+        Fts5Column {
+            name: "entity",
+            indexed: true,
+        },
+        Fts5Column {
+            name: "operation",
+            indexed: true,
+        },
+        Fts5Column {
+            name: "symbols",
+            indexed: true,
+        },
+    ]
 }
 
 /// Chunk text into overlapping segments with context headers
@@ -162,9 +200,9 @@ impl SDKDocsIndex {
         )
     }
 
-    /// Check if the index table exists
-    async fn table_exists_check(&self, table_name: &str) -> Result<bool, String> {
-        table_exists(&self.pool, table_name).await
+    /// Build an [`Fts5Table`] handle for the given table name.
+    fn fts_table(&self, table_name: &str) -> Result<Fts5Table, String> {
+        Fts5Table::new(self.pool.clone(), table_name, docs_fts_columns())
     }
 
     /// Bootstrap with a pre-computed SDK version
@@ -179,9 +217,10 @@ impl SDKDocsIndex {
                 self.version = Some(version.to_string());
 
                 let table_name = Self::table_name(version);
+                let fts = self.fts_table(&table_name)?;
 
                 // Check if already indexed
-                if self.table_exists_check(&table_name).await? {
+                if fts.exists().await? {
                     tracing::info!("SDK docs already indexed for version {}", version);
                     return Ok(false);
                 }
@@ -190,7 +229,7 @@ impl SDKDocsIndex {
                 let docs_path = download_and_extract_sdk(version).await?;
 
                 // Build index (async)
-                self.build_index(&table_name, &docs_path).await?;
+                self.build_index(&fts, &docs_path).await?;
 
                 Ok(true)
             }
@@ -200,7 +239,7 @@ impl SDKDocsIndex {
     /// Build index from a docs path
     async fn build_index(
         &self,
-        table_name: &str,
+        fts: &Fts5Table,
         docs_path: &std::path::Path,
     ) -> Result<(), String> {
         let overall_timer = Timer::start("build_index");
@@ -260,52 +299,31 @@ impl SDKDocsIndex {
         // Database operations (async)
         let db_timer = Timer::start("database_operations");
 
-        // Drop existing table if it exists
-        sqlx::query(&format!("DROP TABLE IF EXISTS \"{table_name}\""))
-            .execute(&self.pool)
-            .await
-            .map_err(|e| format!("Failed to drop existing table: {e}"))?;
-
-        // Create FTS5 virtual table
-        sqlx::query(&format!(
-            "CREATE VIRTUAL TABLE \"{table_name}\" USING fts5(\
-                id UNINDEXED, text, source_file UNINDEXED, \
-                chunk_index UNINDEXED, service, entity, operation, symbols, \
-                tokenize='porter unicode61'\
-            )"
-        ))
-        .execute(&self.pool)
-        .await
-        .map_err(|e| format!("Failed to create FTS5 table: {e}"))?;
+        fts.create_or_replace().await?;
 
         db_timer.lap("Created FTS5 table");
 
         // Insert all chunks in a transaction
         let insert_timer = Timer::start("insert_chunks");
 
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| format!("Transaction error: {e}"))?;
+        let mut tx = fts.begin().await?;
 
         for chunk in &doc_chunks {
-            sqlx::query(&format!(
-                "INSERT INTO \"{table_name}\" \
-                 (id, text, source_file, chunk_index, service, entity, operation, symbols) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
-            ))
-            .bind(&chunk.id)
-            .bind(&chunk.text)
-            .bind(&chunk.source_file)
-            .bind(chunk.chunk_index as i64)
-            .bind(&chunk.service)
-            .bind(&chunk.entity)
-            .bind(&chunk.operation)
-            .bind(&chunk.symbols)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| format!("Insert error: {e}"))?;
+            let chunk_idx = chunk.chunk_index.to_string();
+            fts.insert_str(
+                &mut tx,
+                &[
+                    &chunk.id,
+                    &chunk.text,
+                    &chunk.source_file,
+                    &chunk_idx,
+                    &chunk.service,
+                    &chunk.entity,
+                    &chunk.operation,
+                    &chunk.symbols,
+                ],
+            )
+            .await?;
         }
 
         tx.commit()
@@ -319,7 +337,7 @@ impl SDKDocsIndex {
         tracing::info!(
             "SDK docs FTS5 index built: {} chunks in table '{}'",
             doc_chunks.len(),
-            table_name
+            fts.table_name()
         );
         Ok(())
     }
@@ -354,8 +372,9 @@ impl SDKDocsIndex {
                 })?;
 
                 let table_name = Self::table_name(version);
+                let fts = self.fts_table(&table_name)?;
 
-                if !table_exists(&self.pool, &table_name).await? {
+                if !fts.exists().await? {
                     return Err(format!(
                         "SDK docs not indexed for version {version}. Index will be built on next server start."
                     ));
@@ -375,21 +394,16 @@ impl SDKDocsIndex {
                     query
                 );
 
-                // bm25() weights: entity(5.0), text(1.0), operation(1.0),
-                // symbols(3.0), service(1.0), chunk_index(0.0)
-                // Column order in FTS5 table: text, service, entity, operation, symbols
-                let rows = sqlx::query(&format!(
-                    "SELECT text, source_file, bm25(\"{table_name}\", 1.0, 1.0, 5.0, 1.0, 3.0) AS rank \
-                     FROM \"{table_name}\" \
-                     WHERE \"{table_name}\" MATCH ?1 \
-                     ORDER BY rank \
-                     LIMIT ?2"
-                ))
-                .bind(&sanitized)
-                .bind(limit as i64)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| format!("Query error: {e}"))?;
+                // bm25 indexed-column weights (column order):
+                //   text(1.0), service(1.0), entity(5.0), operation(1.0), symbols(3.0)
+                let rows = fts
+                    .search_bm25(
+                        &sanitized,
+                        &[1.0, 1.0, 5.0, 1.0, 3.0],
+                        limit,
+                        &["text", "source_file"],
+                    )
+                    .await?;
 
                 let mut results = Vec::new();
 
@@ -410,49 +424,6 @@ impl SDKDocsIndex {
             }
         }
     }
-}
-
-/// Enhance pre-sanitized FTS5 terms to boost entity/class matches.
-///
-/// Accepts individually quoted terms (e.g. `['"GenieAttachment"', '"fields"']`)
-/// and returns a single FTS5 MATCH expression joined with `OR`.
-///
-/// - If a term is PascalCase, an extra `entity:<term>` clause is added.
-/// - Hint words like "fields" / "attributes" are stripped (they only guide
-///   boosting).
-fn enhance_fts5_query(terms: &[String]) -> String {
-    let hint_words: &[&str] = &["fields", "attributes", "members", "properties"];
-
-    let mut entity_terms = Vec::new();
-    let mut regular_terms = Vec::new();
-
-    for token in terms {
-        let clean = token.trim_matches('"');
-        if hint_words.contains(&clean.to_lowercase().as_str()) {
-            continue;
-        }
-        if is_pascal_case(clean) {
-            entity_terms.push(format!("entity:{token}"));
-            regular_terms.push(token.clone());
-        } else {
-            regular_terms.push(token.clone());
-        }
-    }
-
-    let mut parts = entity_terms;
-    parts.extend(regular_terms);
-    parts.join(" OR ")
-}
-
-/// Check if a string looks like PascalCase (starts with uppercase, contains lowercase).
-fn is_pascal_case(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_uppercase() => {}
-        _ => return false,
-    }
-    // Must contain at least one lowercase letter (to distinguish from ALL_CAPS)
-    s.chars().any(|c| c.is_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -520,94 +491,36 @@ mod tests {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let table_name = "sdk_docs_fts_test_v1";
 
-        sqlx::query(&format!(
-            "CREATE VIRTUAL TABLE \"{table_name}\" USING fts5(\
-                id UNINDEXED, text, source_file UNINDEXED, \
-                chunk_index UNINDEXED, service, entity, operation, symbols, \
-                tokenize='porter unicode61'\
-            )"
-        ))
-        .execute(&pool)
-        .await
-        .unwrap();
+        let fts = Fts5Table::new(pool, table_name, docs_fts_columns()).unwrap();
+        fts.create_or_replace().await.unwrap();
 
-        sqlx::query(&format!(
-            "INSERT INTO \"{table_name}\" \
-             (id, text, source_file, chunk_index, service, entity, operation, symbols) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
-        ))
-        .bind("test.rst:0")
-        .bind("ClustersAPI clusters create This is about creating clusters")
-        .bind("test.rst")
-        .bind(0i64)
-        .bind("clusters")
-        .bind("ClustersAPI")
-        .bind("create")
-        .bind("clusters create ClustersAPI")
-        .execute(&pool)
+        let mut tx = fts.begin().await.unwrap();
+        fts.insert_str(
+            &mut tx,
+            &[
+                "test.rst:0",
+                "ClustersAPI clusters create This is about creating clusters",
+                "test.rst",
+                "0",
+                "clusters",
+                "ClustersAPI",
+                "create",
+                "clusters create ClustersAPI",
+            ],
+        )
         .await
         .unwrap();
+        tx.commit().await.map_err(|e| format!("{e}")).unwrap();
 
         // Verify the data is searchable
-        let results = sqlx::query(&format!(
-            "SELECT text, source_file FROM \"{table_name}\" \
-             WHERE \"{table_name}\" MATCH '\"clusters\"' LIMIT 5"
-        ))
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let rows = fts
+            .search("\"clusters\"", 5, &["text", "source_file"])
+            .await
+            .unwrap();
 
-        assert_eq!(results.len(), 1);
-        let text: String = results[0].get("text");
+        assert_eq!(rows.len(), 1);
+        let text: String = rows[0].get("text");
         assert!(text.contains("clusters"));
-    }
-
-    #[test]
-    fn test_is_pascal_case() {
-        assert!(is_pascal_case("GenieAttachment"));
-        assert!(is_pascal_case("ClustersAPI"));
-        assert!(is_pascal_case("Abc"));
-        assert!(!is_pascal_case("abc"));
-        assert!(!is_pascal_case("ABC")); // ALL_CAPS, not PascalCase
-        assert!(!is_pascal_case("create"));
-        assert!(!is_pascal_case("123"));
-    }
-
-    #[test]
-    fn test_enhance_fts5_query_pascal_case() {
-        let terms = vec!["\"GenieAttachment\"".to_string()];
-        let result = enhance_fts5_query(&terms);
-        assert!(result.contains("entity:\"GenieAttachment\""));
-        assert!(result.contains("\"GenieAttachment\""));
-    }
-
-    #[test]
-    fn test_enhance_fts5_query_with_fields_hint() {
-        let terms = vec!["\"GenieAttachment\"".to_string(), "\"fields\"".to_string()];
-        let result = enhance_fts5_query(&terms);
-        assert!(result.contains("entity:\"GenieAttachment\""));
-        // "fields" is a hint word and should be stripped
-        assert!(!result.contains("\"fields\""));
-    }
-
-    #[test]
-    fn test_enhance_fts5_query_plain() {
-        let terms = vec!["\"create\"".to_string(), "\"clusters\"".to_string()];
-        let result = enhance_fts5_query(&terms);
-        // No PascalCase terms, should just join with OR
-        assert_eq!(result, "\"create\" OR \"clusters\"");
-    }
-
-    /// Regression: multi-word queries must not produce `OR OR`.
-    #[test]
-    fn test_enhance_fts5_query_no_double_or() {
-        let terms = vec!["\"serving\"".to_string(), "\"endpoints\"".to_string()];
-        let result = enhance_fts5_query(&terms);
-        assert!(
-            !result.contains("OR OR"),
-            "must not contain double OR: {result}"
-        );
-        assert_eq!(result, "\"serving\" OR \"endpoints\"");
     }
 
     /// End-to-end: insert a doc row, search with a multi-word query, verify no FTS5 error.
@@ -616,45 +529,35 @@ mod tests {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         let table_name = "sdk_docs_fts_multiword_v1";
 
-        sqlx::query(&format!(
-            "CREATE VIRTUAL TABLE \"{table_name}\" USING fts5(\
-                id UNINDEXED, text, source_file UNINDEXED, \
-                chunk_index UNINDEXED, service, entity, operation, symbols, \
-                tokenize='porter unicode61'\
-            )"
-        ))
-        .execute(&pool)
-        .await
-        .unwrap();
+        let fts = Fts5Table::new(pool, table_name, docs_fts_columns()).unwrap();
+        fts.create_or_replace().await.unwrap();
 
-        sqlx::query(&format!(
-            "INSERT INTO \"{table_name}\" \
-             (id, text, source_file, chunk_index, service, entity, operation, symbols) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
-        ))
-        .bind("serving.rst:0")
-        .bind("Guide to serving endpoints and model serving")
-        .bind("serving.rst")
-        .bind(0i64)
-        .bind("serving")
-        .bind("")
-        .bind("")
-        .bind("serving endpoints")
-        .execute(&pool)
+        let mut tx = fts.begin().await.unwrap();
+        fts.insert_str(
+            &mut tx,
+            &[
+                "serving.rst:0",
+                "Guide to serving endpoints and model serving",
+                "serving.rst",
+                "0",
+                "serving",
+                "",
+                "",
+                "serving endpoints",
+            ],
+        )
         .await
         .unwrap();
+        tx.commit().await.map_err(|e| format!("{e}")).unwrap();
 
         // Build the query exactly as the search method does
-        let terms = apx_db::dev::sanitize_fts5_terms("serving endpoints");
+        let terms = sanitize_fts5_terms("serving endpoints");
         let query = enhance_fts5_query(&terms);
 
-        let rows = sqlx::query(&format!(
-            "SELECT text FROM \"{table_name}\" WHERE \"{table_name}\" MATCH ?1 LIMIT 5"
-        ))
-        .bind(&query)
-        .fetch_all(&pool)
-        .await
-        .expect("multi-word FTS5 query must not fail");
+        let rows = fts
+            .search(&query, 5, &["text"])
+            .await
+            .expect("multi-word FTS5 query must not fail");
 
         assert_eq!(rows.len(), 1);
     }
