@@ -183,7 +183,6 @@ def main() -> None:
     t_total = time.monotonic()
 
     try:
-
         with stage("Cleaning up dist directory", 1, total):
             if dist_dir.exists():
                 shutil.rmtree(dist_dir)
