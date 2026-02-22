@@ -5,6 +5,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::RwLock;
 use tracing::debug;
 
+use crate::api::apps::AppsApi;
 use crate::api::current_user::CurrentUserApi;
 use crate::auth::{CachedToken, acquire_token};
 use crate::config::{DatabricksConfig, resolve_config};
@@ -140,6 +141,10 @@ impl DatabricksClient {
 
     pub fn profile(&self) -> &str {
         &self.inner.config.profile
+    }
+
+    pub fn apps(&self) -> AppsApi<'_> {
+        AppsApi::new(self)
     }
 
     pub fn current_user(&self) -> CurrentUserApi<'_> {

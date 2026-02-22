@@ -1,14 +1,16 @@
-use crate::server::ApxServer;
-use crate::tools::{ToolError, ToolResultExt};
-use crate::validation::validated_app_path;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::time::Duration;
+
 use apx_core::dotenv::DotenvFile;
-use apx_core::external::CommandError;
-use apx_core::external::databricks::{AppsLogsArgs, DatabricksCli};
+use apx_databricks_sdk::{AppLogsArgs, DatabricksClient, LogEntry};
 use rmcp::model::*;
 use rmcp::schemars;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
+
+use crate::server::ApxServer;
+use crate::tools::ToolError;
+use crate::validation::validated_app_path;
 
 pub(crate) fn truncate(s: &str, max_chars: i32) -> String {
     if max_chars <= 0 {
@@ -46,36 +48,11 @@ pub(crate) fn resolve_app_name_from_databricks_yml(project_dir: &Path) -> Result
     let data: Value = serde_yaml::from_str(&contents)
         .map_err(|e| format!("Failed to parse databricks.yml: {e}"))?;
 
-    let resources = data
-        .get("resources")
-        .ok_or_else(|| "databricks.yml 'resources' must be a mapping/object".to_string())?;
+    let apps_obj = extract_apps_object(&data)?;
+    let app_names = collect_app_names(apps_obj);
 
-    let apps = resources
-        .get("apps")
-        .ok_or_else(|| "databricks.yml 'resources.apps' must be a mapping/object".to_string())?;
-
-    let apps_obj = apps
-        .as_object()
-        .ok_or_else(|| "databricks.yml 'resources.apps' must be a mapping/object".to_string())?;
-
-    let mut app_names = HashSet::new();
-    for app_def in apps_obj.values() {
-        if let Some(app_obj) = app_def.as_object()
-            && let Some(name_val) = app_obj.get("name")
-            && let Some(name_str) = name_val.as_str()
-        {
-            let name = name_str.trim();
-            if !name.is_empty() {
-                app_names.insert(name.to_string());
-            }
-        }
-    }
-
-    let mut app_names_vec: Vec<String> = app_names.into_iter().collect();
-    app_names_vec.sort();
-
-    match app_names_vec.len() {
-        1 => Ok(app_names_vec[0].clone()),
+    match app_names.len() {
+        1 => Ok(app_names[0].clone()),
         0 => Err(
             "Could not auto-detect app name because no apps were found in databricks.yml under \
             resources.apps.*.name. Please pass app_name explicitly."
@@ -84,9 +61,36 @@ pub(crate) fn resolve_app_name_from_databricks_yml(project_dir: &Path) -> Result
         _ => Err(format!(
             "Could not auto-detect app name because multiple apps were found in databricks.yml \
             ({}). Please pass app_name explicitly.",
-            app_names_vec.join(", ")
+            app_names.join(", ")
         )),
     }
+}
+
+fn extract_apps_object(data: &Value) -> Result<&serde_json::Map<String, Value>, String> {
+    data.get("resources")
+        .ok_or_else(|| "databricks.yml 'resources' must be a mapping/object".to_string())?
+        .get("apps")
+        .ok_or_else(|| "databricks.yml 'resources.apps' must be a mapping/object".to_string())?
+        .as_object()
+        .ok_or_else(|| "databricks.yml 'resources.apps' must be a mapping/object".to_string())
+}
+
+fn collect_app_names(apps_obj: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut names = HashSet::new();
+    for app_def in apps_obj.values() {
+        if let Some(app_obj) = app_def.as_object()
+            && let Some(name_val) = app_obj.get("name")
+            && let Some(name_str) = name_val.as_str()
+        {
+            let name = name_str.trim();
+            if !name.is_empty() {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    let mut sorted: Vec<String> = names.into_iter().collect();
+    sorted.sort();
+    sorted
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -102,18 +106,12 @@ pub struct DatabricksAppsLogsArgs {
     /// Search string to filter logs
     #[serde(default)]
     pub search: Option<String>,
-    /// Log sources to include
+    /// Log sources to include (e.g. ["APP"], ["SYSTEM"], or ["APP", "SYSTEM"])
     #[serde(default)]
     pub source: Option<Vec<String>>,
     /// Databricks CLI profile
     #[serde(default)]
     pub profile: Option<String>,
-    /// Databricks CLI target
-    #[serde(default)]
-    pub target: Option<String>,
-    /// Output format (default: "text")
-    #[serde(default = "default_output")]
-    pub output: String,
     /// Timeout in seconds (default: 60)
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: f64,
@@ -124,10 +122,6 @@ pub struct DatabricksAppsLogsArgs {
 
 fn default_tail_lines() -> i32 {
     200
-}
-
-fn default_output() -> String {
-    "text".to_string()
 }
 
 fn default_timeout_seconds() -> f64 {
@@ -144,136 +138,55 @@ impl ApxServer {
         args: DatabricksAppsLogsArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let cwd = validated_app_path(&args.app_path)?;
-
         let mut resolved_from_yml = false;
 
         // Load env vars from .env if present
-        let dotenv_path = cwd.join(".env");
-        let dotenv_vars: HashMap<String, String> = if dotenv_path.exists() {
-            DotenvFile::read(&dotenv_path)
-                .map(|dotenv| dotenv.get_vars())
-                .unwrap_or_default()
-        } else {
-            HashMap::new()
+        let dotenv_vars = load_dotenv_vars(&cwd);
+
+        // Resolve app_name
+        let app_name = match resolve_app_name(&args, &cwd, &mut resolved_from_yml) {
+            Ok(name) => name,
+            Err(e) => return ToolError::OperationFailed(e).into_result(),
         };
 
-        // Resolve app_name if not provided
-        let app_name = match args.app_name.as_ref() {
-            Some(name) if !name.trim().is_empty() => name.trim().to_string(),
-            _ => match resolve_app_name_from_databricks_yml(&cwd) {
-                Ok(name) => {
-                    resolved_from_yml = true;
-                    name
-                }
-                Err(e) => {
-                    return ToolError::OperationFailed(format!(
-                        "Failed to auto-detect app name: {e}"
-                    ))
-                    .into_result();
-                }
-            },
-        };
+        // Resolve profile: explicit arg → .env DATABRICKS_CONFIG_PROFILE → "" (SDK default)
+        let profile = resolve_profile(&args, &dotenv_vars);
 
-        // Resolve databricks CLI
-        let cli = match DatabricksCli::new() {
-            Ok(cli) => cli,
-            Err(CommandError::NotFound { .. }) => {
-                return ToolError::OperationFailed(
-                    "Databricks CLI executable not found (`databricks`). \
-                    Please install Databricks CLI v0.280.0 or higher and ensure it's on PATH."
-                        .to_string(),
-                )
-                .into_result();
-            }
+        let client = match DatabricksClient::new(&profile).await {
+            Ok(c) => c,
             Err(e) => {
                 return ToolError::OperationFailed(format!(
-                    "Failed to resolve databricks CLI: {e}"
+                    "Failed to create Databricks client: {e}"
                 ))
                 .into_result();
             }
         };
 
-        let logs_args = AppsLogsArgs {
+        let start = std::time::Instant::now();
+        let logs_args = AppLogsArgs {
             app_name: &app_name,
-            tail_lines: args.tail_lines,
+            tail_lines: args.tail_lines.max(0) as usize,
             search: args.search.as_deref(),
-            source: args.source.as_deref(),
-            profile: args.profile.as_deref(),
-            target: args.target.as_deref(),
-            output_format: &args.output,
-            timeout_secs: args.timeout_seconds,
-            cwd: &cwd,
-            env_vars: &dotenv_vars,
+            sources: args.source.as_deref(),
+            timeout: Duration::from_secs_f64(args.timeout_seconds),
         };
 
-        let result = match cli.apps_logs(logs_args).await {
-            Ok(r) => r,
-            Err(CommandError::NotFound { .. }) => {
-                return ToolError::OperationFailed(
-                    "Databricks CLI executable not found (`databricks`). \
-                    Please install Databricks CLI v0.280.0 or higher and ensure it's on PATH."
-                        .to_string(),
-                )
-                .into_result();
-            }
-            Err(CommandError::Timeout { timeout_secs, .. }) => {
-                return ToolError::OperationFailed(format!(
-                    "Timed out after {timeout_secs}s running: databricks apps logs"
-                ))
-                .into_result();
-            }
+        let entries = match client.apps().logs(&logs_args).await {
+            Ok(e) => e,
             Err(e) => {
-                return ToolError::OperationFailed(format!("Failed to execute command: {e}"))
+                return ToolError::OperationFailed(format!("Failed to fetch app logs: {e}"))
                     .into_result();
             }
         };
 
-        let mut full_command = vec!["databricks".to_string()];
-        full_command.extend(result.command_args.clone());
-        let cmd_str = full_command.join(" ");
-
-        let returncode = result.output.exit_code.unwrap_or(0);
-        let stdout_t = truncate(&result.output.stdout, args.max_output_chars);
-        let stderr_t = truncate(&result.output.stderr, args.max_output_chars);
-
-        if returncode != 0 {
-            let combined =
-                format!("{}\n{}", result.output.stderr, result.output.stdout).to_lowercase();
-            if combined.contains("unknown command \"logs\"")
-                || combined.contains("unknown command logs")
-                || combined.contains("unknown subcommand")
-                || combined.contains("no such command")
-            {
-                return ToolError::OperationFailed(format!(
-                    "Databricks CLI does not support `databricks apps logs` in this version. \
-                    Please upgrade Databricks CLI to v0.280.0 or higher.\n\n\
-                    Command: {cmd_str}\n\
-                    Exit code: {returncode}\n\
-                    stderr:\n{stderr_t}\n\
-                    stdout:\n{stdout_t}"
-                ))
-                .into_result();
-            }
-
-            return ToolError::OperationFailed(format!(
-                "`databricks apps logs` failed.\n\n\
-                Command: {cmd_str}\n\
-                Exit code: {returncode}\n\
-                stderr:\n{stderr_t}\n\
-                stdout:\n{stdout_t}"
-            ))
-            .into_result();
-        }
+        let duration_ms = start.elapsed().as_millis() as i64;
 
         tool_response! {
             struct DatabricksAppsLogsResponse {
                 app_name: String,
                 resolved_from_databricks_yml: bool,
-                command: Vec<String>,
-                cwd: String,
-                returncode: i32,
-                stdout: String,
-                stderr: String,
+                log_count: usize,
+                entries: Vec<LogEntry>,
                 duration_ms: i64,
             }
         }
@@ -281,16 +194,64 @@ impl ApxServer {
         let response = DatabricksAppsLogsResponse {
             app_name,
             resolved_from_databricks_yml: resolved_from_yml,
-            command: full_command,
-            cwd: cwd.to_string_lossy().to_string(),
-            returncode,
-            stdout: stdout_t,
-            stderr: stderr_t,
-            duration_ms: result.duration_ms as i64,
+            log_count: entries.len(),
+            entries,
+            duration_ms,
         };
 
-        Ok(CallToolResult::from_serializable(&response))
+        // Serialize and apply truncation to the final output
+        let json = serde_json::to_string_pretty(&response)
+            .unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {e}\"}}"));
+        let truncated = truncate(&json, args.max_output_chars);
+
+        Ok(CallToolResult::success(vec![Content::text(truncated)]))
     }
+}
+
+fn load_dotenv_vars(cwd: &Path) -> HashMap<String, String> {
+    let dotenv_path = cwd.join(".env");
+    if dotenv_path.exists() {
+        DotenvFile::read(&dotenv_path)
+            .map(|dotenv| dotenv.get_vars())
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    }
+}
+
+fn resolve_app_name(
+    args: &DatabricksAppsLogsArgs,
+    cwd: &Path,
+    resolved_from_yml: &mut bool,
+) -> std::result::Result<String, String> {
+    match args.app_name.as_ref() {
+        Some(name) if !name.trim().is_empty() => Ok(name.trim().to_string()),
+        _ => match resolve_app_name_from_databricks_yml(cwd) {
+            Ok(name) => {
+                *resolved_from_yml = true;
+                Ok(name)
+            }
+            Err(e) => Err(format!("Failed to auto-detect app name: {e}")),
+        },
+    }
+}
+
+fn resolve_profile(args: &DatabricksAppsLogsArgs, dotenv_vars: &HashMap<String, String>) -> String {
+    if let Some(ref p) = args.profile {
+        let trimmed = p.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    if let Some(p) = dotenv_vars.get("DATABRICKS_CONFIG_PROFILE") {
+        let trimmed = p.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    String::new()
 }
 
 #[cfg(test)]
@@ -380,5 +341,57 @@ resources:
         assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_profile_explicit_arg() {
+        let args = DatabricksAppsLogsArgs {
+            app_path: "/tmp".to_string(),
+            app_name: None,
+            tail_lines: 200,
+            search: None,
+            source: None,
+            profile: Some("my-profile".to_string()),
+            timeout_seconds: 60.0,
+            max_output_chars: 20000,
+        };
+        let dotenv = HashMap::new();
+        assert_eq!(resolve_profile(&args, &dotenv), "my-profile");
+    }
+
+    #[test]
+    fn resolve_profile_from_dotenv() {
+        let args = DatabricksAppsLogsArgs {
+            app_path: "/tmp".to_string(),
+            app_name: None,
+            tail_lines: 200,
+            search: None,
+            source: None,
+            profile: None,
+            timeout_seconds: 60.0,
+            max_output_chars: 20000,
+        };
+        let mut dotenv = HashMap::new();
+        dotenv.insert(
+            "DATABRICKS_CONFIG_PROFILE".to_string(),
+            "env-profile".to_string(),
+        );
+        assert_eq!(resolve_profile(&args, &dotenv), "env-profile");
+    }
+
+    #[test]
+    fn resolve_profile_default_empty() {
+        let args = DatabricksAppsLogsArgs {
+            app_path: "/tmp".to_string(),
+            app_name: None,
+            tail_lines: 200,
+            search: None,
+            source: None,
+            profile: None,
+            timeout_seconds: 60.0,
+            max_output_chars: 20000,
+        };
+        let dotenv = HashMap::new();
+        assert_eq!(resolve_profile(&args, &dotenv), "");
     }
 }

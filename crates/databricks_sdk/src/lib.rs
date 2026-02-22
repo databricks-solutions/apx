@@ -8,6 +8,7 @@ pub mod config_parser;
 pub mod error;
 pub mod useragent;
 
+pub use api::apps::{App, AppLogsArgs, LogEntry};
 pub use api::current_user::{User, UserEmail, UserName};
 pub use client::DatabricksClient;
 pub use config::{DatabricksConfig, list_profile_names, resolve_config};

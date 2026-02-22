@@ -264,12 +264,15 @@ version = "0.3.4"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
+ "futures-util",
  "reqwest 0.13.1",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -290,6 +293,7 @@ dependencies = [
  "apx-cli",
  "apx-common",
  "apx-core",
+ "apx-databricks-sdk",
  "apx-db",
  "rmcp",
  "schemars 1.2.0",

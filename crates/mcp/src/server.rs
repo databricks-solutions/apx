@@ -155,7 +155,7 @@ impl ApxServer {
 
     #[tool(
         name = "databricks_apps_logs",
-        description = "Fetch logs from a deployed Databricks App using the Databricks CLI. Use for debugging deployed (not local dev) issues.",
+        description = "Fetch logs from a deployed Databricks App via the Databricks API. Use for debugging deployed (not local dev) issues.",
         annotations(read_only_hint = true)
     )]
     async fn databricks_apps_logs(
