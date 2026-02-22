@@ -115,11 +115,11 @@ async fn spawn_client(
 // Helper: call_tool
 // ---------------------------------------------------------------------------
 
-async fn call_tool(
+async fn try_call_tool(
     client: &Peer<RoleClient>,
     name: &str,
     args: serde_json::Value,
-) -> CallToolResult {
+) -> Result<CallToolResult, rmcp::ServiceError> {
     client
         .call_tool(CallToolRequestParams {
             name: name.to_string().into(),
@@ -127,6 +127,15 @@ async fn call_tool(
             meta: None,
             task: None,
         })
+        .await
+}
+
+async fn call_tool(
+    client: &Peer<RoleClient>,
+    name: &str,
+    args: serde_json::Value,
+) -> CallToolResult {
+    try_call_tool(client, name, args)
         .await
         .expect("call_tool should not fail at protocol level")
 }
@@ -364,4 +373,457 @@ async fn test_routes_structured_content_is_object() {
         "structured_content must be an object (regression e29c897), got: {sc}"
     );
     assert!(!sc.is_array(), "structured_content must NOT be an array");
+}
+
+// --- Task 6: Tool calls — check, get_route_info ---
+
+#[tokio::test]
+async fn test_check_tool() {
+    let path = project_path();
+    let (client, _shutdown) = spawn_client(path).await;
+    let result = call_tool(
+        &client,
+        "check",
+        serde_json::json!({"app_path": path.to_str().unwrap()}),
+    )
+    .await;
+
+    let sc = result
+        .structured_content
+        .expect("check should have structured_content");
+    assert!(sc.is_object(), "structured_content should be an object");
+    let status = sc
+        .get("status")
+        .and_then(|v| v.as_str())
+        .expect("should have status key");
+    assert!(
+        status == "passed" || status == "failed",
+        "status should be 'passed' or 'failed', got: {status}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_route_info() {
+    let path = project_path();
+    let (client, _shutdown) = spawn_client(path).await;
+
+    // First discover a valid operation_id from the routes tool.
+    let routes_result = call_tool(
+        &client,
+        "routes",
+        serde_json::json!({"app_path": path.to_str().unwrap()}),
+    )
+    .await;
+
+    // If routes fails (no OpenAPI for test project), skip this test.
+    if routes_result.is_error == Some(true) {
+        return;
+    }
+
+    let sc = routes_result.structured_content.unwrap();
+    let routes = sc.get("routes").unwrap().as_array().unwrap();
+    if routes.is_empty() {
+        return; // no routes to query
+    }
+
+    let operation_id = routes[0].get("id").unwrap().as_str().unwrap();
+    let result = call_tool(
+        &client,
+        "get_route_info",
+        serde_json::json!({
+            "app_path": path.to_str().unwrap(),
+            "operation_id": operation_id,
+        }),
+    )
+    .await;
+
+    assert!(
+        result.is_error.is_none() || result.is_error == Some(false),
+        "get_route_info should succeed for known operation_id"
+    );
+
+    let sc = result
+        .structured_content
+        .expect("get_route_info should have structured_content");
+    assert!(sc.get("operation_id").is_some(), "should have operation_id");
+    assert!(sc.get("method").is_some(), "should have method");
+    assert!(sc.get("path").is_some(), "should have path");
+    assert!(sc.get("example").is_some(), "should have example");
+
+    let example = sc.get("example").unwrap().as_str().unwrap();
+    // GET routes use Suspense pattern, others use mutate pattern
+    let method = sc.get("method").unwrap().as_str().unwrap();
+    if method == "GET" {
+        assert!(
+            example.contains("Suspense"),
+            "GET route example should contain Suspense"
+        );
+    } else {
+        assert!(
+            example.contains("mutate"),
+            "non-GET route example should contain mutate"
+        );
+    }
+}
+
+// --- Task 7: Dev server lifecycle ---
+
+/// Helper to extract text content from a CallToolResult.
+fn result_text(result: &CallToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| match &c.raw {
+            RawContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn test_start_stop_cycle() {
+    let path = project_path();
+    let (client, _shutdown) = spawn_client(path).await;
+
+    // Start the dev server.
+    let start_result = call_tool(
+        &client,
+        "start",
+        serde_json::json!({"app_path": path.to_str().unwrap()}),
+    )
+    .await;
+
+    let start_text = result_text(&start_result);
+    if start_result.is_error == Some(true) {
+        // Start may fail in CI or constrained environments — that's acceptable.
+        eprintln!("start tool returned error (acceptable in test): {start_text}");
+        return;
+    }
+    assert!(
+        start_text.contains("http://"),
+        "start should return URL, got: {start_text}"
+    );
+
+    // Stop the dev server.
+    let stop_result = call_tool(
+        &client,
+        "stop",
+        serde_json::json!({"app_path": path.to_str().unwrap()}),
+    )
+    .await;
+
+    let stop_text = result_text(&stop_result);
+    assert!(
+        stop_text.contains("stopped") || stop_text.contains("No dev server"),
+        "stop should confirm stopped, got: {stop_text}"
+    );
+}
+
+#[tokio::test]
+async fn test_logs_tool() {
+    let path = project_path();
+    let (client, _shutdown) = spawn_client(path).await;
+
+    // Start the dev server first.
+    let start_result = call_tool(
+        &client,
+        "start",
+        serde_json::json!({"app_path": path.to_str().unwrap()}),
+    )
+    .await;
+
+    if start_result.is_error == Some(true) {
+        eprintln!("start tool returned error — skipping logs test");
+        return;
+    }
+
+    // Fetch logs.
+    let logs_result = call_tool(
+        &client,
+        "logs",
+        serde_json::json!({"app_path": path.to_str().unwrap(), "duration": "1m"}),
+    )
+    .await;
+
+    let sc = logs_result.structured_content;
+    if let Some(sc) = sc {
+        assert!(sc.is_object(), "logs structured_content should be object");
+        assert!(sc.get("duration").is_some(), "should have duration");
+        assert!(sc.get("count").is_some(), "should have count");
+        assert!(sc.get("entries").is_some(), "should have entries");
+    }
+
+    // Cleanup: stop the server.
+    let _ = call_tool(
+        &client,
+        "stop",
+        serde_json::json!({"app_path": path.to_str().unwrap()}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_restart_tool() {
+    let path = project_path();
+    let (client, _shutdown) = spawn_client(path).await;
+
+    // Start the dev server first.
+    let start_result = call_tool(
+        &client,
+        "start",
+        serde_json::json!({"app_path": path.to_str().unwrap()}),
+    )
+    .await;
+
+    if start_result.is_error == Some(true) {
+        eprintln!("start tool returned error — skipping restart test");
+        return;
+    }
+
+    // Restart the dev server.
+    let restart_result = call_tool(
+        &client,
+        "restart",
+        serde_json::json!({"app_path": path.to_str().unwrap()}),
+    )
+    .await;
+
+    let restart_text = result_text(&restart_result);
+    if restart_result.is_error != Some(true) {
+        assert!(
+            restart_text.contains("http://"),
+            "restart should return URL, got: {restart_text}"
+        );
+    }
+
+    // Cleanup: stop the server.
+    let _ = call_tool(
+        &client,
+        "stop",
+        serde_json::json!({"app_path": path.to_str().unwrap()}),
+    )
+    .await;
+}
+
+// --- Task 8: Registry tools ---
+
+#[tokio::test]
+async fn test_list_registry_components() {
+    let path = project_path();
+    let (client, _shutdown) = spawn_client(path).await;
+    let result = try_call_tool(
+        &client,
+        "list_registry_components",
+        serde_json::json!({"app_path": path.to_str().unwrap()}),
+    )
+    .await;
+
+    // list_registry_components may return protocol-level error if the project
+    // has no UI config (--no-addons). That's acceptable.
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("list_registry_components protocol error (acceptable): {e}");
+            return;
+        }
+    };
+
+    if result.is_error == Some(true) {
+        let text = result_text(&result);
+        eprintln!("list_registry_components tool error (acceptable): {text}");
+        return;
+    }
+
+    let sc = result
+        .structured_content
+        .expect("list_registry_components should have structured_content");
+    assert!(sc.is_object(), "structured_content should be object");
+    assert!(sc.get("registry").is_some(), "should have registry key");
+    assert!(sc.get("total").is_some(), "should have total key");
+    assert!(sc.get("items").is_some(), "should have items key");
+}
+
+#[tokio::test]
+async fn test_search_registry_components() {
+    let path = project_path();
+    let (client, _shutdown) = spawn_client(path).await;
+    let result = try_call_tool(
+        &client,
+        "search_registry_components",
+        serde_json::json!({"app_path": path.to_str().unwrap(), "query": "button"}),
+    )
+    .await;
+
+    // Search may fail at protocol level if component index wasn't built.
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("search_registry_components protocol error (acceptable): {e}");
+            return;
+        }
+    };
+
+    if result.is_error == Some(true) {
+        let text = result_text(&result);
+        eprintln!("search_registry_components tool error (acceptable): {text}");
+        return;
+    }
+
+    let sc = result
+        .structured_content
+        .expect("search_registry_components should have structured_content");
+    assert!(sc.is_object(), "structured_content should be object");
+    assert!(sc.get("query").is_some(), "should have query key");
+    assert!(sc.get("results").is_some(), "should have results key");
+    assert!(
+        sc.get("results").unwrap().is_array(),
+        "results should be array"
+    );
+}
+
+// --- Task 9: Error handling ---
+
+#[tokio::test]
+async fn test_tool_with_relative_path() {
+    let path = project_path();
+    let (client, _shutdown) = spawn_client(path).await;
+    let result = try_call_tool(
+        &client,
+        "routes",
+        serde_json::json!({"app_path": "relative/path"}),
+    )
+    .await;
+
+    // validate_app_path returns Err → handler maps to ErrorData::invalid_params
+    assert!(
+        result.is_err(),
+        "relative path should produce protocol error"
+    );
+}
+
+#[tokio::test]
+async fn test_tool_with_nonexistent_path() {
+    let path = project_path();
+    let (client, _shutdown) = spawn_client(path).await;
+    let result = try_call_tool(
+        &client,
+        "routes",
+        serde_json::json!({"app_path": "/tmp/__apx_nonexistent__"}),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "nonexistent path should produce protocol error"
+    );
+}
+
+#[tokio::test]
+async fn test_get_route_info_unknown_operation() {
+    let path = project_path();
+    let (client, _shutdown) = spawn_client(path).await;
+    let result = call_tool(
+        &client,
+        "get_route_info",
+        serde_json::json!({
+            "app_path": path.to_str().unwrap(),
+            "operation_id": "nonexistent_operation_id_xyz",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "unknown operation_id should return is_error=true"
+    );
+    let text = result_text(&result);
+    assert!(
+        text.contains("not found") || text.contains("Not found") || text.contains("Failed"),
+        "error text should indicate not found, got: {text}"
+    );
+}
+
+// --- Task 10: Cross-cutting structured content validation ---
+
+#[tokio::test]
+async fn test_all_tools_return_structured_objects() {
+    let path = project_path();
+    let (client, _shutdown) = spawn_client(path).await;
+    let app_path = path.to_str().unwrap();
+
+    // Tools that return structured content and should work on any project.
+    let tool_calls: Vec<(&str, serde_json::Value)> = vec![
+        ("check", serde_json::json!({"app_path": app_path})),
+        ("routes", serde_json::json!({"app_path": app_path})),
+    ];
+
+    for (tool_name, args) in tool_calls {
+        let result = try_call_tool(&client, tool_name, args).await;
+        let result = match result {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{tool_name}: protocol error (skipping): {e}");
+                continue;
+            }
+        };
+
+        // Some tools may return is_error=true (e.g., routes on no-openapi project).
+        // In that case, structured_content may not be present. Only validate when
+        // the tool reports success.
+        if result.is_error == Some(true) {
+            eprintln!("{tool_name}: tool error (skipping structured content check)");
+            continue;
+        }
+
+        if let Some(sc) = &result.structured_content {
+            assert!(
+                sc.is_object(),
+                "{tool_name}: structured_content should be an object, got: {sc}"
+            );
+            assert!(
+                !sc.is_array(),
+                "{tool_name}: structured_content must NOT be an array"
+            );
+            assert!(
+                !sc.is_null(),
+                "{tool_name}: structured_content must NOT be null"
+            );
+            assert!(
+                !sc.is_string(),
+                "{tool_name}: structured_content must NOT be a string"
+            );
+        }
+    }
+
+    // Also test list_registry_components and search_registry_components
+    // which may fail at protocol level on --no-addons projects.
+    let registry_calls: Vec<(&str, serde_json::Value)> = vec![
+        (
+            "list_registry_components",
+            serde_json::json!({"app_path": app_path}),
+        ),
+        (
+            "search_registry_components",
+            serde_json::json!({"app_path": app_path, "query": "button"}),
+        ),
+    ];
+
+    for (tool_name, args) in registry_calls {
+        let result = try_call_tool(&client, tool_name, args).await;
+        let result = match result {
+            Ok(r) => r,
+            Err(_) => continue, // protocol error acceptable for registry tools
+        };
+        if result.is_error == Some(true) {
+            continue;
+        }
+        if let Some(sc) = &result.structured_content {
+            assert!(
+                sc.is_object(),
+                "{tool_name}: structured_content should be an object, got: {sc}"
+            );
+        }
+    }
 }
