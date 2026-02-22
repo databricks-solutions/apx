@@ -1,10 +1,11 @@
 use crate::server::ApxServer;
 use crate::tools::openapi::{
-    ParamInfo, RouteInfo, extract_body_schema, extract_parameters, extract_response_schema,
-    generate_mutation_example, generate_query_example, parse_openapi_operations,
+    ParamInfo, RouteInfo, body_schema_from_spec, generate_mutation_example, generate_query_example,
+    merge_parameters, parse_openapi_operations, response_schema_from_spec,
 };
 use crate::tools::{AppPathArgs, ToolError, ToolResultExt};
 use crate::validation::validated_app_path;
+use apx_core::openapi::spec::OpenApiSpec;
 use rmcp::model::*;
 use rmcp::schemars;
 use serde_json::Value;
@@ -92,53 +93,51 @@ impl ApxServer {
             }
         };
 
-        let openapi: Value = match serde_json::from_str(&openapi_content) {
-            Ok(spec) => spec,
+        let spec = match OpenApiSpec::from_json(&openapi_content) {
+            Ok(s) => s,
             Err(e) => {
                 return ToolError::OperationFailed(format!("Failed to parse OpenAPI schema: {e}"))
                     .into_result();
             }
         };
 
-        let paths = match openapi.get("paths").and_then(|p| p.as_object()) {
-            Some(p) => p,
-            None => {
-                return ToolError::OperationFailed(
-                    "OpenAPI schema missing 'paths' object".to_string(),
-                )
-                .into_result();
-            }
-        };
-
-        let components = openapi.get("components");
+        let components = spec.components.as_ref();
 
         // Find the operation and capture all context
         let mut found = None;
-        for (route_path, path_item) in paths {
-            if let Some(methods_obj) = path_item.as_object() {
-                for (method, operation) in methods_obj {
-                    if let Some(operation_obj) = operation.as_object()
-                        && let Some(op_id) =
-                            operation_obj.get("operationId").and_then(|v| v.as_str())
-                        && op_id == args.operation_id
-                    {
-                        let method_upper = method.to_uppercase();
-                        let parameters = extract_parameters(operation, path_item);
-                        let body_schema = extract_body_schema(operation, components);
-                        let resp_schema = extract_response_schema(operation, components);
-                        found = Some((
-                            route_path.clone(),
-                            method_upper,
-                            parameters,
-                            body_schema,
-                            resp_schema,
-                        ));
-                        break;
-                    }
-                }
-                if found.is_some() {
+        for (route_path, path_item) in &spec.paths {
+            let methods: Vec<(&str, Option<&apx_core::openapi::spec::Operation>)> = vec![
+                ("GET", path_item.get.as_ref()),
+                ("POST", path_item.post.as_ref()),
+                ("PUT", path_item.put.as_ref()),
+                ("PATCH", path_item.patch.as_ref()),
+                ("DELETE", path_item.delete.as_ref()),
+                ("HEAD", path_item.head.as_ref()),
+                ("OPTIONS", path_item.options.as_ref()),
+            ];
+
+            for (method, op) in methods {
+                if let Some(operation) = op
+                    && operation.operation_id.as_deref() == Some(&args.operation_id)
+                {
+                    let parameters = merge_parameters(
+                        path_item.parameters.as_ref(),
+                        operation.parameters.as_ref(),
+                    );
+                    let body_schema = body_schema_from_spec(operation, components);
+                    let resp_schema = response_schema_from_spec(operation, components);
+                    found = Some((
+                        route_path.clone(),
+                        method.to_string(),
+                        parameters,
+                        body_schema,
+                        resp_schema,
+                    ));
                     break;
                 }
+            }
+            if found.is_some() {
+                break;
             }
         }
 
@@ -225,15 +224,15 @@ impl ApxServer {
             }
         };
 
-        let openapi: Value = match serde_json::from_str(&openapi_content) {
-            Ok(spec) => spec,
+        let spec = match OpenApiSpec::from_json(&openapi_content) {
+            Ok(s) => s,
             Err(e) => {
                 return ToolError::OperationFailed(format!("Failed to parse OpenAPI schema: {e}"))
                     .into_result();
             }
         };
 
-        match parse_openapi_operations(&openapi) {
+        match parse_openapi_operations(&spec) {
             Ok(routes) => {
                 tool_response! {
                     struct RoutesResponse {

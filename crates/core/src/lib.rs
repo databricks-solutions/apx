@@ -29,7 +29,7 @@ pub mod resources;
 pub mod search;
 pub mod tracing_init;
 
-pub(crate) mod openapi;
+pub mod openapi;
 pub(crate) mod python_logging;
 pub(crate) mod registry;
 pub(crate) mod sources;

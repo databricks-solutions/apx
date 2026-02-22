@@ -116,14 +116,14 @@ async fn try_parse_routes(
     metadata: &apx_core::common::ProjectMetadata,
 ) -> Result<Vec<RouteSummary>, String> {
     use apx_core::interop::generate_openapi_spec;
+    use apx_core::openapi::spec::OpenApiSpec;
 
     let (openapi_content, _) =
         generate_openapi_spec(path, &metadata.app_entrypoint, &metadata.app_slug).await?;
 
-    let openapi: serde_json::Value =
-        serde_json::from_str(&openapi_content).map_err(|e| format!("Parse error: {e}"))?;
+    let spec = OpenApiSpec::from_json(&openapi_content)?;
 
-    let route_infos = parse_openapi_operations(&openapi)?;
+    let route_infos = parse_openapi_operations(&spec)?;
 
     Ok(route_infos
         .into_iter()

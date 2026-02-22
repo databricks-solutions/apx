@@ -7,9 +7,10 @@
 
 mod emitter;
 mod ir;
-mod spec;
+pub mod spec;
 
 pub use emitter::generate;
+pub use ir::utils::capitalize_first;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)]

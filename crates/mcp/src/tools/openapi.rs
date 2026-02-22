@@ -1,3 +1,5 @@
+use apx_core::openapi::capitalize_first;
+use apx_core::openapi::spec::{Components, OpenApiSpec, Operation, Parameter, Schema};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -25,165 +27,145 @@ pub(crate) struct RouteInfo {
     pub(crate) response_schema: Option<Value>,
 }
 
-/// Single-level `$ref` resolution against `#/components/schemas/*`.
-fn resolve_schema_ref<'a>(schema: &'a Value, components: Option<&'a Value>) -> &'a Value {
-    if let Some(ref_str) = schema.get("$ref").and_then(|v| v.as_str())
-        && let Some(schema_name) = ref_str.strip_prefix("#/components/schemas/")
-        && let Some(resolved) = components
-            .and_then(|c| c.get("schemas"))
-            .and_then(|s| s.get(schema_name))
-    {
-        return resolved;
+/// Convert a core `Parameter` to MCP's `ParamInfo`.
+fn param_from_spec(p: &Parameter) -> ParamInfo {
+    let param_type = p
+        .schema
+        .as_ref()
+        .and_then(|s| match &s.schema_type {
+            Some(apx_core::openapi::spec::SchemaType::Single(t)) => Some(t.as_str()),
+            _ => None,
+        })
+        .unwrap_or("string")
+        .to_string();
+
+    ParamInfo {
+        name: p.name.clone(),
+        location: p.location.clone(),
+        param_type,
+        required: p.required,
+        description: p.description.clone(),
     }
-    schema
 }
 
-/// Extract parameters from an OpenAPI operation, merging path-level and operation-level params.
-/// Operation-level params take precedence on name+location collision.
-pub(crate) fn extract_parameters(operation: &Value, path_item: &Value) -> Vec<ParamInfo> {
+/// Merge path-level and operation-level parameters.
+/// Operation-level params override path-level on name+location match.
+pub(crate) fn merge_parameters(
+    path_params: Option<&Vec<Parameter>>,
+    op_params: Option<&Vec<Parameter>>,
+) -> Vec<ParamInfo> {
     let mut params: Vec<ParamInfo> = Vec::new();
 
-    // Collect path-level params first
-    if let Some(path_params) = path_item.get("parameters").and_then(|p| p.as_array()) {
-        for p in path_params {
-            if let Some(info) = parse_single_param(p) {
-                params.push(info);
-            }
+    if let Some(pp) = path_params {
+        for p in pp {
+            params.push(param_from_spec(p));
         }
     }
 
-    // Collect operation-level params, overriding path-level on name+location match
-    if let Some(op_params) = operation.get("parameters").and_then(|p| p.as_array()) {
-        for p in op_params {
-            if let Some(info) = parse_single_param(p) {
-                // Remove any existing param with same name+location
-                params.retain(|existing| {
-                    !(existing.name == info.name && existing.location == info.location)
-                });
-                params.push(info);
-            }
+    if let Some(op) = op_params {
+        for p in op {
+            let info = param_from_spec(p);
+            params.retain(|existing| {
+                !(existing.name == info.name && existing.location == info.location)
+            });
+            params.push(info);
         }
     }
 
     params
 }
 
-fn parse_single_param(param: &Value) -> Option<ParamInfo> {
-    let name = param.get("name").and_then(|v| v.as_str())?.to_string();
-    let location = param
-        .get("in")
-        .and_then(|v| v.as_str())
-        .unwrap_or("query")
-        .to_string();
-    let param_type = param
-        .get("schema")
-        .and_then(|s| s.get("type"))
-        .and_then(|t| t.as_str())
-        .unwrap_or("string")
-        .to_string();
-    let required = param
-        .get("required")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let description = param
-        .get("description")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    Some(ParamInfo {
-        name,
-        location,
-        param_type,
-        required,
-        description,
-    })
+/// Resolve a `$ref` in a Schema against components, returning raw JSON Value.
+fn resolve_schema(schema: &Schema, components: Option<&Components>) -> Value {
+    if let Some(ref_path) = &schema.ref_path
+        && let Some(name) = ref_path.strip_prefix("#/components/schemas/")
+        && let Some(resolved) = components
+            .and_then(|c| c.schemas.as_ref())
+            .and_then(|s| s.get(name))
+    {
+        return serde_json::to_value(resolved).unwrap_or_default();
+    }
+    serde_json::to_value(schema).unwrap_or_default()
 }
 
-/// Extract request body JSON schema, resolving `$ref` if present.
-pub(crate) fn extract_body_schema(operation: &Value, components: Option<&Value>) -> Option<Value> {
-    let schema = operation
-        .get("requestBody")?
-        .get("content")?
-        .get("application/json")?
-        .get("schema")?;
-
-    Some(resolve_schema_ref(schema, components).clone())
-}
-
-/// Extract response schema from the first 2xx response, resolving `$ref` if present.
-pub(crate) fn extract_response_schema(
-    operation: &Value,
-    components: Option<&Value>,
+/// Extract request body JSON schema from a typed Operation.
+pub(crate) fn body_schema_from_spec(
+    op: &Operation,
+    components: Option<&Components>,
 ) -> Option<Value> {
-    let responses = operation.get("responses")?.as_object()?;
+    let schema = op
+        .request_body
+        .as_ref()?
+        .content
+        .as_ref()?
+        .get("application/json")?
+        .schema
+        .as_ref()?;
+    Some(resolve_schema(schema, components))
+}
 
-    // Find first 2xx response
+/// Extract response schema from the first 2xx response of a typed Operation.
+pub(crate) fn response_schema_from_spec(
+    op: &Operation,
+    components: Option<&Components>,
+) -> Option<Value> {
     let response = ["200", "201", "202", "204"]
         .iter()
-        .find_map(|code| responses.get(*code))?;
-
+        .find_map(|code| op.responses.get(*code))?;
     let schema = response
-        .get("content")?
+        .content
+        .as_ref()?
         .get("application/json")?
-        .get("schema")?;
-
-    Some(resolve_schema_ref(schema, components).clone())
+        .schema
+        .as_ref()?;
+    Some(resolve_schema(schema, components))
 }
 
-/// Compute the React hook name from an operation ID (e.g., "listItems" → "useListItems").
+/// Compute the React hook name from an operation ID (e.g., "listItems" -> "useListItems").
 fn compute_hook_name(operation_id: &str) -> String {
     format!("use{}", capitalize_first(operation_id))
 }
 
-pub(crate) fn parse_openapi_operations(openapi: &Value) -> Result<Vec<RouteInfo>, String> {
+pub(crate) fn parse_openapi_operations(spec: &OpenApiSpec) -> Result<Vec<RouteInfo>, String> {
     let mut routes = Vec::new();
+    let components = spec.components.as_ref();
 
-    let paths = openapi
-        .get("paths")
-        .and_then(|p| p.as_object())
-        .ok_or_else(|| "OpenAPI schema missing 'paths' object".to_string())?;
+    for (path, path_item) in &spec.paths {
+        let methods: Vec<(&str, Option<&Operation>)> = vec![
+            ("GET", path_item.get.as_ref()),
+            ("POST", path_item.post.as_ref()),
+            ("PUT", path_item.put.as_ref()),
+            ("PATCH", path_item.patch.as_ref()),
+            ("DELETE", path_item.delete.as_ref()),
+            ("HEAD", path_item.head.as_ref()),
+            ("OPTIONS", path_item.options.as_ref()),
+        ];
 
-    let components = openapi.get("components");
+        for (method, op) in methods {
+            let Some(operation) = op else { continue };
 
-    for (path, path_item) in paths {
-        let methods_obj = path_item
-            .as_object()
-            .ok_or_else(|| format!("Path '{path}' is not an object"))?;
-
-        for (method, operation) in methods_obj {
-            let method_upper = method.to_uppercase();
-            if !matches!(
-                method_upper.as_str(),
-                "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
-            ) {
-                continue;
-            }
-
-            let operation_obj = operation
-                .as_object()
-                .ok_or_else(|| format!("Operation '{method}' at path '{path}' is not an object"))?;
-
-            let operation_id = operation_obj
-                .get("operationId")
-                .and_then(|v| v.as_str())
+            let operation_id = operation
+                .operation_id
+                .as_deref()
                 .unwrap_or("unknown")
                 .to_string();
 
-            let description = operation_obj
-                .get("summary")
-                .or_else(|| operation_obj.get("description"))
-                .and_then(|v| v.as_str())
+            let description = operation
+                .summary
+                .as_deref()
+                .or(operation.description.as_deref())
                 .unwrap_or("")
                 .to_string();
 
             let hook_name = compute_hook_name(&operation_id);
-            let parameters = extract_parameters(operation, path_item);
-            let request_body_schema = extract_body_schema(operation, components);
-            let response_schema = extract_response_schema(operation, components);
+            let parameters =
+                merge_parameters(path_item.parameters.as_ref(), operation.parameters.as_ref());
+            let request_body_schema = body_schema_from_spec(operation, components);
+            let response_schema = response_schema_from_spec(operation, components);
 
             routes.push(RouteInfo {
                 id: operation_id,
-                method: method_upper,
+                method: method.to_string(),
                 path: path.clone(),
                 description,
                 hook_name,
@@ -195,14 +177,6 @@ pub(crate) fn parse_openapi_operations(openapi: &Value) -> Result<Vec<RouteInfo>
     }
 
     Ok(routes)
-}
-
-fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-    }
 }
 
 pub(crate) fn generate_query_example(
@@ -349,7 +323,7 @@ function {capitalized}Button() {{
 }
 
 /// Derive a related query key from a path for cache invalidation.
-/// e.g., "/api/jobs/{id}" → "listJobs", "/api/items" → "listItems"
+/// e.g., "/api/jobs/{id}" -> "listJobs", "/api/items" -> "listItems"
 fn derive_related_query_key(path: &str) -> String {
     let segments: Vec<&str> = path
         .split('/')
@@ -366,6 +340,10 @@ mod tests {
     use super::*;
     use crate::tools::ToolResultExt;
     use rmcp::model::CallToolResult;
+
+    fn parse_test_spec(json: serde_json::Value) -> OpenApiSpec {
+        serde_json::from_value(json).unwrap()
+    }
 
     #[test]
     fn parse_openapi_operations_basic() {
@@ -384,7 +362,8 @@ mod tests {
             }
         });
 
-        let routes = parse_openapi_operations(&openapi).unwrap();
+        let spec = parse_test_spec(openapi);
+        let routes = parse_openapi_operations(&spec).unwrap();
         assert_eq!(routes.len(), 2);
 
         let get_route = routes.iter().find(|r| r.method == "GET").unwrap();
@@ -404,7 +383,7 @@ mod tests {
         let openapi = serde_json::json!({
             "paths": {
                 "/items": {
-                    "parameters": [{"name": "id"}],
+                    "parameters": [{"name": "id", "in": "query"}],
                     "get": {
                         "operationId": "listItems",
                         "summary": "List items"
@@ -413,15 +392,17 @@ mod tests {
             }
         });
 
-        let routes = parse_openapi_operations(&openapi).unwrap();
+        let spec = parse_test_spec(openapi);
+        let routes = parse_openapi_operations(&spec).unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].method, "GET");
     }
 
     #[test]
     fn parse_openapi_operations_missing_paths() {
-        let openapi = serde_json::json!({});
-        assert!(parse_openapi_operations(&openapi).is_err());
+        let json = "{}";
+        let result = OpenApiSpec::from_json(json);
+        assert!(result.is_err(), "Expected error for missing paths");
     }
 
     #[test]
@@ -452,7 +433,8 @@ mod tests {
             }
         });
 
-        let routes = parse_openapi_operations(&openapi).unwrap();
+        let spec = parse_test_spec(openapi);
+        let routes = parse_openapi_operations(&spec).unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].parameters.len(), 2);
 
@@ -500,7 +482,8 @@ mod tests {
             }
         });
 
-        let routes = parse_openapi_operations(&openapi).unwrap();
+        let spec = parse_test_spec(openapi);
+        let routes = parse_openapi_operations(&spec).unwrap();
         assert_eq!(routes.len(), 1);
         assert!(routes[0].request_body_schema.is_some());
         let schema = routes[0].request_body_schema.as_ref().unwrap();
@@ -533,7 +516,8 @@ mod tests {
             }
         });
 
-        let routes = parse_openapi_operations(&openapi).unwrap();
+        let spec = parse_test_spec(openapi);
+        let routes = parse_openapi_operations(&spec).unwrap();
         assert_eq!(routes.len(), 1);
         assert!(routes[0].response_schema.is_some());
         let schema = routes[0].response_schema.as_ref().unwrap();
@@ -575,7 +559,8 @@ mod tests {
             }
         });
 
-        let routes = parse_openapi_operations(&openapi).unwrap();
+        let spec = parse_test_spec(openapi);
+        let routes = parse_openapi_operations(&spec).unwrap();
         assert_eq!(routes.len(), 1);
         let schema = routes[0].response_schema.as_ref().unwrap();
         // $ref should be resolved to the inline schema
@@ -596,7 +581,8 @@ mod tests {
             }
         });
 
-        let routes = parse_openapi_operations(&openapi).unwrap();
+        let spec = parse_test_spec(openapi);
+        let routes = parse_openapi_operations(&spec).unwrap();
         assert_eq!(routes[0].hook_name, "useListItems");
     }
 
@@ -631,7 +617,8 @@ mod tests {
             }
         });
 
-        let routes = parse_openapi_operations(&openapi).unwrap();
+        let spec = parse_test_spec(openapi);
+        let routes = parse_openapi_operations(&spec).unwrap();
         assert_eq!(routes[0].parameters.len(), 1);
         // Operation-level param should override path-level
         assert_eq!(routes[0].parameters[0].param_type, "integer");
@@ -645,7 +632,7 @@ mod tests {
     fn routes_response_structured_content_is_object() {
         // MCP spec requires structuredContent to be a JSON object, not an array.
         // Vec<RouteInfo> doesn't implement StructuredObject, so it can't be
-        // passed to from_serializable — this is enforced at compile time.
+        // passed to from_serializable -- this is enforced at compile time.
         // The RoutesResponse wrapper ensures the output is always an object.
         tool_response! {
             struct RoutesResponse {
@@ -653,7 +640,7 @@ mod tests {
             }
         }
 
-        let routes = parse_openapi_operations(&serde_json::json!({
+        let spec = parse_test_spec(serde_json::json!({
             "paths": {
                 "/items": {
                     "get": {
@@ -662,8 +649,8 @@ mod tests {
                     }
                 }
             }
-        }))
-        .unwrap();
+        }));
+        let routes = parse_openapi_operations(&spec).unwrap();
 
         let result = CallToolResult::from_serializable(&RoutesResponse { routes });
         let sc = result
