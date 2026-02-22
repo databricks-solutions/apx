@@ -36,7 +36,7 @@ rmcp = { version = "0.15", features = ["server", "transport-io", "schemars"] }
 # Web server
 axum = { version = "0.8.8", features = ["ws"] }
 reqwest = { version = "0.13.1", default-features = false, features = ["json", "stream", "rustls", "http2", "charset", "system-proxy"] }
-tokio-tungstenite = { version = "0.28", features = ["connect", "handshake", "stream", "__rustls-tls"] }
+tokio-tungstenite = { version = "0.28", features = ["connect", "rustls-tls-native-roots"] }
 
 # OpenTelemetry
 opentelemetry = "0.29"
