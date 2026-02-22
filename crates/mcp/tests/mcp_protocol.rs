@@ -5,7 +5,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use rmcp::ServiceExt;
 use rmcp::model::*;
@@ -16,42 +15,42 @@ use rmcp::service::{Peer, RoleClient, RunningService};
 // ---------------------------------------------------------------------------
 
 /// Returns a path to a fully-initialized apx project (created once per test run).
-fn project_path() -> &'static Path {
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let dir = tempfile::Builder::new()
-            .prefix("apx-mcp-test-")
-            .tempdir()
-            .expect("failed to create tempdir");
-        // Leak the tempdir so it persists for the whole test run.
-        let path = dir.keep();
+async fn project_path() -> &'static Path {
+    static PROJECT: tokio::sync::OnceCell<PathBuf> = tokio::sync::OnceCell::const_new();
+    PROJECT
+        .get_or_init(|| async {
+            let dir = tempfile::Builder::new()
+                .prefix("apx-mcp-test-")
+                .tempdir()
+                .expect("failed to create tempdir");
+            // Leak the tempdir so it persists for the whole test run.
+            let path = dir.keep();
 
-        // Run `apx init` to scaffold a project.
-        let status = std::process::Command::new("apx")
-            .args([
-                "init",
-                path.to_str().unwrap(),
-                "--name",
-                "mcp-test",
-                "--no-addons",
-                "--profile",
-                "DEFAULT",
-            ])
-            .env("APX_NON_INTERACTIVE", "1")
-            .status()
-            .expect("failed to run `apx init`");
-        assert!(status.success(), "apx init failed with {status}");
+            // Run `apx init` programmatically with UI addon.
+            let exit_code = apx_cli::init::run(apx_cli::init::InitArgs {
+                app_path: Some(path.clone()),
+                app_name: Some("mcp-test".into()),
+                addons: Some(vec!["ui".into()]),
+                no_addons: false,
+                profile: Some("DEFAULT".into()),
+                as_member: None,
+            })
+            .await;
+            assert_eq!(exit_code, 0, "apx init failed");
 
-        // Run `uv sync` inside the project.
-        let status = std::process::Command::new("uv")
-            .arg("sync")
-            .current_dir(&path)
-            .status()
-            .expect("failed to run `uv sync`");
-        assert!(status.success(), "uv sync failed with {status}");
+            // Run `uv sync` using the resolved uv binary (cached by init).
+            let uv = apx_core::download::try_resolve_uv().expect("uv should be cached after init");
+            let status = tokio::process::Command::new(&uv.path)
+                .arg("sync")
+                .current_dir(&path)
+                .status()
+                .await
+                .expect("failed to run uv sync");
+            assert!(status.success(), "uv sync failed");
 
-        path
-    })
+            path
+        })
+        .await
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +147,7 @@ async fn call_tool(
 
 #[tokio::test]
 async fn test_harness_smoke() {
-    let path = project_path();
+    let path = project_path().await;
     assert!(path.join("pyproject.toml").exists());
 }
 
@@ -156,7 +155,7 @@ async fn test_harness_smoke() {
 
 #[tokio::test]
 async fn test_initialize_handshake() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let info = client.peer_info().expect("server info should be present");
     assert_eq!(info.server_info.name, "apx");
@@ -177,7 +176,7 @@ async fn test_initialize_handshake() {
 
 #[tokio::test]
 async fn test_list_tools() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let tools = client.list_all_tools().await.expect("list_all_tools");
 
@@ -225,7 +224,7 @@ async fn test_list_tools() {
 
 #[tokio::test]
 async fn test_list_resources() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let resources = client
         .list_all_resources()
@@ -237,7 +236,7 @@ async fn test_list_resources() {
 
 #[tokio::test]
 async fn test_list_resource_templates() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let templates = client
         .list_all_resource_templates()
@@ -251,7 +250,7 @@ async fn test_list_resource_templates() {
 
 #[tokio::test]
 async fn test_read_info_resource() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let result = client
         .read_resource(ReadResourceRequestParams {
@@ -281,7 +280,7 @@ async fn test_read_info_resource() {
 
 #[tokio::test]
 async fn test_read_project_resource() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let uri = format!("apx://project/{}", path.display());
     let result = client
@@ -303,7 +302,7 @@ async fn test_read_project_resource() {
 
 #[tokio::test]
 async fn test_read_unknown_resource() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let result = client
         .read_resource(ReadResourceRequestParams {
@@ -318,7 +317,7 @@ async fn test_read_unknown_resource() {
 
 #[tokio::test]
 async fn test_routes_tool() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let result = call_tool(
         &client,
@@ -327,13 +326,11 @@ async fn test_routes_tool() {
     )
     .await;
 
-    // The tool may return is_error=true if OpenAPI generation failed for the
-    // test project. Either way, the protocol-level call succeeded. When routes
-    // are available, validate the structured content shape.
-    if result.is_error == Some(true) {
-        // Acceptable for a --no-addons test project.
-        return;
-    }
+    assert!(
+        result.is_error.is_none() || result.is_error == Some(false),
+        "routes tool should succeed, got error: {}",
+        result_text(&result)
+    );
     let sc = result
         .structured_content
         .expect("routes should have structured_content");
@@ -354,7 +351,7 @@ async fn test_routes_tool() {
 #[tokio::test]
 async fn test_routes_structured_content_is_object() {
     // Regression test for e29c897 — structured_content must be an object, not an array.
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let result = call_tool(
         &client,
@@ -363,10 +360,10 @@ async fn test_routes_structured_content_is_object() {
     )
     .await;
 
-    // If routes tool returned an error (e.g., no OpenAPI for test project), skip shape check.
-    if result.is_error == Some(true) {
-        return;
-    }
+    assert!(
+        result.is_error.is_none() || result.is_error == Some(false),
+        "routes tool should succeed for regression test"
+    );
     let sc = result.structured_content.unwrap();
     assert!(
         sc.is_object(),
@@ -379,7 +376,7 @@ async fn test_routes_structured_content_is_object() {
 
 #[tokio::test]
 async fn test_check_tool() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let result = call_tool(
         &client,
@@ -404,7 +401,7 @@ async fn test_check_tool() {
 
 #[tokio::test]
 async fn test_get_route_info() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
 
     // First discover a valid operation_id from the routes tool.
@@ -415,16 +412,14 @@ async fn test_get_route_info() {
     )
     .await;
 
-    // If routes fails (no OpenAPI for test project), skip this test.
-    if routes_result.is_error == Some(true) {
-        return;
-    }
+    assert!(
+        routes_result.is_error.is_none() || routes_result.is_error == Some(false),
+        "routes tool should succeed"
+    );
 
     let sc = routes_result.structured_content.unwrap();
     let routes = sc.get("routes").unwrap().as_array().unwrap();
-    if routes.is_empty() {
-        return; // no routes to query
-    }
+    assert!(!routes.is_empty(), "project should have at least one route");
 
     let operation_id = routes[0].get("id").unwrap().as_str().unwrap();
     let result = call_tool(
@@ -451,7 +446,6 @@ async fn test_get_route_info() {
     assert!(sc.get("example").is_some(), "should have example");
 
     let example = sc.get("example").unwrap().as_str().unwrap();
-    // GET routes use Suspense pattern, others use mutate pattern
     let method = sc.get("method").unwrap().as_str().unwrap();
     if method == "GET" {
         assert!(
@@ -483,7 +477,7 @@ fn result_text(result: &CallToolResult) -> String {
 
 #[tokio::test]
 async fn test_start_stop_cycle() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
 
     // Start the dev server.
@@ -522,7 +516,7 @@ async fn test_start_stop_cycle() {
 
 #[tokio::test]
 async fn test_logs_tool() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
 
     // Start the dev server first.
@@ -565,7 +559,7 @@ async fn test_logs_tool() {
 
 #[tokio::test]
 async fn test_restart_tool() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
 
     // Start the dev server first.
@@ -610,31 +604,20 @@ async fn test_restart_tool() {
 
 #[tokio::test]
 async fn test_list_registry_components() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
-    let result = try_call_tool(
+    let result = call_tool(
         &client,
         "list_registry_components",
         serde_json::json!({"app_path": path.to_str().unwrap()}),
     )
     .await;
 
-    // list_registry_components now returns a tool-level error (is_error=true)
-    // instead of a protocol-level error when the project has no UI config.
-    let result = match result {
-        Ok(r) => r,
-        Err(e) => {
-            panic!(
-                "list_registry_components should not return protocol error for missing UI config: {e}"
-            );
-        }
-    };
-
-    if result.is_error == Some(true) {
-        let text = result_text(&result);
-        eprintln!("list_registry_components tool error (acceptable): {text}");
-        return;
-    }
+    assert!(
+        result.is_error.is_none() || result.is_error == Some(false),
+        "list_registry_components should succeed with UI addon: {}",
+        result_text(&result)
+    );
 
     let sc = result
         .structured_content
@@ -647,29 +630,20 @@ async fn test_list_registry_components() {
 
 #[tokio::test]
 async fn test_search_registry_components() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
-    let result = try_call_tool(
+    let result = call_tool(
         &client,
         "search_registry_components",
         serde_json::json!({"app_path": path.to_str().unwrap(), "query": "button"}),
     )
     .await;
 
-    // Search may fail at protocol level if component index wasn't built.
-    let result = match result {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("search_registry_components protocol error (acceptable): {e}");
-            return;
-        }
-    };
-
-    if result.is_error == Some(true) {
-        let text = result_text(&result);
-        eprintln!("search_registry_components tool error (acceptable): {text}");
-        return;
-    }
+    assert!(
+        result.is_error.is_none() || result.is_error == Some(false),
+        "search_registry_components should succeed with UI addon: {}",
+        result_text(&result)
+    );
 
     let sc = result
         .structured_content
@@ -687,7 +661,7 @@ async fn test_search_registry_components() {
 
 #[tokio::test]
 async fn test_tool_with_relative_path() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let result = try_call_tool(
         &client,
@@ -696,7 +670,7 @@ async fn test_tool_with_relative_path() {
     )
     .await;
 
-    // validate_app_path returns Err → handler maps to ErrorData::invalid_params
+    // validated_app_path returns Err(ErrorData::invalid_params)
     assert!(
         result.is_err(),
         "relative path should produce protocol error"
@@ -705,7 +679,7 @@ async fn test_tool_with_relative_path() {
 
 #[tokio::test]
 async fn test_tool_with_nonexistent_path() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let result = try_call_tool(
         &client,
@@ -722,7 +696,7 @@ async fn test_tool_with_nonexistent_path() {
 
 #[tokio::test]
 async fn test_get_route_info_unknown_operation() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let result = call_tool(
         &client,
@@ -750,34 +724,27 @@ async fn test_get_route_info_unknown_operation() {
 
 #[tokio::test]
 async fn test_all_tools_return_structured_objects() {
-    let path = project_path();
+    let path = project_path().await;
     let (client, _shutdown) = spawn_client(path).await;
     let app_path = path.to_str().unwrap();
 
-    // Tools that return structured content and should work on any project.
     let tool_calls: Vec<(&str, serde_json::Value)> = vec![
         ("check", serde_json::json!({"app_path": app_path})),
         ("routes", serde_json::json!({"app_path": app_path})),
+        (
+            "list_registry_components",
+            serde_json::json!({"app_path": app_path}),
+        ),
+        (
+            "search_registry_components",
+            serde_json::json!({"app_path": app_path, "query": "button"}),
+        ),
     ];
 
     for (tool_name, args) in tool_calls {
-        let result = try_call_tool(&client, tool_name, args).await;
-        let result = match result {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("{tool_name}: protocol error (skipping): {e}");
-                continue;
-            }
-        };
+        let result = call_tool(&client, tool_name, args).await;
 
-        // Some tools may return is_error=true (e.g., routes on no-openapi project).
-        // In that case, structured_content may not be present. Only validate when
-        // the tool reports success.
-        if result.is_error == Some(true) {
-            eprintln!("{tool_name}: tool error (skipping structured content check)");
-            continue;
-        }
-
+        // check tool may report status=failed (pyright issues) but still returns structured content
         if let Some(sc) = &result.structured_content {
             assert!(
                 sc.is_object(),
@@ -794,36 +761,6 @@ async fn test_all_tools_return_structured_objects() {
             assert!(
                 !sc.is_string(),
                 "{tool_name}: structured_content must NOT be a string"
-            );
-        }
-    }
-
-    // Also test list_registry_components and search_registry_components
-    // which may fail at protocol level on --no-addons projects.
-    let registry_calls: Vec<(&str, serde_json::Value)> = vec![
-        (
-            "list_registry_components",
-            serde_json::json!({"app_path": app_path}),
-        ),
-        (
-            "search_registry_components",
-            serde_json::json!({"app_path": app_path, "query": "button"}),
-        ),
-    ];
-
-    for (tool_name, args) in registry_calls {
-        let result = try_call_tool(&client, tool_name, args).await;
-        let result = match result {
-            Ok(r) => r,
-            Err(_) => continue, // protocol error acceptable for registry tools
-        };
-        if result.is_error == Some(true) {
-            continue;
-        }
-        if let Some(sc) = &result.structured_content {
-            assert!(
-                sc.is_object(),
-                "{tool_name}: structured_content should be an object, got: {sc}"
             );
         }
     }
