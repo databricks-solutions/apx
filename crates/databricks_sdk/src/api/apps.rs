@@ -23,9 +23,28 @@ pub struct App {
     pub compute_status: Option<ComputeStatus>,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ComputeState {
+    Active,
+    Starting,
+    Stopping,
+    Stopped,
+    Deleting,
+    Error,
+    #[serde(other)]
+    Unknown,
+}
+
+impl ComputeState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Stopped | Self::Deleting | Self::Error)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ComputeStatus {
-    pub state: String,
+    pub state: ComputeState,
 }
 
 // ---------------------------------------------------------------------------
@@ -43,12 +62,14 @@ pub struct LogEntry {
 // Input parameters
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct AppLogsArgs<'a> {
     pub app_name: &'a str,
     pub tail_lines: usize,
     pub search: Option<&'a str>,
     pub sources: Option<&'a [String]>,
     pub timeout: Duration,
+    pub idle_timeout: Option<Duration>,
 }
 
 // ---------------------------------------------------------------------------
@@ -87,60 +108,69 @@ impl<'a> AppsApi<'a> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Terminal compute states that cannot produce logs.
-const TERMINAL_STATES: &[&str] = &["STOPPED", "DELETING", "ERROR"];
-
 fn validate_app(app: &App) -> Result<&str> {
-    if let Some(ref cs) = app.compute_status {
-        let state = cs.state.as_str();
-        if TERMINAL_STATES.contains(&state) {
-            return Err(DatabricksError::Api {
-                status: 0,
-                message: format!(
-                    "App '{}' is in state {state} and cannot produce logs",
-                    app.name
-                ),
-                body: None,
-            });
-        }
+    if let Some(ref cs) = app.compute_status
+        && cs.state.is_terminal()
+    {
+        return Err(DatabricksError::Validation(format!(
+            "App '{}' is in state {:?} and cannot produce logs",
+            app.name, cs.state
+        )));
     }
 
-    app.url
-        .as_deref()
-        .filter(|u| !u.is_empty())
-        .ok_or_else(|| DatabricksError::Api {
-            status: 0,
-            message: format!("App '{}' has no URL — it may not be deployed yet", app.name),
-            body: None,
-        })
+    app.url.as_deref().filter(|u| !u.is_empty()).ok_or_else(|| {
+        DatabricksError::Validation(format!(
+            "App '{}' has no URL — it may not be deployed yet",
+            app.name
+        ))
+    })
 }
 
 fn build_ws_url(app_url: &str) -> Result<String> {
-    let ws_scheme = if app_url.starts_with("https://") {
-        app_url.replacen("https://", "wss://", 1)
-    } else if app_url.starts_with("http://") {
-        app_url.replacen("http://", "ws://", 1)
-    } else {
-        return Err(DatabricksError::WebSocket(format!(
-            "Unexpected app URL scheme: {app_url}"
-        )));
+    let mut parsed = url::Url::parse(app_url)
+        .map_err(|e| DatabricksError::WebSocket(format!("Invalid app URL: {e}")))?;
+
+    let ws_scheme = match parsed.scheme() {
+        "https" => "wss",
+        "http" => "ws",
+        other => {
+            return Err(DatabricksError::WebSocket(format!(
+                "Unexpected app URL scheme: {other}"
+            )));
+        }
     };
 
-    let base = ws_scheme.trim_end_matches('/');
-    Ok(format!("{base}/logz/stream"))
+    parsed
+        .set_scheme(ws_scheme)
+        .map_err(|()| DatabricksError::WebSocket("Failed to set WS scheme".to_string()))?;
+
+    // Append /logz/stream to existing path
+    let path = parsed.path().trim_end_matches('/').to_string();
+    parsed.set_path(&format!("{path}/logz/stream"));
+
+    Ok(parsed.to_string())
 }
 
 fn extract_origin(app_url: &str) -> Result<String> {
     let parsed = url::Url::parse(app_url)
         .map_err(|e| DatabricksError::WebSocket(format!("Invalid app URL: {e}")))?;
-    let scheme = parsed.scheme();
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| DatabricksError::WebSocket("App URL has no host".to_string()))?;
 
-    match parsed.port() {
-        Some(port) => Ok(format!("{scheme}://{host}:{port}")),
-        None => Ok(format!("{scheme}://{host}")),
+    match parsed.origin() {
+        url::Origin::Tuple(scheme, host, port) => {
+            let default_port = match scheme.as_str() {
+                "https" | "wss" => 443,
+                "http" | "ws" => 80,
+                _ => 0,
+            };
+            if port == default_port {
+                Ok(format!("{scheme}://{host}"))
+            } else {
+                Ok(format!("{scheme}://{host}:{port}"))
+            }
+        }
+        url::Origin::Opaque(_) => Err(DatabricksError::WebSocket(
+            "App URL has opaque origin".to_string(),
+        )),
     }
 }
 
@@ -176,6 +206,10 @@ async fn connect_ws(url: &str, token: &str, origin: &str) -> Result<WsStream> {
 /// The heartbeat frame is a single null byte.
 const HEARTBEAT: &[u8] = &[0x00];
 
+/// Default idle timeout: if no text frame arrives within this window after
+/// we've already received at least one, we assume the backlog is done.
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+
 async fn collect_logs(mut stream: WsStream, args: &AppLogsArgs<'_>) -> Result<Vec<LogEntry>> {
     // Send search term as the first text frame.
     let search_term = args.search.unwrap_or("");
@@ -205,17 +239,38 @@ async fn read_frames(
     args: &AppLogsArgs<'_>,
     buffer: &mut VecDeque<LogEntry>,
 ) -> Result<()> {
-    while let Some(msg) = stream.next().await {
-        let msg =
-            msg.map_err(|e| DatabricksError::WebSocket(format!("Failed to read frame: {e}")))?;
+    let idle = args.idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT);
+    let mut received_any = false;
 
-        match msg {
-            Message::Text(text) => {
-                parse_and_buffer(text.as_ref(), args, buffer);
+    loop {
+        let next = tokio::time::timeout(idle, stream.next()).await;
+
+        match next {
+            Ok(Some(msg)) => {
+                let msg = msg.map_err(|e| {
+                    DatabricksError::WebSocket(format!("Failed to read frame: {e}"))
+                })?;
+
+                match msg {
+                    Message::Text(text) => {
+                        received_any = true;
+                        parse_and_buffer(text.as_ref(), args, buffer);
+                    }
+                    Message::Binary(data) if data.as_ref() == HEARTBEAT => continue,
+                    Message::Close(_) => break,
+                    _ => continue,
+                }
             }
-            Message::Binary(data) if data.as_ref() == HEARTBEAT => continue,
-            Message::Close(_) => break,
-            _ => continue,
+            Ok(None) => break, // stream ended
+            Err(_) => {
+                // Idle timeout elapsed
+                if received_any {
+                    debug!("Idle timeout reached after receiving logs, assuming backlog complete");
+                    break;
+                }
+                // Haven't received any logs yet — keep waiting (outer timeout guards)
+                continue;
+            }
         }
     }
     Ok(())
@@ -224,7 +279,10 @@ async fn read_frames(
 fn parse_and_buffer(text: &str, args: &AppLogsArgs<'_>, buffer: &mut VecDeque<LogEntry>) {
     let entry: LogEntry = match serde_json::from_str(text) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(e) => {
+            debug!(error = %e, "Skipping unparseable log frame");
+            return;
+        }
     };
 
     if let Some(sources) = args.sources
@@ -294,6 +352,7 @@ mod tests {
             search: None,
             sources: None,
             timeout: Duration::from_secs(5),
+            idle_timeout: None,
         };
         let mut buffer = VecDeque::with_capacity(3);
 
@@ -317,6 +376,7 @@ mod tests {
             search: None,
             sources: Some(&sources),
             timeout: Duration::from_secs(5),
+            idle_timeout: None,
         };
         let mut buffer = VecDeque::new();
 
@@ -344,6 +404,7 @@ mod tests {
             search: None,
             sources: Some(&sources),
             timeout: Duration::from_secs(5),
+            idle_timeout: None,
         };
         let mut buffer = VecDeque::new();
 
@@ -362,7 +423,7 @@ mod tests {
             name: "test-app".to_string(),
             url: Some("https://test.databricks.app".to_string()),
             compute_status: Some(ComputeStatus {
-                state: "STOPPED".to_string(),
+                state: ComputeState::Stopped,
             }),
         };
         assert!(validate_app(&app).is_err());
@@ -374,7 +435,7 @@ mod tests {
             name: "test-app".to_string(),
             url: None,
             compute_status: Some(ComputeStatus {
-                state: "ACTIVE".to_string(),
+                state: ComputeState::Active,
             }),
         };
         assert!(validate_app(&app).is_err());
@@ -386,7 +447,7 @@ mod tests {
             name: "test-app".to_string(),
             url: Some("https://test.databricks.app".to_string()),
             compute_status: Some(ComputeStatus {
-                state: "ACTIVE".to_string(),
+                state: ComputeState::Active,
             }),
         };
         let result = validate_app(&app).unwrap();
@@ -401,10 +462,155 @@ mod tests {
             search: None,
             sources: None,
             timeout: Duration::from_secs(5),
+            idle_timeout: None,
         };
         let mut buffer = VecDeque::new();
 
         parse_and_buffer("not json", &args, &mut buffer);
         assert!(buffer.is_empty());
+    }
+
+    // ----- New API-level tests -----
+
+    #[test]
+    fn deserialize_app_active_full() {
+        let json = r#"{
+            "name": "my-app",
+            "url": "https://my-app.databricks.app",
+            "compute_status": { "state": "ACTIVE" }
+        }"#;
+        let app: App = serde_json::from_str(json).unwrap();
+        assert_eq!(app.name, "my-app");
+        assert_eq!(app.url.as_deref(), Some("https://my-app.databricks.app"));
+        assert_eq!(app.compute_status.unwrap().state, ComputeState::Active);
+    }
+
+    #[test]
+    fn deserialize_app_minimal() {
+        let json = r#"{ "name": "bare-app" }"#;
+        let app: App = serde_json::from_str(json).unwrap();
+        assert_eq!(app.name, "bare-app");
+        assert!(app.url.is_none());
+        assert!(app.compute_status.is_none());
+    }
+
+    #[test]
+    fn deserialize_app_unknown_state() {
+        let json = r#"{
+            "name": "future-app",
+            "compute_status": { "state": "SOME_FUTURE_STATE" }
+        }"#;
+        let app: App = serde_json::from_str(json).unwrap();
+        assert_eq!(app.compute_status.unwrap().state, ComputeState::Unknown);
+    }
+
+    #[test]
+    fn deserialize_log_entry_valid() {
+        let json = r#"{"source":"APP","timestamp":1700000000.123,"message":"hello world"}"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.source, "APP");
+        assert!((entry.timestamp - 1700000000.123).abs() < f64::EPSILON);
+        assert_eq!(entry.message, "hello world");
+    }
+
+    #[test]
+    fn deserialize_log_entry_extra_fields() {
+        let json = r#"{
+            "source": "APP",
+            "timestamp": 1.0,
+            "message": "msg",
+            "extra_field": "ignored",
+            "another": 42
+        }"#;
+        let entry: LogEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.message, "msg");
+    }
+
+    #[test]
+    fn deserialize_log_entry_missing_field() {
+        let json = r#"{"source":"APP","timestamp":1.0}"#;
+        let result: std::result::Result<LogEntry, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_app_all_terminal_states() {
+        for state in [
+            ComputeState::Stopped,
+            ComputeState::Deleting,
+            ComputeState::Error,
+        ] {
+            let app = App {
+                name: "test-app".to_string(),
+                url: Some("https://test.databricks.app".to_string()),
+                compute_status: Some(ComputeStatus { state }),
+            };
+            assert!(
+                validate_app(&app).is_err(),
+                "Expected error for terminal state {:?}",
+                app.compute_status.as_ref().unwrap().state
+            );
+        }
+    }
+
+    #[test]
+    fn validate_app_non_terminal_states() {
+        for state in [
+            ComputeState::Active,
+            ComputeState::Starting,
+            ComputeState::Unknown,
+        ] {
+            let app = App {
+                name: "test-app".to_string(),
+                url: Some("https://test.databricks.app".to_string()),
+                compute_status: Some(ComputeStatus { state }),
+            };
+            assert!(
+                validate_app(&app).is_ok(),
+                "Expected Ok for non-terminal state {:?}",
+                app.compute_status.as_ref().unwrap().state
+            );
+        }
+    }
+
+    #[test]
+    fn parse_and_buffer_mixed_scenario() {
+        let sources = vec!["APP".to_string()];
+        let args = AppLogsArgs {
+            app_name: "test",
+            tail_lines: 100,
+            search: None,
+            sources: Some(&sources),
+            timeout: Duration::from_secs(5),
+            idle_timeout: None,
+        };
+        let mut buffer = VecDeque::new();
+
+        // 1. Valid APP entry
+        parse_and_buffer(
+            r#"{"source":"APP","timestamp":1.0,"message":"first"}"#,
+            &args,
+            &mut buffer,
+        );
+        // 2. Bad JSON
+        parse_and_buffer("not json at all", &args, &mut buffer);
+        // 3. Filtered SYSTEM entry
+        parse_and_buffer(
+            r#"{"source":"SYSTEM","timestamp":2.0,"message":"sys"}"#,
+            &args,
+            &mut buffer,
+        );
+        // 4. Valid APP entry
+        parse_and_buffer(
+            r#"{"source":"APP","timestamp":3.0,"message":"second"}"#,
+            &args,
+            &mut buffer,
+        );
+        // 5. Missing required field
+        parse_and_buffer(r#"{"source":"APP","timestamp":4.0}"#, &args, &mut buffer);
+
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(buffer[0].message, "first");
+        assert_eq!(buffer[1].message, "second");
     }
 }

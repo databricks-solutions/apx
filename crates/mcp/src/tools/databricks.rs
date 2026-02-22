@@ -9,28 +9,8 @@ use rmcp::schemars;
 use serde_json::Value;
 
 use crate::server::ApxServer;
-use crate::tools::ToolError;
+use crate::tools::{ToolError, ToolResultExt};
 use crate::validation::validated_app_path;
-
-pub(crate) fn truncate(s: &str, max_chars: i32) -> String {
-    if max_chars <= 0 {
-        return String::new();
-    }
-    let max_chars = max_chars as usize;
-    if s.len() <= max_chars {
-        return s.to_string();
-    }
-    let head_len = max_chars.saturating_sub(50);
-    let tail_len = if max_chars >= 100 { 40 } else { 0 };
-    let head = &s[..head_len];
-    let tail = if tail_len > 0 {
-        &s[s.len().saturating_sub(tail_len)..]
-    } else {
-        ""
-    };
-    let truncated = s.len() - head_len - tail_len;
-    format!("{head}\n\n...[truncated {truncated} chars]...\n\n{tail}")
-}
 
 pub(crate) fn resolve_app_name_from_databricks_yml(project_dir: &Path) -> Result<String, String> {
     let yml_path = project_dir.join("databricks.yml");
@@ -102,7 +82,7 @@ pub struct DatabricksAppsLogsArgs {
     pub app_name: Option<String>,
     /// Number of tail lines to fetch (default: 200)
     #[serde(default = "default_tail_lines")]
-    pub tail_lines: i32,
+    pub tail_lines: u32,
     /// Search string to filter logs
     #[serde(default)]
     pub search: Option<String>,
@@ -115,21 +95,14 @@ pub struct DatabricksAppsLogsArgs {
     /// Timeout in seconds (default: 60)
     #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: f64,
-    /// Maximum output characters (default: 20000)
-    #[serde(default = "default_max_output_chars")]
-    pub max_output_chars: i32,
 }
 
-fn default_tail_lines() -> i32 {
+fn default_tail_lines() -> u32 {
     200
 }
 
 fn default_timeout_seconds() -> f64 {
     60.0
-}
-
-fn default_max_output_chars() -> i32 {
-    20000
 }
 
 impl ApxServer {
@@ -138,21 +111,20 @@ impl ApxServer {
         args: DatabricksAppsLogsArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let cwd = validated_app_path(&args.app_path)?;
-        let mut resolved_from_yml = false;
 
         // Load env vars from .env if present
         let dotenv_vars = load_dotenv_vars(&cwd);
 
         // Resolve app_name
-        let app_name = match resolve_app_name(&args, &cwd, &mut resolved_from_yml) {
-            Ok(name) => name,
+        let resolved = match resolve_app_name(&args, &cwd) {
+            Ok(r) => r,
             Err(e) => return ToolError::OperationFailed(e).into_result(),
         };
 
         // Resolve profile: explicit arg → .env DATABRICKS_CONFIG_PROFILE → "" (SDK default)
         let profile = resolve_profile(&args, &dotenv_vars);
 
-        let client = match DatabricksClient::new(&profile).await {
+        let client = match get_or_create_client(&self.ctx.databricks_clients, &profile).await {
             Ok(c) => c,
             Err(e) => {
                 return ToolError::OperationFailed(format!(
@@ -164,11 +136,12 @@ impl ApxServer {
 
         let start = std::time::Instant::now();
         let logs_args = AppLogsArgs {
-            app_name: &app_name,
-            tail_lines: args.tail_lines.max(0) as usize,
+            app_name: &resolved.name,
+            tail_lines: args.tail_lines as usize,
             search: args.search.as_deref(),
             sources: args.source.as_deref(),
             timeout: Duration::from_secs_f64(args.timeout_seconds),
+            idle_timeout: None,
         };
 
         let entries = match client.apps().logs(&logs_args).await {
@@ -192,19 +165,14 @@ impl ApxServer {
         }
 
         let response = DatabricksAppsLogsResponse {
-            app_name,
-            resolved_from_databricks_yml: resolved_from_yml,
+            app_name: resolved.name,
+            resolved_from_databricks_yml: resolved.from_yml,
             log_count: entries.len(),
             entries,
             duration_ms,
         };
 
-        // Serialize and apply truncation to the final output
-        let json = serde_json::to_string_pretty(&response)
-            .unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {e}\"}}"));
-        let truncated = truncate(&json, args.max_output_chars);
-
-        Ok(CallToolResult::success(vec![Content::text(truncated)]))
+        Ok(CallToolResult::from_serializable(&response))
     }
 }
 
@@ -219,21 +187,51 @@ fn load_dotenv_vars(cwd: &Path) -> HashMap<String, String> {
     }
 }
 
+struct ResolvedAppName {
+    name: String,
+    from_yml: bool,
+}
+
 fn resolve_app_name(
     args: &DatabricksAppsLogsArgs,
     cwd: &Path,
-    resolved_from_yml: &mut bool,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<ResolvedAppName, String> {
     match args.app_name.as_ref() {
-        Some(name) if !name.trim().is_empty() => Ok(name.trim().to_string()),
+        Some(name) if !name.trim().is_empty() => Ok(ResolvedAppName {
+            name: name.trim().to_string(),
+            from_yml: false,
+        }),
         _ => match resolve_app_name_from_databricks_yml(cwd) {
-            Ok(name) => {
-                *resolved_from_yml = true;
-                Ok(name)
-            }
+            Ok(name) => Ok(ResolvedAppName {
+                name,
+                from_yml: true,
+            }),
             Err(e) => Err(format!("Failed to auto-detect app name: {e}")),
         },
     }
+}
+
+async fn get_or_create_client(
+    cache: &tokio::sync::RwLock<HashMap<String, DatabricksClient>>,
+    profile: &str,
+) -> std::result::Result<DatabricksClient, apx_databricks_sdk::DatabricksError> {
+    // Fast path: read lock
+    {
+        let clients = cache.read().await;
+        if let Some(client) = clients.get(profile) {
+            return Ok(client.clone());
+        }
+    }
+
+    // Slow path: write lock with double-check
+    let mut clients = cache.write().await;
+    if let Some(client) = clients.get(profile) {
+        return Ok(client.clone());
+    }
+
+    let client = DatabricksClient::new(profile).await?;
+    clients.insert(profile.to_string(), client.clone());
+    Ok(client)
 }
 
 fn resolve_profile(args: &DatabricksAppsLogsArgs, dotenv_vars: &HashMap<String, String>) -> String {
@@ -258,34 +256,6 @@ fn resolve_profile(args: &DatabricksAppsLogsArgs, dotenv_vars: &HashMap<String, 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn truncate_empty_string() {
-        assert_eq!(truncate("", 100), "");
-    }
-
-    #[test]
-    fn truncate_short_string() {
-        assert_eq!(truncate("hello", 100), "hello");
-    }
-
-    #[test]
-    fn truncate_zero_max() {
-        assert_eq!(truncate("hello", 0), "");
-    }
-
-    #[test]
-    fn truncate_negative_max() {
-        assert_eq!(truncate("hello", -1), "");
-    }
-
-    #[test]
-    fn truncate_long_string() {
-        let long = "a".repeat(1000);
-        let result = truncate(&long, 200);
-        assert!(result.contains("truncated"));
-        assert!(result.len() < 1000);
-    }
 
     #[test]
     fn resolve_app_name_from_databricks_yml_basic() {
@@ -353,7 +323,6 @@ resources:
             source: None,
             profile: Some("my-profile".to_string()),
             timeout_seconds: 60.0,
-            max_output_chars: 20000,
         };
         let dotenv = HashMap::new();
         assert_eq!(resolve_profile(&args, &dotenv), "my-profile");
@@ -369,7 +338,6 @@ resources:
             source: None,
             profile: None,
             timeout_seconds: 60.0,
-            max_output_chars: 20000,
         };
         let mut dotenv = HashMap::new();
         dotenv.insert(
@@ -389,7 +357,6 @@ resources:
             source: None,
             profile: None,
             timeout_seconds: 60.0,
-            max_output_chars: 20000,
         };
         let dotenv = HashMap::new();
         assert_eq!(resolve_profile(&args, &dotenv), "");

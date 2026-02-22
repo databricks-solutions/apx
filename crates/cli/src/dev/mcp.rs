@@ -66,6 +66,7 @@ pub async fn run(_args: McpArgs) -> i32 {
             cache_state,
             index_state,
             shutdown_tx: shutdown_tx.clone(),
+            databricks_clients: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         };
 
         run_server(ctx, Some(sdk_params)).await

@@ -82,6 +82,7 @@ async fn spawn_client(
         cache_state,
         index_state,
         shutdown_tx: shutdown_tx.clone(),
+        databricks_clients: tokio::sync::RwLock::new(std::collections::HashMap::new()),
     };
 
     let server = apx_mcp::server::ApxServer::new(ctx, None);

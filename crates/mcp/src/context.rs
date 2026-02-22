@@ -1,9 +1,11 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
 use apx_core::components::SharedCacheState;
 use apx_core::search::docs_index::SDKDocsIndex;
 use apx_db::DevDb;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use tokio::sync::{Mutex, Notify, broadcast};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast};
 
 /// Parameters for SDK indexing, pre-computed synchronously to avoid Python GIL issues
 #[derive(Debug)]
@@ -49,4 +51,5 @@ pub struct AppContext {
     pub cache_state: SharedCacheState,
     pub index_state: IndexState,
     pub shutdown_tx: broadcast::Sender<()>,
+    pub databricks_clients: RwLock<HashMap<String, apx_databricks_sdk::DatabricksClient>>,
 }
