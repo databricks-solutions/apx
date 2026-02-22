@@ -1,10 +1,9 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 use tracing::debug;
 
 use crate::dev::common::{lock_path, read_lock};
-use crate::download::try_resolve_uv;
+use crate::external::uv::Uv;
 use crate::resources;
 use apx_common::hosts::CLIENT_HOST;
 
@@ -155,131 +154,69 @@ print(json.dumps(app.openapi(), indent=2))
 "#
     );
 
-    let uv_path = try_resolve_uv()?.path;
-    let output = tokio::process::Command::new(&uv_path)
-        .args(["run", "--no-sync", "python", "-c", &script])
-        .arg(project_root.to_string_lossy().as_ref())
-        .current_dir(project_root)
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run uv for OpenAPI generation: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to generate OpenAPI schema: {stderr}"));
-    }
-
-    let spec_json = String::from_utf8(output.stdout)
-        .map_err(|e| format!("OpenAPI output is not valid UTF-8: {e}"))?
-        .trim()
-        .to_string();
+    let uv = Uv::try_new()?;
+    let project_root_str = project_root.to_string_lossy();
+    let spec_json = uv
+        .run_python_code(project_root, &script, &[&project_root_str])
+        .await?
+        .into_stdout("uv")
+        .map_err(|e| format!("Failed to generate OpenAPI schema: {e}"))?;
 
     Ok((spec_json, app_slug.to_string()))
 }
 
-/// Get the Databricks SDK version for a specific project directory via subprocess.
+/// Get the installed Databricks SDK version via subprocess.
 ///
-/// Uses `uv run --directory <project_dir>` to run in the project's venv context.
-pub fn get_databricks_sdk_version_for_project(
-    project_dir: &Path,
+/// When `project_dir` is `Some`, uses `uv run --directory <dir>` to run
+/// in the project's venv context. When `None`, runs in the current context.
+pub async fn get_databricks_sdk_version(
+    project_dir: Option<&Path>,
 ) -> Result<Option<String>, String> {
-    debug!(
-        "get_databricks_sdk_version_for_project: checking project at {}",
-        project_dir.display()
-    );
+    let label = project_dir
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| "default".to_string());
+    debug!("get_databricks_sdk_version: checking (context: {label})");
 
-    let uv_path = match try_resolve_uv() {
-        Ok(resolved) => resolved.path,
-        Err(e) => {
-            debug!("get_databricks_sdk_version_for_project: failed to resolve uv: {e}");
-            return Ok(None);
-        }
-    };
-
-    let dir_str = project_dir.to_str().unwrap_or(".");
-    let output = Command::new(&uv_path)
-        .args([
-            "run",
-            "--directory",
-            dir_str,
-            "--no-sync",
-            "python",
-            "-c",
-            "import importlib.metadata; print(importlib.metadata.version('databricks-sdk'))",
-        ])
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            let version = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if version.is_empty() {
-                debug!("get_databricks_sdk_version_for_project: empty output");
-                Ok(None)
-            } else {
-                debug!(
-                    "get_databricks_sdk_version_for_project: found version {}",
-                    version
-                );
-                Ok(Some(version))
-            }
-        }
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            debug!(
-                "get_databricks_sdk_version_for_project: subprocess failed: {}",
-                stderr
-            );
-            Ok(None)
-        }
-        Err(e) => {
-            debug!(
-                "get_databricks_sdk_version_for_project: failed to run uv: {}",
-                e
-            );
-            Ok(None)
-        }
-    }
-}
-
-/// Get the installed Databricks SDK version via subprocess
-pub fn get_databricks_sdk_version() -> Result<Option<String>, String> {
-    debug!("get_databricks_sdk_version: Starting subprocess call");
-
-    let uv_path = match try_resolve_uv() {
-        Ok(resolved) => resolved.path,
+    let uv = match Uv::try_new() {
+        Ok(uv) => uv,
         Err(e) => {
             debug!("get_databricks_sdk_version: failed to resolve uv: {e}");
             return Ok(None);
         }
     };
-    let output = Command::new(&uv_path)
-        .args([
-            "run",
-            "--no-sync",
-            "python",
-            "-c",
-            "import importlib.metadata; print(importlib.metadata.version('databricks-sdk'))",
-        ])
-        .output();
 
-    match output {
-        Ok(o) if o.status.success() => {
-            let version = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    let mut cmd = uv.cmd().arg("run");
+    if let Some(dir) = project_dir {
+        let dir_str = dir.to_str().unwrap_or(".");
+        cmd = cmd.args(["--directory", dir_str]);
+    }
+    cmd = cmd.args([
+        "--no-sync",
+        "python",
+        "-c",
+        "import importlib.metadata; print(importlib.metadata.version('databricks-sdk'))",
+    ]);
+
+    match cmd.exec().await {
+        Ok(output) if output.exit_code == Some(0) => {
+            let version = output.stdout.trim().to_string();
             if version.is_empty() {
                 debug!("get_databricks_sdk_version: empty output");
                 Ok(None)
             } else {
-                debug!("get_databricks_sdk_version: found version {}", version);
+                debug!("get_databricks_sdk_version: found version {version}");
                 Ok(Some(version))
             }
         }
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            debug!("get_databricks_sdk_version: subprocess failed: {}", stderr);
+        Ok(output) => {
+            debug!(
+                "get_databricks_sdk_version: subprocess failed: {}",
+                output.stderr
+            );
             Ok(None)
         }
         Err(e) => {
-            debug!("get_databricks_sdk_version: failed to run uv: {}", e);
+            debug!("get_databricks_sdk_version: failed to run uv: {e}");
             Ok(None)
         }
     }

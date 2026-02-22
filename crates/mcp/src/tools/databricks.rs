@@ -2,14 +2,13 @@ use crate::server::ApxServer;
 use crate::tools::{ToolError, ToolResultExt};
 use crate::validation::validated_app_path;
 use apx_core::dotenv::DotenvFile;
+use apx_core::external::CommandError;
+use apx_core::external::databricks::{AppsLogsArgs, DatabricksCli};
 use rmcp::model::*;
 use rmcp::schemars;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::process::Stdio;
-use std::time::{Duration, Instant};
-use tokio::process::Command;
 
 pub(crate) fn truncate(s: &str, max_chars: i32) -> String {
     if max_chars <= 0 {
@@ -175,91 +174,71 @@ impl ApxServer {
             },
         };
 
-        // Build command and track arguments for response
-        let mut cmd_args = vec!["apps".to_string(), "logs".to_string(), app_name.clone()];
-        let mut cmd = Command::new("databricks");
-        cmd.args(&cmd_args)
-            .arg("--tail-lines")
-            .arg(args.tail_lines.to_string())
-            .current_dir(&cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        cmd_args.push("--tail-lines".to_string());
-        cmd_args.push(args.tail_lines.to_string());
-
-        let mut push_flag_value = |flag: &str, value: Option<&str>| {
-            if let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) {
-                cmd.arg(flag).arg(value);
-                cmd_args.push(flag.to_string());
-                cmd_args.push(value.to_string());
+        // Resolve databricks CLI
+        let cli = match DatabricksCli::new() {
+            Ok(cli) => cli,
+            Err(CommandError::NotFound { .. }) => {
+                return ToolError::OperationFailed(
+                    "Databricks CLI executable not found (`databricks`). \
+                    Please install Databricks CLI v0.280.0 or higher and ensure it's on PATH."
+                        .to_string(),
+                )
+                .into_result();
             }
-        };
-
-        push_flag_value("--search", args.search.as_deref());
-        push_flag_value("-p", args.profile.as_deref());
-        push_flag_value("-t", args.target.as_deref());
-
-        if let Some(sources) = &args.source {
-            for src in sources {
-                cmd.arg("--source").arg(src);
-                cmd_args.push("--source".to_string());
-                cmd_args.push(src.clone());
-            }
-        }
-
-        cmd.arg("-o").arg(&args.output);
-        cmd_args.push("-o".to_string());
-        cmd_args.push(args.output.clone());
-
-        if !dotenv_vars.is_empty() {
-            cmd.envs(&dotenv_vars);
-        }
-
-        let mut full_command = vec!["databricks".to_string()];
-        full_command.extend(cmd_args.clone());
-        let cmd_str = full_command.join(" ");
-
-        // Run command with timeout
-        let start = Instant::now();
-        let result =
-            tokio::time::timeout(Duration::from_secs_f64(args.timeout_seconds), cmd.output()).await;
-
-        let (returncode, stdout, stderr, duration_ms) = match result {
-            Ok(Ok(cmd_output)) => {
-                let duration_ms = start.elapsed().as_millis() as i64;
-                let returncode = cmd_output.status.code().unwrap_or(0);
-                let stdout = String::from_utf8_lossy(&cmd_output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&cmd_output.stderr).to_string();
-                (returncode, stdout, stderr, duration_ms)
-            }
-            Ok(Err(e)) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    return ToolError::OperationFailed(
-                        "Databricks CLI executable not found (`databricks`). \
-                        Please install Databricks CLI v0.280.0 or higher and ensure it's on PATH."
-                            .to_string(),
-                    )
-                    .into_result();
-                }
-                return ToolError::OperationFailed(format!("Failed to execute command: {e}"))
-                    .into_result();
-            }
-            Err(_) => {
+            Err(e) => {
                 return ToolError::OperationFailed(format!(
-                    "Timed out after {}s running: {}",
-                    args.timeout_seconds, cmd_str
+                    "Failed to resolve databricks CLI: {e}"
                 ))
                 .into_result();
             }
         };
 
-        let stdout_t = truncate(&stdout, args.max_output_chars);
-        let stderr_t = truncate(&stderr, args.max_output_chars);
+        let logs_args = AppsLogsArgs {
+            app_name: &app_name,
+            tail_lines: args.tail_lines,
+            search: args.search.as_deref(),
+            source: args.source.as_deref(),
+            profile: args.profile.as_deref(),
+            target: args.target.as_deref(),
+            output_format: &args.output,
+            timeout_secs: args.timeout_seconds,
+            cwd: &cwd,
+            env_vars: &dotenv_vars,
+        };
+
+        let result = match cli.apps_logs(logs_args).await {
+            Ok(r) => r,
+            Err(CommandError::NotFound { .. }) => {
+                return ToolError::OperationFailed(
+                    "Databricks CLI executable not found (`databricks`). \
+                    Please install Databricks CLI v0.280.0 or higher and ensure it's on PATH."
+                        .to_string(),
+                )
+                .into_result();
+            }
+            Err(CommandError::Timeout { timeout_secs, .. }) => {
+                return ToolError::OperationFailed(format!(
+                    "Timed out after {timeout_secs}s running: databricks apps logs"
+                ))
+                .into_result();
+            }
+            Err(e) => {
+                return ToolError::OperationFailed(format!("Failed to execute command: {e}"))
+                    .into_result();
+            }
+        };
+
+        let mut full_command = vec!["databricks".to_string()];
+        full_command.extend(result.command_args.clone());
+        let cmd_str = full_command.join(" ");
+
+        let returncode = result.output.exit_code.unwrap_or(0);
+        let stdout_t = truncate(&result.output.stdout, args.max_output_chars);
+        let stderr_t = truncate(&result.output.stderr, args.max_output_chars);
 
         if returncode != 0 {
-            let combined = format!("{stderr}\n{stdout}").to_lowercase();
+            let combined =
+                format!("{}\n{}", result.output.stderr, result.output.stdout).to_lowercase();
             if combined.contains("unknown command \"logs\"")
                 || combined.contains("unknown command logs")
                 || combined.contains("unknown subcommand")
@@ -307,7 +286,7 @@ impl ApxServer {
             returncode,
             stdout: stdout_t,
             stderr: stderr_t,
-            duration_ms,
+            duration_ms: result.duration_ms as i64,
         };
 
         Ok(CallToolResult::from_serializable(&response))

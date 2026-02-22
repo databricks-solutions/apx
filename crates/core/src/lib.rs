@@ -19,6 +19,7 @@ pub mod databricks_sdk_doc;
 pub mod dev;
 pub mod dotenv;
 pub mod download;
+pub mod external;
 pub mod feedback;
 pub mod flux;
 pub mod frontend;
@@ -34,5 +35,5 @@ pub(crate) mod python_logging;
 pub(crate) mod registry;
 pub(crate) mod sources;
 
-pub use download::{BinarySource, ResolvedBinary, resolve_bun, resolve_uv};
+pub use external::{BinarySource, ResolvedBinary};
 pub use openapi::generate as generate_openapi_ts;

@@ -8,8 +8,11 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::api_generator::generate_openapi;
-use crate::download::{BinarySource, resolve_bun, resolve_uv};
+use crate::external::{Bun, Uv};
 use crate::python_logging::{DevConfig, parse_dev_config};
+
+// Re-exports for ergonomic access from other crates.
+pub use crate::external::{CommandError, CommandOutput};
 
 /// Controls how progress output is displayed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -37,186 +40,6 @@ pub const ENTRYPOINT_DEV_DEPS: &[&str] = &[
 /// List available Databricks CLI profiles from ~/.databrickscfg
 pub fn list_profiles() -> Result<Vec<String>, String> {
     apx_databricks_sdk::list_profile_names().map_err(|e| e.to_string())
-}
-
-/// Base command for running tools via `uv run`.
-///
-/// Provides a consistent way to spawn subprocesses that run within
-/// the project's uv-managed Python environment.
-#[derive(Debug, Clone)]
-pub struct UvCommand {
-    tool: &'static str,
-    uv_path: PathBuf,
-    source: BinarySource,
-}
-
-impl UvCommand {
-    /// Create a new UvCommand for the specified tool.
-    /// Resolves uv binary (downloads if needed).
-    pub async fn new(tool: &'static str) -> Result<Self, String> {
-        let resolved = resolve_uv().await?;
-        tracing::debug!(
-            "using {} uv: {}",
-            resolved.source_label(),
-            resolved.path.display()
-        );
-        Ok(Self {
-            tool,
-            uv_path: resolved.path,
-            source: resolved.source,
-        })
-    }
-
-    /// Get the path to the resolved uv binary.
-    pub fn path(&self) -> &Path {
-        &self.uv_path
-    }
-
-    /// Get the source of the resolved uv binary.
-    pub fn source(&self) -> &BinarySource {
-        &self.source
-    }
-
-    /// Create a new tokio::process::Command for spawning the tool via uv.
-    pub fn tokio_command(&self) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new(&self.uv_path);
-        cmd.args(["run", self.tool]);
-        cmd
-    }
-
-    /// Format the command for display/logging.
-    pub fn display(&self) -> String {
-        format!("uv run {}", self.tool)
-    }
-}
-
-/// Command to spawn apx subprocesses via `uv run apx`.
-///
-/// Uses uv to ensure the correct Python environment is used,
-/// regardless of which Python installations are available on the system.
-#[derive(Debug, Clone)]
-pub struct ApxCommand {
-    inner: UvCommand,
-}
-
-impl ApxCommand {
-    /// Create a new ApxCommand instance.
-    pub async fn new() -> Result<Self, String> {
-        Ok(Self {
-            inner: UvCommand::new("apx").await?,
-        })
-    }
-
-    /// Create a new tokio::process::Command for spawning apx.
-    pub fn tokio_command(&self) -> tokio::process::Command {
-        self.inner.tokio_command()
-    }
-
-    /// Format the command for display/logging.
-    pub fn display(&self) -> String {
-        self.inner.display()
-    }
-}
-
-/// Command to spawn bun using a resolved bun binary.
-///
-/// Resolution order: env override → system PATH → auto-download.
-#[derive(Debug, Clone)]
-pub struct BunCommand {
-    bun_path: PathBuf,
-    source: BinarySource,
-}
-
-impl BunCommand {
-    /// Create a new BunCommand instance.
-    /// Resolves bun binary (downloads if needed).
-    pub async fn new() -> Result<Self, String> {
-        let resolved = resolve_bun().await?;
-        tracing::debug!(
-            "using {} bun: {}",
-            resolved.source_label(),
-            resolved.path.display()
-        );
-        Ok(Self {
-            bun_path: resolved.path,
-            source: resolved.source,
-        })
-    }
-
-    /// Get the source of the resolved bun binary.
-    pub fn source(&self) -> &BinarySource {
-        &self.source
-    }
-
-    /// Get the path to the resolved bun binary.
-    pub fn path(&self) -> &Path {
-        &self.bun_path
-    }
-
-    /// Build a PATH with the apx bin directory prepended.
-    /// This ensures child processes spawned by bun also use the apx-bundled bun.
-    fn patched_path(&self) -> std::ffi::OsString {
-        let apx_bin_dir = self.bun_path.parent().unwrap_or(std::path::Path::new(""));
-        let current_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut paths = vec![apx_bin_dir.to_path_buf()];
-        paths.extend(std::env::split_paths(&current_path));
-        std::env::join_paths(paths).unwrap_or(current_path)
-    }
-
-    /// Create a new std::process::Command for spawning bun.
-    #[allow(dead_code)]
-    pub fn command(&self) -> std::process::Command {
-        let mut cmd = std::process::Command::new(&self.bun_path);
-        cmd.env("PATH", self.patched_path());
-        cmd
-    }
-
-    /// Create a new tokio::process::Command for spawning bun.
-    pub fn tokio_command(&self) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new(&self.bun_path);
-        cmd.env("PATH", self.patched_path());
-        cmd
-    }
-
-    /// Create a tokio command with NODE_PATH set to `<app_dir>/node_modules`.
-    ///
-    /// Use this when running scripts that live outside the project directory
-    /// (e.g. the bundled entrypoint.ts at ~/.apx/files/). Without NODE_PATH,
-    /// bun resolves transitive dependencies relative to the script's location
-    /// or its global cache, which fails to find packages installed in the
-    /// project's node_modules.
-    pub fn tokio_command_with_node_path(&self, app_dir: &Path) -> tokio::process::Command {
-        let mut cmd = self.tokio_command();
-        cmd.env("NODE_PATH", app_dir.join("node_modules"));
-        cmd
-    }
-
-    /// Format the command for display/logging.
-    #[allow(dead_code)]
-    pub fn display(&self) -> String {
-        format!("bun ({})", self.bun_path.display())
-    }
-}
-
-/// Handle spawn errors with user-friendly messages.
-/// Call this when a Command::spawn() fails to provide actionable feedback.
-pub fn handle_spawn_error(tool: &str, error: std::io::Error) -> String {
-    let msg = if error.kind() == std::io::ErrorKind::NotFound {
-        format!(
-            "Failed to spawn '{}': executable not found. \
-             Make sure '{}' is installed and available in PATH.",
-            tool,
-            if tool == "apx" || tool == "uvicorn" {
-                "uv"
-            } else {
-                tool
-            }
-        )
-    } else {
-        format!("Failed to spawn '{tool}': {error}")
-    };
-    eprintln!("{msg}");
-    msg
 }
 
 const DEFAULT_API_PREFIX: &str = "/api";
@@ -400,32 +223,12 @@ pub fn ensure_dir(path: &Path) -> Result<(), String> {
 }
 
 pub async fn bun_install(app_dir: &Path) -> Result<(), String> {
-    let bun = BunCommand::new().await?;
-    tracing::debug!(
-        bun_path = %bun.path().display(),
-        app_dir = %app_dir.display(),
-        "Running bun install"
-    );
-    let mut cmd = bun.tokio_command();
-    cmd.arg("install");
-    if let Ok(cache_dir) = std::env::var("BUN_CACHE_DIR") {
-        cmd.arg("--cache-dir").arg(cache_dir);
-    }
-    cmd.current_dir(app_dir);
-    let output = cmd
-        .output()
-        .await
-        .map_err(|err| format!("Failed to run bun install: {err}"))?;
-
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "bun install failed with status {status}. Stdout: {stdout} Stderr: {stderr}",
-            status = output.status
-        ));
-    }
-
+    let bun = Bun::new().await?;
+    tracing::debug!(app_dir = %app_dir.display(), "Running bun install");
+    bun.install(app_dir)
+        .await?
+        .check("bun")
+        .map_err(String::from)?;
     Ok(())
 }
 
@@ -438,36 +241,11 @@ pub async fn ensure_entrypoint_deps(app_dir: &Path) -> Result<(), String> {
         "Ensuring frontend dependencies"
     );
 
-    // Run bun add --dev for all dependencies (idempotent operation)
-    let bun = BunCommand::new().await?;
-    tracing::debug!(bun_path = %bun.path().display(), "Running bun add --dev");
-    let mut cmd = bun.tokio_command();
-    cmd.arg("add").arg("--dev");
-    for dep in ENTRYPOINT_DEV_DEPS {
-        cmd.arg(*dep);
-    }
-    cmd.current_dir(app_dir);
-
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run bun add: {e}"))?;
-
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "Failed to install frontend dependencies (exit {}):\n\
-             bun: {}\n\
-             stdout:\n{stdout}\n\
-             stderr:\n{stderr}",
-            output
-                .status
-                .code()
-                .map_or("signal".into(), |c: i32| c.to_string()),
-            bun.path().display(),
-        ));
-    }
+    let bun = Bun::new().await?;
+    bun.add_dev(app_dir, ENTRYPOINT_DEV_DEPS)
+        .await?
+        .check("bun")
+        .map_err(String::from)?;
 
     tracing::debug!("Frontend dependencies installed successfully");
     Ok(())
@@ -477,22 +255,8 @@ pub async fn ensure_entrypoint_deps(app_dir: &Path) -> Result<(), String> {
 pub async fn uv_sync(app_dir: &Path) -> Result<(), String> {
     tracing::debug!("Running uv sync in {}", app_dir.display());
 
-    let uv_path = resolve_uv().await?.path;
-    let output = Command::new(&uv_path)
-        .arg("sync")
-        .current_dir(app_dir)
-        .output()
-        .await
-        .map_err(|err| format!("Failed to run uv sync: {err}"))?;
-
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "uv sync failed with status {status}. Stdout: {stdout} Stderr: {stderr}",
-            status = output.status
-        ));
-    }
+    let uv = Uv::new().await?;
+    uv.sync(app_dir).await?.check("uv").map_err(String::from)?;
 
     tracing::debug!("uv sync completed successfully");
     Ok(())
@@ -515,28 +279,23 @@ pub async fn generate_version_file(
         .ok_or("Failed to determine version file path")?;
 
     // Try running uv-dynamic-versioning (outputs version string to stdout)
-    let uv_path = resolve_uv().await?.path;
-    let output = Command::new(&uv_path)
-        .args(["tool", "run", "uv-dynamic-versioning"])
-        .current_dir(app_dir)
-        .output()
-        .await;
-
-    let version = match output {
-        Ok(result) if result.status.success() => {
-            let stdout = String::from_utf8_lossy(&result.stdout);
-            let version = stdout.trim();
-            if !version.is_empty() {
-                tracing::debug!("uv-dynamic-versioning returned version: {}", version);
-                version.to_string()
+    let uv = Uv::new().await?;
+    let version = match uv.tool_run(app_dir, "uv-dynamic-versioning").await {
+        Ok(output) if output.exit_code == Some(0) => {
+            let v = output.stdout.trim().to_string();
+            if !v.is_empty() {
+                tracing::debug!("uv-dynamic-versioning returned version: {}", v);
+                v
             } else {
                 tracing::warn!("uv-dynamic-versioning returned empty output, using fallback");
                 "0.0.0".to_string()
             }
         }
-        Ok(result) => {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            tracing::warn!("uv-dynamic-versioning failed: {stderr}, using fallback version");
+        Ok(output) => {
+            tracing::warn!(
+                "uv-dynamic-versioning failed: {}, using fallback version",
+                output.stderr
+            );
             "0.0.0".to_string()
         }
         Err(err) => {

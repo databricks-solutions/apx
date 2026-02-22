@@ -1,6 +1,11 @@
 use clap::Args;
 
-use apx_core::common::{BunCommand, UvCommand};
+use apx_core::external::bun::Bun;
+use apx_core::external::databricks::DatabricksCli;
+use apx_core::external::gh::Gh;
+use apx_core::external::git::Git;
+use apx_core::external::uv::Uv;
+use apx_core::external::{ToolInfo, ToolInfoEntry};
 
 use crate::run_cli_async_helper;
 
@@ -42,54 +47,38 @@ async fn run_inner() -> Result<(), String> {
     println!("   {DIM}Build:{RESET}    {build_time} ({git_hash})");
     println!("   {DIM}OS:{RESET}       {os} {arch}");
 
-    // --- uv section ---
-    println!();
-    println!("{BOLD}{YELLOW}\u{1f40d} uv{RESET}");
-    match UvCommand::new("uv").await {
-        Ok(uv) => {
-            let ver = get_version(uv.path()).await;
-            println!("   {DIM}Version:{RESET}  {GREEN}{ver}{RESET}");
-            println!(
-                "   {DIM}Path:{RESET}     {CYAN}{}{RESET}",
-                uv.path().display()
-            );
-            println!("   {DIM}Source:{RESET}   {}", uv.source().source_label());
-        }
-        Err(e) => {
-            println!("   {RED}{e}{RESET}");
-        }
-    }
+    // --- external tools ---
+    let (uv, bun, git, gh, databricks) = tokio::join!(
+        Uv::info(),
+        Bun::info(),
+        Git::info(),
+        Gh::info(),
+        DatabricksCli::info(),
+    );
 
-    // --- bun section ---
-    println!();
-    println!("{BOLD}{YELLOW}\u{1f35e} bun{RESET}");
-    match BunCommand::new().await {
-        Ok(bun) => {
-            let ver = get_version(bun.path()).await;
-            println!("   {DIM}Version:{RESET}  {GREEN}{ver}{RESET}");
-            println!(
-                "   {DIM}Path:{RESET}     {CYAN}{}{RESET}",
-                bun.path().display()
-            );
-            println!("   {DIM}Source:{RESET}   {}", bun.source().source_label());
-        }
-        Err(e) => {
-            println!("   {RED}{e}{RESET}");
-        }
+    for entry in [uv, bun, git, gh, databricks] {
+        print_tool_entry(&entry);
     }
 
     println!();
     Ok(())
 }
 
-async fn get_version(binary: &std::path::Path) -> String {
-    tokio::process::Command::new(binary)
-        .arg("--version")
-        .output()
-        .await
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+#[allow(clippy::print_stdout)]
+fn print_tool_entry(entry: &ToolInfoEntry) {
+    println!();
+    println!("{BOLD}{YELLOW}{} {}{RESET}", entry.emoji, entry.name);
+    if let Some(ref err) = entry.error {
+        println!("   {RED}{err}{RESET}");
+    } else {
+        if let Some(ref ver) = entry.version {
+            println!("   {DIM}Version:{RESET}  {GREEN}{ver}{RESET}");
+        }
+        if let Some(ref path) = entry.path {
+            println!("   {DIM}Path:{RESET}     {CYAN}{path}{RESET}");
+        }
+        if let Some(ref source) = entry.source {
+            println!("   {DIM}Source:{RESET}   {source}");
+        }
+    }
 }

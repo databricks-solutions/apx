@@ -2,7 +2,6 @@ use clap::Args;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tokio::process::Command;
 use tracing::debug;
 
 use crate::common::find_app_dir;
@@ -11,7 +10,7 @@ use apx_core::api_generator::generate_openapi;
 use apx_core::common::{
     ensure_dir, format_elapsed_ms, run_command_streaming_with_output, run_preflight_checks, spinner,
 };
-use apx_core::download::resolve_uv;
+use apx_core::external::uv::Uv;
 
 const DEFAULT_BUILD_DIR: &str = ".build";
 const DEFAULT_FALLBACK_VERSION: &str = "0.0.0";
@@ -88,14 +87,9 @@ async fn build_wheel(app_path: &Path, build_path: &Path) -> Result<(), String> {
     let base_version = get_base_version(app_path).await;
     let build_version = generate_build_version(&base_version);
 
-    let uv_path = resolve_uv().await?.path;
-    let mut cmd = Command::new(&uv_path);
-    cmd.arg("build")
-        .arg("--wheel")
-        .arg("--out-dir")
-        .arg(build_path)
-        .current_dir(app_path)
-        .env("UV_DYNAMIC_VERSIONING_BYPASS", build_version);
+    let uv = Uv::new().await?;
+    let mut cmd = uv.build_wheel_command(app_path, build_path).into_command();
+    cmd.env("UV_DYNAMIC_VERSIONING_BYPASS", build_version);
 
     let result =
         run_command_streaming_with_output(cmd, &sp, "🐍 Wheel:", "Failed to build Python wheel")
@@ -150,28 +144,14 @@ fn find_wheel_file(build_dir: &Path) -> Result<String, String> {
 }
 
 async fn get_base_version(app_path: &Path) -> String {
-    let uv_path = match resolve_uv().await {
-        Ok(resolved) => resolved.path,
+    let uv = match Uv::new().await {
+        Ok(uv) => uv,
         Err(_) => return DEFAULT_FALLBACK_VERSION.to_string(),
     };
-    let output = Command::new(&uv_path)
-        .arg("run")
-        .arg("hatch")
-        .arg("version")
-        .current_dir(app_path)
-        .output()
-        .await;
-
-    if let Ok(result) = output
-        && result.status.success()
-    {
-        let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
-        if !stdout.is_empty() {
-            return stdout;
-        }
+    match uv.run_hatch_version(app_path).await {
+        Ok(version) if !version.is_empty() => version,
+        _ => DEFAULT_FALLBACK_VERSION.to_string(),
     }
-
-    DEFAULT_FALLBACK_VERSION.to_string()
 }
 
 fn generate_build_version(base_version: &str) -> String {

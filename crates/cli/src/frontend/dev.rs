@@ -5,9 +5,8 @@ use tracing::debug;
 
 use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
-use apx_core::common::{
-    BunCommand, ensure_entrypoint_deps, read_project_metadata, write_metadata_file,
-};
+use apx_core::common::{ensure_entrypoint_deps, read_project_metadata, write_metadata_file};
+use apx_core::external::bun::Bun;
 
 use apx_core::frontend::prepare_frontend_args;
 
@@ -81,16 +80,10 @@ pub async fn run_dev(app_dir: &Path) -> Result<Child, String> {
     ensure_entrypoint_deps(app_dir).await?;
 
     let (entrypoint, args, app_name) = prepare_frontend_args(app_dir, "dev")?;
-    let bun = BunCommand::new().await?;
+    let bun = Bun::new().await?;
 
     let child = bun
-        .tokio_command_with_node_path(app_dir)
-        .arg("run")
-        .arg(&entrypoint)
-        .args(&args)
-        .current_dir(app_dir)
-        .env("APX_APP_NAME", &app_name)
-        .spawn()
+        .spawn_entrypoint(app_dir, &entrypoint, &args, &app_name)
         .map_err(|err| format!("Failed to spawn frontend dev server: {err}"))?;
 
     Ok(child)

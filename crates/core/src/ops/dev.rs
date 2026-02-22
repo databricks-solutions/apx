@@ -4,14 +4,14 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::common::{
-    ApxCommand, OutputMode, emit, ensure_dir, format_elapsed_ms, handle_spawn_error,
-    run_preflight_checks, spinner_for_mode,
+    OutputMode, emit, ensure_dir, format_elapsed_ms, run_preflight_checks, spinner_for_mode,
 };
 use crate::dev::client::{HealthCheckConfig, health, stop as stop_server};
 use crate::dev::common::{
     DevLock, is_process_running, lock_path, read_lock, remove_lock, write_lock,
 };
 use crate::dev::process::ProcessManager;
+use crate::external::uv::ApxTool;
 use crate::flux;
 use crate::ops::healthcheck::wait_for_healthy_with_logs;
 use crate::registry::Registry;
@@ -171,7 +171,7 @@ pub async fn spawn_server(
 
     wait_for_port_available(port, mode).await?;
 
-    let apx_cmd = ApxCommand::new().await?;
+    let apx_cmd = ApxTool::new_apx().await?;
 
     let command = format!(
         "{} dev __internal__run_server --app-dir {} --host {} --port {}{}",
@@ -186,8 +186,9 @@ pub async fn spawn_server(
         }
     );
 
-    let mut cmd = apx_cmd.tokio_command();
-    cmd.arg("dev")
+    let mut tool_cmd = apx_cmd
+        .cmd()
+        .arg("dev")
         .arg("__internal__run_server")
         .arg("--app-dir")
         .arg(app_dir)
@@ -197,22 +198,22 @@ pub async fn spawn_server(
         .arg(port.to_string());
 
     if skip_credentials_validation {
-        cmd.arg("--skip-credentials-validation");
+        tool_cmd = tool_cmd.arg("--skip-credentials-validation");
     }
 
     let canonical_app_dir = app_dir
         .canonicalize()
         .unwrap_or_else(|_| app_dir.to_path_buf());
 
-    let mut child = cmd
-        .current_dir(app_dir)
+    let mut child = tool_cmd
+        .cwd(app_dir)
+        .env("APX_OTEL_LOGS", "1")
+        .env("APX_APP_DIR", &canonical_app_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .env("APX_OTEL_LOGS", "1")
-        .env("APX_APP_DIR", &canonical_app_dir)
         .spawn()
-        .map_err(|err| handle_spawn_error("apx", err))?;
+        .map_err(String::from)?;
 
     if skip_healthcheck {
         let pid = child.id().ok_or("Failed to get child process ID")?;

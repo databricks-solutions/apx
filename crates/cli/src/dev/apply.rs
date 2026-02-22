@@ -10,7 +10,8 @@ use crate::common::{find_app_dir, has_ui_config};
 use crate::components::add::{ComponentInput, add_components};
 use crate::init::merge_ui_pyproject_config;
 use crate::run_cli_async_helper;
-use apx_core::common::{BunCommand, format_elapsed_ms, spinner};
+use apx_core::common::{format_elapsed_ms, spinner};
+use apx_core::external::bun::Bun;
 use apx_core::interop::{get_template_content, list_template_files};
 
 // ─── Addon manifest types ───────────────────────────────
@@ -337,7 +338,7 @@ async fn apply_single_addon(
 
         // Resolve bun if needed
         if manifest.config.requires_bun {
-            let _bun = BunCommand::new().await?;
+            let _bun = Bun::new().await?;
         }
     }
 

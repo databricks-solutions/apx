@@ -50,9 +50,12 @@ enum ProbeResult {
     Failed(String),
 }
 
-use crate::common::{ApxCommand, BunCommand, UvCommand, handle_spawn_error, read_project_metadata};
+use crate::common::read_project_metadata;
 use crate::dev::otel::forward_log_to_flux;
 use crate::dotenv::DotenvFile;
+use crate::external::ExternalTool;
+use crate::external::bun::Bun;
+use crate::external::uv::{ApxTool, UvTool};
 use crate::python_logging::{
     DevConfig, LogConfigResult, default_logging_config, resolve_log_config,
     write_logging_config_json,
@@ -339,37 +342,37 @@ impl ProcessManager {
         // See entrypoint.ts for OTEL initialization.
         // ============================================================================
 
-        // Use ApxCommand to invoke `apx frontend dev` via uv
-        let mut cmd = ApxCommand::new().await?.tokio_command();
-        cmd.args(["frontend", "dev"])
-            .current_dir(app_dir)
+        // Use ApxTool to invoke `apx frontend dev` via uv
+        let mut tool_cmd = ApxTool::new_apx()
+            .await?
+            .cmd()
+            .args(["frontend", "dev"])
+            .cwd(app_dir)
             .stdin(Stdio::null())
             // Inherit stdout/stderr for local visibility, but don't capture/forward
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::inherit())
+            .env("APX_BACKEND_PORT", self.backend_port.to_string())
+            .env("APX_DEV_DB_PORT", self.db_port.to_string())
+            .env("APX_DEV_DB_PWD", &self.db_password)
+            .env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string())
+            .env("APX_DEV_SERVER_HOST", &self.host)
+            .env("APX_DEV_TOKEN", &self.dev_token)
+            .env("APX_APP_NAME", &self.app_slug)
+            .env("APX_APP_PATH", self.app_dir.display().to_string())
+            // OpenTelemetry configuration - frontend sends logs directly to flux
+            .env(
+                "OTEL_EXPORTER_OTLP_ENDPOINT",
+                format!("http://{}:{}", CLIENT_HOST, crate::flux::FLUX_PORT),
+            )
+            .env(apx_common::hosts::ENV_FRONTEND_HOST, CLIENT_HOST)
+            .env("OTEL_SERVICE_NAME", format!("{}_ui", self.app_slug));
 
-        // Set APX environment variables
         if let Some(fp) = self.frontend_port {
-            cmd.env("APX_FRONTEND_PORT", fp.to_string());
+            tool_cmd = tool_cmd.env("APX_FRONTEND_PORT", fp.to_string());
         }
-        cmd.env("APX_BACKEND_PORT", self.backend_port.to_string());
-        cmd.env("APX_DEV_DB_PORT", self.db_port.to_string());
-        cmd.env("APX_DEV_DB_PWD", &self.db_password);
-        cmd.env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string());
-        cmd.env("APX_DEV_SERVER_HOST", &self.host);
-        cmd.env("APX_DEV_TOKEN", &self.dev_token);
-        cmd.env("APX_APP_NAME", &self.app_slug);
-        cmd.env("APX_APP_PATH", self.app_dir.display().to_string());
 
-        // OpenTelemetry configuration - frontend sends logs directly to flux
-        cmd.env(
-            "OTEL_EXPORTER_OTLP_ENDPOINT",
-            format!("http://{}:{}", CLIENT_HOST, crate::flux::FLUX_PORT),
-        );
-        cmd.env(apx_common::hosts::ENV_FRONTEND_HOST, CLIENT_HOST);
-        cmd.env("OTEL_SERVICE_NAME", format!("{}_ui", self.app_slug));
-
-        let child = cmd.spawn().map_err(|err| handle_spawn_error("apx", err))?;
+        let child = tool_cmd.spawn().map_err(String::from)?;
 
         let mut guard = self.frontend_child.lock().await;
         *guard = Some(child);
@@ -393,37 +396,37 @@ impl ProcessManager {
         let sitecustomize_dir = setup_sitecustomize();
 
         // Run uvicorn via uv to ensure correct Python environment
-        let mut cmd = UvCommand::new("uvicorn").await?.tokio_command();
-        cmd.args([
-            &app_entrypoint,
-            "--host",
-            &self.host,
-            "--port",
-            &self.backend_port.to_string(),
-            "--reload",
-            "--log-config",
-            &log_config,
-        ])
-        .current_dir(app_dir)
-        .stdin(Stdio::null())
-        // Capture stdout/stderr for prefixed logging and flux forwarding
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        let mut tool_cmd = UvTool::new("uvicorn")
+            .await?
+            .cmd()
+            .args([
+                &app_entrypoint,
+                "--host",
+                &self.host,
+                "--port",
+                &self.backend_port.to_string(),
+                "--reload",
+                "--log-config",
+                &log_config,
+            ])
+            .cwd(app_dir)
+            .stdin(Stdio::null())
+            // Capture stdout/stderr for prefixed logging and flux forwarding
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("APX_BACKEND_PORT", self.backend_port.to_string())
+            .env("APX_DEV_DB_PORT", self.db_port.to_string())
+            .env("APX_DEV_DB_PWD", &self.db_password)
+            .env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string())
+            .env("APX_DEV_SERVER_HOST", &self.host)
+            .env("APX_DEV_TOKEN", &self.dev_token)
+            .env("APX_UVICORN", "1")
+            // Force Python to flush stdout/stderr immediately (no buffering)
+            .env("PYTHONUNBUFFERED", "1");
 
-        // Set APX environment variables
         if let Some(fp) = self.frontend_port {
-            cmd.env("APX_FRONTEND_PORT", fp.to_string());
+            tool_cmd = tool_cmd.env("APX_FRONTEND_PORT", fp.to_string());
         }
-        cmd.env("APX_BACKEND_PORT", self.backend_port.to_string());
-        cmd.env("APX_DEV_DB_PORT", self.db_port.to_string());
-        cmd.env("APX_DEV_DB_PWD", &self.db_password);
-        cmd.env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string());
-        cmd.env("APX_DEV_SERVER_HOST", &self.host);
-        cmd.env("APX_DEV_TOKEN", &self.dev_token);
-        cmd.env("APX_UVICORN", "1");
-
-        // Force Python to flush stdout/stderr immediately (no buffering)
-        cmd.env("PYTHONUNBUFFERED", "1");
 
         // Prepend sitecustomize dir to PYTHONPATH if setup succeeded (non-critical)
         if let Some(sitecustomize_path) = sitecustomize_dir {
@@ -431,19 +434,17 @@ impl ProcessManager {
                 Ok(existing) => format!("{}:{}", sitecustomize_path.display(), existing),
                 Err(_) => sitecustomize_path.display().to_string(),
             };
-            cmd.env("PYTHONPATH", pythonpath);
+            tool_cmd = tool_cmd.env("PYTHONPATH", pythonpath);
         }
 
         // Apply dotenv variables
         let vars = self.dotenv_vars.lock().await;
         for (key, value) in vars.iter() {
-            cmd.env(key, value);
+            tool_cmd = tool_cmd.env(key, value);
         }
         drop(vars);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|err| handle_spawn_error("uvicorn", err))?;
+        let mut child = tool_cmd.spawn().map_err(String::from)?;
 
         // Spawn tasks to read stdout/stderr, prefix with source, and forward to flux
         let service_name = format!("{}_app", self.app_slug);
@@ -479,11 +480,11 @@ impl ProcessManager {
         Ok(())
     }
 
-    async fn spawn_pglite(&self, bun: &BunCommand) -> Result<(), String> {
+    async fn spawn_pglite(&self, bun: &Bun) -> Result<(), String> {
         let child = self
             .spawn_process(
                 &self.app_dir,
-                bun.path().to_path_buf(),
+                bun.binary_path().to_path_buf(),
                 vec![
                     "x".to_string(),
                     "@electric-sql/pglite-socket".to_string(),
@@ -880,23 +881,22 @@ impl ProcessManager {
                     config_path.display()
                 );
 
-                let mut validation_cmd = UvCommand::new("python").await?.tokio_command();
-                validation_cmd
+                let output = UvTool::new("python")
+                    .await?
+                    .cmd()
                     .args(["-c", &validation_script])
-                    .current_dir(app_dir)
+                    .cwd(app_dir)
                     .stdout(Stdio::null())
-                    .stderr(Stdio::piped());
-
-                let output = validation_cmd
-                    .output()
+                    .stderr(Stdio::piped())
+                    .exec()
                     .await
                     .map_err(|e| format!("Failed to validate logging config: {e}"))?;
 
-                if output.status.success() {
+                if output.exit_code == Some(0) {
                     config_path.display().to_string()
                 } else {
                     // Validation failed - log error and fall back to default config
-                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stderr = &output.stderr;
                     warn!(
                         "Logging config validation failed, falling back to default:\n{}",
                         stderr
@@ -918,45 +918,44 @@ impl ProcessManager {
         };
 
         // Run uvicorn via uv to ensure correct Python environment
-        let mut cmd = UvCommand::new("uvicorn").await?.tokio_command();
-        cmd.args([
-            app_entrypoint,
-            "--host",
-            host,
-            "--port",
-            &backend_port.to_string(),
-            "--reload",
-            "--log-config",
-            &log_config_str,
-        ])
-        .current_dir(app_dir)
-        .stdin(Stdio::null())
-        // Capture stdout/stderr for prefixed logging and flux forwarding
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        let mut tool_cmd = UvTool::new("uvicorn")
+            .await?
+            .cmd()
+            .args([
+                app_entrypoint,
+                "--host",
+                host,
+                "--port",
+                &backend_port.to_string(),
+                "--reload",
+                "--log-config",
+                &log_config_str,
+            ])
+            .cwd(app_dir)
+            .stdin(Stdio::null())
+            // Capture stdout/stderr for prefixed logging and flux forwarding
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("APX_BACKEND_PORT", backend_port.to_string())
+            .env("APX_DEV_DB_PORT", db_port.to_string())
+            .env("APX_DEV_DB_PWD", db_password)
+            .env("APX_DEV_SERVER_PORT", dev_server_port.to_string())
+            .env("APX_DEV_SERVER_HOST", host)
+            .env("APX_DEV_TOKEN", dev_token)
+            // Force Python to flush stdout/stderr immediately (no buffering)
+            .env("PYTHONUNBUFFERED", "1");
 
-        // Set APX environment variables
         if let Some(fp) = frontend_port {
-            cmd.env("APX_FRONTEND_PORT", fp.to_string());
+            tool_cmd = tool_cmd.env("APX_FRONTEND_PORT", fp.to_string());
         }
-        cmd.env("APX_BACKEND_PORT", backend_port.to_string());
-        cmd.env("APX_DEV_DB_PORT", db_port.to_string());
-        cmd.env("APX_DEV_DB_PWD", db_password);
-        cmd.env("APX_DEV_SERVER_PORT", dev_server_port.to_string());
-        cmd.env("APX_DEV_SERVER_HOST", host);
-        cmd.env("APX_DEV_TOKEN", dev_token);
-        // Force Python to flush stdout/stderr immediately (no buffering)
-        cmd.env("PYTHONUNBUFFERED", "1");
 
         let vars = dotenv_vars.lock().await;
         for (key, value) in vars.iter() {
-            cmd.env(key, value);
+            tool_cmd = tool_cmd.env(key, value);
         }
         drop(vars);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|err| handle_spawn_error("uvicorn", err))?;
+        let mut child = tool_cmd.spawn().map_err(String::from)?;
 
         // Spawn tasks to read stdout/stderr, prefix with source, and forward to flux
         let service_name = format!("{app_slug}_app");
@@ -1012,8 +1011,8 @@ impl ProcessManager {
         }
     }
 
-    async fn ensure_bun() -> Result<BunCommand, String> {
-        BunCommand::new().await
+    async fn ensure_bun() -> Result<Bun, String> {
+        Bun::new().await
     }
 
     /// Send SIGTERM to a child process tree (polite shutdown request).

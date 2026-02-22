@@ -1,5 +1,8 @@
 use std::fmt;
 
+use crate::external::CommandError;
+use crate::external::gh::Gh;
+
 const GITHUB_REPO: &str = "databricks-solutions/apx";
 
 /// Metadata auto-collected for feedback issues.
@@ -43,6 +46,15 @@ impl fmt::Display for FeedbackError {
         match self {
             Self::GhNotFound => write!(f, "gh CLI not found"),
             Self::GhFailed(msg) => write!(f, "gh CLI error: {msg}"),
+        }
+    }
+}
+
+impl From<CommandError> for FeedbackError {
+    fn from(e: CommandError) -> Self {
+        match e {
+            CommandError::NotFound { .. } => Self::GhNotFound,
+            other => Self::GhFailed(other.to_string()),
         }
     }
 }
@@ -103,35 +115,11 @@ pub fn format_issue_body(
 
 /// Submit feedback via the `gh` CLI. Returns the issue URL on success.
 pub async fn submit_via_gh_cli(title: &str, body: &str) -> Result<String, FeedbackError> {
-    // Check if gh is available
-    if which::which("gh").is_err() {
-        return Err(FeedbackError::GhNotFound);
-    }
-
-    let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "create",
-            "--repo",
-            GITHUB_REPO,
-            "--title",
-            title,
-            "--body",
-            body,
-            "--label",
-            "feedback",
-        ])
-        .output()
-        .await
-        .map_err(|e| FeedbackError::GhFailed(e.to_string()))?;
-
-    if output.status.success() {
-        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(url)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(FeedbackError::GhFailed(stderr))
-    }
+    let gh = Gh::new()?;
+    let url = gh
+        .create_issue(GITHUB_REPO, title, body, &["feedback"])
+        .await?;
+    Ok(url)
 }
 
 /// Build a pre-filled GitHub issue URL for browser fallback.

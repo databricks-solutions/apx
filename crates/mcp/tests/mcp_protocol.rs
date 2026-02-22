@@ -39,14 +39,8 @@ async fn project_path() -> &'static Path {
             assert_eq!(exit_code, 0, "apx init failed");
 
             // Run `uv sync` using the resolved uv binary (cached by init).
-            let uv = apx_core::download::try_resolve_uv().expect("uv should be cached after init");
-            let status = tokio::process::Command::new(&uv.path)
-                .arg("sync")
-                .current_dir(&path)
-                .status()
-                .await
-                .expect("failed to run uv sync");
-            assert!(status.success(), "uv sync failed");
+            let uv = apx_core::external::Uv::try_new().expect("uv should be cached after init");
+            uv.sync(&path).await.expect("uv sync failed");
 
             path
         })

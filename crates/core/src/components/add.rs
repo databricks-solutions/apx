@@ -1,7 +1,8 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::common::{BunCommand, read_project_metadata};
+use crate::common::read_project_metadata;
+use crate::external::bun::Bun;
 
 use super::cache::sync_registry_indexes;
 use super::{
@@ -233,22 +234,12 @@ pub async fn bun_add(app_dir: &Path, deps: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let bun = BunCommand::new().await?;
-    let output = bun
-        .tokio_command()
-        .arg("add")
-        .args(deps)
-        .current_dir(app_dir)
-        .output()
+    let bun = Bun::new().await?;
+    bun.add(app_dir, deps)
         .await
+        .map_err(|e| format!("Failed to install dependencies: {e}"))?
+        .check("bun")
         .map_err(|e| format!("Failed to install dependencies: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Failed to install dependencies. Stdout: {} Stderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
 
     Ok(())
 }

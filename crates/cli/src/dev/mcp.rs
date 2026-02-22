@@ -25,7 +25,7 @@ pub async fn run(_args: McpArgs) -> i32 {
 
         // Get SDK version via subprocess before spawning async task
         const DEFAULT_SDK_VERSION: &str = "0.89.0";
-        let sdk_version = match get_databricks_sdk_version() {
+        let sdk_version = match get_databricks_sdk_version(None).await {
             Ok(Some(v)) => {
                 tracing::info!("Found Databricks SDK version: {}", v);
                 v

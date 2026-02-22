@@ -1,5 +1,5 @@
 use crate::run_cli_async_helper;
-use apx_core::common::BunCommand;
+use apx_core::external::bun::Bun;
 use clap::Args;
 use tokio::select;
 use tokio::signal;
@@ -17,18 +17,15 @@ pub async fn run(args: BunArgs) -> i32 {
 }
 
 pub async fn run_inner(args: BunArgs) -> Result<(), String> {
-    let bun = BunCommand::new().await?;
+    let bun = Bun::new().await?;
 
     debug!(
-        bun_path = %bun.path().display(),
         args = ?args.args,
         "Running bun with passthrough args"
     );
 
     let mut child = bun
-        .tokio_command()
-        .args(&args.args)
-        .spawn()
+        .passthrough(&args.args)
         .map_err(|e| format!("Failed to spawn bun: {e}"))?;
 
     select! {

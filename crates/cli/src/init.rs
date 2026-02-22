@@ -8,7 +8,6 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tera::Context;
-use tokio::process::Command;
 use tracing::debug;
 
 /// (name, display_name, description, is_default, order)
@@ -79,10 +78,10 @@ use crate::components::add::{ComponentInput, add_components};
 use crate::dev::apply::{apply_python_edits, discover_all_addons, read_addon_manifest};
 use crate::run_cli_async_helper;
 use apx_core::common::list_profiles;
-use apx_core::common::{
-    BunCommand, format_elapsed_ms, run_with_spinner, run_with_spinner_async, spinner,
-};
+use apx_core::common::{format_elapsed_ms, run_with_spinner, run_with_spinner_async, spinner};
 use apx_core::dotenv::DotenvFile;
+use apx_core::external::bun::Bun;
+use apx_core::external::git::Git;
 use apx_core::interop::{get_template_content, list_template_files};
 use std::time::Instant;
 
@@ -132,7 +131,7 @@ pub async fn run(args: InitArgs) -> i32 {
 
 async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     // Eagerly resolve uv (always needed)
-    let _uv = apx_core::download::resolve_uv().await?;
+    let _uv = apx_core::external::Uv::new().await?;
 
     let workspace_root = resolve_app_dir(args.app_path.take());
 
@@ -359,7 +358,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
     // Resolve bun only for UI-enabled projects
     if ui_enabled {
-        let _bun = BunCommand::new().await?;
+        let _bun = Bun::new().await?;
     }
 
     println!(
@@ -423,38 +422,37 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     } else {
         &app_path
     };
-    if !is_command_available("git").await {
+    if !Git::is_available().await {
         println!("⚠️  Git is not available - skipping git initialization");
-    } else if is_in_git_repo(git_dir).await? {
-        println!("✓ Already in a git repository - skipping git initialization");
     } else {
-        let git_result = run_with_spinner_async(
-            "🔧 Initializing git repository...",
-            "✅ Git repository initialized",
-            || async {
-                let mut init_cmd = Command::new("git");
-                init_cmd.arg("init").current_dir(git_dir);
-                run_command(&mut init_cmd, "Failed to initialize git repository").await?;
+        let git = Git::new().map_err(|e| e.to_string())?;
+        let inside =
+            git.is_inside_work_tree(git_dir).await.unwrap_or(false) || has_git_dir(git_dir);
+        if inside {
+            println!("✓ Already in a git repository - skipping git initialization");
+        } else {
+            let git_result = run_with_spinner_async(
+                "🔧 Initializing git repository...",
+                "✅ Git repository initialized",
+                || async {
+                    git.init(git_dir)
+                        .await
+                        .map_err(|e| format!("Failed to initialize git repository: {e}"))?;
+                    git.add(git_dir, &["."])
+                        .await
+                        .map_err(|e| format!("Failed to add files to git repository: {e}"))?;
+                    git.commit(git_dir, "init")
+                        .await
+                        .map_err(|e| format!("Failed to commit files to git repository: {e}"))?;
+                    Ok(())
+                },
+            )
+            .await;
 
-                let mut add_cmd = Command::new("git");
-                add_cmd.arg("add").arg(".").current_dir(git_dir);
-                run_command(&mut add_cmd, "Failed to add files to git repository").await?;
-
-                let mut commit_cmd = Command::new("git");
-                commit_cmd
-                    .arg("commit")
-                    .arg("-m")
-                    .arg("init")
-                    .current_dir(git_dir);
-                run_command(&mut commit_cmd, "Failed to commit files to git repository").await?;
-                Ok(())
-            },
-        )
-        .await;
-
-        if let Err(err) = git_result {
-            println!("⚠️  Git initialization failed: {err}");
-            println!("   Continuing with project setup...");
+            if let Err(err) = git_result {
+                println!("⚠️  Git initialization failed: {err}");
+                println!("   Continuing with project setup...");
+            }
         }
     }
 
@@ -674,22 +672,6 @@ pub(crate) fn merge_ui_pyproject_config(app_dir: &Path, app_slug: &str) -> Resul
     })
 }
 
-async fn is_in_git_repo(path: &Path) -> Result<bool, String> {
-    let output = Command::new("git")
-        .arg("rev-parse")
-        .arg("--is-inside-work-tree")
-        .current_dir(path)
-        .output()
-        .await
-        .map_err(|err| format!("Failed to check git repository: {err}"))?;
-    let is_inside =
-        output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true";
-    if is_inside {
-        return Ok(true);
-    }
-    Ok(has_git_dir(path))
-}
-
 fn has_git_dir(path: &Path) -> bool {
     for ancestor in path.ancestors() {
         let candidate = ancestor.join(".git");
@@ -698,26 +680,6 @@ fn has_git_dir(path: &Path) -> bool {
         }
     }
     false
-}
-
-async fn run_command(cmd: &mut Command, error_msg: &str) -> Result<(), String> {
-    let output = cmd
-        .output()
-        .await
-        .map_err(|err| format!("{error_msg}: {err}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut message = format!("❌ {error_msg}");
-    if !stderr.trim().is_empty() {
-        message.push_str(&format!("\n{stderr}"));
-    }
-    if !stdout.trim().is_empty() {
-        message.push_str(&format!("\n{stdout}"));
-    }
-    Err(message)
 }
 
 use toml_edit::{Array, Item, Table, Value};
@@ -769,15 +731,6 @@ fn ensure_workspace_config(root_pyproject: &Path, member_path: &Path) -> Result<
 
         Ok(())
     })
-}
-
-async fn is_command_available(cmd: &str) -> bool {
-    Command::new(cmd)
-        .arg("--version")
-        .output()
-        .await
-        .map(|output| output.status.success())
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

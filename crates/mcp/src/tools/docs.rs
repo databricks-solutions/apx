@@ -2,7 +2,7 @@ use crate::indexing::wait_for_index_ready;
 use crate::server::ApxServer;
 use crate::tools::{ToolError, ToolResultExt};
 use apx_core::databricks_sdk_doc::SDKSource;
-use apx_core::interop::get_databricks_sdk_version_for_project;
+use apx_core::interop::get_databricks_sdk_version;
 use rmcp::model::*;
 use rmcp::schemars;
 use serde::Serialize;
@@ -58,7 +58,7 @@ impl ApxServer {
         // If app_path is provided, detect that project's SDK version and switch if different
         if let Some(ref app_path) = args.app_path {
             let project_dir = std::path::Path::new(app_path);
-            match get_databricks_sdk_version_for_project(project_dir) {
+            match get_databricks_sdk_version(Some(project_dir)).await {
                 Ok(Some(project_version)) => {
                     if let Err(e) = index.ensure_version(&args.source, &project_version).await {
                         tracing::warn!(
