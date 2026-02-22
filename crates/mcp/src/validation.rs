@@ -1,5 +1,37 @@
 use std::path::PathBuf;
 
+/// A path that has been validated as an absolute, existing directory.
+///
+/// Created via `try_from_str`, which validates and canonicalizes the path.
+/// Derefs to `std::path::Path` for transparent use with filesystem APIs.
+#[derive(Debug, Clone)]
+pub struct ValidatedAppPath(PathBuf);
+
+impl ValidatedAppPath {
+    /// Validate and canonicalize an app path string.
+    ///
+    /// Returns `Err(rmcp::ErrorData)` with `invalid_params` code on failure,
+    /// suitable for direct use with `?` in MCP handlers.
+    pub fn try_from_str(s: &str) -> Result<Self, rmcp::ErrorData> {
+        validate_app_path(s)
+            .map(ValidatedAppPath)
+            .map_err(|e| rmcp::ErrorData::invalid_params(e, None))
+    }
+}
+
+impl std::ops::Deref for ValidatedAppPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for ValidatedAppPath {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
 /// Validate that `app_path` is an absolute path to an existing directory.
 /// Returns the canonicalized path (symlinks and `..` segments resolved).
 pub fn validate_app_path(app_path: &str) -> Result<PathBuf, String> {

@@ -23,7 +23,7 @@ macro_rules! tool_response {
         }
     ) => {
         $(#[$meta])*
-        #[derive(serde::Serialize)]
+        #[derive(Debug, serde::Serialize)]
         $vis struct $name {
             $(
                 $(#[$field_meta])*
@@ -38,11 +38,19 @@ macro_rules! tool_response {
 pub mod databricks;
 pub mod devserver;
 pub mod docs;
+pub mod error;
 pub mod feedback;
+pub mod openapi;
 pub mod project;
 pub mod registry;
 
+pub use error::ToolError;
+
 /// Shared args for tools that only need an app path.
+///
+/// `app_path` is a `String` (not a validated type) because serde deserialization
+/// and schemars schema generation don't compose reliably with newtypes.
+/// Validation is handled at the handler level via `ValidatedAppPath::try_from_str`.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AppPathArgs {
     /// Absolute path to the project directory

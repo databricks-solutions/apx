@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use crate::indexing::{rebuild_search_index, wait_for_index_ready};
 use crate::server::ApxServer;
-use crate::tools::ToolResultExt;
-use crate::validation::validate_app_path;
+use crate::tools::{ToolError, ToolResultExt};
+use crate::validation::ValidatedAppPath;
 use apx_core::components::{
     get_all_registry_indexes, needs_registry_refresh, sync_registry_indexes,
 };
@@ -50,8 +50,7 @@ impl ApxServer {
         &self,
         args: SearchRegistryComponentsArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = validate_app_path(&args.app_path)
-            .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
+        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
 
         let ctx = &self.ctx;
 
@@ -63,40 +62,28 @@ impl ApxServer {
         )
         .await
         {
-            return Ok(CallToolResult::error(vec![Content::text(e)]));
+            return ToolError::IndexNotReady(e).into_result();
         }
 
         // Check if registry indexes need refresh and collect configured registry names
-        let mut configured_registries: Option<HashSet<String>> = None;
-        if let Ok(metadata) = apx_core::common::read_project_metadata(&path)
-            && let Ok(cfg) = apx_core::components::UiConfig::from_metadata(&metadata, &path)
-        {
-            configured_registries = Some(cfg.registries.keys().cloned().collect());
-            if needs_registry_refresh(&cfg.registries) {
-                tracing::info!("Registry indexes stale, refreshing...");
-                if let Ok(true) = sync_registry_indexes(&path, false).await {
-                    let pool = self.ctx.dev_db.pool().clone();
-                    if let Err(e) = rebuild_search_index(pool.clone()).await {
-                        tracing::warn!("Failed to rebuild search index after refresh: {}", e);
-                    }
-                }
-            }
-        }
+        let configured_registries = self.refresh_registries_if_stale(&path).await;
 
         // Search using async DB layer
         let pool = self.ctx.dev_db.pool().clone();
-        let index = ComponentIndex::new(pool).map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("Failed to create index: {e}"), None)
-        })?;
+        let index = match ComponentIndex::new(pool) {
+            Ok(idx) => idx,
+            Err(e) => {
+                return ToolError::OperationFailed(format!("Failed to create index: {e}"))
+                    .into_result();
+            }
+        };
         let search_results = match index
             .search(&args.query, args.limit, configured_registries.as_ref())
             .await
         {
             Ok(results) => results,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Search failed: {e}"
-                ))]));
+                return ToolError::OperationFailed(format!("Search failed: {e}")).into_result();
             }
         };
 
@@ -108,7 +95,7 @@ impl ApxServer {
             }
         }
 
-        #[derive(serde::Serialize)]
+        #[derive(Debug, serde::Serialize)]
         struct SearchResultItem {
             id: String,
             name: String,
@@ -139,8 +126,7 @@ impl ApxServer {
         &self,
         args: AddComponentArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = validate_app_path(&args.app_path)
-            .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
+        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
 
         use apx_core::components::add::{ComponentInput, add_components};
 
@@ -148,10 +134,11 @@ impl ApxServer {
             if let Some((prefix, name)) = args.component_id.split_once('/') {
                 ComponentInput::with_registry(name, prefix)
             } else {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
+                return ToolError::InvalidInput(format!(
                     "Invalid component ID format: {}. Expected '@registry-name/component-name'",
                     args.component_id
-                ))]));
+                ))
+                .into_result();
             }
         } else {
             ComponentInput::new(args.component_id.clone())
@@ -193,9 +180,9 @@ impl ApxServer {
 
                 Ok(CallToolResult::from_serializable(&response))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Failed to add component: {e}"
-            ))])),
+            Err(e) => {
+                ToolError::OperationFailed(format!("Failed to add component: {e}")).into_result()
+            }
         }
     }
 
@@ -203,30 +190,16 @@ impl ApxServer {
         &self,
         args: ListRegistryComponentsArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = validate_app_path(&args.app_path)
-            .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
+        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
 
         // Check if registry indexes need refresh
-        if let Ok(metadata) = apx_core::common::read_project_metadata(&path) {
-            let cfg = apx_core::components::UiConfig::from_metadata(&metadata, &path)
-                .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
-            if needs_registry_refresh(&cfg.registries) {
-                tracing::info!("Registry indexes stale, refreshing...");
-                if let Ok(true) = sync_registry_indexes(&path, false).await {
-                    let pool = self.ctx.dev_db.pool().clone();
-                    if let Err(e) = rebuild_search_index(pool.clone()).await {
-                        tracing::warn!("Failed to rebuild search index after refresh: {}", e);
-                    }
-                }
-            }
-        }
+        let _ = self.refresh_registries_if_stale(&path).await;
 
         let all_indexes = match get_all_registry_indexes() {
             Ok(indexes) => indexes,
             Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to load registry indexes: {e}"
-                ))]));
+                return ToolError::OperationFailed(format!("Failed to load registry indexes: {e}"))
+                    .into_result();
             }
         };
 
@@ -240,10 +213,11 @@ impl ApxServer {
             Some(items) => items,
             None => {
                 let available: Vec<&String> = all_indexes.keys().collect();
-                return Ok(CallToolResult::error(vec![Content::text(format!(
+                return ToolError::OperationFailed(format!(
                     "Registry '{}' not found. Available registries: {:?}",
                     registry_key, available
-                ))]));
+                ))
+                .into_result();
             }
         };
 
@@ -255,7 +229,7 @@ impl ApxServer {
             }
         }
 
-        #[derive(serde::Serialize)]
+        #[derive(Debug, serde::Serialize)]
         struct ListItem {
             name: String,
             description: Option<String>,
@@ -278,5 +252,25 @@ impl ApxServer {
         };
 
         Ok(CallToolResult::from_serializable(&response))
+    }
+
+    /// Read project metadata + UiConfig, refresh stale registry indexes,
+    /// and return the set of configured registry names (if available).
+    async fn refresh_registries_if_stale(&self, path: &std::path::Path) -> Option<HashSet<String>> {
+        let metadata = apx_core::common::read_project_metadata(path).ok()?;
+        let cfg = apx_core::components::UiConfig::from_metadata(&metadata, path).ok()?;
+        let registries: HashSet<String> = cfg.registries.keys().cloned().collect();
+
+        if needs_registry_refresh(&cfg.registries) {
+            tracing::info!("Registry indexes stale, refreshing...");
+            if let Ok(true) = sync_registry_indexes(path, false).await {
+                let pool = self.ctx.dev_db.pool().clone();
+                if let Err(e) = rebuild_search_index(pool).await {
+                    tracing::warn!("Failed to rebuild search index after refresh: {}", e);
+                }
+            }
+        }
+
+        Some(registries)
     }
 }

@@ -1,6 +1,6 @@
 use crate::server::ApxServer;
-use crate::tools::{AppPathArgs, ToolResultExt};
-use crate::validation::validate_app_path;
+use crate::tools::{AppPathArgs, ToolError, ToolResultExt};
+use crate::validation::ValidatedAppPath;
 use rmcp::model::*;
 use rmcp::schemars;
 
@@ -19,8 +19,7 @@ fn default_logs_duration() -> String {
 
 impl ApxServer {
     pub async fn handle_start(&self, args: AppPathArgs) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = validate_app_path(&args.app_path)
-            .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
+        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
 
         use apx_core::common::OutputMode;
         use apx_core::ops::dev::start_dev_server;
@@ -30,13 +29,12 @@ impl ApxServer {
                 "Dev server started at http://{}:{port}",
                 apx_common::hosts::BROWSER_HOST
             ))])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => ToolError::OperationFailed(e).into_result(),
         }
     }
 
     pub async fn handle_stop(&self, args: AppPathArgs) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = validate_app_path(&args.app_path)
-            .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
+        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
 
         use apx_core::common::OutputMode;
         use apx_core::ops::dev::stop_dev_server;
@@ -48,7 +46,7 @@ impl ApxServer {
             Ok(false) => Ok(CallToolResult::success(vec![Content::text(
                 "No dev server running",
             )])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => ToolError::OperationFailed(e).into_result(),
         }
     }
 
@@ -56,8 +54,7 @@ impl ApxServer {
         &self,
         args: AppPathArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = validate_app_path(&args.app_path)
-            .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
+        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
 
         use apx_core::common::OutputMode;
         use apx_core::ops::dev::restart_dev_server;
@@ -67,13 +64,12 @@ impl ApxServer {
                 "Dev server restarted at http://{}:{port}",
                 apx_common::hosts::BROWSER_HOST
             ))])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => ToolError::OperationFailed(e).into_result(),
         }
     }
 
     pub async fn handle_logs(&self, args: LogsToolArgs) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = validate_app_path(&args.app_path)
-            .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
+        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
 
         use apx_core::ops::logs::fetch_logs_structured;
 
@@ -95,7 +91,7 @@ impl ApxServer {
 
                 Ok(CallToolResult::from_serializable(&response))
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            Err(e) => ToolError::OperationFailed(e).into_result(),
         }
     }
 }

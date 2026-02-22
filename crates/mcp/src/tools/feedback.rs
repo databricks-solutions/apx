@@ -1,5 +1,5 @@
 use crate::server::ApxServer;
-use crate::tools::ToolResultExt;
+use crate::tools::{ToolError, ToolResultExt};
 use rmcp::model::*;
 use rmcp::schemars;
 
@@ -40,10 +40,8 @@ impl ApxServer {
         args: FeedbackPrepareArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         if args.message.trim().is_empty() {
-            return Err(rmcp::ErrorData::invalid_params(
-                "Feedback message cannot be empty",
-                None,
-            ));
+            return ToolError::InvalidInput("Feedback message cannot be empty".to_string())
+                .into_result();
         }
 
         let category = if args.category.is_empty() {
@@ -81,10 +79,10 @@ impl ApxServer {
         args: FeedbackSubmitArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         if args.title.trim().is_empty() || args.body.trim().is_empty() {
-            return Err(rmcp::ErrorData::invalid_params(
-                "Title and body are required. Call feedback_prepare first.",
-                None,
-            ));
+            return ToolError::InvalidInput(
+                "Title and body are required. Call feedback_prepare first.".to_string(),
+            )
+            .into_result();
         }
 
         let prepared = apx_core::feedback::PreparedFeedback {

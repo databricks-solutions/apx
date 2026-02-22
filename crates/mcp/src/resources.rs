@@ -1,5 +1,5 @@
 use crate::info_content::APX_INFO_CONTENT;
-use crate::tools::project::parse_openapi_operations;
+use crate::tools::openapi::parse_openapi_operations;
 use crate::validation::validate_app_path;
 use rmcp::model::*;
 use serde::Serialize;

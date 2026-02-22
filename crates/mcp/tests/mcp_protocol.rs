@@ -619,13 +619,14 @@ async fn test_list_registry_components() {
     )
     .await;
 
-    // list_registry_components may return protocol-level error if the project
-    // has no UI config (--no-addons). That's acceptable.
+    // list_registry_components now returns a tool-level error (is_error=true)
+    // instead of a protocol-level error when the project has no UI config.
     let result = match result {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("list_registry_components protocol error (acceptable): {e}");
-            return;
+            panic!(
+                "list_registry_components should not return protocol error for missing UI config: {e}"
+            );
         }
     };
 
