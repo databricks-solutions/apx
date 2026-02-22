@@ -14,6 +14,7 @@
 //! This crate contains shared functionality used by both the main `apx` CLI
 //! and the standalone `apx-agent` binary.
 
+pub mod bundles;
 pub mod format;
 pub mod hosts;
 pub mod storage;

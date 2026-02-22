@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -6,72 +6,10 @@ use apx_core::dotenv::DotenvFile;
 use apx_databricks_sdk::{AppLogsArgs, DatabricksClient, LogEntry};
 use rmcp::model::*;
 use rmcp::schemars;
-use serde_json::Value;
 
 use crate::server::ApxServer;
 use crate::tools::{ToolError, ToolResultExt};
 use crate::validation::validated_app_path;
-
-pub(crate) fn resolve_app_name_from_databricks_yml(project_dir: &Path) -> Result<String, String> {
-    let yml_path = project_dir.join("databricks.yml");
-    if !yml_path.exists() {
-        return Err(format!(
-            "Could not auto-detect app name because databricks.yml was not found at {}. \
-            Please pass app_name explicitly.",
-            yml_path.display()
-        ));
-    }
-
-    let contents = std::fs::read_to_string(&yml_path)
-        .map_err(|e| format!("Failed to read databricks.yml: {e}"))?;
-
-    let data: Value = serde_yaml::from_str(&contents)
-        .map_err(|e| format!("Failed to parse databricks.yml: {e}"))?;
-
-    let apps_obj = extract_apps_object(&data)?;
-    let app_names = collect_app_names(apps_obj);
-
-    match app_names.len() {
-        1 => Ok(app_names[0].clone()),
-        0 => Err(
-            "Could not auto-detect app name because no apps were found in databricks.yml under \
-            resources.apps.*.name. Please pass app_name explicitly."
-                .to_string(),
-        ),
-        _ => Err(format!(
-            "Could not auto-detect app name because multiple apps were found in databricks.yml \
-            ({}). Please pass app_name explicitly.",
-            app_names.join(", ")
-        )),
-    }
-}
-
-fn extract_apps_object(data: &Value) -> Result<&serde_json::Map<String, Value>, String> {
-    data.get("resources")
-        .ok_or_else(|| "databricks.yml 'resources' must be a mapping/object".to_string())?
-        .get("apps")
-        .ok_or_else(|| "databricks.yml 'resources.apps' must be a mapping/object".to_string())?
-        .as_object()
-        .ok_or_else(|| "databricks.yml 'resources.apps' must be a mapping/object".to_string())
-}
-
-fn collect_app_names(apps_obj: &serde_json::Map<String, Value>) -> Vec<String> {
-    let mut names = HashSet::new();
-    for app_def in apps_obj.values() {
-        if let Some(app_obj) = app_def.as_object()
-            && let Some(name_val) = app_obj.get("name")
-            && let Some(name_str) = name_val.as_str()
-        {
-            let name = name_str.trim();
-            if !name.is_empty() {
-                names.insert(name.to_string());
-            }
-        }
-    }
-    let mut sorted: Vec<String> = names.into_iter().collect();
-    sorted.sort();
-    sorted
-}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct DatabricksAppsLogsArgs {
@@ -201,7 +139,7 @@ fn resolve_app_name(
             name: name.trim().to_string(),
             from_yml: false,
         }),
-        _ => match resolve_app_name_from_databricks_yml(cwd) {
+        _ => match apx_common::bundles::resolve_single_app_name(cwd) {
             Ok(name) => Ok(ResolvedAppName {
                 name,
                 from_yml: true,
@@ -256,62 +194,6 @@ fn resolve_profile(args: &DatabricksAppsLogsArgs, dotenv_vars: &HashMap<String, 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn resolve_app_name_from_databricks_yml_basic() {
-        let dir = std::env::temp_dir().join("apx_test_resolve_app");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let yml_content = r#"
-resources:
-  apps:
-    my_app:
-      name: my-cool-app
-      source_code_path: ./src
-"#;
-        std::fs::write(dir.join("databricks.yml"), yml_content).unwrap();
-
-        let result = resolve_app_name_from_databricks_yml(&dir);
-        assert_eq!(result.unwrap(), "my-cool-app");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn resolve_app_name_multiple_apps_returns_error() {
-        let dir = std::env::temp_dir().join("apx_test_resolve_multi");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let yml_content = r#"
-resources:
-  apps:
-    app1:
-      name: first-app
-    app2:
-      name: second-app
-"#;
-        std::fs::write(dir.join("databricks.yml"), yml_content).unwrap();
-
-        let result = resolve_app_name_from_databricks_yml(&dir);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("multiple apps"));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn resolve_app_name_no_file_returns_error() {
-        let dir = std::env::temp_dir().join("apx_test_resolve_nofile");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let result = resolve_app_name_from_databricks_yml(&dir);
-        assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn resolve_profile_explicit_arg() {

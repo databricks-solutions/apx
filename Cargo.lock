@@ -198,6 +198,7 @@ dependencies = [
  "dirs 5.0.1",
  "serde",
  "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]
@@ -299,7 +300,6 @@ dependencies = [
  "schemars 1.2.0",
  "serde",
  "serde_json",
- "serde_yaml",
  "tempfile",
  "tokio",
  "tracing",

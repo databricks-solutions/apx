@@ -11,7 +11,6 @@ apx-databricks-sdk.workspace = true
 apx-db.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 schemars.workspace = true
