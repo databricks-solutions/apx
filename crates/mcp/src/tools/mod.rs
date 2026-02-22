@@ -50,7 +50,7 @@ pub use error::ToolError;
 ///
 /// `app_path` is a `String` (not a validated type) because serde deserialization
 /// and schemars schema generation don't compose reliably with newtypes.
-/// Validation is handled at the handler level via `ValidatedAppPath::try_from_str`.
+/// Validation is handled at the handler level via `validated_app_path`.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AppPathArgs {
     /// Absolute path to the project directory

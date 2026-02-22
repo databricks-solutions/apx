@@ -1,6 +1,6 @@
 use crate::info_content::APX_INFO_CONTENT;
 use crate::tools::openapi::parse_openapi_operations;
-use crate::validation::validate_app_path;
+use crate::validation::validated_app_path;
 use rmcp::model::*;
 use serde::Serialize;
 
@@ -59,7 +59,7 @@ struct ProjectContext {
 }
 
 pub async fn read_project_resource(app_path: &str) -> Result<ReadResourceResult, String> {
-    let path = validate_app_path(app_path)?;
+    let path = validated_app_path(app_path).map_err(|e| e.message)?;
 
     use apx_core::common::{read_project_metadata, read_python_dependencies};
     use apx_core::interop::get_databricks_sdk_version_for_project;

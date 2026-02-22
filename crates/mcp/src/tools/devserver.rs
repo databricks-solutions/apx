@@ -1,6 +1,6 @@
 use crate::server::ApxServer;
 use crate::tools::{AppPathArgs, ToolError, ToolResultExt};
-use crate::validation::ValidatedAppPath;
+use crate::validation::validated_app_path;
 use rmcp::model::*;
 use rmcp::schemars;
 
@@ -19,7 +19,7 @@ fn default_logs_duration() -> String {
 
 impl ApxServer {
     pub async fn handle_start(&self, args: AppPathArgs) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
+        let path = validated_app_path(&args.app_path)?;
 
         use apx_core::common::OutputMode;
         use apx_core::ops::dev::start_dev_server;
@@ -34,7 +34,7 @@ impl ApxServer {
     }
 
     pub async fn handle_stop(&self, args: AppPathArgs) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
+        let path = validated_app_path(&args.app_path)?;
 
         use apx_core::common::OutputMode;
         use apx_core::ops::dev::stop_dev_server;
@@ -54,7 +54,7 @@ impl ApxServer {
         &self,
         args: AppPathArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
+        let path = validated_app_path(&args.app_path)?;
 
         use apx_core::common::OutputMode;
         use apx_core::ops::dev::restart_dev_server;
@@ -69,7 +69,7 @@ impl ApxServer {
     }
 
     pub async fn handle_logs(&self, args: LogsToolArgs) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
+        let path = validated_app_path(&args.app_path)?;
 
         use apx_core::ops::logs::fetch_logs_structured;
 

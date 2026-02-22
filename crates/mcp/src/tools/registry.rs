@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::indexing::{rebuild_search_index, wait_for_index_ready};
 use crate::server::ApxServer;
 use crate::tools::{ToolError, ToolResultExt};
-use crate::validation::ValidatedAppPath;
+use crate::validation::validated_app_path;
 use apx_core::components::{
     get_all_registry_indexes, needs_registry_refresh, sync_registry_indexes,
 };
@@ -50,7 +50,7 @@ impl ApxServer {
         &self,
         args: SearchRegistryComponentsArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
+        let path = validated_app_path(&args.app_path)?;
 
         let ctx = &self.ctx;
 
@@ -126,7 +126,7 @@ impl ApxServer {
         &self,
         args: AddComponentArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
+        let path = validated_app_path(&args.app_path)?;
 
         use apx_core::components::add::{ComponentInput, add_components};
 
@@ -190,7 +190,7 @@ impl ApxServer {
         &self,
         args: ListRegistryComponentsArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
+        let path = validated_app_path(&args.app_path)?;
 
         // Check if registry indexes need refresh
         let _ = self.refresh_registries_if_stale(&path).await;

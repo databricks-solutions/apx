@@ -1,6 +1,6 @@
 use crate::server::ApxServer;
 use crate::tools::{ToolError, ToolResultExt};
-use crate::validation::ValidatedAppPath;
+use crate::validation::validated_app_path;
 use apx_core::dotenv::DotenvFile;
 use rmcp::model::*;
 use rmcp::schemars;
@@ -144,7 +144,7 @@ impl ApxServer {
         &self,
         args: DatabricksAppsLogsArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let cwd = ValidatedAppPath::try_from_str(&args.app_path)?;
+        let cwd = validated_app_path(&args.app_path)?;
 
         let mut resolved_from_yml = false;
 

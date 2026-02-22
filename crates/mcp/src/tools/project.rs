@@ -4,7 +4,7 @@ use crate::tools::openapi::{
     generate_mutation_example, generate_query_example, parse_openapi_operations,
 };
 use crate::tools::{AppPathArgs, ToolError, ToolResultExt};
-use crate::validation::ValidatedAppPath;
+use crate::validation::validated_app_path;
 use rmcp::model::*;
 use rmcp::schemars;
 use serde_json::Value;
@@ -19,7 +19,7 @@ pub struct GetRouteInfoArgs {
 
 impl ApxServer {
     pub async fn handle_check(&self, args: AppPathArgs) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
+        let path = validated_app_path(&args.app_path)?;
 
         use apx_core::common::OutputMode;
         use apx_core::ops::check::run_check;
@@ -54,7 +54,7 @@ impl ApxServer {
         &self,
         args: AppPathArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
+        let path = validated_app_path(&args.app_path)?;
 
         match apx_core::api_generator::generate_openapi(&path).await {
             Ok(()) => Ok(CallToolResult::success(vec![Content::text(
@@ -68,7 +68,7 @@ impl ApxServer {
         &self,
         args: GetRouteInfoArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
+        let path = validated_app_path(&args.app_path)?;
 
         use apx_core::common::read_project_metadata;
         use apx_core::interop::generate_openapi_spec;
@@ -201,7 +201,7 @@ impl ApxServer {
         &self,
         args: AppPathArgs,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let path = ValidatedAppPath::try_from_str(&args.app_path)?;
+        let path = validated_app_path(&args.app_path)?;
 
         use apx_core::common::read_project_metadata;
         use apx_core::interop::generate_openapi_spec;
