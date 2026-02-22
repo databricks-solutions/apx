@@ -19,7 +19,7 @@ pub(crate) mod feedback;
 pub(crate) mod flux;
 pub(crate) mod frontend;
 pub(crate) mod info;
-pub(crate) mod init;
+pub mod init;
 pub(crate) mod skill;
 pub(crate) mod upgrade;
 

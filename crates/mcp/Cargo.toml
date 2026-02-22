@@ -17,6 +17,8 @@ schemars.workspace = true
 rmcp.workspace = true
 
 [dev-dependencies]
+apx-cli = { path = "../cli", version = "0.3.3" }
+apx-core = { path = "../core", version = "0.3.3" }
 rmcp = { version = "0.15", features = ["server", "transport-io", "schemars", "client"] }
 serde_json = { workspace = true }
 tokio = { workspace = true }
