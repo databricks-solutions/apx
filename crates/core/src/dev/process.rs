@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use sysinfo::{Pid, Signal, System};
@@ -114,7 +114,7 @@ except Exception:
 pub struct ProcessManager {
     frontend_child: Arc<Mutex<Option<Child>>>,
     backend_child: Arc<Mutex<Option<Child>>>,
-    db: Arc<Mutex<Option<EmbeddedDb>>>,
+    db: Arc<OnceLock<EmbeddedDb>>,
     backend_port: u16,
     frontend_port: Option<u16>,
     db_port: u16,
@@ -174,7 +174,7 @@ impl ProcessManager {
         Ok(Self {
             frontend_child: Arc::new(Mutex::new(None)),
             backend_child: Arc::new(Mutex::new(None)),
-            db: Arc::new(Mutex::new(None)),
+            db: Arc::new(OnceLock::new()),
             backend_port,
             frontend_port,
             db_port,
@@ -202,8 +202,7 @@ impl ProcessManager {
             debug!("Starting embedded database process...");
             match EmbeddedDb::start(&pm.app_dir, &pm.host, pm.db_port, &pm.app_slug).await {
                 Ok(embedded_db) => {
-                    let mut guard = pm.db.lock().await;
-                    *guard = Some(embedded_db);
+                    let _ = pm.db.set(embedded_db);
                     debug!("Embedded database started successfully");
                 }
                 Err(e) => {
@@ -265,11 +264,7 @@ impl ProcessManager {
             "Stopping dev processes with phased shutdown."
         );
 
-        // Extract the db child handle once (avoids holding the EmbeddedDb lock during shutdown)
-        let db_child_handle = {
-            let guard = self.db.lock().await;
-            guard.as_ref().map(|db| Arc::clone(db.child_handle()))
-        };
+        let db_child_handle = self.db.get().map(|db| Arc::clone(db.child_handle()));
 
         // Phase 1: Send SIGTERM to all processes (polite request to stop)
         debug!("Phase 1: Sending SIGTERM to all processes.");
@@ -315,10 +310,7 @@ impl ProcessManager {
             self.status_for_process(&self.frontend_child, frontend_http_check),
             self.status_for_process(&self.backend_child, Some((CLIENT_HOST, self.backend_port))),
             async {
-                // Outer db lock held while inner child lock is acquired in db.status();
-                // safe because try_wait() is non-blocking.
-                let guard = self.db.lock().await;
-                match guard.as_ref() {
+                match self.db.get() {
                     Some(db) => db.status().await.to_string(),
                     None => "stopped".to_string(),
                 }
@@ -389,11 +381,8 @@ impl ProcessManager {
             tool_cmd = tool_cmd.env("APX_FRONTEND_PORT", fp.to_string());
         }
 
-        {
-            let guard = self.db.lock().await;
-            if let Some(db) = guard.as_ref() {
-                tool_cmd = tool_cmd.env("APX_DEV_DB_PWD", db.password());
-            }
+        if let Some(db) = self.db.get() {
+            tool_cmd = tool_cmd.env("APX_DEV_DB_PWD", db.password());
         }
 
         let child = tool_cmd.spawn().map_err(String::from)?;
@@ -451,11 +440,8 @@ impl ProcessManager {
             tool_cmd = tool_cmd.env("APX_FRONTEND_PORT", fp.to_string());
         }
 
-        {
-            let guard = self.db.lock().await;
-            if let Some(db) = guard.as_ref() {
-                tool_cmd = tool_cmd.env("APX_DEV_DB_PWD", db.password());
-            }
+        if let Some(db) = self.db.get() {
+            tool_cmd = tool_cmd.env("APX_DEV_DB_PWD", db.password());
         }
 
         // Prepend sitecustomize dir to PYTHONPATH if setup succeeded (non-critical)
@@ -644,14 +630,8 @@ impl ProcessManager {
                         *vars = new_vars.clone();
                     }
 
-                    // Extract db password from EmbeddedDb (may not be running)
-                    let db_password = {
-                        let guard = db.lock().await;
-                        guard
-                            .as_ref()
-                            .map(|d| d.password().to_string())
-                            .unwrap_or_default()
-                    };
+                    // Read db password (no lock — OnceLock is lock-free after init)
+                    let db_password = db.get().map(|d| d.password()).unwrap_or_default();
 
                     // Restart uvicorn
                     if let Err(e) = Self::spawn_uvicorn_static(
@@ -664,7 +644,7 @@ impl ProcessManager {
                         db_port,
                         dev_server_port,
                         &dev_token,
-                        &db_password,
+                        db_password,
                         &dotenv_vars,
                         &backend_child,
                         &dev_config,
