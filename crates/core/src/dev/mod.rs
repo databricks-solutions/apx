@@ -1,5 +1,6 @@
 pub mod client;
 pub mod common;
+pub(crate) mod embedded_db;
 pub mod logging;
 pub mod otel;
 pub mod process;
