@@ -9,6 +9,8 @@ use tracing::{debug, warn};
 
 use apx_common::hosts::CLIENT_HOST;
 
+use crate::dev::token::DEV_TOKEN_HEADER;
+
 const DEFAULT_TIMEOUT_SECS: u64 = 5;
 const STOP_TIMEOUT_SECS: u64 = 10;
 
@@ -201,18 +203,19 @@ pub async fn status(port: u16) -> Result<StatusResponse, HealthError> {
 
 /// Request the dev server to stop gracefully.
 /// Returns Ok(()) if the server acknowledged the stop request, Err otherwise.
-pub async fn stop(port: u16) -> Result<(), String> {
+pub async fn stop(port: u16, token: Option<&str>) -> Result<(), String> {
     let url = build_url(CLIENT_HOST, port, "/_apx/stop");
     debug!(%url, "Sending dev server stop request.");
-    let response = DEV_CLIENT
-        .get(url)
-        .timeout(Duration::from_secs(STOP_TIMEOUT_SECS))
-        .send()
-        .await
-        .map_err(|err| {
-            warn!(error = %err, "Stop request failed.");
-            format!("Stop request failed: {err}")
-        })?;
+    let mut request = DEV_CLIENT
+        .get(&url)
+        .timeout(Duration::from_secs(STOP_TIMEOUT_SECS));
+    if let Some(t) = token {
+        request = request.header(DEV_TOKEN_HEADER, t);
+    }
+    let response = request.send().await.map_err(|err| {
+        warn!(error = %err, "Stop request failed.");
+        format!("Stop request failed: {err}")
+    })?;
     if response.status() == StatusCode::OK {
         debug!("Dev server stop request acknowledged.");
         Ok(())

@@ -3,7 +3,7 @@
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -399,10 +399,17 @@ async fn browser_logs(
     StatusCode::OK
 }
 
-async fn stop(State(state): State<AppState>) -> StatusCode {
-    debug!("Received dev server stop request.");
+async fn stop(headers: HeaderMap, State(state): State<AppState>) -> StatusCode {
+    use crate::dev::token::DEV_TOKEN_HEADER;
 
-    // Send the shutdown signal
+    let request_token = headers.get(DEV_TOKEN_HEADER).and_then(|v| v.to_str().ok());
+
+    if request_token != Some(state.process_manager.dev_token()) {
+        warn!("Unauthorized stop request (missing or invalid token)");
+        return StatusCode::UNAUTHORIZED;
+    }
+
+    info!("Authenticated stop request received");
     let _ = state.shutdown_tx.send(Shutdown::Stop);
     StatusCode::OK
 }

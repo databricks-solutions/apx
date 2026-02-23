@@ -19,6 +19,8 @@ use tracing::{debug, info, warn};
 use apx_common::hosts::CLIENT_HOST;
 use apx_databricks_sdk::DatabricksClient;
 
+use crate::dev::token::DEV_TOKEN_HEADER;
+
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 const HOP_HEADERS: [&str; 8] = [
     "connection",
@@ -31,8 +33,6 @@ const HOP_HEADERS: [&str; 8] = [
     "host",
 ];
 
-// Header used by the Vite plugin to verify proxy requests
-const APX_DEV_TOKEN_HEADER: &str = "x-apx-dev-token";
 // Header used to forward OAuth access token to API
 const ACCESS_TOKEN_HEADER: &str = "X-Forwarded-Access-Token";
 // Header used to forward user identity to API
@@ -330,7 +330,7 @@ async fn proxy_http(
         builder = builder.header(name, value);
     }
     if let Some(dev_token) = dev_token {
-        builder = builder.header(APX_DEV_TOKEN_HEADER, dev_token);
+        builder = builder.header(DEV_TOKEN_HEADER, dev_token);
     }
     if let Some(access_token) = access_token {
         builder = builder.header(ACCESS_TOKEN_HEADER, access_token);

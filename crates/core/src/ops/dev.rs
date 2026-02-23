@@ -11,6 +11,7 @@ use crate::dev::common::{
     DevLock, is_process_running, lock_path, read_lock, remove_lock, write_lock,
 };
 use crate::dev::process::ProcessManager;
+use crate::dev::token;
 use crate::external::uv::ApxTool;
 use crate::flux;
 use crate::ops::healthcheck::wait_for_healthy_with_logs;
@@ -201,6 +202,8 @@ pub async fn spawn_server(
         tool_cmd = tool_cmd.arg("--skip-credentials-validation");
     }
 
+    let dev_token = token::generate();
+
     let canonical_app_dir = app_dir
         .canonicalize()
         .unwrap_or_else(|_| app_dir.to_path_buf());
@@ -209,6 +212,7 @@ pub async fn spawn_server(
         .cwd(app_dir)
         .env("APX_OTEL_LOGS", "1")
         .env("APX_APP_DIR", &canonical_app_dir)
+        .env(token::DEV_TOKEN_ENV, &dev_token)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -217,7 +221,7 @@ pub async fn spawn_server(
 
     if skip_healthcheck {
         let pid = child.id().ok_or("Failed to get child process ID")?;
-        let lock = DevLock::new(pid, port, command, app_dir);
+        let lock = DevLock::new(pid, port, command, app_dir, dev_token);
         write_lock(&lock_path, &lock)?;
 
         emit(
@@ -240,7 +244,8 @@ pub async fn spawn_server(
 
     if let Err(e) = health_result {
         debug!("Health checks failed, attempting graceful shutdown.");
-        let shutdown_result = tokio::time::timeout(Duration::from_secs(5), stop_server(port)).await;
+        let shutdown_result =
+            tokio::time::timeout(Duration::from_secs(5), stop_server(port, Some(&dev_token))).await;
 
         match shutdown_result {
             Ok(Ok(())) => debug!("Graceful shutdown completed."),
@@ -266,7 +271,7 @@ pub async fn spawn_server(
     }
 
     let pid = child.id().ok_or("Failed to get child process ID")?;
-    let lock = DevLock::new(pid, port, command, app_dir);
+    let lock = DevLock::new(pid, port, command, app_dir, dev_token);
     write_lock(&lock_path, &lock)?;
 
     emit(
@@ -300,7 +305,7 @@ pub async fn stop_dev_server(app_dir: &Path, mode: OutputMode) -> Result<bool, S
     let start_time = Instant::now();
     let stop_spinner = spinner_for_mode("Stopping dev server...", mode);
 
-    match stop_server(lock.port).await {
+    match stop_server(lock.port, lock.token.as_deref()).await {
         Ok(()) => {
             debug!("Dev server stopped gracefully via HTTP.");
             stop_spinner.finish_and_clear();

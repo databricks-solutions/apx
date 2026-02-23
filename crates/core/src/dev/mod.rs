@@ -5,3 +5,4 @@ pub mod otel;
 pub mod process;
 pub mod proxy;
 pub mod server;
+pub mod token;

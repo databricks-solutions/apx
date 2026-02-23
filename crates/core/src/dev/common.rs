@@ -30,10 +30,12 @@ pub struct DevLock {
     pub port: u16,
     pub command: String,
     pub app_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 impl DevLock {
-    pub fn new(pid: u32, port: u16, command: String, app_dir: &Path) -> Self {
+    pub fn new(pid: u32, port: u16, command: String, app_dir: &Path, token: String) -> Self {
         let started_at: DateTime<Utc> = Utc::now();
         Self {
             pid,
@@ -41,6 +43,7 @@ impl DevLock {
             port,
             command,
             app_dir: app_dir.display().to_string(),
+            token: Some(token),
         }
     }
 }

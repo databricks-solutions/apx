@@ -13,7 +13,6 @@ use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
-use rand::{Rng, distributions::Alphanumeric};
 use sysinfo::{Pid, Signal, System};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -52,6 +51,7 @@ enum ProbeResult {
 
 use crate::common::read_project_metadata;
 use crate::dev::otel::forward_log_to_flux;
+use crate::dev::token;
 use crate::dotenv::DotenvFile;
 use crate::external::ExternalTool;
 use crate::external::bun::Bun;
@@ -154,8 +154,17 @@ impl ProcessManager {
         let app_entrypoint = metadata.app_entrypoint.clone();
         let dev_config = metadata.dev_config.clone();
 
-        let dev_token = Self::generate_dev_token();
-        let db_password = Self::generate_dev_token(); // Random password for PGlite
+        let dev_token = match std::env::var(token::DEV_TOKEN_ENV) {
+            Ok(t) => t,
+            Err(_) => {
+                warn!(
+                    "{} not set, generating ephemeral token (stop via lock file will not work)",
+                    token::DEV_TOKEN_ENV
+                );
+                token::generate()
+            }
+        };
+        let db_password = token::generate();
 
         debug!(
             app_dir = %app_dir.display(),
@@ -357,7 +366,7 @@ impl ProcessManager {
             .env("APX_DEV_DB_PWD", &self.db_password)
             .env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string())
             .env("APX_DEV_SERVER_HOST", &self.host)
-            .env("APX_DEV_TOKEN", &self.dev_token)
+            .env(token::DEV_TOKEN_ENV, &self.dev_token)
             .env("APX_APP_NAME", &self.app_slug)
             .env("APX_APP_PATH", self.app_dir.display().to_string())
             // OpenTelemetry configuration - frontend sends logs directly to flux
@@ -419,7 +428,7 @@ impl ProcessManager {
             .env("APX_DEV_DB_PWD", &self.db_password)
             .env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string())
             .env("APX_DEV_SERVER_HOST", &self.host)
-            .env("APX_DEV_TOKEN", &self.dev_token)
+            .env(token::DEV_TOKEN_ENV, &self.dev_token)
             .env("APX_UVICORN", "1")
             // Force Python to flush stdout/stderr immediately (no buffering)
             .env("PYTHONUNBUFFERED", "1");
@@ -941,7 +950,7 @@ impl ProcessManager {
             .env("APX_DEV_DB_PWD", db_password)
             .env("APX_DEV_SERVER_PORT", dev_server_port.to_string())
             .env("APX_DEV_SERVER_HOST", host)
-            .env("APX_DEV_TOKEN", dev_token)
+            .env(token::DEV_TOKEN_ENV, dev_token)
             // Force Python to flush stdout/stderr immediately (no buffering)
             .env("PYTHONUNBUFFERED", "1");
 
@@ -1001,7 +1010,7 @@ impl ProcessManager {
         cmd.env("APX_DEV_DB_PWD", self.db_password.clone());
         cmd.env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string());
         cmd.env("APX_DEV_SERVER_HOST", self.host.clone());
-        cmd.env("APX_DEV_TOKEN", self.dev_token.clone());
+        cmd.env(token::DEV_TOKEN_ENV, self.dev_token.clone());
 
         if include_dotenv {
             let vars = self.dotenv_vars.lock().await;
@@ -1290,14 +1299,6 @@ impl ProcessManager {
                 ProbeResult::Failed(err.to_string())
             }
         }
-    }
-
-    fn generate_dev_token() -> String {
-        rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(32)
-            .map(char::from)
-            .collect()
     }
 
     /// Kill a process tree. This is a blocking operation that should be called
