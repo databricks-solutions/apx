@@ -15,7 +15,7 @@ use std::sync::{Arc, LazyLock};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use sysinfo::{Pid, Signal, System};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
@@ -62,17 +62,14 @@ use crate::python_logging::{
 use apx_common::hosts::CLIENT_HOST;
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 enum LogSource {
     App,
-    Db,
 }
 
 impl LogSource {
     fn as_str(&self) -> &'static str {
         match self {
             LogSource::App => "app",
-            LogSource::Db => "db",
         }
     }
 }
@@ -318,6 +315,8 @@ impl ProcessManager {
             self.status_for_process(&self.frontend_child, frontend_http_check),
             self.status_for_process(&self.backend_child, Some((CLIENT_HOST, self.backend_port))),
             async {
+                // Outer db lock held while inner child lock is acquired in db.status();
+                // safe because try_wait() is non-blocking.
                 let guard = self.db.lock().await;
                 match guard.as_ref() {
                     Some(db) => db.status().await.to_string(),
@@ -680,60 +679,6 @@ impl ProcessManager {
         });
     }
 
-    #[allow(dead_code)]
-    async fn spawn_process(
-        &self,
-        app_dir: &Path,
-        executable: PathBuf,
-        args: Vec<String>,
-        source: LogSource,
-        include_dotenv: bool,
-    ) -> Result<Child, String> {
-        let mut cmd = Command::new(executable);
-        cmd.args(args)
-            .current_dir(app_dir)
-            .stdin(Stdio::null())
-            // Capture stdout/stderr to forward to flux
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        self.apply_env(&mut cmd, include_dotenv).await;
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|err| format!("Failed to start {source} process: {err}"))?;
-
-        // Spawn tasks to read stdout/stderr, prefix with source, and forward to flux
-        let service_name = format!("{}_{}", self.app_slug, source);
-        let app_path = self.app_dir.display().to_string();
-
-        if let Some(stdout) = child.stdout.take() {
-            let service_name = service_name.clone();
-            let app_path = app_path.clone();
-            tokio::spawn(async move {
-                let reader = BufReader::new(stdout);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    println!("{}", format_log_line(source, &line));
-                    forward_log_to_flux(&line, "INFO", &service_name, &app_path).await;
-                }
-            });
-        }
-
-        if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(async move {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    eprintln!("{}", format_log_line(source, &line));
-                    let severity = apx_common::format::parse_python_severity(&line);
-                    forward_log_to_flux(&line, severity, &service_name, &app_path).await;
-                }
-            });
-        }
-
-        Ok(child)
-    }
-
     /// Static version of stop_child_tree for use in async tasks without self
     async fn stop_child_tree_static(name: &str, child: &Arc<Mutex<Option<Child>>>) {
         let mut guard = child.lock().await;
@@ -906,31 +851,6 @@ impl ProcessManager {
         *guard = Some(child);
 
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    async fn apply_env(&self, cmd: &mut Command, include_dotenv: bool) {
-        if let Some(fp) = self.frontend_port {
-            cmd.env("APX_FRONTEND_PORT", fp.to_string());
-        }
-        cmd.env("APX_BACKEND_PORT", self.backend_port.to_string());
-        cmd.env("APX_DEV_DB_PORT", self.db_port.to_string());
-        {
-            let guard = self.db.lock().await;
-            if let Some(db) = guard.as_ref() {
-                cmd.env("APX_DEV_DB_PWD", db.password());
-            }
-        }
-        cmd.env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string());
-        cmd.env("APX_DEV_SERVER_HOST", self.host.clone());
-        cmd.env(token::DEV_TOKEN_ENV, self.dev_token.clone());
-
-        if include_dotenv {
-            let vars = self.dotenv_vars.lock().await;
-            for (key, value) in vars.iter() {
-                cmd.env(key, value);
-            }
-        }
     }
 
     /// Send SIGTERM to a child process tree (polite shutdown request).

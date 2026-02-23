@@ -32,7 +32,7 @@ const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Health monitor timeout (stop checking after this duration).
-const HEALTH_MONITOR_TIMEOUT_SECS: i64 = 60;
+const HEALTH_MONITOR_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Default PGlite username for initial connection.
 const DEFAULT_USER: &str = "postgres";
@@ -59,7 +59,6 @@ impl std::fmt::Debug for EmbeddedDb {
     }
 }
 
-#[allow(dead_code)]
 impl EmbeddedDb {
     /// Spawn PGlite via bun, wait for TCP readiness, rotate the default
     /// password, and start a background health monitor.
@@ -88,6 +87,7 @@ impl EmbeddedDb {
         })
     }
 
+    #[allow(dead_code)]
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -237,13 +237,12 @@ impl EmbeddedDb {
     /// Background task that polls the child process for early exit.
     fn spawn_health_monitor(child: Arc<Mutex<Option<Child>>>) {
         tokio::spawn(async move {
-            let start_time = chrono::Utc::now();
-            let timeout_duration = chrono::Duration::seconds(HEALTH_MONITOR_TIMEOUT_SECS);
+            let start = tokio::time::Instant::now();
 
             loop {
                 tokio::time::sleep(HEALTH_POLL_INTERVAL).await;
 
-                if chrono::Utc::now() - start_time > timeout_duration {
+                if start.elapsed() > HEALTH_MONITOR_TIMEOUT {
                     break;
                 }
 
