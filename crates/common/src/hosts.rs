@@ -1,7 +1,6 @@
-/// Address for binding servers to all network interfaces.
-/// Used by: dev server, uvicorn backend, PGlite, flux agent.
-/// This allows connections from any IP, required for Docker/container environments.
-pub const BIND_HOST: &str = "0.0.0.0";
+/// Default bind address for all APX services (dev server, uvicorn, PGlite, flux).
+/// Loopback-only to prevent LAN exposure. Override with `--host 0.0.0.0` if needed.
+pub const BIND_HOST: &str = "127.0.0.1";
 
 /// IPv4 loopback address for local client connections.
 /// Used by: health probes, flux OTLP endpoints, OpenAPI fetching, proxy targets.
