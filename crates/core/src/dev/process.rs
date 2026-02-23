@@ -50,11 +50,10 @@ enum ProbeResult {
 }
 
 use crate::common::read_project_metadata;
+use crate::dev::embedded_db::EmbeddedDb;
 use crate::dev::otel::forward_log_to_flux;
 use crate::dev::token;
 use crate::dotenv::DotenvFile;
-use crate::external::ExternalTool;
-use crate::external::bun::Bun;
 use crate::external::uv::{ApxTool, UvTool};
 use crate::python_logging::{
     DevConfig, LogConfigResult, default_logging_config, resolve_log_config,
@@ -63,6 +62,7 @@ use crate::python_logging::{
 use apx_common::hosts::CLIENT_HOST;
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 enum LogSource {
     App,
     Db,
@@ -117,14 +117,13 @@ except Exception:
 pub struct ProcessManager {
     frontend_child: Arc<Mutex<Option<Child>>>,
     backend_child: Arc<Mutex<Option<Child>>>,
-    db_child: Arc<Mutex<Option<Child>>>,
+    db: Arc<Mutex<Option<EmbeddedDb>>>,
     backend_port: u16,
     frontend_port: Option<u16>,
     db_port: u16,
     dev_server_port: u16,
     host: String,
     dev_token: String,
-    db_password: String,
     app_dir: PathBuf,
     app_slug: String,
     app_entrypoint: String,
@@ -164,8 +163,6 @@ impl ProcessManager {
                 token::generate()
             }
         };
-        let db_password = token::generate();
-
         debug!(
             app_dir = %app_dir.display(),
             host = %host,
@@ -180,14 +177,13 @@ impl ProcessManager {
         Ok(Self {
             frontend_child: Arc::new(Mutex::new(None)),
             backend_child: Arc::new(Mutex::new(None)),
-            db_child: Arc::new(Mutex::new(None)),
+            db: Arc::new(Mutex::new(None)),
             backend_port,
             frontend_port,
             db_port,
             dev_server_port,
             host: host.to_string(),
             dev_token,
-            db_password,
             app_dir: app_dir
                 .canonicalize()
                 .unwrap_or_else(|_| app_dir.to_path_buf()),
@@ -206,22 +202,16 @@ impl ProcessManager {
         let pm = Arc::clone(self);
         tokio::spawn(async move {
             // 1. DB (non-critical) - warn on failure but continue
-            debug!("Starting PGlite database process...");
-            match Self::ensure_bun().await {
-                Ok(bun) => {
-                    if let Err(e) = pm.spawn_pglite(&bun).await {
-                        warn!(
-                            "⚠️ Failed to start PGlite database: {}. Continuing without DB.",
-                            e
-                        );
-                        // Don't return - continue with other processes
-                    } else {
-                        debug!("PGlite database started successfully");
-                    }
+            debug!("Starting embedded database process...");
+            match EmbeddedDb::start(&pm.app_dir, &pm.host, pm.db_port, &pm.app_slug).await {
+                Ok(embedded_db) => {
+                    let mut guard = pm.db.lock().await;
+                    *guard = Some(embedded_db);
+                    debug!("Embedded database started successfully");
                 }
                 Err(e) => {
                     warn!(
-                        "⚠️ Bun not available for PGlite: {}. Continuing without DB.",
+                        "Failed to start embedded database: {}. Continuing without DB.",
                         e
                     );
                 }
@@ -278,17 +268,29 @@ impl ProcessManager {
             "Stopping dev processes with phased shutdown."
         );
 
+        // Extract the db child handle once (avoids holding the EmbeddedDb lock during shutdown)
+        let db_child_handle = {
+            let guard = self.db.lock().await;
+            guard.as_ref().map(|db| Arc::clone(db.child_handle()))
+        };
+
         // Phase 1: Send SIGTERM to all processes (polite request to stop)
         debug!("Phase 1: Sending SIGTERM to all processes.");
         Self::send_sigterm("backend", &self.backend_child).await;
         Self::send_sigterm("frontend", &self.frontend_child).await;
-        Self::send_sigterm("db", &self.db_child).await;
+        if let Some(ref handle) = db_child_handle {
+            Self::send_sigterm("db", handle).await;
+        }
 
         // Phase 2: Wait briefly for graceful exit (500ms)
         debug!("Phase 2: Waiting for graceful exit.");
         let wait_backend = Self::wait_for_child("backend", &self.backend_child);
         let wait_frontend = Self::wait_for_child("frontend", &self.frontend_child);
-        let wait_db = Self::wait_for_child("db", &self.db_child);
+        let wait_db = async {
+            if let Some(ref handle) = db_child_handle {
+                Self::wait_for_child("db", handle).await;
+            }
+        };
         let _ = timeout(Duration::from_millis(500), async {
             tokio::join!(wait_backend, wait_frontend, wait_db)
         })
@@ -298,7 +300,9 @@ impl ProcessManager {
         debug!("Phase 3: Force killing remaining processes.");
         Self::force_kill("backend", &self.backend_child).await;
         Self::force_kill("frontend", &self.frontend_child).await;
-        Self::force_kill("db", &self.db_child).await;
+        if let Some(ref handle) = db_child_handle {
+            Self::force_kill("db", handle).await;
+        }
 
         debug!("All processes stopped.");
     }
@@ -313,7 +317,13 @@ impl ProcessManager {
         let (frontend_status, backend_status, db_status) = tokio::join!(
             self.status_for_process(&self.frontend_child, frontend_http_check),
             self.status_for_process(&self.backend_child, Some((CLIENT_HOST, self.backend_port))),
-            self.status_for_process(&self.db_child, None), // DB: no HTTP check, just process status
+            async {
+                let guard = self.db.lock().await;
+                match guard.as_ref() {
+                    Some(db) => db.status().await.to_string(),
+                    None => "stopped".to_string(),
+                }
+            },
         );
         // For backend-only projects, report frontend as "n/a" instead of "stopped"
         let frontend_status = if !self.has_ui && frontend_status == "stopped" {
@@ -363,7 +373,6 @@ impl ProcessManager {
             .stderr(Stdio::inherit())
             .env("APX_BACKEND_PORT", self.backend_port.to_string())
             .env("APX_DEV_DB_PORT", self.db_port.to_string())
-            .env("APX_DEV_DB_PWD", &self.db_password)
             .env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string())
             .env("APX_DEV_SERVER_HOST", &self.host)
             .env(token::DEV_TOKEN_ENV, &self.dev_token)
@@ -379,6 +388,13 @@ impl ProcessManager {
 
         if let Some(fp) = self.frontend_port {
             tool_cmd = tool_cmd.env("APX_FRONTEND_PORT", fp.to_string());
+        }
+
+        {
+            let guard = self.db.lock().await;
+            if let Some(db) = guard.as_ref() {
+                tool_cmd = tool_cmd.env("APX_DEV_DB_PWD", db.password());
+            }
         }
 
         let child = tool_cmd.spawn().map_err(String::from)?;
@@ -425,7 +441,6 @@ impl ProcessManager {
             .stderr(Stdio::piped())
             .env("APX_BACKEND_PORT", self.backend_port.to_string())
             .env("APX_DEV_DB_PORT", self.db_port.to_string())
-            .env("APX_DEV_DB_PWD", &self.db_password)
             .env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string())
             .env("APX_DEV_SERVER_HOST", &self.host)
             .env(token::DEV_TOKEN_ENV, &self.dev_token)
@@ -435,6 +450,13 @@ impl ProcessManager {
 
         if let Some(fp) = self.frontend_port {
             tool_cmd = tool_cmd.env("APX_FRONTEND_PORT", fp.to_string());
+        }
+
+        {
+            let guard = self.db.lock().await;
+            if let Some(db) = guard.as_ref() {
+                tool_cmd = tool_cmd.env("APX_DEV_DB_PWD", db.password());
+            }
         }
 
         // Prepend sitecustomize dir to PYTHONPATH if setup succeeded (non-critical)
@@ -489,131 +511,6 @@ impl ProcessManager {
         Ok(())
     }
 
-    async fn spawn_pglite(&self, bun: &Bun) -> Result<(), String> {
-        let child = self
-            .spawn_process(
-                &self.app_dir,
-                bun.binary_path().to_path_buf(),
-                vec![
-                    "x".to_string(),
-                    "@electric-sql/pglite-socket".to_string(),
-                    "--db=memory://".to_string(),
-                    format!("--host={}", self.host),
-                    "--debug=0".to_string(),
-                    format!("--port={}", self.db_port),
-                ],
-                LogSource::Db,
-                false,
-            )
-            .await?;
-
-        let mut guard = self.db_child.lock().await;
-        *guard = Some(child);
-
-        // Wait for PGlite to be ready and change the default password
-        // Use CLIENT_HOST (127.0.0.1) for connections, not the bind host (0.0.0.0)
-        Self::wait_for_db_ready(CLIENT_HOST, self.db_port).await?;
-        Self::change_db_password(CLIENT_HOST, self.db_port, &self.db_password).await?;
-        debug!("PGlite password changed successfully");
-
-        self.spawn_db_health_monitor();
-        Ok(())
-    }
-
-    /// Wait for PGlite database to be ready to accept connections.
-    async fn wait_for_db_ready(host: &str, port: u16) -> Result<(), String> {
-        for _ in 0..30 {
-            if tokio::net::TcpStream::connect((host, port)).await.is_ok() {
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        Err(format!("PGlite not ready on {host}:{port}"))
-    }
-
-    /// Change the PGlite database password using tokio-postgres.
-    /// Important: PGlite only supports one connection at a time, so we must
-    /// ensure the connection is fully closed before returning.
-    async fn change_db_password(host: &str, port: u16, new_password: &str) -> Result<(), String> {
-        use tokio_postgres::NoTls;
-
-        let conn_str =
-            format!("host={host} port={port} user=postgres password=postgres dbname=postgres");
-
-        let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
-            .await
-            .map_err(|e| format!("Failed to connect to PGlite: {e}"))?;
-
-        // Spawn connection task with a handle so we can wait for it
-        let conn_handle = tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                warn!("PGlite connection error: {}", e);
-            }
-        });
-
-        // Escape single quotes for SQL safety
-        let escaped = new_password.replace('\'', "''");
-        let query = format!("ALTER USER postgres WITH PASSWORD '{escaped}'");
-
-        let result = client
-            .execute(&query, &[])
-            .await
-            .map_err(|e| format!("Failed to change password: {e}"));
-
-        // Drop the client to signal the connection to close
-        drop(client);
-
-        // Wait up to 5 seconds for the connection task to exit
-        match timeout(Duration::from_secs(5), conn_handle).await {
-            Ok(Ok(())) => {
-                // connection task exited cleanly
-            }
-            Ok(Err(e)) => {
-                warn!("Postgres connection task panicked: {}", e);
-            }
-            Err(_) => {
-                warn!("Timed out waiting for Postgres connection to shut down");
-            }
-        }
-
-        result.map(|_| ())
-    }
-
-    fn spawn_db_health_monitor(&self) {
-        let db_child = Arc::clone(&self.db_child);
-        tokio::spawn(async move {
-            let start_time = chrono::Utc::now();
-            let timeout_duration = chrono::Duration::seconds(60);
-
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                let elapsed = chrono::Utc::now() - start_time;
-
-                if elapsed > timeout_duration {
-                    break;
-                }
-
-                let mut guard = db_child.lock().await;
-                if let Some(child) = guard.as_mut() {
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            warn!("PGLite process exited early with status: {:?}", status);
-                            break;
-                        }
-                        Ok(None) => continue,
-                        Err(e) => {
-                            warn!("Failed to check PGLite process status: {}", e);
-                            break;
-                        }
-                    }
-                } else {
-                    warn!("PGLite process handle lost");
-                    break;
-                }
-            }
-        });
-    }
-
     fn start_backend_file_watcher(&self) {
         let app_dir = self.app_dir.clone();
         let dotenv_vars = Arc::clone(&self.dotenv_vars);
@@ -626,7 +523,7 @@ impl ProcessManager {
         let db_port = self.db_port;
         let dev_server_port = self.dev_server_port;
         let dev_token = self.dev_token.clone();
-        let db_password = self.db_password.clone();
+        let db = Arc::clone(&self.db);
         let dev_config = self.dev_config.clone();
         let restarting = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -748,6 +645,15 @@ impl ProcessManager {
                         *vars = new_vars.clone();
                     }
 
+                    // Extract db password from EmbeddedDb (may not be running)
+                    let db_password = {
+                        let guard = db.lock().await;
+                        guard
+                            .as_ref()
+                            .map(|d| d.password().to_string())
+                            .unwrap_or_default()
+                    };
+
                     // Restart uvicorn
                     if let Err(e) = Self::spawn_uvicorn_static(
                         &app_dir,
@@ -774,6 +680,7 @@ impl ProcessManager {
         });
     }
 
+    #[allow(dead_code)]
     async fn spawn_process(
         &self,
         app_dir: &Path,
@@ -1001,13 +908,19 @@ impl ProcessManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn apply_env(&self, cmd: &mut Command, include_dotenv: bool) {
         if let Some(fp) = self.frontend_port {
             cmd.env("APX_FRONTEND_PORT", fp.to_string());
         }
         cmd.env("APX_BACKEND_PORT", self.backend_port.to_string());
         cmd.env("APX_DEV_DB_PORT", self.db_port.to_string());
-        cmd.env("APX_DEV_DB_PWD", self.db_password.clone());
+        {
+            let guard = self.db.lock().await;
+            if let Some(db) = guard.as_ref() {
+                cmd.env("APX_DEV_DB_PWD", db.password());
+            }
+        }
         cmd.env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string());
         cmd.env("APX_DEV_SERVER_HOST", self.host.clone());
         cmd.env(token::DEV_TOKEN_ENV, self.dev_token.clone());
@@ -1018,10 +931,6 @@ impl ProcessManager {
                 cmd.env(key, value);
             }
         }
-    }
-
-    async fn ensure_bun() -> Result<Bun, String> {
-        Bun::new().await
     }
 
     /// Send SIGTERM to a child process tree (polite shutdown request).
