@@ -2,6 +2,7 @@ pub(crate) mod backend;
 pub mod client;
 pub mod common;
 pub(crate) mod embedded_db;
+pub(crate) mod frontend;
 pub mod logging;
 pub mod otel;
 pub mod process;

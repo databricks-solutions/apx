@@ -1,14 +1,13 @@
 //! Process management for APX dev server.
 //!
-//! Manages frontend (Vite/Bun), backend (uvicorn), and database (PGlite) processes.
-//! Backend lifecycle is delegated to [`Backend`]; this module orchestrates all three.
+//! Orchestrates frontend, backend, and database processes.
+//! Individual lifecycles are delegated to [`Frontend`], [`Backend`], and [`EmbeddedDb`].
 // Runs inside the dev server child process (spawned with Stdio::null()),
 // never in the MCP server process — stdout output here is safe.
 #![allow(clippy::print_stdout)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 
 use sysinfo::{Pid, Signal, System};
@@ -19,26 +18,23 @@ use tracing::{debug, warn};
 
 use crate::common::read_project_metadata;
 use crate::dev::backend::{Backend, BackendConfig};
-use crate::dev::common::{DevProcess, ProbeResult, build_parent_map, http_health_probe};
+use crate::dev::common::{DevProcess, build_parent_map};
 use crate::dev::embedded_db::EmbeddedDb;
+use crate::dev::frontend::{Frontend, FrontendConfig};
 use crate::dev::token;
 use crate::dotenv::DotenvFile;
-use crate::external::uv::ApxTool;
-use apx_common::hosts::CLIENT_HOST;
 
 #[derive(Debug)]
 pub struct ProcessManager {
-    frontend_child: Arc<Mutex<Option<Child>>>,
+    frontend: Option<Arc<Frontend>>,
     backend: Arc<Backend>,
     db: Arc<OnceLock<EmbeddedDb>>,
     backend_port: u16,
-    frontend_port: Option<u16>,
     db_port: u16,
     dev_server_port: u16,
     host: String,
     app_dir: PathBuf,
     app_slug: String,
-    has_ui: bool,
 }
 
 impl ProcessManager {
@@ -79,6 +75,25 @@ impl ProcessManager {
 
         let db = Arc::new(OnceLock::new());
 
+        // Frontend is only created when the project has a UI and a port is assigned
+        let frontend = if has_ui {
+            frontend_port.map(|port| {
+                Arc::new(Frontend::new(FrontendConfig {
+                    app_dir: app_dir.clone(),
+                    app_slug: app_slug.clone(),
+                    host: host.to_string(),
+                    backend_port,
+                    frontend_port: port,
+                    db_port,
+                    dev_server_port,
+                    dev_token: dev_token.clone(),
+                    db: Arc::clone(&db),
+                }))
+            })
+        } else {
+            None
+        };
+
         let backend = Arc::new(Backend::new(BackendConfig {
             app_dir: app_dir.clone(),
             app_slug: app_slug.clone(),
@@ -106,21 +121,19 @@ impl ProcessManager {
         );
 
         Ok(Self {
-            frontend_child: Arc::new(Mutex::new(None)),
+            frontend,
             backend,
             db,
             backend_port,
-            frontend_port,
             db_port,
             dev_server_port,
             host: host.to_string(),
             app_dir,
             app_slug,
-            has_ui,
         })
     }
 
-    /// Spawn processes in background (DB → Vite → Uvicorn).
+    /// Spawn processes in background (DB → Frontend → Backend).
     /// DB is non-critical - failures are logged but don't block other processes.
     /// This method spawns a background task and returns immediately.
     pub fn start_processes(self: &Arc<Self>) {
@@ -141,16 +154,16 @@ impl ProcessManager {
                 }
             }
 
-            // 2. Vite (critical, but only if project has UI)
-            if pm.has_ui {
-                debug!("Starting Vite frontend process...");
-                if let Err(e) = pm.spawn_bun_dev().await {
+            // 2. Frontend (critical, but only if project has UI)
+            if let Some(ref frontend) = pm.frontend {
+                debug!("Starting frontend process...");
+                if let Err(e) = frontend.spawn().await {
                     warn!("Failed to start frontend: {}", e);
                     return; // Critical failure
                 }
-                debug!("Vite frontend started successfully");
+                debug!("Frontend started successfully");
             } else {
-                debug!("Skipping Vite frontend (backend-only project)");
+                debug!("Skipping frontend (backend-only project)");
             }
 
             // 3. Uvicorn (critical)
@@ -182,7 +195,7 @@ impl ProcessManager {
     pub async fn stop(&self) {
         debug!(
             host = %self.host,
-            frontend_port = ?self.frontend_port,
+            has_frontend = self.frontend.is_some(),
             backend_port = self.backend_port,
             db_port = self.db_port,
             dev_server_port = self.dev_server_port,
@@ -190,22 +203,29 @@ impl ProcessManager {
         );
 
         let backend_child = self.backend.child_handle();
-        let db_child_handle = self.db.get().map(|db| Arc::clone(db.child_handle()));
+        let frontend_child = self.frontend.as_ref().map(|f| Arc::clone(f.child_handle()));
+        let db_child = self.db.get().map(|db| Arc::clone(db.child_handle()));
 
         // Phase 1: Send SIGTERM to all processes (polite request to stop)
         debug!("Phase 1: Sending SIGTERM to all processes.");
         Self::send_sigterm("backend", backend_child).await;
-        Self::send_sigterm("frontend", &self.frontend_child).await;
-        if let Some(ref handle) = db_child_handle {
+        if let Some(ref handle) = frontend_child {
+            Self::send_sigterm("frontend", handle).await;
+        }
+        if let Some(ref handle) = db_child {
             Self::send_sigterm("db", handle).await;
         }
 
         // Phase 2: Wait briefly for graceful exit (500ms)
         debug!("Phase 2: Waiting for graceful exit.");
         let wait_backend = Self::wait_for_child("backend", backend_child);
-        let wait_frontend = Self::wait_for_child("frontend", &self.frontend_child);
+        let wait_frontend = async {
+            if let Some(ref handle) = frontend_child {
+                Self::wait_for_child("frontend", handle).await;
+            }
+        };
         let wait_db = async {
-            if let Some(ref handle) = db_child_handle {
+            if let Some(ref handle) = db_child {
                 Self::wait_for_child("db", handle).await;
             }
         };
@@ -217,8 +237,10 @@ impl ProcessManager {
         // Phase 3: Force kill any remaining processes
         debug!("Phase 3: Force killing remaining processes.");
         Self::force_kill("backend", backend_child).await;
-        Self::force_kill("frontend", &self.frontend_child).await;
-        if let Some(ref handle) = db_child_handle {
+        if let Some(ref handle) = frontend_child {
+            Self::force_kill("frontend", handle).await;
+        }
+        if let Some(ref handle) = db_child {
             Self::force_kill("db", handle).await;
         }
 
@@ -228,12 +250,13 @@ impl ProcessManager {
     /// Get the status of all managed processes.
     /// Runs all three checks in parallel using tokio::join! to avoid blocking.
     pub async fn status(&self) -> (String, String, String) {
-        // Run all checks in parallel - no mutex held during HTTP probes
-        // Use CLIENT_HOST (127.0.0.1) for health probes, not the bind host (0.0.0.0)
-        // which doesn't resolve to localhost on Windows.
-        let frontend_http_check = self.frontend_port.map(|p| (CLIENT_HOST, p));
         let (frontend_status, backend_status, db_status) = tokio::join!(
-            self.status_for_process(&self.frontend_child, frontend_http_check),
+            async {
+                match self.frontend.as_ref() {
+                    Some(f) => DevProcess::status(f.as_ref()).await.to_string(),
+                    None => "n/a".to_string(),
+                }
+            },
             async { self.backend.status().await.to_string() },
             async {
                 match self.db.get() {
@@ -242,18 +265,12 @@ impl ProcessManager {
                 }
             },
         );
-        // For backend-only projects, report frontend as "n/a" instead of "stopped"
-        let frontend_status = if !self.has_ui && frontend_status == "stopped" {
-            "n/a".to_string()
-        } else {
-            frontend_status
-        };
         (frontend_status, backend_status, db_status)
     }
 
     /// Returns true if this project has a frontend (UI).
     pub fn has_ui(&self) -> bool {
-        self.has_ui
+        self.frontend.is_some()
     }
 
     pub async fn restart_uvicorn_with_env(
@@ -261,55 +278,6 @@ impl ProcessManager {
         new_vars: HashMap<String, String>,
     ) -> Result<(), String> {
         self.backend.restart_with_env(new_vars).await
-    }
-
-    async fn spawn_bun_dev(&self) -> Result<(), String> {
-        // ============================================================================
-        // IMPORTANT: Frontend logs are NOT piped through apx stdout/stderr.
-        // The frontend process sends logs directly to flux via OTEL SDK.
-        // This ensures proper service attribution (service.name = {app}_ui) and avoids
-        // log interleaving issues that occur when multiple processes share stdout.
-        // See entrypoint.ts for OTEL initialization.
-        // ============================================================================
-
-        // Use ApxTool to invoke `apx frontend dev` via uv
-        let mut tool_cmd = ApxTool::new_apx()
-            .await?
-            .cmd()
-            .args(["frontend", "dev"])
-            .cwd(&self.app_dir)
-            .stdin(Stdio::null())
-            // Inherit stdout/stderr for local visibility, but don't capture/forward
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .env("APX_BACKEND_PORT", self.backend_port.to_string())
-            .env("APX_DEV_DB_PORT", self.db_port.to_string())
-            .env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string())
-            .env("APX_DEV_SERVER_HOST", &self.host)
-            .env(token::DEV_TOKEN_ENV, self.backend.dev_token())
-            .env("APX_APP_NAME", &self.app_slug)
-            .env("APX_APP_PATH", self.app_dir.display().to_string())
-            // OpenTelemetry configuration - frontend sends logs directly to flux
-            .env(
-                "OTEL_EXPORTER_OTLP_ENDPOINT",
-                format!("http://{}:{}", CLIENT_HOST, crate::flux::FLUX_PORT),
-            )
-            .env(apx_common::hosts::ENV_FRONTEND_HOST, CLIENT_HOST)
-            .env("OTEL_SERVICE_NAME", format!("{}_ui", self.app_slug));
-
-        if let Some(fp) = self.frontend_port {
-            tool_cmd = tool_cmd.env("APX_FRONTEND_PORT", fp.to_string());
-        }
-
-        if let Some(db) = self.db.get() {
-            tool_cmd = tool_cmd.env("APX_DEV_DB_PWD", db.password());
-        }
-
-        let child = tool_cmd.spawn().map_err(String::from)?;
-
-        let mut guard = self.frontend_child.lock().await;
-        *guard = Some(child);
-        Ok(())
     }
 
     // -- Process lifecycle helpers (used for all child processes) --
@@ -385,39 +353,6 @@ impl ProcessManager {
                     warn!(error = %err, process = name, "Failed to check process status.");
                 }
             }
-        }
-    }
-
-    /// Check the status of a process (frontend only — backend uses DevProcess::status).
-    /// If http_check is Some((host, port)), also performs an HTTP health probe.
-    async fn status_for_process(
-        &self,
-        child: &Arc<Mutex<Option<Child>>>,
-        http_check: Option<(&str, u16)>,
-    ) -> String {
-        // Quick mutex access to check process state - released before HTTP probe
-        let process_running = {
-            let mut guard = child.lock().await;
-            match guard.as_mut() {
-                None => return "stopped".to_string(),
-                Some(process) => match process.try_wait() {
-                    Ok(None) => true,
-                    Ok(Some(_)) => return "failed".to_string(),
-                    Err(_) => return "error".to_string(),
-                },
-            }
-        }; // Mutex released here!
-
-        if !process_running {
-            return "stopped".to_string();
-        }
-
-        match http_check {
-            None => "healthy".to_string(),
-            Some((host, port)) => match http_health_probe(host, port).await {
-                ProbeResult::Responded(_) => "healthy".to_string(),
-                ProbeResult::Failed(_) => "starting".to_string(),
-            },
         }
     }
 
