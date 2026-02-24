@@ -1,16 +1,6 @@
 name: "CodeQL"
 
 on:
-  push:
-    branches: ["main"]
-    paths-ignore:
-      - "docs/**"
-      - "*.md"
-  pull_request:
-    branches: ["main"]
-    paths-ignore:
-      - "docs/**"
-      - "*.md"
   schedule:
     - cron: "0 5 * * 1"
 
