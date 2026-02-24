@@ -249,10 +249,9 @@ impl Backend {
             cmd = cmd.env("APX_FRONTEND_PORT", fp.to_string());
         }
         if let Some(db) = cfg.db.get() {
-            info!("Setting APX_DEV_DB_PWD env variable for backend");
             cmd = cmd.env("APX_DEV_DB_PWD", db.password());
         } else {
-            warn!("No database found for backend, APX_DEV_DB_PWD will not be set for this backend");
+            warn!("No database found for backend, APX_DEV_DB_PWD will not be set");
         }
 
         let vars = cfg.dotenv_vars.lock().await;

@@ -375,7 +375,6 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRespon
     let all_healthy = if has_ui {
         frontend_status == "healthy" && backend_status == "healthy"
     } else {
-        // Backend-only: only backend needs to be healthy
         backend_status == "healthy"
     };
     let status = if all_healthy { "ok" } else { "starting" };
@@ -396,7 +395,7 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRespon
             status,
             frontend_status,
             backend_status,
-            db_status, // Reported but doesn't affect overall status
+            db_status,
             failed,
         }),
     )
