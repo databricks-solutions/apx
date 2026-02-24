@@ -11,7 +11,7 @@ concurrency:
 jobs:
   analyze:
     name: CodeQL Analysis
-    runs-on: ubuntu-latest
+    runs-on: linux-ubuntu-latest
     permissions:
       security-events: write
       actions: read
@@ -35,7 +35,7 @@ jobs:
 
   cargo-audit:
     name: Dependency Audit
-    runs-on: ubuntu-latest
+    runs-on: linux-ubuntu-latest
     permissions:
       contents: read
     steps:
