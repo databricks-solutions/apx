@@ -185,8 +185,8 @@ pub(crate) trait DevProcess: Send + Sync {
     /// Human-readable label for log messages ("backend", "db").
     fn label(&self) -> &'static str;
 
-    /// Report current process status.
-    async fn status(&self) -> String;
+    /// Report current process status as a static label.
+    async fn status(&self) -> &'static str;
 }
 
 /// Kill a child process tree immediately (used for restart operations).

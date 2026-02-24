@@ -11,12 +11,12 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::dev::common::{DevProcess, ProbeResult, http_health_probe, stop_child_tree};
 use crate::dev::embedded_db::EmbeddedDb;
@@ -30,79 +30,73 @@ use crate::python_logging::{
 };
 use apx_common::hosts::CLIENT_HOST;
 
+/// Files that trigger a backend restart when modified.
+const WATCHED_FILES: &[&str] = &[".env", "pyproject.toml", "uv.lock"];
+
+/// Files that require `uv sync` before restarting.
+const DEPENDENCY_FILES: &[&str] = &["pyproject.toml", "uv.lock"];
+
+/// Debounce window for file change events (ms).
+const DEBOUNCE_MS: u64 = 150;
+
+// ---------------------------------------------------------------------------
+// BackendConfig — named constructor parameters
+// ---------------------------------------------------------------------------
+
+/// All immutable and shared-state values needed to construct a [`Backend`].
+/// Avoids a 12-parameter positional constructor.
+pub(crate) struct BackendConfig {
+    pub app_dir: PathBuf,
+    pub app_slug: String,
+    pub app_entrypoint: String,
+    pub host: String,
+    pub backend_port: u16,
+    pub frontend_port: Option<u16>,
+    pub db_port: u16,
+    pub dev_server_port: u16,
+    pub dev_token: String,
+    pub dev_config: DevConfig,
+    pub dotenv_vars: Arc<Mutex<HashMap<String, String>>>,
+    pub db: Arc<OnceLock<EmbeddedDb>>,
+}
+
+// ---------------------------------------------------------------------------
+// Backend
+// ---------------------------------------------------------------------------
+
 /// Self-contained backend (uvicorn) lifecycle manager.
 /// `ProcessManager` interacts only through this API.
 pub(crate) struct Backend {
     child: Arc<Mutex<Option<Child>>>,
-    // Immutable config
-    app_dir: PathBuf,
-    app_slug: String,
-    app_entrypoint: String,
-    host: String,
-    backend_port: u16,
-    frontend_port: Option<u16>,
-    db_port: u16,
-    dev_server_port: u16,
-    dev_token: String,
-    dev_config: DevConfig,
-    // Shared mutable state
-    dotenv_vars: Arc<Mutex<HashMap<String, String>>>,
-    // DB password (lock-free read after init)
-    db: Arc<OnceLock<EmbeddedDb>>,
+    cfg: BackendConfig,
 }
 
 // `Child` does not implement `Debug`, so we provide a manual impl.
 impl std::fmt::Debug for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Backend")
-            .field("app_slug", &self.app_slug)
-            .field("backend_port", &self.backend_port)
+            .field("app_slug", &self.cfg.app_slug)
+            .field("backend_port", &self.cfg.backend_port)
             .finish()
     }
 }
 
 impl Backend {
-    /// Create a new Backend without spawning the process.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        app_dir: PathBuf,
-        app_slug: String,
-        app_entrypoint: String,
-        host: String,
-        backend_port: u16,
-        frontend_port: Option<u16>,
-        db_port: u16,
-        dev_server_port: u16,
-        dev_token: String,
-        dev_config: DevConfig,
-        dotenv_vars: Arc<Mutex<HashMap<String, String>>>,
-        db: Arc<OnceLock<EmbeddedDb>>,
-    ) -> Self {
+    pub fn new(cfg: BackendConfig) -> Self {
         Self {
             child: Arc::new(Mutex::new(None)),
-            app_dir,
-            app_slug,
-            app_entrypoint,
-            host,
-            backend_port,
-            frontend_port,
-            db_port,
-            dev_server_port,
-            dev_token,
-            dev_config,
-            dotenv_vars,
-            db,
+            cfg,
         }
     }
 
     pub fn dev_token(&self) -> &str {
-        &self.dev_token
+        &self.cfg.dev_token
     }
 
     /// Spawn uvicorn. Resolves log config, builds the command, attaches log
     /// forwarders, and stores the child handle.
     pub async fn spawn(&self) -> Result<(), String> {
-        let log_config = self.resolve_log_config().await?;
+        let log_config = self.resolve_and_validate_log_config().await?;
         let tool_cmd = self.build_uvicorn_command(&log_config).await?;
 
         let mut child = tool_cmd.spawn().map_err(String::from)?;
@@ -117,7 +111,7 @@ impl Backend {
     pub async fn restart_with_env(&self, new_vars: HashMap<String, String>) -> Result<(), String> {
         self.stop_current().await;
         {
-            let mut vars = self.dotenv_vars.lock().await;
+            let mut vars = self.cfg.dotenv_vars.lock().await;
             *vars = new_vars;
         }
         self.spawn().await
@@ -132,253 +126,163 @@ impl Backend {
         tokio::spawn(async move {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(100);
 
-            let mut watcher = match RecommendedWatcher::new(
-                move |res: Result<Event, notify::Error>| {
-                    if let Ok(event) = res {
-                        let _ = tx.blocking_send(event);
-                    }
-                },
-                notify::Config::default(),
-            ) {
-                Ok(w) => w,
-                Err(e) => {
-                    warn!("Failed to create file watcher: {}", e);
-                    return;
-                }
+            let Some(mut watcher) = create_watcher(tx) else {
+                return;
             };
-
-            let watched_files = vec![
-                backend.app_dir.join(".env"),
-                backend.app_dir.join("pyproject.toml"),
-                backend.app_dir.join("uv.lock"),
-            ];
-
-            for file in &watched_files {
-                if file.exists()
-                    && let Err(e) = watcher.watch(file, RecursiveMode::NonRecursive)
-                {
-                    warn!("Failed to watch file {:?}: {}", file, e);
-                }
-            }
-
-            let debounce_duration = Duration::from_millis(150);
+            register_watches(&mut watcher, &backend.cfg.app_dir);
 
             while let Some(event) = rx.recv().await {
-                if !matches!(
-                    event.kind,
-                    notify::EventKind::Modify(_) | notify::EventKind::Create(_)
-                ) {
+                let Some(file_name) = classify_event(&event) else {
+                    continue;
+                };
+                let Some(file_name) = debounce(&mut rx, file_name).await else {
+                    continue;
+                };
+                if !try_acquire_restart(&restarting) {
                     continue;
                 }
 
-                let mut triggered_file = None;
-                for path in &event.paths {
-                    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                handle_file_change(&backend, &file_name).await;
 
-                    if ["pyproject.toml", "uv.lock", ".env"].contains(&file_name) {
-                        triggered_file = Some(file_name.to_string());
-                        break;
-                    }
-                }
-
-                if let Some(mut file_name) = triggered_file {
-                    // Debounce: wait for more events
-                    tokio::time::sleep(debounce_duration).await;
-
-                    // Drain additional events during the debounce period
-                    let mut received_more = false;
-                    while let Ok(additional_event) = rx.try_recv() {
-                        received_more = true;
-                        for path in &additional_event.paths {
-                            let additional_file_name =
-                                path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                            if ["pyproject.toml", "uv.lock", ".env"].contains(&additional_file_name)
-                            {
-                                file_name = additional_file_name.to_string();
-                            }
-                        }
-                    }
-
-                    // If we received more events, continue the loop to debounce again
-                    if received_more {
-                        continue;
-                    }
-
-                    // Guard against concurrent restarts
-                    if restarting
-                        .compare_exchange(
-                            false,
-                            true,
-                            std::sync::atomic::Ordering::SeqCst,
-                            std::sync::atomic::Ordering::SeqCst,
-                        )
-                        .is_err()
-                    {
-                        debug!("Restart already in progress, skipping.");
-                        continue;
-                    }
-
-                    info!("{} changed, restarting uvicorn", file_name);
-
-                    // Run uv sync if Python dependencies changed
-                    let needs_sync = file_name == "pyproject.toml" || file_name == "uv.lock";
-                    if needs_sync {
-                        info!("Running uv sync due to {} change", file_name);
-                        if let Err(e) = crate::common::uv_sync(&backend.app_dir).await {
-                            warn!("uv sync failed: {}", e);
-                        }
-                    }
-
-                    // Reload .env if it exists
-                    let new_vars =
-                        if let Ok(dotenv) = DotenvFile::read(&backend.app_dir.join(".env")) {
-                            dotenv.get_vars()
-                        } else {
-                            HashMap::new()
-                        };
-
-                    // Stop → update vars → respawn
-                    backend.stop_current().await;
-                    {
-                        let mut vars = backend.dotenv_vars.lock().await;
-                        *vars = new_vars;
-                    }
-                    if let Err(e) = backend.spawn().await {
-                        warn!("Failed to restart backend: {}", e);
-                    }
-
-                    restarting.store(false, std::sync::atomic::Ordering::SeqCst);
-                }
+                restarting.store(false, std::sync::atomic::Ordering::SeqCst);
             }
         });
     }
 
-    // -- private helpers --
+    // -- private: log config --
 
-    /// Resolve uvicorn logging config, with validation and fallback.
-    async fn resolve_log_config(&self) -> Result<String, String> {
-        let log_config_result =
-            resolve_log_config(&self.dev_config, &self.app_slug, &self.app_dir).await?;
+    /// Resolve uvicorn logging config. For JSON configs, validates via Python
+    /// and falls back to the default config on failure.
+    async fn resolve_and_validate_log_config(&self) -> Result<String, String> {
+        let result =
+            resolve_log_config(&self.cfg.dev_config, &self.cfg.app_slug, &self.cfg.app_dir).await?;
 
-        match &log_config_result {
+        match &result {
             LogConfigResult::PythonFile(path) => Ok(path.display().to_string()),
-            LogConfigResult::JsonConfig(config_path) => {
-                // Validate the JSON config can be loaded by Python's logging.config.dictConfig
-                let validation_script = format!(
-                    "import json, logging.config; logging.config.dictConfig(json.load(open('{}')))",
-                    config_path.display()
-                );
-
-                let output = UvTool::new("python")
-                    .await?
-                    .cmd()
-                    .args(["-c", &validation_script])
-                    .cwd(&self.app_dir)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .exec()
-                    .await
-                    .map_err(|e| format!("Failed to validate logging config: {e}"))?;
-
-                if output.exit_code == Some(0) {
-                    Ok(config_path.display().to_string())
-                } else {
-                    // Validation failed — fall back to default config
-                    let stderr = &output.stderr;
-                    warn!(
-                        "Logging config validation failed, falling back to default:\n{}",
-                        stderr
-                    );
-                    eprintln!(
-                        "⚠️  Custom logging config is invalid, using default config:\n{}",
-                        stderr
-                    );
-
-                    let default_config = default_logging_config(&self.app_slug);
-                    let fallback_path = write_logging_config_json(&default_config, &self.app_dir)
-                        .await
-                        .map_err(|e| format!("Failed to write fallback logging config: {e}"))?;
-                    Ok(fallback_path.display().to_string())
-                }
-            }
+            LogConfigResult::JsonConfig(path) => self.validate_json_log_config(path).await,
         }
     }
 
-    /// Construct the uvicorn `ToolCommand` with all env vars.
+    /// Run Python's `logging.config.dictConfig` against a JSON config file.
+    /// Returns the config path on success, or generates a default fallback.
+    async fn validate_json_log_config(
+        &self,
+        config_path: &std::path::Path,
+    ) -> Result<String, String> {
+        let script = format!(
+            "import json, logging.config; logging.config.dictConfig(json.load(open('{}')))",
+            config_path.display()
+        );
+
+        let output = UvTool::new("python")
+            .await?
+            .cmd()
+            .args(["-c", &script])
+            .cwd(&self.cfg.app_dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .exec()
+            .await
+            .map_err(|e| format!("Failed to validate logging config: {e}"))?;
+
+        if output.exit_code == Some(0) {
+            return Ok(config_path.display().to_string());
+        }
+
+        warn!(
+            "Logging config validation failed, falling back to default:\n{}",
+            output.stderr
+        );
+        eprintln!(
+            "⚠️  Custom logging config is invalid, using default config:\n{}",
+            output.stderr
+        );
+
+        let default = default_logging_config(&self.cfg.app_slug);
+        let path = write_logging_config_json(&default, &self.cfg.app_dir)
+            .await
+            .map_err(|e| format!("Failed to write fallback logging config: {e}"))?;
+        Ok(path.display().to_string())
+    }
+
+    // -- private: command construction --
+
+    /// Construct the `uv run uvicorn` command with all env vars.
     async fn build_uvicorn_command(
         &self,
         log_config: &str,
     ) -> Result<crate::external::ToolCommand, String> {
-        let mut tool_cmd = UvTool::new("uvicorn")
+        let cfg = &self.cfg;
+
+        let mut cmd = UvTool::new("uvicorn")
             .await?
             .cmd()
             .args([
-                &self.app_entrypoint,
+                &cfg.app_entrypoint,
                 "--host",
-                &self.host,
+                &cfg.host,
                 "--port",
-                &self.backend_port.to_string(),
+                &cfg.backend_port.to_string(),
                 "--reload",
                 "--log-config",
                 log_config,
             ])
-            .cwd(&self.app_dir)
+            .cwd(&cfg.app_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env("APX_BACKEND_PORT", self.backend_port.to_string())
-            .env("APX_DEV_DB_PORT", self.db_port.to_string())
-            .env("APX_DEV_SERVER_PORT", self.dev_server_port.to_string())
-            .env("APX_DEV_SERVER_HOST", &self.host)
-            .env(token::DEV_TOKEN_ENV, &self.dev_token)
-            // Databricks SDK user-agent tracking via env vars
+            // APX runtime context
+            .env("APX_BACKEND_PORT", cfg.backend_port.to_string())
+            .env("APX_DEV_DB_PORT", cfg.db_port.to_string())
+            .env("APX_DEV_SERVER_PORT", cfg.dev_server_port.to_string())
+            .env("APX_DEV_SERVER_HOST", &cfg.host)
+            .env(token::DEV_TOKEN_ENV, &cfg.dev_token)
+            // Databricks SDK user-agent tracking
             .env("DATABRICKS_SDK_UPSTREAM", "apx")
             .env("DATABRICKS_SDK_UPSTREAM_VERSION", apx_common::VERSION)
-            // Force Python to flush stdout/stderr immediately (no buffering)
+            // Force Python to flush stdout/stderr immediately
             .env("PYTHONUNBUFFERED", "1");
 
-        if let Some(fp) = self.frontend_port {
-            tool_cmd = tool_cmd.env("APX_FRONTEND_PORT", fp.to_string());
+        if let Some(fp) = cfg.frontend_port {
+            cmd = cmd.env("APX_FRONTEND_PORT", fp.to_string());
+        }
+        if let Some(db) = cfg.db.get() {
+            cmd = cmd.env("APX_DEV_DB_PWD", db.password());
         }
 
-        if let Some(db) = self.db.get() {
-            tool_cmd = tool_cmd.env("APX_DEV_DB_PWD", db.password());
-        }
-
-        // Apply dotenv variables
-        let vars = self.dotenv_vars.lock().await;
+        let vars = cfg.dotenv_vars.lock().await;
         for (key, value) in vars.iter() {
-            tool_cmd = tool_cmd.env(key, value);
+            cmd = cmd.env(key, value);
         }
 
-        Ok(tool_cmd)
+        Ok(cmd)
     }
+
+    // -- private: log forwarding --
 
     /// Spawn tasks to read stdout/stderr, prefix with source, and forward to flux.
     fn attach_log_forwarders(&self, child: &mut Child) {
-        let service_name = format!("{}_app", self.app_slug);
-        let app_path = self.app_dir.display().to_string();
+        let service_name = format!("{}_app", self.cfg.app_slug);
+        let app_path = self.cfg.app_dir.display().to_string();
 
         if let Some(stdout) = child.stdout.take() {
-            let service_name = service_name.clone();
-            let app_path = app_path.clone();
+            let svc = service_name.clone();
+            let path = app_path.clone();
             tokio::spawn(async move {
-                let reader = BufReader::new(stdout);
-                let mut lines = reader.lines();
+                let mut lines = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     println!(
                         "{}",
                         apx_common::format::format_process_log_line("app", &line)
                     );
-                    forward_log_to_flux(&line, "INFO", &service_name, &app_path).await;
+                    forward_log_to_flux(&line, "INFO", &svc, &path).await;
                 }
             });
         }
 
         if let Some(stderr) = child.stderr.take() {
             tokio::spawn(async move {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
+                let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     eprintln!(
                         "{}",
@@ -391,11 +295,17 @@ impl Backend {
         }
     }
 
+    // -- private: process control --
+
     /// Stop the current backend process tree.
     async fn stop_current(&self) {
         stop_child_tree(self.label(), &self.child).await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// DevProcess impl
+// ---------------------------------------------------------------------------
 
 impl DevProcess for Backend {
     fn child_handle(&self) -> &Arc<Mutex<Option<Child>>> {
@@ -406,22 +316,123 @@ impl DevProcess for Backend {
         "backend"
     }
 
-    async fn status(&self) -> String {
+    async fn status(&self) -> &'static str {
         let mut guard = self.child.lock().await;
         match guard.as_mut() {
-            None => return "stopped".to_string(),
+            None => return "stopped",
             Some(process) => match process.try_wait() {
                 Ok(None) => {} // still running — continue to HTTP probe
-                Ok(Some(_)) => return "failed".to_string(),
-                Err(_) => return "error".to_string(),
+                Ok(Some(_)) => return "failed",
+                Err(_) => return "error",
             },
         }
         drop(guard);
 
-        // Process is running — do HTTP health probe
-        match http_health_probe(CLIENT_HOST, self.backend_port).await {
-            ProbeResult::Responded(_) => "healthy".to_string(),
-            ProbeResult::Failed(_) => "starting".to_string(),
+        match http_health_probe(CLIENT_HOST, self.cfg.backend_port).await {
+            ProbeResult::Responded(_) => "healthy",
+            ProbeResult::Failed(_) => "starting",
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File watcher helpers — free functions to keep start_file_watcher short
+// ---------------------------------------------------------------------------
+
+/// Create a `notify` watcher that sends events to `tx`.
+fn create_watcher(tx: tokio::sync::mpsc::Sender<Event>) -> Option<RecommendedWatcher> {
+    match RecommendedWatcher::new(
+        move |res: Result<Event, notify::Error>| {
+            if let Ok(event) = res {
+                let _ = tx.blocking_send(event);
+            }
+        },
+        notify::Config::default(),
+    ) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            warn!("Failed to create file watcher: {}", e);
+            None
+        }
+    }
+}
+
+/// Register watches on known project files (only if they exist on disk).
+fn register_watches(watcher: &mut RecommendedWatcher, app_dir: &std::path::Path) {
+    for name in WATCHED_FILES {
+        let path = app_dir.join(name);
+        if path.exists()
+            && let Err(e) = watcher.watch(&path, RecursiveMode::NonRecursive)
+        {
+            warn!("Failed to watch file {:?}: {}", path, e);
+        }
+    }
+}
+
+/// If the event is a create/modify on a watched file, return its file name.
+fn classify_event(event: &Event) -> Option<String> {
+    if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+        return None;
+    }
+
+    event.paths.iter().find_map(|path| {
+        let name = path.file_name()?.to_str()?;
+        WATCHED_FILES.contains(&name).then(|| name.to_string())
+    })
+}
+
+/// Wait for the debounce window, drain queued events, and return the latest
+/// triggered file name. Returns `None` if more events arrived (caller should
+/// re-enter the loop to debounce again).
+async fn debounce(
+    rx: &mut tokio::sync::mpsc::Receiver<Event>,
+    mut file_name: String,
+) -> Option<String> {
+    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
+
+    let mut received_more = false;
+    while let Ok(extra) = rx.try_recv() {
+        received_more = true;
+        if let Some(name) = classify_event(&extra) {
+            file_name = name;
+        }
+    }
+
+    if received_more { None } else { Some(file_name) }
+}
+
+/// Atomically try to set the `restarting` flag. Returns `true` if acquired.
+fn try_acquire_restart(flag: &std::sync::atomic::AtomicBool) -> bool {
+    flag.compare_exchange(
+        false,
+        true,
+        std::sync::atomic::Ordering::SeqCst,
+        std::sync::atomic::Ordering::SeqCst,
+    )
+    .is_ok()
+}
+
+/// Execute a single file-change restart cycle: sync deps, reload env, respawn.
+async fn handle_file_change(backend: &Backend, file_name: &str) {
+    info!("{} changed, restarting uvicorn", file_name);
+
+    if DEPENDENCY_FILES.contains(&file_name) {
+        info!("Running uv sync due to {} change", file_name);
+        if let Err(e) = crate::common::uv_sync(&backend.cfg.app_dir).await {
+            warn!("uv sync failed: {}", e);
+        }
+    }
+
+    let new_vars = DotenvFile::read(&backend.cfg.app_dir.join(".env"))
+        .map(|d| d.get_vars())
+        .unwrap_or_default();
+
+    backend.stop_current().await;
+    {
+        let mut vars = backend.cfg.dotenv_vars.lock().await;
+        *vars = new_vars;
+    }
+    if let Err(e) = backend.spawn().await {
+        warn!("Failed to restart backend: {}", e);
     }
 }

@@ -279,7 +279,7 @@ impl DevProcess for EmbeddedDb {
         "db"
     }
 
-    async fn status(&self) -> String {
-        EmbeddedDb::status(self).await.to_string()
+    async fn status(&self) -> &'static str {
+        EmbeddedDb::status(self).await
     }
 }

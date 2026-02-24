@@ -18,7 +18,7 @@ use tokio::time::{Duration, timeout};
 use tracing::{debug, warn};
 
 use crate::common::read_project_metadata;
-use crate::dev::backend::Backend;
+use crate::dev::backend::{Backend, BackendConfig};
 use crate::dev::common::{DevProcess, ProbeResult, build_parent_map, http_health_probe};
 use crate::dev::embedded_db::EmbeddedDb;
 use crate::dev::token;
@@ -79,11 +79,11 @@ impl ProcessManager {
 
         let db = Arc::new(OnceLock::new());
 
-        let backend = Arc::new(Backend::new(
-            app_dir.clone(),
-            app_slug.clone(),
+        let backend = Arc::new(Backend::new(BackendConfig {
+            app_dir: app_dir.clone(),
+            app_slug: app_slug.clone(),
             app_entrypoint,
-            host.to_string(),
+            host: host.to_string(),
             backend_port,
             frontend_port,
             db_port,
@@ -91,8 +91,8 @@ impl ProcessManager {
             dev_token,
             dev_config,
             dotenv_vars,
-            Arc::clone(&db),
-        ));
+            db: Arc::clone(&db),
+        }));
 
         debug!(
             app_dir = %app_dir.display(),
@@ -234,10 +234,10 @@ impl ProcessManager {
         let frontend_http_check = self.frontend_port.map(|p| (CLIENT_HOST, p));
         let (frontend_status, backend_status, db_status) = tokio::join!(
             self.status_for_process(&self.frontend_child, frontend_http_check),
-            self.backend.status(),
+            async { self.backend.status().await.to_string() },
             async {
                 match self.db.get() {
-                    Some(db) => DevProcess::status(db).await,
+                    Some(db) => DevProcess::status(db).await.to_string(),
                     None => "stopped".to_string(),
                 }
             },
