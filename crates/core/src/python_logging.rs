@@ -100,6 +100,7 @@ pub enum LogConfigResult {
 
 impl LogConfigResult {
     /// Get the path as a string for passing to uvicorn
+    #[cfg(test)]
     pub fn to_string_path(&self) -> String {
         match self {
             LogConfigResult::JsonConfig(p) | LogConfigResult::PythonFile(p) => {

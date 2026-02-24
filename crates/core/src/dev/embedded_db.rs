@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, warn};
 
+use crate::dev::common::DevProcess;
 use crate::dev::otel::forward_log_to_flux;
 use crate::dev::token;
 use crate::external::ExternalTool;
@@ -266,5 +267,19 @@ impl EmbeddedDb {
                 }
             }
         });
+    }
+}
+
+impl DevProcess for EmbeddedDb {
+    fn child_handle(&self) -> &Arc<Mutex<Option<Child>>> {
+        &self.child
+    }
+
+    fn label(&self) -> &'static str {
+        "db"
+    }
+
+    async fn status(&self) -> String {
+        EmbeddedDb::status(self).await.to_string()
     }
 }

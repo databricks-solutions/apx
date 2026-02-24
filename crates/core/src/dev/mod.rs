@@ -1,3 +1,4 @@
+pub(crate) mod backend;
 pub mod client;
 pub mod common;
 pub(crate) mod embedded_db;

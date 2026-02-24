@@ -10,7 +10,6 @@ use crate::dev::client::{HealthCheckConfig, health, stop as stop_server};
 use crate::dev::common::{
     DevLock, is_process_running, lock_path, read_lock, remove_lock, write_lock,
 };
-use crate::dev::process::ProcessManager;
 use crate::dev::token;
 use crate::external::uv::ApxTool;
 use crate::flux;
@@ -254,7 +253,8 @@ pub async fn spawn_server(
         }
 
         if let Some(pid) = child.id() {
-            let _ = ProcessManager::kill_process_tree_async(pid, "dev-server".to_string()).await;
+            let _ =
+                crate::dev::common::kill_process_tree_async(pid, "dev-server".to_string()).await;
         }
         drop(child.kill());
 
@@ -323,7 +323,7 @@ pub async fn stop_dev_server(app_dir: &Path, mode: OutputMode) -> Result<bool, S
         }
     }
 
-    let kill_result = ProcessManager::kill_process_tree(lock.pid, "dev-server");
+    let kill_result = crate::dev::common::kill_process_tree(lock.pid, "dev-server");
     stop_spinner.finish_and_clear();
     match kill_result {
         Ok(()) => {

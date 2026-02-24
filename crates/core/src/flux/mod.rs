@@ -171,8 +171,6 @@ pub fn ensure_running() -> Result<(), String> {
 ///
 /// Stops the running flux daemon and removes the lock file.
 pub fn stop() -> Result<(), String> {
-    use crate::dev::process::ProcessManager;
-
     let lock = match read_lock()? {
         Some(l) => l,
         None => {
@@ -189,8 +187,8 @@ pub fn stop() -> Result<(), String> {
 
     info!("Stopping flux daemon (pid={})", lock.pid);
 
-    // Use ProcessManager to kill the process tree
-    if let Err(e) = ProcessManager::kill_process_tree(lock.pid, "flux-daemon") {
+    // Kill the process tree
+    if let Err(e) = crate::dev::common::kill_process_tree(lock.pid, "flux-daemon") {
         warn!("Failed to kill flux process tree: {}", e);
     }
 
