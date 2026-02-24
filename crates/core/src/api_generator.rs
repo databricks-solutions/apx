@@ -1,16 +1,17 @@
 use notify::{RecursiveMode, Watcher};
 use std::fs;
+use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
-use std::pin::Pin;
 use std::time::SystemTime;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tokio::time::{Duration, Sleep};
+use tokio::time::Duration;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 use crate::common::{read_project_metadata, write_metadata_file};
 use crate::dev::common::Shutdown;
+use crate::dev::watcher::{PollingWatcher, spawn_polling_watcher};
 use crate::external::uv::Uv;
 use crate::interop::generate_openapi_spec;
 use crate::openapi;
@@ -61,170 +62,237 @@ pub async fn generate_openapi(project_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Debounce period after a Python file change before regenerating the OpenAPI spec.
+/// Prevents rapid-fire regeneration during batch saves.
 const OPENAPI_WATCH_DEBOUNCE_MS: u64 = 100;
 
-pub fn start_openapi_watcher(
+/// Longer debounce for the initial generation at startup, giving the server time
+/// to finish initialization before running `uv run apx __generate_openapi`.
+const OPENAPI_INITIAL_DEBOUNCE_MS: u64 = 500;
+
+/// Watches Python files for changes and regenerates the TypeScript API client
+/// from the OpenAPI spec.
+///
+/// Uses both `notify` filesystem events (for responsiveness) and periodic mtime
+/// polling (as a fallback) to detect changes. A debounce timer prevents
+/// rapid-fire regeneration during batch saves.
+struct OpenApiWatcher {
     app_dir: PathBuf,
-    mut shutdown_rx: broadcast::Receiver<Shutdown>,
+    uv: Uv,
+    /// Receives filesystem events from the `notify` crate. Drained via `try_recv`
+    /// on each poll to batch process events.
+    notify_rx: mpsc::UnboundedReceiver<notify::Result<notify::Event>>,
+    /// Kept alive to maintain the recursive filesystem watch.
+    _notify_watcher: notify::RecommendedWatcher,
+    last_mtime: Option<SystemTime>,
+    /// True when a Python change has been detected and generation is pending.
+    pending: bool,
+    /// Generation fires once this instant passes. Reset on each new change (debounce).
+    debounce_until: Option<tokio::time::Instant>,
+    /// True until the first generation completes (affects log messages).
+    is_initial_generation: bool,
+}
+
+impl OpenApiWatcher {
+    /// Drain all buffered filesystem events from the notify channel.
+    ///
+    /// Returns `Break` if the channel is disconnected (notify watcher dropped),
+    /// `Continue` otherwise.
+    fn drain_notify_events(&mut self) -> ControlFlow<()> {
+        loop {
+            match self.notify_rx.try_recv() {
+                Ok(Ok(event)) => self.process_notify_event(&event),
+                Ok(Err(err)) => warn!("OpenAPI watcher error: {err}"),
+                Err(mpsc::error::TryRecvError::Empty) => return ControlFlow::Continue(()),
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    debug!("OpenAPI watcher channel closed.");
+                    return ControlFlow::Break(());
+                }
+            }
+        }
+    }
+
+    /// Extract Python file changes from a single notify event, updating mtime
+    /// tracking and marking generation as pending.
+    fn process_notify_event(&mut self, event: &notify::Event) {
+        for path in &event.paths {
+            if is_ignored_path(path) || !is_python_path(path) {
+                continue;
+            }
+            self.mark_pending();
+            if let Ok(metadata) = fs::metadata(path)
+                && let Ok(modified) = metadata.modified()
+                && self.last_mtime.is_none_or(|current| modified > current)
+            {
+                self.last_mtime = Some(modified);
+            }
+        }
+    }
+
+    /// Fallback mtime check for platforms where `notify` is unreliable.
+    /// Walks all Python files and compares the latest mtime against the last known.
+    fn check_mtime_changes(&mut self) {
+        let latest = latest_python_mtime(&self.app_dir);
+        let changed =
+            latest.is_some_and(|modified| self.last_mtime.is_none_or(|current| modified > current));
+        if changed {
+            self.mark_pending();
+            self.last_mtime = latest;
+        }
+    }
+
+    /// Record that a Python change was detected and reset the debounce timer.
+    fn mark_pending(&mut self) {
+        if !self.pending {
+            info!("Python change detected, regenerating OpenAPI\u{2026}");
+        }
+        self.pending = true;
+        self.debounce_until =
+            Some(tokio::time::Instant::now() + Duration::from_millis(OPENAPI_WATCH_DEBOUNCE_MS));
+    }
+
+    /// Run generation if the debounce period has elapsed and a change is pending.
+    async fn maybe_generate(&mut self) {
+        let Some(until) = self.debounce_until else {
+            return;
+        };
+        if !self.pending || tokio::time::Instant::now() < until {
+            return;
+        }
+        self.debounce_until = None;
+        self.pending = false;
+        self.run_generation().await;
+    }
+
+    /// Spawn `uv run apx __generate_openapi` and log the result.
+    async fn run_generation(&mut self) {
+        let is_initial = self.is_initial_generation;
+        self.is_initial_generation = false;
+
+        if is_initial {
+            info!("Running initial OpenAPI generation...");
+        } else {
+            info!("Running OpenAPI regeneration...");
+        }
+
+        let mut cmd = self
+            .uv
+            .cmd()
+            .args(["run", "apx", "__generate_openapi", "--app-dir"])
+            .arg(&self.app_dir)
+            .cwd(&self.app_dir)
+            .into_command();
+        let output = tokio::time::timeout(Duration::from_secs(30), cmd.output()).await;
+        log_generation_result(output, is_initial);
+    }
+}
+
+impl PollingWatcher for OpenApiWatcher {
+    fn label(&self) -> &'static str {
+        "OpenAPI"
+    }
+
+    fn poll_interval(&self) -> Duration {
+        Duration::from_millis(200)
+    }
+
+    async fn poll(&mut self) -> ControlFlow<()> {
+        // Drain buffered filesystem events from notify
+        if self.drain_notify_events().is_break() {
+            return ControlFlow::Break(());
+        }
+        // Fallback: check mtimes for platforms where notify is unreliable
+        self.check_mtime_changes();
+        // Run generation if debounce period has elapsed
+        self.maybe_generate().await;
+        ControlFlow::Continue(())
+    }
+}
+
+/// Log the result of an OpenAPI generation command.
+fn log_generation_result(
+    output: Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed>,
+    is_initial: bool,
+) {
+    let label = if is_initial {
+        "generation"
+    } else {
+        "regeneration"
+    };
+    match output {
+        Ok(Ok(result)) if result.status.success() => {
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            if is_initial {
+                if stdout.contains("regenerated") {
+                    info!("Initial OpenAPI generated successfully");
+                } else {
+                    info!("Initial OpenAPI generation complete (unchanged)");
+                }
+            } else if stdout.contains("regenerated") {
+                info!("OpenAPI regenerated successfully");
+            } else {
+                info!("OpenAPI regeneration skipped (unchanged)");
+            }
+        }
+        Ok(Ok(result)) => {
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            warn!(
+                status = %result.status,
+                stdout = %stdout,
+                stderr = %stderr,
+                "OpenAPI {label} failed."
+            );
+        }
+        Ok(Err(err)) => warn!("Failed to spawn OpenAPI {label}: {err}"),
+        Err(_) => warn!("OpenAPI {label} timed out."),
+    }
+}
+
+/// Set up and spawn the OpenAPI watcher as a background task.
+///
+/// Creates a `notify` filesystem watcher, resolves `uv`, and spawns the
+/// polling watcher. Returns an error if the filesystem watcher or `uv`
+/// resolution fails.
+pub async fn start_openapi_watcher(
+    app_dir: PathBuf,
+    shutdown_rx: broadcast::Receiver<Shutdown>,
 ) -> Result<(), String> {
     debug!(
         app_dir = %app_dir.display(),
         "Starting OpenAPI watcher."
     );
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut watcher = notify::recommended_watcher(move |result| {
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut notify_watcher = notify::recommended_watcher(move |result| {
         let _ = tx.send(result);
     })
     .map_err(|err| format!("Failed to create file watcher: {err}"))?;
-    watcher
+    notify_watcher
         .watch(&app_dir, RecursiveMode::Recursive)
         .map_err(|err| format!("Failed to watch app dir: {err}"))?;
 
+    let uv = Uv::new()
+        .await
+        .map_err(|e| format!("Failed to resolve uv for OpenAPI watcher: {e}"))?;
+
     let initial_mtime = latest_python_mtime(&app_dir);
+    info!("Will generate OpenAPI on startup");
 
-    tokio::spawn(async move {
-        let _watcher = watcher;
+    let watcher = OpenApiWatcher {
+        app_dir,
+        uv,
+        notify_rx: rx,
+        _notify_watcher: notify_watcher,
+        last_mtime: initial_mtime,
+        pending: true,
+        debounce_until: Some(
+            tokio::time::Instant::now() + Duration::from_millis(OPENAPI_INITIAL_DEBOUNCE_MS),
+        ),
+        is_initial_generation: true,
+    };
 
-        // Resolve uv once for the lifetime of this watcher task
-        let uv = match Uv::new().await {
-            Ok(uv) => uv,
-            Err(e) => {
-                warn!("Failed to resolve uv for OpenAPI watcher: {e}");
-                return;
-            }
-        };
-
-        // Always run initial generation on startup
-        let mut pending = true;
-        let mut is_initial_generation = true;
-        let mut debounce: Option<Pin<Box<Sleep>>> = {
-            info!("Will generate OpenAPI on startup");
-            // Start with a short debounce to allow server to fully initialize
-            Some(Box::pin(tokio::time::sleep(Duration::from_millis(500))))
-        };
-        let mut last_mtime = initial_mtime;
-        let mut poll_interval = tokio::time::interval(Duration::from_millis(200));
-
-        loop {
-            tokio::select! {
-                biased;
-
-                // React to shutdown signal
-                result = shutdown_rx.recv() => {
-                    match result {
-                        Ok(Shutdown::Stop) | Err(_) => {
-                            debug!("OpenAPI watcher stopping.");
-                            break;
-                        }
-                    }
-                }
-
-                _ = poll_interval.tick() => {
-                    let latest = latest_python_mtime(&app_dir);
-                    let changed = latest.is_some_and(|modified| {
-                        last_mtime.is_none_or(|current| modified > current)
-                    });
-                    if changed {
-                        if !pending {
-                            info!("Python change detected, regenerating OpenAPI…");
-                        }
-                        pending = true;
-                        debounce = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
-                            OPENAPI_WATCH_DEBOUNCE_MS,
-                        ))));
-                        last_mtime = latest;
-                    }
-                }
-                maybe = rx.recv() => {
-                    let Some(result) = maybe else {
-                        debug!("OpenAPI watcher channel closed.");
-                        break;
-                    };
-                    match result {
-                        Ok(event) => {
-                            let mut has_python_change = false;
-                            for path in &event.paths {
-                                if is_ignored_path(path) || !is_python_path(path) {
-                                    continue;
-                                }
-                                has_python_change = true;
-                                if let Ok(metadata) = fs::metadata(path)
-                                    && let Ok(modified) = metadata.modified()
-                                    && last_mtime.is_none_or(|current| modified > current)
-                                {
-                                    last_mtime = Some(modified);
-                                }
-                            }
-                            if has_python_change {
-                                if !pending {
-                                    info!("Python change detected, regenerating OpenAPI…");
-                                }
-                                pending = true;
-                                debounce = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
-                                    OPENAPI_WATCH_DEBOUNCE_MS,
-                                ))));
-                            }
-                        }
-                        Err(err) => {
-                            warn!("OpenAPI watcher error: {err}");
-                        }
-                    }
-                }
-                _ = async { if let Some(d) = debounce.as_mut() { d.await } }, if debounce.is_some() => {
-                    debounce = None;
-                    if pending {
-                        pending = false;
-                        let is_initial = is_initial_generation;
-                        is_initial_generation = false;
-
-                        if is_initial {
-                            info!("Running initial OpenAPI generation...");
-                        } else {
-                            info!("Running OpenAPI regeneration...");
-                        }
-
-                        let mut cmd = uv.cmd()
-                            .args(["run", "apx", "__generate_openapi", "--app-dir"])
-                            .arg(&app_dir)
-                            .cwd(&app_dir)
-                            .into_command();
-                        let output = cmd.output();
-                        let output = tokio::time::timeout(Duration::from_secs(30), output).await;
-                        match output {
-                            Ok(Ok(result)) if result.status.success() => {
-                                let stdout = String::from_utf8_lossy(&result.stdout);
-                                if is_initial {
-                                    if stdout.contains("regenerated") {
-                                        info!("Initial OpenAPI generated successfully");
-                                    } else {
-                                        info!("Initial OpenAPI generation complete (unchanged)");
-                                    }
-                                } else if stdout.contains("regenerated") {
-                                    info!("OpenAPI regenerated successfully");
-                                } else {
-                                    info!("OpenAPI regeneration skipped (unchanged)");
-                                }
-                            }
-                            Ok(Ok(result)) => {
-                                let stdout = String::from_utf8_lossy(&result.stdout);
-                                let stderr = String::from_utf8_lossy(&result.stderr);
-                                warn!(
-                                    status = %result.status,
-                                    stdout = %stdout,
-                                    stderr = %stderr,
-                                    "OpenAPI {} failed.",
-                                    if is_initial { "generation" } else { "regeneration" }
-                                );
-                            }
-                            Ok(Err(err)) => warn!("Failed to spawn OpenAPI generation: {err}"),
-                            Err(_) => warn!("OpenAPI {} timed out.", if is_initial { "generation" } else { "regeneration" }),
-                        }
-                    }
-                }
-            }
-        }
-    });
-
+    spawn_polling_watcher(watcher, shutdown_rx);
     Ok(())
 }
 

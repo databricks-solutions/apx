@@ -5,13 +5,12 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
 use crate::dev::common::{DevProcess, ProbeResult, http_health_probe};
-use crate::dev::embedded_db::EmbeddedDb;
 use crate::dev::token;
 use crate::external::uv::ApxTool;
 use apx_common::hosts::CLIENT_HOST;
@@ -30,7 +29,6 @@ pub(crate) struct FrontendConfig {
     pub db_port: u16,
     pub dev_server_port: u16,
     pub dev_token: String,
-    pub db: Arc<OnceLock<EmbeddedDb>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +79,7 @@ impl Frontend {
     async fn build_command(&self) -> Result<crate::external::ToolCommand, String> {
         let cfg = &self.cfg;
 
-        let mut cmd = ApxTool::new_apx()
+        let cmd = ApxTool::new_apx()
             .await?
             .cmd()
             .args(["frontend", "dev"])
@@ -106,10 +104,6 @@ impl Frontend {
             )
             .env(apx_common::hosts::ENV_FRONTEND_HOST, CLIENT_HOST)
             .env("OTEL_SERVICE_NAME", format!("{}_ui", cfg.app_slug));
-
-        if let Some(db) = cfg.db.get() {
-            cmd = cmd.env("APX_DEV_DB_PWD", db.password());
-        }
 
         Ok(cmd)
     }

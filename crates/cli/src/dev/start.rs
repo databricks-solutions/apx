@@ -5,7 +5,7 @@ use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
 use apx_core::common::OutputMode;
 use apx_core::ops::dev::stop_dev_server;
-use apx_core::ops::dev::{resolve_existing_server, spawn_server, start_dev_server};
+use apx_core::ops::dev::{ServerLauncher, prepare_server_launch, resolve_existing_server};
 
 #[derive(Args, Debug, Clone)]
 pub struct StartArgs {
@@ -52,7 +52,29 @@ pub async fn run(args: StartArgs) -> i32 {
 
 async fn run_detached(args: StartArgs) -> Result<(), String> {
     let app_dir = find_app_dir(args.app_path)?;
-    let _ = start_dev_server(&app_dir, args.skip_healthcheck, OutputMode::Interactive).await?;
+    let mode = OutputMode::Interactive;
+
+    // Check for existing server first
+    if let Some(port) = resolve_existing_server(&app_dir, mode).await? {
+        apx_core::common::emit(
+            mode,
+            &format!(
+                "Dev server is already running at http://{}:{port}\n",
+                apx_common::hosts::BROWSER_HOST
+            ),
+        );
+        return Ok(());
+    }
+
+    let server = prepare_server_launch(&app_dir, None, mode).await?;
+    let launcher = ServerLauncher::Detached {
+        app_dir: app_dir.clone(),
+        skip_credentials_validation: args.skip_credentials_validation,
+        timeout_secs: args.timeout,
+        skip_healthcheck: args.skip_healthcheck,
+        mode,
+    };
+    launcher.launch(server).await?;
     Ok(())
 }
 
@@ -60,31 +82,23 @@ async fn run_attached(args: StartArgs) -> Result<(), String> {
     let app_dir = find_app_dir(args.app_path)?;
     let mode = OutputMode::Interactive;
 
-    // If server is already running, skip spawn and go straight to log following
-    let already_running = resolve_existing_server(&app_dir, mode).await?.is_some();
-
-    if !already_running {
-        let _port = spawn_server(
-            &app_dir,
-            None,
-            args.skip_credentials_validation,
-            args.timeout,
-            args.skip_healthcheck,
-            mode,
-        )
-        .await?;
+    // If detached server already running, fall back to log tailing
+    if resolve_existing_server(&app_dir, mode).await?.is_some() {
+        let logs_args = super::logs::LogsArgs {
+            app_path: Some(app_dir.clone()),
+            duration: "10m".to_string(),
+            follow: true,
+        };
+        let _ = super::logs::run(logs_args).await;
+        stop_dev_server(&app_dir, mode).await?;
+        return Ok(());
     }
 
-    // Use the SQLite-based log following (reads from flux storage)
-    let logs_args = super::logs::LogsArgs {
-        app_path: Some(app_dir.clone()),
-        duration: "10m".to_string(),
-        follow: true,
+    let server = prepare_server_launch(&app_dir, None, mode).await?;
+    let launcher = ServerLauncher::Attached {
+        app_dir: app_dir.clone(),
+        skip_credentials_validation: args.skip_credentials_validation,
     };
-
-    // Run logs command (will return on Ctrl+C)
-    let _ = super::logs::run(logs_args).await;
-
-    stop_dev_server(&app_dir, OutputMode::Interactive).await?;
+    launcher.launch(server).await?;
     Ok(())
 }

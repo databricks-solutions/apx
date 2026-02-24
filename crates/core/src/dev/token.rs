@@ -13,7 +13,7 @@ pub const DEV_TOKEN_ENV: &str = "APX_DEV_TOKEN";
 const TOKEN_LENGTH: usize = 32;
 
 /// Generate a cryptographically random alphanumeric token.
-pub(crate) fn generate() -> String {
+pub fn generate() -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(TOKEN_LENGTH)

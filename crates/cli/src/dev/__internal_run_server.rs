@@ -11,7 +11,8 @@ use apx_core::dev::common::{
     BACKEND_PORT_END, BACKEND_PORT_START, DB_PORT_END, DB_PORT_START, FRONTEND_PORT_END,
     FRONTEND_PORT_START, find_random_port_in_range,
 };
-use apx_core::dev::server::run_server;
+use apx_core::dev::server::{ServerConfig, run_server};
+use apx_core::dev::token;
 
 /// Maximum number of retries for subprocess port allocation
 const MAX_PORT_RETRIES: u32 = 5;
@@ -34,6 +35,18 @@ pub async fn run(args: InternalRunServerArgs) -> i32 {
 
 async fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
     set_app_dir(args.app_dir.clone())?;
+
+    // Read dev token from env (set by parent process in spawn_server)
+    let dev_token = match std::env::var(token::DEV_TOKEN_ENV) {
+        Ok(t) => t,
+        Err(_) => {
+            warn!(
+                "{} not set, generating ephemeral token (stop via lock file will not work)",
+                token::DEV_TOKEN_ENV
+            );
+            token::generate()
+        }
+    };
 
     // Validate credentials before starting server (warn if skipped or failed)
     if args.skip_credentials_validation {
@@ -85,15 +98,16 @@ async fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
             "Attempting to start dev server with ports"
         );
 
-        match run_server(
-            args.app_dir.clone(),
+        let config = ServerConfig {
+            app_dir: args.app_dir.clone(),
             listener,
             backend_port,
             frontend_port,
             db_port,
-        )
-        .await
-        {
+            dev_token: dev_token.clone(),
+        };
+
+        match run_server(config).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 // Check if this is a port-related error that might benefit from retry

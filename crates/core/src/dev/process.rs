@@ -2,8 +2,9 @@
 //!
 //! Orchestrates frontend, backend, and database processes.
 //! Individual lifecycles are delegated to [`Frontend`], [`Backend`], and [`EmbeddedDb`].
-// Runs inside the dev server child process (spawned with Stdio::null()),
-// never in the MCP server process — stdout output here is safe.
+// Runs inside the dev server process (in-process for attached mode,
+// child process for detached mode). Never in the MCP server process
+// — stdout output here is safe.
 #![allow(clippy::print_stdout)]
 
 use std::collections::HashMap;
@@ -21,7 +22,6 @@ use crate::dev::backend::{Backend, BackendConfig};
 use crate::dev::common::{DevProcess, build_parent_map};
 use crate::dev::embedded_db::EmbeddedDb;
 use crate::dev::frontend::{Frontend, FrontendConfig};
-use crate::dev::token;
 use crate::dotenv::DotenvFile;
 
 #[derive(Debug)]
@@ -47,6 +47,7 @@ impl ProcessManager {
         backend_port: u16,
         frontend_port: Option<u16>,
         db_port: u16,
+        dev_token: String,
     ) -> Result<Self, String> {
         // Note: Preflight checks (metadata, uv sync, bun install) are done client-side in start.rs
         let metadata = read_project_metadata(app_dir)?;
@@ -57,17 +58,6 @@ impl ProcessManager {
         let app_slug = metadata.app_slug.clone();
         let app_entrypoint = metadata.app_entrypoint.clone();
         let dev_config = metadata.dev_config.clone();
-
-        let dev_token = match std::env::var(token::DEV_TOKEN_ENV) {
-            Ok(t) => t,
-            Err(_) => {
-                warn!(
-                    "{} not set, generating ephemeral token (stop via lock file will not work)",
-                    token::DEV_TOKEN_ENV
-                );
-                token::generate()
-            }
-        };
 
         let app_dir = app_dir
             .canonicalize()
@@ -87,7 +77,6 @@ impl ProcessManager {
                     db_port,
                     dev_server_port,
                     dev_token: dev_token.clone(),
-                    db: Arc::clone(&db),
                 }))
             })
         } else {

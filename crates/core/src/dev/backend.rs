@@ -2,8 +2,9 @@
 //!
 //! Encapsulates uvicorn spawning, log config resolution, log forwarding,
 //! file watching, and environment variable management.
-// Runs inside the dev server child process (spawned with Stdio::null()),
-// never in the MCP server process — stdout output here is safe.
+// Runs inside the dev server process (in-process for attached mode,
+// child process for detached mode). Never in the MCP server process
+// — stdout output here is safe.
 #![allow(clippy::print_stdout)]
 
 use std::collections::HashMap;

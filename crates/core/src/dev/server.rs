@@ -6,6 +6,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -20,6 +21,7 @@ use crate::dev::logging::BrowserLogPayload;
 use crate::dev::otel::build_otlp_log_payload_from_ms;
 use crate::dev::process::ProcessManager;
 use crate::dev::proxy;
+use crate::dev::watcher::{PollingWatcher, spawn_polling_watcher};
 use crate::dotenv::DotenvFile;
 use crate::flux;
 
@@ -45,15 +47,28 @@ struct HealthResponse {
     failed: bool,
 }
 
+/// All values needed to start the dev server's Axum instance + process manager.
+#[derive(Debug)]
+pub struct ServerConfig {
+    pub app_dir: PathBuf,
+    pub listener: tokio::net::TcpListener,
+    pub backend_port: u16,
+    pub frontend_port: Option<u16>,
+    pub db_port: u16,
+    pub dev_token: String,
+}
+
 /// Run the dev server with a pre-bound listener.
 /// The listener is passed in to avoid TOCTOU race conditions with port allocation.
-pub async fn run_server(
-    app_dir: PathBuf,
-    listener: tokio::net::TcpListener,
-    backend_port: u16,
-    frontend_port: Option<u16>,
-    db_port: u16,
-) -> Result<(), String> {
+pub async fn run_server(config: ServerConfig) -> Result<(), String> {
+    let ServerConfig {
+        app_dir,
+        listener,
+        backend_port,
+        frontend_port,
+        db_port,
+        dev_token,
+    } = config;
     // Ensure flux is running for log collection
     if let Err(e) = flux::ensure_running() {
         warn!(
@@ -119,6 +134,10 @@ pub async fn run_server(
     // Create the single shutdown broadcast channel
     let (shutdown_tx, _) = broadcast::channel::<Shutdown>(16);
 
+    // Watch for Ctrl+C to trigger graceful shutdown.
+    // Safe in both modes: attached (Ctrl+C fires), detached child (no terminal, dormant).
+    start_signal_watcher(shutdown_tx.clone());
+
     // Create ProcessManager (doesn't spawn processes yet)
     let process_manager = Arc::new(ProcessManager::new(
         &app_dir,
@@ -127,6 +146,7 @@ pub async fn run_server(
         backend_port,
         frontend_port,
         db_port,
+        dev_token,
     )?);
 
     // Spawn processes in background (DB → Vite → Uvicorn)
@@ -134,25 +154,23 @@ pub async fn run_server(
     process_manager.start_processes();
     debug!("Process spawning started in background");
 
-    // Start .env watcher with shutdown receiver
-    start_env_watcher(
+    // Start .env watcher — restarts uvicorn when environment variables change
+    spawn_polling_watcher(
+        EnvWatcher::new(Arc::clone(&process_manager), app_dir.join(".env")),
         shutdown_tx.subscribe(),
-        Arc::clone(&process_manager),
-        app_dir.join(".env"),
     );
 
     // Start OpenAPI watcher with shutdown receiver (only for projects with UI)
     if process_manager.has_ui()
-        && let Err(err) = start_openapi_watcher(app_dir.clone(), shutdown_tx.subscribe())
+        && let Err(err) = start_openapi_watcher(app_dir.clone(), shutdown_tx.subscribe()).await
     {
         warn!("Failed to start OpenAPI watcher: {err}");
     }
 
-    // Start filesystem watcher to stop server if project folder or lock file is removed
-    start_filesystem_watcher(
+    // Start filesystem watcher — stops the server if the project folder is removed
+    spawn_polling_watcher(
+        FilesystemWatcher::new(shutdown_tx.clone(), app_dir.clone()),
         shutdown_tx.subscribe(),
-        shutdown_tx.clone(),
-        app_dir.clone(),
     );
 
     // Create HTTP client for OTLP forwarding
@@ -232,83 +250,110 @@ pub async fn run_server(
     Ok(())
 }
 
-/// Start the .env file watcher that restarts uvicorn when environment changes.
-fn start_env_watcher(
-    mut shutdown_rx: broadcast::Receiver<Shutdown>,
+/// Watches the `.env` file for changes and restarts uvicorn when environment
+/// variables are added, removed, or modified.
+///
+/// On the first poll the current variables are recorded as the baseline.
+/// Subsequent polls compare against the baseline and trigger a restart on diff.
+struct EnvWatcher {
     process_manager: Arc<ProcessManager>,
     dotenv_path: PathBuf,
-) {
-    tokio::spawn(async move {
-        let mut last_vars: HashMap<String, String> = HashMap::new();
-        let mut has_loaded = false;
-
-        loop {
-            tokio::select! {
-                biased;
-                result = shutdown_rx.recv() => {
-                    match result {
-                        Ok(Shutdown::Stop) | Err(_) => {
-                            debug!(".env watcher stopping.");
-                            break;
-                        }
-                    }
-                }
-                _ = tokio::time::sleep(Duration::from_millis(300)) => {
-                    let current_vars = match DotenvFile::read(&dotenv_path) {
-                        Ok(dotenv) => dotenv.get_vars(),
-                        Err(err) => {
-                            warn!("Failed to read .env: {err}");
-                            continue;
-                        }
-                    };
-                    if has_loaded && current_vars != last_vars {
-                        info!(".env changed, restarting uvicorn");
-                        if let Err(err) = process_manager
-                            .restart_uvicorn_with_env(current_vars.clone())
-                            .await
-                        {
-                            warn!("Failed to restart uvicorn: {err}");
-                        }
-                    }
-                    last_vars = current_vars;
-                    has_loaded = true;
-                }
-            }
-        }
-    });
+    last_vars: HashMap<String, String>,
+    /// False until the first successful read establishes the baseline.
+    has_loaded: bool,
 }
 
-/// Start the filesystem watcher that stops the server if the project folder
-/// or the lock file is removed.
-fn start_filesystem_watcher(
-    mut shutdown_rx: broadcast::Receiver<Shutdown>,
+impl EnvWatcher {
+    fn new(process_manager: Arc<ProcessManager>, dotenv_path: PathBuf) -> Self {
+        Self {
+            process_manager,
+            dotenv_path,
+            last_vars: HashMap::new(),
+            has_loaded: false,
+        }
+    }
+}
+
+impl PollingWatcher for EnvWatcher {
+    fn label(&self) -> &'static str {
+        ".env"
+    }
+
+    fn poll_interval(&self) -> Duration {
+        Duration::from_millis(300)
+    }
+
+    async fn poll(&mut self) -> ControlFlow<()> {
+        let current_vars = match DotenvFile::read(&self.dotenv_path) {
+            Ok(dotenv) => dotenv.get_vars(),
+            Err(err) => {
+                warn!("Failed to read .env: {err}");
+                return ControlFlow::Continue(());
+            }
+        };
+        if self.has_loaded && current_vars != self.last_vars {
+            info!(".env changed, restarting uvicorn");
+            if let Err(err) = self
+                .process_manager
+                .restart_uvicorn_with_env(current_vars.clone())
+                .await
+            {
+                warn!("Failed to restart uvicorn: {err}");
+            }
+        }
+        self.last_vars = current_vars;
+        self.has_loaded = true;
+        ControlFlow::Continue(())
+    }
+}
+
+/// Watches for the removal of the project folder and sends a shutdown signal
+/// when detected, ensuring the dev server doesn't keep running after the
+/// project is deleted.
+struct FilesystemWatcher {
     shutdown_tx: broadcast::Sender<Shutdown>,
     app_dir: PathBuf,
-) {
+}
+
+impl FilesystemWatcher {
+    fn new(shutdown_tx: broadcast::Sender<Shutdown>, app_dir: PathBuf) -> Self {
+        Self {
+            shutdown_tx,
+            app_dir,
+        }
+    }
+}
+
+impl PollingWatcher for FilesystemWatcher {
+    fn label(&self) -> &'static str {
+        "filesystem"
+    }
+
+    fn poll_interval(&self) -> Duration {
+        Duration::from_millis(500)
+    }
+
+    async fn poll(&mut self) -> ControlFlow<()> {
+        if !self.app_dir.exists() {
+            warn!(
+                "Project folder '{}' was removed, stopping dev server.",
+                self.app_dir.display()
+            );
+            let _ = self.shutdown_tx.send(Shutdown::Stop);
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Watch for Ctrl+C and send a shutdown signal.
+/// In attached mode, Ctrl+C fires and triggers graceful shutdown.
+/// In detached mode (no terminal), the signal never arrives — the watcher is dormant.
+fn start_signal_watcher(shutdown_tx: broadcast::Sender<Shutdown>) {
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-                result = shutdown_rx.recv() => {
-                    match result {
-                        Ok(Shutdown::Stop) | Err(_) => {
-                            debug!("Filesystem watcher stopping.");
-                            break;
-                        }
-                    }
-                }
-                _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                    // Check if project folder was removed
-                    if !app_dir.exists() {
-                        warn!(
-                            "Project folder '{}' was removed, stopping dev server.",
-                            app_dir.display()
-                        );
-                        let _ = shutdown_tx.send(Shutdown::Stop);
-                        break;
-                    }
-                }
-            }
+        if tokio::signal::ctrl_c().await.is_ok() {
+            info!("Ctrl+C received, shutting down...");
+            let _ = shutdown_tx.send(Shutdown::Stop);
         }
     });
 }

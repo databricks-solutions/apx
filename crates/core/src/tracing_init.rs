@@ -2,21 +2,21 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
 pub fn init_tracing() {
-    let crate_root = "_core";
+    let apx_root = "apx";
 
     let filter = match std::env::var("APX_LOG") {
         Ok(level) if is_plain_level(&level) => {
-            format!("{crate_root}={level}")
+            format!("{apx_root}={level}")
         }
         Ok(spec) => spec,
-        Err(_) => format!("{crate_root}=info"),
+        Err(_) => format!("{apx_root}=info"),
     };
 
     let otel_enabled = std::env::var("APX_OTEL_LOGS").is_ok_and(|v| v == "1");
     let app_dir = std::env::var("APX_APP_DIR").ok();
 
     if otel_enabled {
-        if let Err(e) = init_tracing_with_otel(crate_root, &filter, app_dir.as_deref()) {
+        if let Err(e) = init_tracing_with_otel(apx_root, &filter, app_dir.as_deref()) {
             eprintln!("Warning: Failed to initialize OTLP logging: {e}");
             init_tracing_fmt_only(&filter);
         }

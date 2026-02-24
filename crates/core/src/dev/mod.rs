@@ -9,3 +9,4 @@ pub mod process;
 pub mod proxy;
 pub mod server;
 pub mod token;
+pub(crate) mod watcher;

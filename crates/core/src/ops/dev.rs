@@ -1,15 +1,20 @@
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use crate::app_state::set_app_dir;
 use crate::common::{
-    OutputMode, emit, ensure_dir, format_elapsed_ms, run_preflight_checks, spinner_for_mode,
+    OutputMode, emit, ensure_dir, format_elapsed_ms, read_project_metadata, run_preflight_checks,
+    spinner_for_mode,
 };
 use crate::dev::client::{HealthCheckConfig, health, stop as stop_server};
 use crate::dev::common::{
-    DevLock, is_process_running, lock_path, read_lock, remove_lock, write_lock,
+    BACKEND_PORT_END, BACKEND_PORT_START, DB_PORT_END, DB_PORT_START, DevLock, FRONTEND_PORT_END,
+    FRONTEND_PORT_START, find_random_port_in_range, is_process_running, lock_path, read_lock,
+    remove_lock, write_lock,
 };
+use crate::dev::server::{ServerConfig, run_server};
 use crate::dev::token;
 use crate::external::uv::ApxTool;
 use crate::flux;
@@ -138,21 +143,30 @@ async fn wait_for_port_available(port: u16, mode: OutputMode) -> Result<(), Stri
     ))
 }
 
-/// Spawn a new dev server subprocess (does not check for existing server).
-pub async fn spawn_server(
+// ---------------------------------------------------------------------------
+// PreparedServer — shared launch preparation
+// ---------------------------------------------------------------------------
+
+/// Immutable result of server launch preparation.
+/// Shared by all `ServerLauncher` implementations.
+#[derive(Debug)]
+pub struct PreparedServer {
+    pub port: u16,
+    pub dev_token: String,
+    pub lock_path: PathBuf,
+    pub canonical_app_dir: PathBuf,
+    pub command_display: String,
+}
+
+/// Run preflight checks, start flux, allocate a stable port.
+/// Returns a `PreparedServer` ready for any launch mode.
+pub async fn prepare_server_launch(
     app_dir: &Path,
     preferred_port: Option<u16>,
-    skip_credentials_validation: bool,
-    timeout_secs: u64,
-    skip_healthcheck: bool,
     mode: OutputMode,
-) -> Result<u16, String> {
-    let start_time = Instant::now();
+) -> Result<PreparedServer, String> {
     prepare_app_dir(app_dir)?;
-
     run_preflight(app_dir, mode).await?;
-
-    let lock_path = lock_path(app_dir);
 
     emit(mode, "🚀 Starting dev server...");
 
@@ -171,6 +185,120 @@ pub async fn spawn_server(
 
     wait_for_port_available(port, mode).await?;
 
+    let dev_token = token::generate();
+    let canonical_app_dir = app_dir
+        .canonicalize()
+        .unwrap_or_else(|_| app_dir.to_path_buf());
+
+    Ok(PreparedServer {
+        port,
+        dev_token,
+        lock_path: lock_path(app_dir),
+        canonical_app_dir,
+        command_display: format!("apx dev (port {port})"),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// ServerLauncher — enum-based launch strategy
+// ---------------------------------------------------------------------------
+
+/// Strategy for launching and running the dev server.
+/// Two variants cover the fixed set of launch modes.
+#[derive(Debug)]
+pub enum ServerLauncher {
+    /// Spawns a background child process (`apx dev __internal__run_server`).
+    /// Returns after healthcheck confirms the server is ready.
+    Detached {
+        app_dir: PathBuf,
+        skip_credentials_validation: bool,
+        timeout_secs: u64,
+        skip_healthcheck: bool,
+        mode: OutputMode,
+    },
+    /// Runs the Axum dev server in-process as an async task.
+    /// Subprocess logs stream directly to the terminal. Returns after shutdown.
+    Attached {
+        app_dir: PathBuf,
+        skip_credentials_validation: bool,
+    },
+}
+
+/// Result of a server launch.
+#[derive(Debug)]
+pub enum LaunchOutcome {
+    /// Server is running in the background. Port is ready.
+    Running { port: u16 },
+    /// Server ran in-process and has shut down.
+    Shutdown,
+}
+
+impl ServerLauncher {
+    pub async fn launch(self, server: PreparedServer) -> Result<LaunchOutcome, String> {
+        match self {
+            Self::Detached {
+                app_dir,
+                skip_credentials_validation,
+                timeout_secs,
+                skip_healthcheck,
+                mode,
+            } => {
+                launch_detached(
+                    &app_dir,
+                    skip_credentials_validation,
+                    timeout_secs,
+                    skip_healthcheck,
+                    mode,
+                    server,
+                )
+                .await
+            }
+            Self::Attached {
+                app_dir,
+                skip_credentials_validation,
+            } => launch_attached(&app_dir, skip_credentials_validation, server).await,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Detached mode — spawns a background child process
+// ---------------------------------------------------------------------------
+
+async fn launch_detached(
+    app_dir: &Path,
+    skip_credentials_validation: bool,
+    timeout_secs: u64,
+    skip_healthcheck: bool,
+    mode: OutputMode,
+    server: PreparedServer,
+) -> Result<LaunchOutcome, String> {
+    let start_time = Instant::now();
+    let (command, mut child) =
+        spawn_detached_child(app_dir, skip_credentials_validation, &server).await?;
+
+    if skip_healthcheck {
+        return finalize_skip_healthcheck(app_dir, mode, &server, &command, &mut child, start_time);
+    }
+
+    wait_for_healthy_or_cleanup(
+        app_dir,
+        mode,
+        timeout_secs,
+        &server,
+        &command,
+        &mut child,
+        start_time,
+    )
+    .await
+}
+
+/// Build and spawn the `apx dev __internal__run_server` subprocess.
+async fn spawn_detached_child(
+    app_dir: &Path,
+    skip_credentials_validation: bool,
+    server: &PreparedServer,
+) -> Result<(String, tokio::process::Child), String> {
     let apx_cmd = ApxTool::new_apx().await?;
 
     let command = format!(
@@ -178,7 +306,7 @@ pub async fn spawn_server(
         apx_cmd.display(),
         app_dir.display(),
         BIND_HOST,
-        port,
+        server.port,
         if skip_credentials_validation {
             " --skip-credentials-validation"
         } else {
@@ -195,93 +323,273 @@ pub async fn spawn_server(
         .arg("--host")
         .arg(BIND_HOST)
         .arg("--port")
-        .arg(port.to_string());
+        .arg(server.port.to_string());
 
     if skip_credentials_validation {
         tool_cmd = tool_cmd.arg("--skip-credentials-validation");
     }
 
-    let dev_token = token::generate();
-
-    let canonical_app_dir = app_dir
-        .canonicalize()
-        .unwrap_or_else(|_| app_dir.to_path_buf());
-
-    let mut child = tool_cmd
+    let child = tool_cmd
         .cwd(app_dir)
         .env("APX_OTEL_LOGS", "1")
-        .env("APX_APP_DIR", &canonical_app_dir)
-        .env(token::DEV_TOKEN_ENV, &dev_token)
+        .env("APX_APP_DIR", &server.canonical_app_dir)
+        .env(token::DEV_TOKEN_ENV, &server.dev_token)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map_err(String::from)?;
 
-    if skip_healthcheck {
-        let pid = child.id().ok_or("Failed to get child process ID")?;
-        let lock = DevLock::new(pid, port, command, app_dir, dev_token);
-        write_lock(&lock_path, &lock)?;
+    Ok((command, child))
+}
 
-        emit(
-            mode,
-            &format!(
-                "✅ Dev server started at http://{BROWSER_HOST}:{port} in {} (healthcheck skipped)\n",
-                format_elapsed_ms(start_time)
-            ),
-        );
-        return Ok(port);
-    }
+/// Write lock file and return immediately (no healthcheck).
+fn finalize_skip_healthcheck(
+    app_dir: &Path,
+    mode: OutputMode,
+    server: &PreparedServer,
+    command: &str,
+    child: &mut tokio::process::Child,
+    start_time: Instant,
+) -> Result<LaunchOutcome, String> {
+    let pid = child.id().ok_or("Failed to get child process ID")?;
+    let lock = DevLock::new(
+        pid,
+        server.port,
+        command.to_string(),
+        app_dir,
+        server.dev_token.clone(),
+    );
+    write_lock(&server.lock_path, &lock)?;
 
+    emit(
+        mode,
+        &format!(
+            "✅ Dev server started at http://{BROWSER_HOST}:{port} in {} (healthcheck skipped)\n",
+            format_elapsed_ms(start_time),
+            port = server.port,
+        ),
+    );
+    Ok(LaunchOutcome::Running { port: server.port })
+}
+
+/// Run healthcheck, handle failure with cleanup, or finalize on success.
+async fn wait_for_healthy_or_cleanup(
+    app_dir: &Path,
+    mode: OutputMode,
+    timeout_secs: u64,
+    server: &PreparedServer,
+    command: &str,
+    child: &mut tokio::process::Child,
+    start_time: Instant,
+) -> Result<LaunchOutcome, String> {
     emit(mode, "⏳ Waiting for dev server to become healthy...\n");
     let config = HealthCheckConfig {
         timeout_secs,
         ..HealthCheckConfig::default()
     };
 
-    let health_result = wait_for_healthy_with_logs(port, &config, app_dir, mode).await;
+    let health_result = wait_for_healthy_with_logs(server.port, &config, app_dir, mode).await;
 
     if let Err(e) = health_result {
-        debug!("Health checks failed, attempting graceful shutdown.");
-        let shutdown_result =
-            tokio::time::timeout(Duration::from_secs(5), stop_server(port, Some(&dev_token))).await;
-
-        match shutdown_result {
-            Ok(Ok(())) => debug!("Graceful shutdown completed."),
-            Ok(Err(err)) => debug!("Graceful shutdown failed: {}", err),
-            Err(_) => debug!("Graceful shutdown timed out."),
-        }
-
-        if let Some(pid) = child.id() {
-            let _ =
-                crate::dev::common::kill_process_tree_async(pid, "dev-server".to_string()).await;
-        }
-        drop(child.kill());
-
-        let _ = remove_lock(&lock_path);
-
-        if let Ok(logs) = crate::ops::logs::fetch_logs(app_dir, "30s").await {
-            let logs = logs.trim();
-            if !logs.is_empty() {
-                eprintln!("\n📋 Recent logs:\n{logs}\n");
-            }
-        }
-
+        cleanup_failed_child(app_dir, server, child).await;
         return Err(e);
     }
 
     let pid = child.id().ok_or("Failed to get child process ID")?;
-    let lock = DevLock::new(pid, port, command, app_dir, dev_token);
-    write_lock(&lock_path, &lock)?;
+    let lock = DevLock::new(
+        pid,
+        server.port,
+        command.to_string(),
+        app_dir,
+        server.dev_token.clone(),
+    );
+    write_lock(&server.lock_path, &lock)?;
 
     emit(
         mode,
         &format!(
             "✅ Dev server started at http://{BROWSER_HOST}:{port} in {}\n",
-            format_elapsed_ms(start_time)
+            format_elapsed_ms(start_time),
+            port = server.port,
         ),
     );
-    Ok(port)
+    Ok(LaunchOutcome::Running { port: server.port })
+}
+
+/// Attempt graceful shutdown, kill process tree, remove lock, show recent logs.
+async fn cleanup_failed_child(
+    app_dir: &Path,
+    server: &PreparedServer,
+    child: &mut tokio::process::Child,
+) {
+    debug!("Health checks failed, attempting graceful shutdown.");
+
+    let shutdown_result = tokio::time::timeout(
+        Duration::from_secs(5),
+        stop_server(server.port, Some(&server.dev_token)),
+    )
+    .await;
+
+    match shutdown_result {
+        Ok(Ok(())) => debug!("Graceful shutdown completed."),
+        Ok(Err(err)) => debug!("Graceful shutdown failed: {}", err),
+        Err(_) => debug!("Graceful shutdown timed out."),
+    }
+
+    if let Some(pid) = child.id() {
+        let _ = crate::dev::common::kill_process_tree_async(pid, "dev-server".to_string()).await;
+    }
+    drop(child.kill());
+
+    let _ = remove_lock(&server.lock_path);
+
+    if let Ok(logs) = crate::ops::logs::fetch_logs(app_dir, "30s").await {
+        let logs = logs.trim();
+        if !logs.is_empty() {
+            eprintln!("\n📋 Recent logs:\n{logs}\n");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Attached mode — runs the server in-process
+// ---------------------------------------------------------------------------
+
+/// Maximum number of retries for subprocess port allocation.
+const MAX_PORT_RETRIES: u32 = 5;
+
+async fn launch_attached(
+    app_dir: &Path,
+    skip_credentials_validation: bool,
+    server: PreparedServer,
+) -> Result<LaunchOutcome, String> {
+    set_app_dir(app_dir.to_path_buf())?;
+    validate_credentials(skip_credentials_validation).await;
+
+    let mut last_error = String::new();
+
+    for attempt in 1..=MAX_PORT_RETRIES {
+        let config = build_attached_server_config(app_dir, &server, attempt)?;
+
+        // Write lock file with current process PID
+        let pid = std::process::id();
+        let lock = DevLock::new(
+            pid,
+            server.port,
+            server.command_display.clone(),
+            app_dir,
+            server.dev_token.clone(),
+        );
+        write_lock(&server.lock_path, &lock)?;
+
+        match run_server(config).await {
+            Ok(()) => return Ok(LaunchOutcome::Shutdown),
+            Err(e) if is_port_error(&e) && attempt < MAX_PORT_RETRIES => {
+                warn!(attempt, error = %e, "Subprocess port conflict, retrying with new ports");
+                last_error = e;
+                continue;
+            }
+            Err(e) => {
+                let _ = remove_lock(&server.lock_path);
+                return Err(e);
+            }
+        }
+    }
+
+    let _ = remove_lock(&server.lock_path);
+    Err(format!(
+        "Failed to start dev server after {MAX_PORT_RETRIES} attempts. Last error: {last_error}"
+    ))
+}
+
+/// Warn if credentials are missing or invalid.
+async fn validate_credentials(skip: bool) {
+    if skip {
+        warn!("Credentials validation skipped. API proxy may not work correctly.");
+        return;
+    }
+    let profile = std::env::var("DATABRICKS_CONFIG_PROFILE").unwrap_or_default();
+    if let Err(err) = apx_databricks_sdk::validate_credentials(&profile).await {
+        warn!("Credentials validation failed: {err}. API proxy may not work correctly.");
+    }
+}
+
+/// Bind listener and pick random subprocess ports for one attempt.
+fn build_attached_server_config(
+    app_dir: &Path,
+    server: &PreparedServer,
+    attempt: u32,
+) -> Result<ServerConfig, String> {
+    let std_listener = TcpListener::bind((BIND_HOST, server.port))
+        .map_err(|e| format!("Failed to bind main server port {}: {e}", server.port))?;
+    std_listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("Failed to set listener to non-blocking: {e}"))?;
+    let listener = tokio::net::TcpListener::from_std(std_listener)
+        .map_err(|e| format!("Failed to convert to tokio listener: {e}"))?;
+
+    let backend_port = find_random_port_in_range(BIND_HOST, BACKEND_PORT_START, BACKEND_PORT_END)?;
+    let db_port = find_random_port_in_range(BIND_HOST, DB_PORT_START, DB_PORT_END)?;
+
+    let metadata = read_project_metadata(app_dir)?;
+    let frontend_port = if metadata.has_ui() {
+        Some(find_random_port_in_range(
+            BIND_HOST,
+            FRONTEND_PORT_START,
+            FRONTEND_PORT_END,
+        )?)
+    } else {
+        None
+    };
+
+    debug!(
+        attempt,
+        backend_port,
+        ?frontend_port,
+        db_port,
+        "Attempting to start dev server with ports"
+    );
+
+    Ok(ServerConfig {
+        app_dir: app_dir.to_path_buf(),
+        listener,
+        backend_port,
+        frontend_port,
+        db_port,
+        dev_token: server.dev_token.clone(),
+    })
+}
+
+fn is_port_error(e: &str) -> bool {
+    e.contains("address already in use") || e.contains("EADDRINUSE") || e.contains("not ready on")
+}
+
+// ---------------------------------------------------------------------------
+// spawn_server — backward-compatible entry point (delegates to Detached)
+// ---------------------------------------------------------------------------
+
+/// Spawn a new dev server subprocess (does not check for existing server).
+pub async fn spawn_server(
+    app_dir: &Path,
+    preferred_port: Option<u16>,
+    skip_credentials_validation: bool,
+    timeout_secs: u64,
+    skip_healthcheck: bool,
+    mode: OutputMode,
+) -> Result<u16, String> {
+    let server = prepare_server_launch(app_dir, preferred_port, mode).await?;
+    let launcher = ServerLauncher::Detached {
+        app_dir: app_dir.to_path_buf(),
+        skip_credentials_validation,
+        timeout_secs,
+        skip_healthcheck,
+        mode,
+    };
+    match launcher.launch(server).await? {
+        LaunchOutcome::Running { port } => Ok(port),
+        LaunchOutcome::Shutdown => unreachable!("Detached mode always returns Running"),
+    }
 }
 
 /// Stop the dev server for the given app directory.
