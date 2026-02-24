@@ -8,12 +8,6 @@
   "homepage": "https://databricks-solutions.github.io/apx/",
   "repository": "https://github.com/databricks-solutions/apx",
   "license": "Databricks License",
-  "keywords": [
-    "databricks",
-    "fastapi",
-    "react",
-    "full-stack",
-    "apps"
-  ],
+  "keywords": ["databricks", "fastapi", "react", "full-stack", "apps"],
   "skills": "./skills/"
 }
