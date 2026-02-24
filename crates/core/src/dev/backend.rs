@@ -169,15 +169,16 @@ impl Backend {
         &self,
         config_path: &std::path::Path,
     ) -> Result<String, String> {
-        let script = format!(
-            "import json, logging.config; logging.config.dictConfig(json.load(open('{}')))",
-            config_path.display()
-        );
+        const VALIDATE_LOGGING_CONFIG: &str = "import sys, json, logging.config; logging.config.dictConfig(json.load(open(sys.argv[1])))";
 
         let output = UvTool::new("python")
             .await?
             .cmd()
-            .args(["-c", &script])
+            .args([
+                "-c",
+                VALIDATE_LOGGING_CONFIG,
+                &config_path.display().to_string(),
+            ])
             .cwd(&self.cfg.app_dir)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
