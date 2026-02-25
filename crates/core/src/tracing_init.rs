@@ -55,10 +55,10 @@ where
             if writer.has_ansi_escapes() {
                 writeln!(
                     writer,
-                    "{ANSI_YELLOW}{timestamp} | apx | {channel} | {message}{ANSI_RESET}"
+                    "{ANSI_YELLOW}{timestamp} |  apx | {channel} | {message}{ANSI_RESET}"
                 )
             } else {
-                writeln!(writer, "{timestamp} | apx | {channel} | {message}")
+                writeln!(writer, "{timestamp} |  apx | {channel} | {message}")
             }
         } else {
             // Verbose format with target, file, and line number
