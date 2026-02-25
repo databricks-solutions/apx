@@ -90,6 +90,9 @@ jobs:
 
       - name: Cargo deny check
         uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: licenses
 
       - name: Cargo fmt
         run: cargo fmt --all -- --check
