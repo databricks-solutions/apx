@@ -20,7 +20,7 @@ jobs:
         uses: dorny/paths-filter@v3
         id: filter
         with:
-          token: ''  # Forces git-based detection, bypasses GitHub API
+          token: "" # Forces git-based detection, bypasses GitHub API
           filters: |
             docs:
               - 'docs/**'
@@ -87,9 +87,9 @@ jobs:
       # Run checks
       - name: Cargo check
         run: cargo check --workspace --exclude apx-studio --all-targets
-      
+
       - name: Cargo deny check
-        run: cargo deny check licenses
+        uses: EmbarkStudios/cargo-deny-action@v2
 
       - name: Cargo fmt
         run: cargo fmt --all -- --check
