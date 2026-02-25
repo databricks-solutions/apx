@@ -53,12 +53,12 @@ where
             let message = visitor.0;
 
             if writer.has_ansi_escapes() {
-                write!(
+                writeln!(
                     writer,
                     "{ANSI_YELLOW}{timestamp} | apx | {channel} | {message}{ANSI_RESET}"
                 )
             } else {
-                write!(writer, "{timestamp} | apx | {channel} | {message}")
+                writeln!(writer, "{timestamp} | apx | {channel} | {message}")
             }
         } else {
             // Verbose format with target, file, and line number
