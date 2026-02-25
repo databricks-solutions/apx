@@ -481,7 +481,7 @@ async fn launch_attached(
     server: PreparedServer,
 ) -> Result<LaunchOutcome, String> {
     set_app_dir(app_dir.to_path_buf())?;
-    validate_credentials(skip_credentials_validation).await;
+    validate_credentials(app_dir, skip_credentials_validation).await;
 
     let mut last_error = String::new();
 
@@ -519,12 +519,12 @@ async fn launch_attached(
 }
 
 /// Warn if credentials are missing or invalid.
-async fn validate_credentials(skip: bool) {
+async fn validate_credentials(app_dir: &Path, skip: bool) {
     if skip {
         warn!("Credentials validation skipped. API proxy may not work correctly.");
         return;
     }
-    let profile = std::env::var("DATABRICKS_CONFIG_PROFILE").unwrap_or_default();
+    let profile = crate::dev::server::resolve_databricks_profile(app_dir).unwrap_or_default();
     if let Err(err) = apx_databricks_sdk::validate_credentials(&profile).await {
         warn!("Credentials validation failed: {err}. API proxy may not work correctly.");
     }

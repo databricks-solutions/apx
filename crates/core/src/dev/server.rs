@@ -463,7 +463,7 @@ async fn stop(headers: HeaderMap, State(state): State<AppState>) -> StatusCode {
 }
 
 /// Resolve the Databricks profile name from env var or `.env` file.
-fn resolve_databricks_profile(app_dir: &std::path::Path) -> Option<String> {
+pub(crate) fn resolve_databricks_profile(app_dir: &std::path::Path) -> Option<String> {
     std::env::var("DATABRICKS_CONFIG_PROFILE").ok().or_else(|| {
         DotenvFile::read(&app_dir.join(".env"))
             .ok()
