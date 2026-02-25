@@ -36,6 +36,7 @@ pub struct UserName {
     pub family_name: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct CurrentUserApi<'a> {
     client: &'a DatabricksClient,
 }

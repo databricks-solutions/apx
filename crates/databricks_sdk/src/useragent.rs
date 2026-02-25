@@ -6,6 +6,7 @@ use std::fmt;
 /// ```text
 /// {product}/{product_version} apx-databricks-sdk-rust/{sdk_version} rust/{rust_version} os/{os} auth/{auth_type} [extras...] [upstream/{name}] [upstream-version/{ver}] [runtime/{ver}] [cicd/{provider}]
 /// ```
+#[derive(Debug)]
 pub struct UserAgent {
     product: String,
     product_version: String,

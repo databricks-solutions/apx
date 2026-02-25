@@ -76,6 +76,7 @@ pub struct AppLogsArgs<'a> {
 // AppsApi
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub struct AppsApi<'a> {
     client: &'a DatabricksClient,
 }

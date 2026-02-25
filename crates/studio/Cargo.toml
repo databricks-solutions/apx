@@ -4,6 +4,9 @@ version = "0.3.6"
 edition.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "apx-studio"
 path = "src/main.rs"

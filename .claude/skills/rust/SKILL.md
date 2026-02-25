@@ -150,3 +150,8 @@ fn validate(pos: usize, bytes: &[u8]) -> Option<Boundary> { ... }  // checks inv
 ### Test-first for bugs
 
 When hitting a bug, write a failing test that reproduces it first. Only then write the fix. Tests document the exact failure mode and prevent regressions.
+
+
+### Lints and allows
+
+Do not introduce new `allow` annotations unless absolutely necessary. If a lint or rule is disabled, add a comment explaining why.

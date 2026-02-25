@@ -10,10 +10,18 @@ if ! cargo fmt --all -- --check; then
     exit 1
 fi
 
-# Cargo clippy — must match CI exactly:
-#   cargo clippy --workspace --exclude apx-studio --all-targets -- -D warnings
-echo "Running cargo clippy --workspace --exclude apx-studio --all-targets -- -D warnings..."
-if ! cargo clippy --workspace --exclude apx-studio --all-targets -- -D warnings; then
+# Cargo clippy — strict lints for library and binary code
+echo "Running cargo clippy (lib + bins)..."
+if ! cargo clippy --workspace --exclude apx-studio --lib --bins -- -D warnings; then
+    echo ""
+    echo "Clippy check failed. Fix the warnings above."
+    exit 1
+fi
+
+# Cargo clippy — relaxed lints for test code (allow unwrap/expect/panic in tests)
+echo "Running cargo clippy (tests)..."
+if ! cargo clippy --workspace --exclude apx-studio --tests -- -D warnings \
+    -A clippy::unwrap-used -A clippy::expect-used -A clippy::panic; then
     echo ""
     echo "Clippy check failed. Fix the warnings above."
     exit 1

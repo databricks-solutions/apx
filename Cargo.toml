@@ -103,6 +103,21 @@ tempfile = "3.15"
 # Embedded resources
 which = "7"
 
+[workspace.lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"
+unused_must_use = "deny"
+dead_code = "deny"
+missing_debug_implementations = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

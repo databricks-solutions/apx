@@ -4,6 +4,9 @@ version = "0.3.6"
 edition.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 apx-common.workspace = true
 apx-core = { path = "../core" , version = "0.3.6" }

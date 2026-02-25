@@ -151,7 +151,7 @@ host = https://production.cloud.databricks.com
     }
 
     #[test]
-    fn test_get_profile() {
+    fn test_get_profile() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let content = "\
 [DEFAULT]
 host = https://default.cloud.databricks.com
@@ -160,9 +160,12 @@ host = https://default.cloud.databricks.com
 host = https://staging.cloud.databricks.com
 ";
         let config = ConfigParser::parse_str(content);
-        let staging = config.get_profile("staging").unwrap();
+        let staging = config
+            .get_profile("staging")
+            .ok_or("staging profile not found")?;
         assert_eq!(staging.host, "https://staging.cloud.databricks.com");
         assert!(config.get_profile("nonexistent").is_none());
+        Ok(())
     }
 
     #[test]
