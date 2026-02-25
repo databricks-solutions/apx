@@ -258,7 +258,7 @@ async fn test_read_info_resource() {
     let text = match &result.contents[0] {
         ResourceContents::TextResourceContents { text, .. } => text,
         other @ ResourceContents::BlobResourceContents { .. } => {
-            panic!("expected text resource, got {other:?}")
+            unreachable!("expected text resource, got {other:?}")
         }
     };
     assert!(
@@ -288,7 +288,7 @@ async fn test_read_project_resource() {
     let text = match &result.contents[0] {
         ResourceContents::TextResourceContents { text, .. } => text,
         other @ ResourceContents::BlobResourceContents { .. } => {
-            panic!("expected text resource, got {other:?}")
+            unreachable!("expected text resource, got {other:?}")
         }
     };
     let json: serde_json::Value =
