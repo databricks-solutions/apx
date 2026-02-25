@@ -8,9 +8,10 @@ use apx_core::components::{
     get_all_registry_indexes, needs_registry_refresh, sync_registry_indexes,
 };
 use apx_core::search::ComponentIndex;
-use rmcp::model::*;
+use rmcp::model::{CallToolResult, ErrorData};
 use rmcp::schemars;
 
+/// Arguments for the `search_registry_components` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchRegistryComponentsArgs {
     /// Absolute path to the project directory
@@ -26,6 +27,7 @@ fn default_search_limit() -> usize {
     10
 }
 
+/// Arguments for the `add_component` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AddComponentArgs {
     /// Absolute path to the project directory
@@ -37,6 +39,7 @@ pub struct AddComponentArgs {
     pub force: bool,
 }
 
+/// Arguments for the `list_registry_components` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ListRegistryComponentsArgs {
     /// Absolute path to the project directory
@@ -46,10 +49,11 @@ pub struct ListRegistryComponentsArgs {
 }
 
 impl ApxServer {
+    /// Handle the `search_registry_components` tool call.
     pub async fn handle_search_registry_components(
         &self,
         args: SearchRegistryComponentsArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let path = validated_app_path(&args.app_path)?;
 
         let ctx = &self.ctx;
@@ -122,10 +126,11 @@ impl ApxServer {
         Ok(CallToolResult::from_serializable(&response))
     }
 
+    /// Handle the `add_component` tool call.
     pub async fn handle_add_component(
         &self,
         args: AddComponentArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let path = validated_app_path(&args.app_path)?;
 
         use apx_core::components::add::{ComponentInput, add_components};
@@ -186,10 +191,11 @@ impl ApxServer {
         }
     }
 
+    /// Handle the `list_registry_components` tool call.
     pub async fn handle_list_registry_components(
         &self,
         args: ListRegistryComponentsArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let path = validated_app_path(&args.app_path)?;
 
         // Check if registry indexes need refresh
@@ -209,16 +215,12 @@ impl ApxServer {
             _ => "ui".to_string(),
         };
 
-        let items = match all_indexes.get(&registry_key) {
-            Some(items) => items,
-            None => {
-                let available: Vec<&String> = all_indexes.keys().collect();
-                return ToolError::OperationFailed(format!(
-                    "Registry '{}' not found. Available registries: {:?}",
-                    registry_key, available
-                ))
-                .into_result();
-            }
+        let Some(items) = all_indexes.get(&registry_key) else {
+            let available: Vec<&String> = all_indexes.keys().collect();
+            return ToolError::OperationFailed(format!(
+                "Registry '{registry_key}' not found. Available registries: {available:?}",
+            ))
+            .into_result();
         };
 
         tool_response! {
@@ -263,7 +265,7 @@ impl ApxServer {
 
         if needs_registry_refresh(&cfg.registries) {
             tracing::info!("Registry indexes stale, refreshing...");
-            if let Ok(true) = sync_registry_indexes(path, false).await {
+            if sync_registry_indexes(path, false).await == Ok(true) {
                 let pool = self.ctx.dev_db.pool().clone();
                 if let Err(e) = rebuild_search_index(pool).await {
                     tracing::warn!("Failed to rebuild search index after refresh: {}", e);

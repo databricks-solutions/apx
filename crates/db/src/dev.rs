@@ -1,4 +1,4 @@
-//! Async dev database operations using SQLx.
+//! Async dev database operations using `SQLx`.
 //!
 //! Provides [`DevDb`] as the connection pool for the dev database at `~/.apx/dev/db`.
 //! This database holds search indexes (FTS5) and will hold future dev-related tables.
@@ -16,12 +16,22 @@ pub struct DevDb {
 
 impl DevDb {
     /// Open or create the dev database at the default location (`~/.apx/dev/db`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database path cannot be determined or the database
+    /// cannot be opened.
     pub async fn open() -> Result<Self, String> {
         let path = super::dev_db_path()?;
         Self::open_at(&path).await
     }
 
     /// Open or create the dev database at a specific path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created or the database
+    /// cannot be opened.
     pub async fn open_at(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -44,12 +54,17 @@ impl DevDb {
     }
 
     /// Get a reference to the underlying connection pool.
-    pub fn pool(&self) -> &SqlitePool {
+    #[must_use]
+    pub const fn pool(&self) -> &SqlitePool {
         &self.pool
     }
 }
 
 /// Check if a table exists in the database.
+///
+/// # Errors
+///
+/// Returns an error if the existence check query fails.
 pub async fn table_exists(pool: &SqlitePool, table_name: &str) -> Result<bool, String> {
     let row: (bool,) =
         sqlx::query_as("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)")

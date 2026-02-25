@@ -8,32 +8,31 @@ use chrono::{Local, TimeZone, Utc};
 use crate::{AggregatedRecord, LogRecord, source_label};
 
 /// Format a timestamp in milliseconds to `YYYY-MM-DD HH:MM:SS.mmm` in local timezone.
+#[must_use]
 pub fn format_timestamp(timestamp_ms: i64) -> String {
-    let datetime = Utc.timestamp_millis_opt(timestamp_ms).single();
-    match datetime {
-        Some(dt) => {
-            let local_dt = dt.with_timezone(&Local);
-            local_dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string()
-        }
-        None => "????-??-?? ??:??:??.???".to_string(),
-    }
+    Utc.timestamp_millis_opt(timestamp_ms).single().map_or_else(
+        || "????-??-?? ??:??:??.???".to_string(),
+        |dt| {
+            dt.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string()
+        },
+    )
 }
 
 /// Format a timestamp in milliseconds to `HH:MM:SS.mmm` in local timezone.
+#[must_use]
 pub fn format_short_timestamp(timestamp_ms: i64) -> String {
-    let datetime = Utc.timestamp_millis_opt(timestamp_ms).single();
-    match datetime {
-        Some(dt) => {
-            let local_dt = dt.with_timezone(&Local);
-            local_dt.format("%H:%M:%S%.3f").to_string()
-        }
-        None => "??:??:??.???".to_string(),
-    }
+    Utc.timestamp_millis_opt(timestamp_ms).single().map_or_else(
+        || "??:??:??.???".to_string(),
+        |dt| dt.with_timezone(&Local).format("%H:%M:%S%.3f").to_string(),
+    )
 }
 
 /// Format a log record for terminal display.
 ///
 /// Output: `2026-01-28 16:09:02.413 | app | <message>`
+#[must_use]
 pub fn format_log_record(record: &LogRecord, colorize: bool) -> String {
     let timestamp = format_timestamp(record.effective_timestamp_ms());
     let src = record.source_label();
@@ -50,6 +49,7 @@ pub fn format_log_record(record: &LogRecord, colorize: bool) -> String {
 }
 
 /// Format an aggregated record for terminal display.
+#[must_use]
 pub fn format_aggregated_record(agg: &AggregatedRecord, colorize: bool) -> String {
     let timestamp = format_timestamp(agg.timestamp_ms);
     let src = source_label(&agg.service_name);
@@ -66,6 +66,7 @@ pub fn format_aggregated_record(agg: &AggregatedRecord, colorize: bool) -> Strin
 }
 
 /// Format a log record for startup display (compact timestamp, always colorized, with channel).
+#[must_use]
 pub fn format_startup_log(record: &LogRecord) -> String {
     let timestamp = format_timestamp(record.effective_timestamp_ms());
 
@@ -102,6 +103,7 @@ pub fn format_startup_log(record: &LogRecord) -> String {
 /// Format a subprocess log line with local timestamp and source prefix.
 ///
 /// Output: `2026-01-28 16:09:02.413 |  app | <message>`
+#[must_use]
 pub fn format_process_log_line(source: &str, message: &str) -> String {
     let now = Local::now();
     let timestamp = now.format("%Y-%m-%d %H:%M:%S%.3f");
@@ -109,6 +111,7 @@ pub fn format_process_log_line(source: &str, message: &str) -> String {
 }
 
 /// ANSI color code for a source label.
+#[must_use]
 pub fn source_color(src: &str) -> &'static str {
     match src {
         "app" => "\x1b[36m",
@@ -119,15 +122,15 @@ pub fn source_color(src: &str) -> &'static str {
 }
 
 /// Convert severity level string to OTLP severity number.
+#[must_use]
 pub fn severity_to_number(level: &str) -> u8 {
     match level.to_uppercase().as_str() {
         "TRACE" => 1,
         "DEBUG" => 5,
-        "INFO" | "LOG" => 9,
         "WARN" | "WARNING" => 13,
         "ERROR" => 17,
         "FATAL" | "CRITICAL" => 21,
-        _ => 9, // default to INFO
+        _ => 9, // INFO, LOG, and unknown levels default to INFO
     }
 }
 
@@ -139,6 +142,7 @@ pub fn severity_to_number(level: &str) -> u8 {
 /// - `"WARNING  ..."`, `"ERROR    ..."`, `"DEBUG    ..."` etc.
 ///
 /// Returns `"INFO"` if no level found (most stderr is informational).
+#[must_use]
 pub fn parse_python_severity(line: &str) -> &'static str {
     let trimmed = line.trim_start();
 

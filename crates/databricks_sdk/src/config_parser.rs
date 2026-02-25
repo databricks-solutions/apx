@@ -14,13 +14,19 @@ pub struct ConfigParser {
 /// A single `[section]` with its `host = ...` value.
 #[derive(Debug, Clone)]
 pub struct ProfileEntry {
+    /// Section name (e.g. `"DEFAULT"`, `"staging"`).
     pub name: String,
+    /// The `host` value from this section.
     pub host: String,
 }
 
 impl ConfigParser {
     /// Parse a `.databrickscfg` file at `path`.
     /// Returns an empty config if the file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file exists but cannot be read.
     pub fn parse(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self {
@@ -36,6 +42,7 @@ impl ConfigParser {
     }
 
     /// Parse from an in-memory string (useful for testing).
+    #[must_use]
     pub fn parse_str(content: &str) -> Self {
         let mut profiles = Vec::new();
         let mut current_section: Option<String> = None;
@@ -52,8 +59,8 @@ impl ConfigParser {
                 }
                 current_section = Some(trimmed[1..trimmed.len() - 1].to_string());
                 current_host = None;
-            } else if let Some((_key, value)) = trimmed.split_once('=') {
-                let key = _key.trim();
+            } else if let Some((key, value)) = trimmed.split_once('=') {
+                let key = key.trim();
                 let value = value.trim();
                 if key == "host" {
                     current_host = Some(value.to_string());
@@ -71,16 +78,19 @@ impl ConfigParser {
     }
 
     /// All parsed profiles with their host values.
+    #[must_use]
     pub fn profiles(&self) -> &[ProfileEntry] {
         &self.profiles
     }
 
     /// Find a profile by name.
+    #[must_use]
     pub fn get_profile(&self, name: &str) -> Option<&ProfileEntry> {
         self.profiles.iter().find(|p| p.name == name)
     }
 
     /// List unique profile names (section headers), plus `DEFAULT` if not already present.
+    #[must_use]
     pub fn list_profiles(&self) -> Vec<String> {
         let mut seen = HashSet::new();
         let mut names: Vec<String> = self
@@ -151,7 +161,7 @@ host = https://production.cloud.databricks.com
     }
 
     #[test]
-    fn test_get_profile() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    fn test_get_profile() {
         let content = "\
 [DEFAULT]
 host = https://default.cloud.databricks.com
@@ -162,10 +172,9 @@ host = https://staging.cloud.databricks.com
         let config = ConfigParser::parse_str(content);
         let staging = config
             .get_profile("staging")
-            .ok_or("staging profile not found")?;
+            .expect("staging profile not found");
         assert_eq!(staging.host, "https://staging.cloud.databricks.com");
         assert!(config.get_profile("nonexistent").is_none());
-        Ok(())
     }
 
     #[test]

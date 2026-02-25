@@ -1,8 +1,14 @@
+/// High-level API for adding components to a project.
 pub mod add;
+/// Registry index caching and refresh logic.
 pub mod cache;
+/// Append-only CSS updater for component CSS variables and theme mappings.
 pub mod css_updater;
+/// Data models for registry items, UI config, and related types.
 pub mod models;
+/// Tailwind v3 config to CSS v4 transformer.
 pub mod tw_transform;
+/// Path formatting and JSONC comment-stripping utilities.
 pub mod utils;
 
 // Re-export models for easier access
@@ -18,6 +24,8 @@ pub use cache::{
 
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::future::Future;
+use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -161,7 +169,7 @@ const INITIAL_DELAY_MS: u64 = 125;
 async fn fetch_with_retry<T, F, Fut>(operation: F, operation_name: &str) -> Result<T, String>
 where
     F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<T, String>>,
+    Fut: Future<Output = Result<T, String>>,
 {
     let mut last_error = String::new();
     for attempt in 0..MAX_RETRIES {
@@ -189,6 +197,7 @@ where
     ))
 }
 
+/// Fetch the upstream shadcn registry catalog, using cache when available.
 pub async fn fetch_registry_catalog_impl(
     client: &reqwest::Client,
 ) -> Result<Vec<RegistryCatalogEntry>, String> {
@@ -222,8 +231,9 @@ pub async fn fetch_registry_catalog_impl(
     Ok(catalog)
 }
 
-pub fn merge_registries(
-    local: &HashMap<String, RegistryConfig>,
+/// Merge local (project-level) and discovered (catalog) registries, with local taking precedence.
+pub fn merge_registries<S: BuildHasher>(
+    local: &HashMap<String, RegistryConfig, S>,
     discovered: &[RegistryCatalogEntry],
 ) -> HashMap<String, RegistryConfig> {
     let mut merged: HashMap<String, RegistryConfig> = discovered
@@ -243,34 +253,51 @@ pub fn merge_registries(
     merged
 }
 
+/// A component that has been resolved from a registry.
 #[derive(Debug)]
 pub struct ResolvedComponent {
+    /// Component name.
     pub name: String,
+    /// Parsed registry item specification.
     pub spec: RegistryItem,
+    /// Registry the component was resolved from, if any.
     pub registry: Option<String>,
+    /// Warnings produced during resolution.
     pub warnings: Vec<String>,
 }
 
+/// Plan describing which files and dependencies an `add` operation will produce.
 #[derive(Debug)]
 pub struct AddPlan {
+    /// Components included in the plan.
     pub components: Vec<ResolvedComponent>,
+    /// Files that will be written to disk.
     pub files_to_write: Vec<PlannedFile>,
+    /// npm dependency names required by the components.
     pub component_deps: BTreeSet<String>,
+    /// Warnings collected during planning.
     pub warnings: Vec<String>,
 }
 
+/// A file that will be written by an add-component plan.
 #[derive(Debug)]
 pub struct PlannedFile {
+    /// Path relative to the project root.
     pub relative_path: PathBuf,
+    /// Absolute path on disk.
     pub absolute_path: PathBuf,
+    /// File content to write.
     pub content: String,
+    /// Name of the component that produced this file.
     pub source_component: String,
 }
 
 /// Request resolved from a registry definition (URL + optional headers/params).
 #[derive(Debug, Clone)]
 pub struct ResolvedRequest {
+    /// Fully resolved URL for the component spec.
     pub url: Url,
+    /// Extra HTTP headers to send with the request.
     pub headers: HashMap<String, String>,
 }
 
@@ -304,6 +331,7 @@ pub fn resolve_component_request(
     let style = cfg.style();
 
     // 2) Default registry: shadcn/ui
+    #[allow(clippy::literal_string_with_formatting_args)]
     if registry.is_none() {
         let url_candidate = SHADCN_REGISTRY_ITEM_TEMPLATE
             .replace("{style}", style)
@@ -319,7 +347,7 @@ pub fn resolve_component_request(
         );
 
         return Ok(ResolvedRequest {
-            url: url.clone(),
+            url,
             headers: HashMap::new(),
         });
     }
@@ -357,7 +385,7 @@ pub fn resolve_component_request(
             );
 
             Ok(ResolvedRequest {
-                url: url.clone(),
+                url,
                 headers: HashMap::new(),
             })
         }
@@ -397,6 +425,7 @@ pub fn resolve_component_request(
     }
 }
 
+/// Fetch a single component spec from its resolved request, using cache when available.
 pub async fn fetch_component_impl(
     client: &reqwest::Client,
     req: &ResolvedRequest,
@@ -451,7 +480,7 @@ pub(crate) async fn fetch_http_component(
                     .map_err(|e| format!("Failed to fetch component: {e}"))?
                     .error_for_status()
                     .map_err(|e| format!("Registry returned error: {e}"))?
-                    .json::<serde_json::Value>()
+                    .json::<Value>()
                     .await
                     .map_err(|e| format!("Invalid component spec: {e}"))
             }
@@ -476,13 +505,13 @@ async fn fetch_file_component(
     let path = req
         .url
         .to_file_path()
-        .map_err(|_| format!("Invalid file URL: {}", req.url))?;
+        .map_err(|()| format!("Invalid file URL: {}", req.url))?;
 
     let text = tokio::fs::read_to_string(&path)
         .await
         .map_err(|e| format!("Failed to read registry file {}: {e}", path.display()))?;
 
-    let value: serde_json::Value =
+    let value: Value =
         serde_json::from_str(&text).map_err(|e| format!("Invalid component spec: {e}"))?;
 
     let warnings = detect_forbidden_fields(&value);
@@ -495,6 +524,7 @@ async fn fetch_file_component(
     Ok((item, warnings))
 }
 
+/// Recursively resolve a component and all its transitive dependencies.
 pub async fn resolve_component_closure(
     client: &reqwest::Client,
     cfg: &UiConfig,
@@ -566,7 +596,7 @@ pub async fn resolve_component_closure(
                 .await?;
 
                 for dep in &spec.dependencies {
-                    component_deps.insert(dep.to_string());
+                    component_deps.insert(dep.clone());
                 }
 
                 stack.push((
@@ -616,6 +646,7 @@ pub async fn resolve_component_closure(
     Ok(ordered)
 }
 
+/// Build an add-component plan without writing any files.
 pub async fn plan_add(
     client: &reqwest::Client,
     _app_dir: &Path,
@@ -662,7 +693,7 @@ pub async fn plan_add(
     for resolved in &components {
         warnings.extend(resolved.warnings.clone());
         for dep in &resolved.spec.dependencies {
-            component_deps.insert(dep.to_string());
+            component_deps.insert(dep.clone());
         }
 
         for file in &resolved.spec.files {
@@ -729,9 +760,8 @@ enum OutputRoot {
 
 fn determine_output_root(file_type: Option<&str>) -> OutputRoot {
     match file_type {
-        Some("registry:ui") => OutputRoot::Components,
         Some("registry:hook") => OutputRoot::Hooks,
-        Some("registry:lib") | Some("registry:file") => OutputRoot::Lib,
+        Some("registry:lib" | "registry:file") => OutputRoot::Lib,
         _ => OutputRoot::Components,
     }
 }
@@ -842,6 +872,7 @@ fn rewrite_registry_imports(content: &str) -> String {
     tw_transform::transform_tailwind_v3_to_v4(&result)
 }
 
+#[allow(clippy::literal_string_with_formatting_args)]
 fn apply_placeholders(template: &str, name: &str, style: &str) -> Result<String, String> {
     if !template.contains("{name}") {
         return Err("Registry template missing {name} placeholder".to_string());
@@ -909,9 +940,8 @@ fn parse_registry_dependency(
 
 fn detect_forbidden_fields(value: &Value) -> Vec<String> {
     let mut warnings = Vec::new();
-    let obj = match value.as_object() {
-        Some(obj) => obj,
-        None => return warnings,
+    let Some(obj) = value.as_object() else {
+        return warnings;
     };
     let name = obj
         .get("name")
@@ -1038,6 +1068,7 @@ fn render_declaration_value(value: &Value) -> Result<String, String> {
     }
 }
 
+/// Apply a set of CSS mutations to the file at `css_path`.
 pub fn apply_css_updates(css_path: &Path, mutations: Vec<CssMutation>) -> Result<(), String> {
     let source =
         std::fs::read_to_string(css_path).map_err(|e| format!("Failed to read CSS file: {e}"))?;

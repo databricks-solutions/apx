@@ -29,6 +29,11 @@ struct AppState {
 ///
 /// This function initializes storage, starts the cleanup scheduler,
 /// and runs the HTTP server. It blocks forever (or until error).
+///
+/// # Errors
+///
+/// Returns an error if storage initialization fails or the HTTP server
+/// cannot bind to the configured address.
 pub async fn run_server() -> Result<(), String> {
     info!("Flux daemon starting...");
 
@@ -50,6 +55,9 @@ pub async fn run_server() -> Result<(), String> {
 
 /// Periodic cleanup loop that runs within the daemon process.
 /// Deletes logs older than 7 days every hour.
+// The function is straightforward despite its measured complexity — it's just
+// an init step followed by a loop, both doing the same match.
+#[allow(clippy::cognitive_complexity)]
 async fn run_cleanup_loop(storage: LogsDb) {
     // Cleanup interval: 1 hour
     let interval = Duration::from_secs(60 * 60);
@@ -109,6 +117,8 @@ async fn health_check() -> impl IntoResponse {
 }
 
 /// Handle incoming OTLP logs (JSON or Protobuf).
+// Complexity is inherent to dispatching between JSON/protobuf and storing results.
+#[allow(clippy::cognitive_complexity)]
 async fn handle_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -214,13 +224,13 @@ fn parse_json_logs(body: &[u8]) -> Result<Vec<LogRecord>, String> {
 
                 let severity_number = record
                     .get("severityNumber")
-                    .and_then(|v| v.as_i64())
-                    .map(|n| n as i32);
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|n| i32::try_from(n).ok());
 
                 let severity_text = record
                     .get("severityText")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                    .map(ToString::to_string);
 
                 let body = extract_any_value(record.get("body"));
 
@@ -228,13 +238,13 @@ fn parse_json_logs(body: &[u8]) -> Result<Vec<LogRecord>, String> {
                     .get("traceId")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty() && *s != "00000000000000000000000000000000")
-                    .map(|s| s.to_string());
+                    .map(ToString::to_string);
 
                 let span_id = record
                     .get("spanId")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty() && *s != "0000000000000000")
-                    .map(|s| s.to_string());
+                    .map(ToString::to_string);
 
                 let log_attrs = record
                     .get("attributes")
@@ -280,7 +290,7 @@ fn parse_protobuf_logs(body: &[u8]) -> Result<Vec<LogRecord>, String> {
                 .map(|kv| {
                     serde_json::json!({
                         "key": kv.key,
-                        "value": any_value_to_json(&kv.value)
+                        "value": any_value_to_json(kv.value.as_ref())
                     })
                 })
                 .collect();
@@ -299,9 +309,11 @@ fn parse_protobuf_logs(body: &[u8]) -> Result<Vec<LogRecord>, String> {
 
         for scope_log in resource_log.scope_logs {
             for record in scope_log.log_records {
-                let timestamp_ns = record.time_unix_nano as i64;
-                let observed_timestamp_ns =
-                    (record.observed_time_unix_nano as i64).max(timestamp_ns);
+                let timestamp_ns = record.time_unix_nano.cast_signed();
+                let observed_timestamp_ns = record
+                    .observed_time_unix_nano
+                    .cast_signed()
+                    .max(timestamp_ns);
 
                 let severity_number = if record.severity_number != 0 {
                     Some(record.severity_number)
@@ -337,7 +349,7 @@ fn parse_protobuf_logs(body: &[u8]) -> Result<Vec<LogRecord>, String> {
                     .map(|kv| {
                         serde_json::json!({
                             "key": kv.key,
-                            "value": any_value_to_json(&kv.value)
+                            "value": any_value_to_json(kv.value.as_ref())
                         })
                     })
                     .collect();
@@ -376,7 +388,7 @@ fn parse_timestamp(value: Option<&serde_json::Value>) -> i64 {
     }
 }
 
-/// Extract a string value from an OTLP AnyValue JSON structure.
+/// Extract a string value from an OTLP `AnyValue` JSON structure.
 fn extract_any_value(value: Option<&serde_json::Value>) -> Option<String> {
     let v = value?;
 
@@ -396,12 +408,12 @@ fn extract_any_value(value: Option<&serde_json::Value>) -> Option<String> {
     }
 
     // Try doubleValue
-    if let Some(n) = v.get("doubleValue").and_then(|v| v.as_f64()) {
+    if let Some(n) = v.get("doubleValue").and_then(serde_json::Value::as_f64) {
         return Some(n.to_string());
     }
 
     // Try boolValue
-    if let Some(b) = v.get("boolValue").and_then(|v| v.as_bool()) {
+    if let Some(b) = v.get("boolValue").and_then(serde_json::Value::as_bool) {
         return Some(b.to_string());
     }
 
@@ -409,7 +421,7 @@ fn extract_any_value(value: Option<&serde_json::Value>) -> Option<String> {
     Some(serde_json::to_string(v).unwrap_or_default())
 }
 
-/// Convert protobuf AnyValue to a string.
+/// Convert protobuf `AnyValue` to a string.
 fn any_value_to_string(value: &opentelemetry_proto::tonic::common::v1::AnyValue) -> Option<String> {
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
 
@@ -442,9 +454,9 @@ fn any_value_to_string(value: &opentelemetry_proto::tonic::common::v1::AnyValue)
     }
 }
 
-/// Convert protobuf AnyValue to JSON.
+/// Convert protobuf `AnyValue` to JSON.
 fn any_value_to_json(
-    value: &Option<opentelemetry_proto::tonic::common::v1::AnyValue>,
+    value: Option<&opentelemetry_proto::tonic::common::v1::AnyValue>,
 ) -> serde_json::Value {
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
 
@@ -462,7 +474,7 @@ fn any_value_to_json(
             let items: Vec<serde_json::Value> = arr
                 .values
                 .iter()
-                .map(|v| any_value_to_json(&Some(v.clone())))
+                .map(|v| any_value_to_json(Some(v)))
                 .collect();
             serde_json::json!({ "arrayValue": { "values": items } })
         }
@@ -473,7 +485,7 @@ fn any_value_to_json(
                 .map(|kv| {
                     serde_json::json!({
                         "key": kv.key,
-                        "value": any_value_to_json(&kv.value)
+                        "value": any_value_to_json(kv.value.as_ref())
                     })
                 })
                 .collect();

@@ -77,16 +77,19 @@ fn should_log_request(path: &str, is_ui: bool) -> bool {
     true
 }
 
+/// Manages OAuth token refresh for Databricks API proxy requests.
 #[derive(Debug)]
 pub struct TokenManager {
     client: Option<DatabricksClient>,
 }
 
 impl TokenManager {
+    /// Create a new token manager with an optional Databricks client.
     pub fn new(client: Option<DatabricksClient>) -> Self {
         Self { client }
     }
 
+    /// Retrieve a fresh OAuth access token, refreshing if necessary.
     pub async fn get_token_refreshing_if_needed(&self) -> Option<String> {
         let client = self.client.as_ref()?;
         match client.access_token().await {
@@ -99,20 +102,31 @@ impl TokenManager {
     }
 }
 
+/// Shared state for the API reverse proxy.
 #[derive(Clone, Debug)]
 pub struct ApiProxyState {
+    /// HTTP client used for proxied requests.
     pub client: reqwest::Client,
+    /// Backend host address.
     pub host: String,
+    /// Backend port.
     pub port: u16,
+    /// Token manager for OAuth header injection.
     pub token_manager: Arc<TokenManager>,
+    /// Pre-computed forwarded user header value.
     pub forwarded_user_header: Option<String>,
 }
 
+/// Shared state for the UI reverse proxy.
 #[derive(Clone, Debug)]
 pub struct UiProxyState {
+    /// HTTP client used for proxied requests.
     pub client: reqwest::Client,
+    /// Frontend host address.
     pub host: String,
+    /// Frontend port.
     pub port: u16,
+    /// Dev token for authenticating proxy requests.
     pub dev_token: String,
 }
 
@@ -184,10 +198,7 @@ async fn api_proxy_handler(State(state): State<ApiProxyState>, req: Request<Body
     // Reconstruct path with /api prefix since nest strips it
     let path_and_query = format!(
         "/api{}",
-        original_uri
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/")
+        original_uri.path_and_query().map_or("/", |pq| pq.as_str())
     );
 
     // Get OAuth access token for API requests (None if not available)
@@ -214,8 +225,7 @@ async fn api_utils_proxy_handler(
     let path_and_query = req
         .uri()
         .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/")
+        .map_or("/", |pq| pq.as_str())
         .to_string();
 
     // Get OAuth access token for API requests (None if not available)
@@ -238,8 +248,7 @@ async fn ui_proxy_handler(State(state): State<UiProxyState>, req: Request<Body>)
     let path_and_query = req
         .uri()
         .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/")
+        .map_or("/", |pq| pq.as_str())
         .to_string();
     proxy_request(
         req,
@@ -323,7 +332,7 @@ async fn proxy_http(
         }
     };
     let mut builder = client.request(parts.method, url);
-    for (name, value) in parts.headers.iter() {
+    for (name, value) in &parts.headers {
         if is_hop_header(name.as_str()) {
             continue;
         }
@@ -387,7 +396,7 @@ async fn proxy_http(
     let body_stream = response.bytes_stream();
 
     let mut builder = Response::builder().status(status);
-    for (name, value) in headers.iter() {
+    for (name, value) in &headers {
         if is_hop_header(name.as_str()) {
             continue;
         }
@@ -461,7 +470,7 @@ async fn proxy_websocket(
                     None => break,
                 }
             }
-            _ = tokio::time::sleep(idle_timeout) => {
+            () = tokio::time::sleep(idle_timeout) => {
                 debug!("WebSocket idle timeout, closing proxy connection.");
                 break;
             }
@@ -512,7 +521,7 @@ fn is_websocket_request(headers: &HeaderMap) -> bool {
 
 fn filter_headers(headers: HeaderMap) -> HeaderMap {
     let mut filtered = HeaderMap::new();
-    for (name, value) in headers.iter() {
+    for (name, value) in &headers {
         if is_hop_header(name.as_str()) {
             continue;
         }

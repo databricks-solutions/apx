@@ -48,7 +48,7 @@ impl Uv {
         if let Some(cached) = UV_CELL.get() {
             return Ok(Self::from_resolved(cached.clone()));
         }
-        super::resolve_local::<Self>().map(Self::from_resolved)
+        resolve_local::<Self>().map(Self::from_resolved)
     }
 
     /// Create a `ToolCommand` for the uv binary.

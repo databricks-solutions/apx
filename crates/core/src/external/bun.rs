@@ -42,7 +42,7 @@ impl Bun {
     /// Build a PATH with the apx bin directory prepended.
     /// This ensures child processes spawned by bun also use the apx-bundled bun.
     fn patched_path(&self) -> std::ffi::OsString {
-        let apx_bin_dir = self.path.parent().unwrap_or(Path::new(""));
+        let apx_bin_dir = self.path.parent().unwrap_or_else(|| Path::new(""));
         let current_path = std::env::var_os("PATH").unwrap_or_default();
         let mut paths = vec![apx_bin_dir.to_path_buf()];
         paths.extend(std::env::split_paths(&current_path));

@@ -1,6 +1,9 @@
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
+/// Initialize the tracing subscriber with optional OTLP log export.
+///
+/// Reads `APX_LOG` for the log filter and `APX_OTEL_LOGS=1` to enable OTLP export.
 pub fn init_tracing() {
     let apx_root = "apx";
 

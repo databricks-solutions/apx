@@ -87,14 +87,16 @@ pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
 
     if let Some(tsc_result) = tsc_result {
         let tsc_result = tsc_result?;
-        if !tsc_result.0 {
+        if tsc_result.0 {
+            emit(mode, "✅ [tsc] TypeScript compilation succeeded");
+        } else {
             emit(mode, "❌ [tsc] TypeScript compilation failed");
             let combined_output = if !tsc_result.2.is_empty() && !tsc_result.1.is_empty() {
                 format!("{}\n{}", tsc_result.1, tsc_result.2)
             } else if !tsc_result.2.is_empty() {
-                tsc_result.2.clone()
+                tsc_result.2
             } else if !tsc_result.1.is_empty() {
-                tsc_result.1.clone()
+                tsc_result.1
             } else {
                 String::new()
             };
@@ -111,20 +113,20 @@ pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
                     &combined_output
                 }
             ));
-        } else {
-            emit(mode, "✅ [tsc] TypeScript compilation succeeded");
         }
     }
 
     let ty_result = ty_result?;
-    if !ty_result.0 {
+    if ty_result.0 {
+        emit(mode, "✅ [ty] Python type check succeeded");
+    } else {
         emit(mode, "❌ [ty] Python type check failed");
         let combined_output = if !ty_result.1.is_empty() && !ty_result.2.is_empty() {
             format!("{}\n{}", ty_result.1, ty_result.2)
         } else if !ty_result.1.is_empty() {
-            ty_result.1.clone()
+            ty_result.1
         } else if !ty_result.2.is_empty() {
-            ty_result.2.clone()
+            ty_result.2
         } else {
             String::new()
         };
@@ -141,8 +143,6 @@ pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
                 &combined_output
             }
         ));
-    } else {
-        emit(mode, "✅ [ty] Python type check succeeded");
     }
 
     if !errors.is_empty() {
@@ -183,7 +183,7 @@ async fn generate_route_tree(app_dir: &Path, mode: OutputMode) -> Result<(), Str
             }
             let exit_code = out
                 .exit_code
-                .map_or("signal".into(), |c: i32| c.to_string());
+                .map_or_else(|| "signal".into(), |c: i32| c.to_string());
             return Err(format!(
                 "Route tree generation failed (exit {exit_code}):\n\
                  entrypoint: {entrypoint}\n\

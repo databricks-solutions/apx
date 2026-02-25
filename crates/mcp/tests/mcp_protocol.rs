@@ -257,7 +257,9 @@ async fn test_read_info_resource() {
     assert_eq!(result.contents.len(), 1);
     let text = match &result.contents[0] {
         ResourceContents::TextResourceContents { text, .. } => text,
-        other => panic!("expected text resource, got {other:?}"),
+        other @ ResourceContents::BlobResourceContents { .. } => {
+            panic!("expected text resource, got {other:?}")
+        }
     };
     assert!(
         text.contains("Project Structure"),
@@ -285,7 +287,9 @@ async fn test_read_project_resource() {
     assert_eq!(result.contents.len(), 1);
     let text = match &result.contents[0] {
         ResourceContents::TextResourceContents { text, .. } => text,
-        other => panic!("expected text resource, got {other:?}"),
+        other @ ResourceContents::BlobResourceContents { .. } => {
+            panic!("expected text resource, got {other:?}")
+        }
     };
     let json: serde_json::Value =
         serde_json::from_str(text).expect("project resource should be valid JSON");

@@ -3,6 +3,8 @@ use crate::common::read_project_metadata;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::future::Future;
+use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -25,7 +27,7 @@ const INITIAL_DELAY_MS: u64 = 125;
 async fn fetch_with_retry<T, F, Fut>(operation: F, operation_name: &str) -> Result<T, String>
 where
     F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<T, String>>,
+    Fut: Future<Output = Result<T, String>>,
 {
     let mut last_error = String::new();
     for attempt in 0..MAX_RETRIES {
@@ -81,11 +83,15 @@ struct CachedRegistryIndex {
 /// Item from registry.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryIndexItem {
+    /// Component name.
     pub name: String,
+    /// Brief description.
     #[serde(default)]
     pub description: Option<String>,
+    /// npm dependencies.
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// Other registry components this item depends on.
     #[serde(default, rename = "registryDependencies")]
     pub registry_dependencies: Vec<String>,
 }
@@ -182,18 +188,16 @@ pub fn load_cached_component(
     component_name: &str,
     registry_name: Option<&str>,
 ) -> Result<Option<(RegistryItem, Vec<String>)>, String> {
-    let cache_path = match get_component_cache_path(component_name, registry_name) {
-        Ok(path) => path,
-        Err(_) => return Ok(None),
+    let Ok(cache_path) = get_component_cache_path(component_name, registry_name) else {
+        return Ok(None);
     };
 
     if !cache_path.exists() {
         return Ok(None);
     }
 
-    let content = match fs::read_to_string(&cache_path) {
-        Ok(c) => c,
-        Err(_) => return Ok(None),
+    let Ok(content) = fs::read_to_string(&cache_path) else {
+        return Ok(None);
     };
 
     let cached: CachedItem = match serde_json::from_str(&content) {
@@ -355,6 +359,7 @@ fn get_registry_index_url(
                 RegistryConfig::Advanced(a) => a.url.clone(),
             };
             // Replace {name} with "registry" and remove {style} if present
+            #[allow(clippy::literal_string_with_formatting_args)]
             let url = template
                 .replace("{name}", "registry")
                 .replace("{style}", style);
@@ -457,7 +462,9 @@ async fn fetch_and_cache_registry_index(
 }
 
 /// Check if any registry.json files need refresh (older than 1 hour)
-pub fn needs_registry_refresh(registries: &HashMap<String, RegistryConfig>) -> bool {
+pub fn needs_registry_refresh<S: BuildHasher>(
+    registries: &HashMap<String, RegistryConfig, S>,
+) -> bool {
     // Check default registry
     if let Ok(path) = get_registry_index_path(None)
         && !is_file_fresh(&path, CACHE_TTL_HOURS)
@@ -564,8 +571,9 @@ pub fn get_all_registry_indexes() -> Result<HashMap<String, Vec<RegistryIndexIte
 }
 
 /// State for tracking background indexing
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct CachePopulationState {
+    /// Whether a background cache population task is currently in progress.
     pub is_running: bool,
 }
 

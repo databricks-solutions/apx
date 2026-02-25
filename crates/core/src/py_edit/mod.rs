@@ -13,10 +13,13 @@ use ruff_text_size::Ranged;
 /// Errors returned by py_edit operations.
 #[derive(Debug, thiserror::Error)]
 pub enum PyEditError {
+    /// Python source failed to parse.
     #[error("Parse error: {0}")]
     Parse(String),
+    /// The item to add already exists in the source.
     #[error("Already present: {0}")]
     AlreadyPresent(String),
+    /// The target item was not found in the source.
     #[error("Not found: {0}")]
     NotFound(String),
 }

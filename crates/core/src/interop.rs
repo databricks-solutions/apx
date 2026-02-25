@@ -86,6 +86,7 @@ pub fn list_template_files(prefix: &str) -> Vec<String> {
     resources::list_templates(Some(prefix))
 }
 
+/// Generate the OpenAPI JSON spec and its hash by invoking the Python app.
 pub async fn generate_openapi_spec(
     project_root: &Path,
     app_entrypoint: &str,
@@ -172,9 +173,7 @@ print(json.dumps(app.openapi(), indent=2))
 pub async fn get_databricks_sdk_version(
     project_dir: Option<&Path>,
 ) -> Result<Option<String>, String> {
-    let label = project_dir
-        .map(|d| d.display().to_string())
-        .unwrap_or_else(|| "default".to_string());
+    let label = project_dir.map_or_else(|| "default".to_string(), |d| d.display().to_string());
     debug!("get_databricks_sdk_version: checking (context: {label})");
 
     let uv = match Uv::try_new() {

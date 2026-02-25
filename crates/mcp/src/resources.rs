@@ -1,9 +1,13 @@
 use crate::info_content::APX_INFO_CONTENT;
 use crate::tools::openapi::parse_openapi_operations;
 use crate::validation::validated_app_path;
-use rmcp::model::*;
+use rmcp::model::{
+    AnnotateAble, RawResource, RawResourceTemplate, ReadResourceResult, Resource, ResourceContents,
+    ResourceTemplate,
+};
 use serde::Serialize;
 
+/// Return the static list of MCP resources (e.g. `apx://info`).
 pub fn list_resources() -> Vec<Resource> {
     let mut raw = RawResource::new("apx://info", "apx-info".to_string());
     raw.description = Some("Information about apx toolkit".to_string());
@@ -11,6 +15,7 @@ pub fn list_resources() -> Vec<Resource> {
     vec![raw.no_annotation()]
 }
 
+/// Return the list of parameterized resource templates (e.g. `apx://project/{app_path}`).
 pub fn list_resource_templates() -> Vec<ResourceTemplate> {
     let raw = RawResourceTemplate {
         uri_template: "apx://project/{app_path}".to_string(),
@@ -26,6 +31,7 @@ pub fn list_resource_templates() -> Vec<ResourceTemplate> {
     vec![raw.no_annotation()]
 }
 
+/// Read a static resource by URI. Returns an error if the URI is unknown.
 pub fn read_resource(uri: &str) -> Result<ReadResourceResult, String> {
     match uri {
         "apx://info" => Ok(ReadResourceResult {
@@ -58,6 +64,7 @@ struct ProjectContext {
     configured_registries: Vec<String>,
 }
 
+/// Read a project-scoped resource, returning routes, components, and metadata as JSON.
 pub async fn read_project_resource(app_path: &str) -> Result<ReadResourceResult, String> {
     let path = validated_app_path(app_path).map_err(|e| e.message)?;
 

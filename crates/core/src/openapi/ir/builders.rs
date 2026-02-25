@@ -6,6 +6,7 @@
 
 use swc_atoms::Atom;
 use swc_common::{DUMMY_SP, SyntaxContext};
+#[allow(clippy::wildcard_imports)]
 use swc_ecma_ast::*;
 
 use super::types::{self as ir, TypeRef};

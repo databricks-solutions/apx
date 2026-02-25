@@ -45,7 +45,7 @@ const DEFAULT_DB: &str = "postgres";
 /// Self-contained embedded database lifecycle manager.
 /// Encapsulates PGlite spawning, readiness polling, credential rotation,
 /// and health monitoring. ProcessManager interacts only through this API.
-pub(crate) struct EmbeddedDb {
+pub struct EmbeddedDb {
     child: Arc<Mutex<Option<Child>>>,
     port: u16,
     password: String,
@@ -73,7 +73,7 @@ impl EmbeddedDb {
         let bun = Bun::new().await?;
         let password = token::generate();
 
-        let child = Self::spawn_pglite(&bun, app_dir, host, port, app_slug).await?;
+        let child = Self::spawn_pglite(&bun, app_dir, host, port, app_slug)?;
         let child = Arc::new(Mutex::new(Some(child)));
 
         Self::wait_for_ready(port).await?;
@@ -119,7 +119,7 @@ impl EmbeddedDb {
 
     // -- private helpers --
 
-    async fn spawn_pglite(
+    fn spawn_pglite(
         bun: &Bun,
         app_dir: &Path,
         host: &str,
@@ -271,22 +271,21 @@ impl EmbeddedDb {
                 }
 
                 let mut guard = child.lock().await;
-                match guard.as_mut() {
-                    Some(c) => match c.try_wait() {
+                if let Some(c) = guard.as_mut() {
+                    match c.try_wait() {
                         Ok(Some(status)) => {
                             warn!("Embedded database exited early with status: {:?}", status);
                             break;
                         }
-                        Ok(None) => continue,
+                        Ok(None) => {}
                         Err(e) => {
                             warn!("Failed to check embedded database status: {}", e);
                             break;
                         }
-                    },
-                    None => {
-                        warn!("Embedded database process handle lost");
-                        break;
                     }
+                } else {
+                    warn!("Embedded database process handle lost");
+                    break;
                 }
             }
         });

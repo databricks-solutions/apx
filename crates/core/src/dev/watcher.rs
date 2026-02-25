@@ -4,6 +4,7 @@
 //! that handle the common `tokio::spawn` + `loop` + `select!` boilerplate.
 //! Each watcher only needs to define what to check and how often.
 
+use std::future::Future;
 use std::ops::ControlFlow;
 
 use tokio::sync::broadcast;
@@ -19,7 +20,7 @@ use crate::dev::common::Shutdown;
 ///
 /// Return [`ControlFlow::Break`] from [`poll`](PollingWatcher::poll) to stop the watcher
 /// (e.g. when the watched resource disappears).
-pub(crate) trait PollingWatcher: Send + 'static {
+pub trait PollingWatcher: Send + 'static {
     /// Human-readable name for log messages (e.g. ".env", "filesystem").
     fn label(&self) -> &'static str;
 
@@ -33,14 +34,14 @@ pub(crate) trait PollingWatcher: Send + 'static {
     /// or `ControlFlow::Break(())` to stop this watcher.
     ///
     /// The returned future must be `Send` so it can run inside `tokio::spawn`.
-    fn poll(&mut self) -> impl std::future::Future<Output = ControlFlow<()>> + Send;
+    fn poll(&mut self) -> impl Future<Output = ControlFlow<()>> + Send;
 }
 
 /// Spawn a polling watcher as a background task.
 ///
 /// The task calls `watcher.poll()` at the configured interval and stops
 /// when either `shutdown_rx` fires or `poll()` returns `Break`.
-pub(crate) fn spawn_polling_watcher<W: PollingWatcher>(
+pub fn spawn_polling_watcher<W: PollingWatcher>(
     mut watcher: W,
     mut shutdown_rx: broadcast::Receiver<Shutdown>,
 ) {
@@ -56,7 +57,7 @@ pub(crate) fn spawn_polling_watcher<W: PollingWatcher>(
                         }
                     }
                 }
-                _ = tokio::time::sleep(watcher.poll_interval()) => {
+                () = tokio::time::sleep(watcher.poll_interval()) => {
                     if watcher.poll().await.is_break() {
                         break;
                     }

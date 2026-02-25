@@ -476,23 +476,22 @@ fn normalize_operation(
     // Determine if params is optional (used by both fetch and hooks)
     let params_optional = params
         .as_ref()
-        .map(|p| !p.fields.iter().any(|f| f.required))
-        .unwrap_or(true);
+        .is_none_or(|p| !p.fields.iter().any(|f| f.required));
 
     // Build fetch IR
     let fetch = build_fetch_ir(
         &name,
         path,
         method,
-        &params,
-        &body,
+        params.as_ref(),
+        body.as_ref(),
         &response,
         params_optional,
     );
 
     // Build query key (for queries only)
     let query_key = if kind == OperationKind::Query {
-        Some(build_query_key_ir(&name, path, &params))
+        Some(build_query_key_ir(&name, path, params.as_ref()))
     } else {
         None
     };
@@ -501,11 +500,11 @@ fn normalize_operation(
     let hooks = build_hooks(
         &name,
         kind,
-        &params,
+        params.as_ref(),
         params_optional,
-        &body,
+        body.as_ref(),
         &response,
-        &query_key,
+        query_key.as_ref(),
     );
 
     Ok(OperationIR {
@@ -606,10 +605,10 @@ fn normalize_param(p: &Parameter) -> ParamIR {
         .schema
         .as_ref()
         .and_then(|s| schema_to_ts_type(s).ok())
-        .map(|t| TypeRef::Inline(Box::new(t)))
-        .unwrap_or(TypeRef::Inline(Box::new(TsType::Primitive(
-            TsPrimitive::String,
-        ))));
+        .map_or_else(
+            || TypeRef::Inline(Box::new(TsType::Primitive(TsPrimitive::String))),
+            |t| TypeRef::Inline(Box::new(t)),
+        );
 
     let location = match p.location.as_str() {
         "path" => ParamLocation::Path,
@@ -746,8 +745,8 @@ fn build_fetch_ir(
     name: &str,
     path: &str,
     method: HttpMethod,
-    params: &Option<ParamsIR>,
-    body: &Option<BodyIR>,
+    params: Option<&ParamsIR>,
+    body: Option<&BodyIR>,
     response: &ResponseIR,
     params_optional: bool,
 ) -> FetchIR {
@@ -793,7 +792,6 @@ fn build_fetch_ir(
 
     // Collect header params
     let header_params = params
-        .as_ref()
         .map(|p| {
             p.fields
                 .iter()
@@ -808,17 +806,16 @@ fn build_fetch_ir(
         args,
         response: response.clone(),
         url,
-        body: body.clone(),
+        body: body.cloned(),
         method,
         header_params,
     }
 }
 
 /// Build URL IR
-fn build_url_ir(path: &str, params: &Option<ParamsIR>) -> UrlIR {
+fn build_url_ir(path: &str, params: Option<&ParamsIR>) -> UrlIR {
     // Collect path params for lookup
     let path_params: Vec<&ParamIR> = params
-        .as_ref()
         .map(|p| {
             p.fields
                 .iter()
@@ -860,7 +857,6 @@ fn build_url_ir(path: &str, params: &Option<ParamsIR>) -> UrlIR {
 
     // Collect query params
     let query_params = params
-        .as_ref()
         .map(|p| {
             p.fields
                 .iter()
@@ -897,11 +893,11 @@ fn find_matching_param(placeholder: &str, params: &[&ParamIR]) -> Option<String>
 }
 
 /// Build query key IR
-fn build_query_key_ir(name: &str, path: &str, params: &Option<ParamsIR>) -> QueryKeyIR {
+fn build_query_key_ir(name: &str, path: &str, params: Option<&ParamsIR>) -> QueryKeyIR {
     QueryKeyIR {
         fn_name: format!("{name}Key"),
         base_key: path.to_string(),
-        params_type: params.as_ref().map(|p| TypeRef::Named(p.type_name.clone())),
+        params_type: params.map(|p| TypeRef::Named(p.type_name.clone())),
     }
 }
 
@@ -909,19 +905,19 @@ fn build_query_key_ir(name: &str, path: &str, params: &Option<ParamsIR>) -> Quer
 fn build_hooks(
     name: &str,
     kind: OperationKind,
-    params: &Option<ParamsIR>,
+    params: Option<&ParamsIR>,
     params_optional: bool,
-    body: &Option<BodyIR>,
+    body: Option<&BodyIR>,
     response: &ResponseIR,
-    query_key: &Option<QueryKeyIR>,
+    query_key: Option<&QueryKeyIR>,
 ) -> Vec<HookIR> {
     let mut hooks = Vec::new();
     let capitalized = capitalize_first(name);
 
     match kind {
         OperationKind::Query => {
-            let vars_type = params.as_ref().map(|p| TypeRef::Named(p.type_name.clone()));
-            let key_fn = query_key.as_ref().map(|k| k.fn_name.clone());
+            let vars_type = params.map(|p| TypeRef::Named(p.type_name.clone()));
+            let key_fn = query_key.map(|k| k.fn_name.clone());
             // params_required is true when there are params and at least one is required
             let params_required = params.is_some() && !params_optional;
 
@@ -960,7 +956,7 @@ fn build_hooks(
 
             // Determine vars type
             // For FormData, use FormData type instead of the schema type
-            let vars_type = match (params.as_ref(), body.as_ref()) {
+            let vars_type = match (params, body) {
                 (Some(p), Some(b)) => {
                     let data_ty = if b.content_type == BodyContentType::FormData {
                         TsType::Ref("FormData".into())

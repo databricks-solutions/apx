@@ -1,6 +1,8 @@
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -45,15 +47,24 @@ pub fn list_profiles() -> Result<Vec<String>, String> {
 const DEFAULT_API_PREFIX: &str = "/api";
 const PYPROJECT_FILENAME: &str = "pyproject.toml";
 
+/// Parsed project configuration from `pyproject.toml`.
 #[derive(Debug, Clone)]
 pub struct ProjectMetadata {
+    /// Human-readable application name.
     pub app_name: String,
+    /// Python package slug (used for directory names).
     pub app_slug: String,
+    /// Python module entrypoint (e.g. `"my_app.app:app"`).
     pub app_entrypoint: String,
+    /// API route prefix (default `"/api"`).
     pub api_prefix: String,
+    /// Path to the `_metadata.py` file relative to project root.
     pub metadata_path: PathBuf,
+    /// Optional UI root directory (present when `[tool.apx.ui]` is configured).
     pub ui_root: Option<PathBuf>,
+    /// Optional UI component registries from `[tool.apx.ui.registries]`.
     pub ui_registries: Option<HashMap<String, String>>,
+    /// Dev server configuration parsed from `[tool.apx.dev]`.
     pub dev_config: DevConfig,
 }
 
@@ -73,6 +84,7 @@ impl ProjectMetadata {
     }
 }
 
+/// Read and parse project metadata from `pyproject.toml` in the given directory.
 pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, String> {
     let pyproject_path = project_root.join(PYPROJECT_FILENAME);
     let pyproject_contents = fs::read_to_string(&pyproject_path)
@@ -158,6 +170,7 @@ pub fn read_python_dependencies(project_root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Write (or update) the `_metadata.py` file and initialize the `__dist__` directory.
 pub fn write_metadata_file(project_root: &Path, metadata: &ProjectMetadata) -> Result<(), String> {
     let target_path = project_root.join(&metadata.metadata_path);
     tracing::debug!("Writing metadata file to {}", target_path.display());
@@ -218,10 +231,12 @@ pub fn write_metadata_file(project_root: &Path, metadata: &ProjectMetadata) -> R
     Ok(())
 }
 
+/// Create a directory and all parent directories if they don't exist.
 pub fn ensure_dir(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|err| format!("Failed to create directory: {err}"))
 }
 
+/// Run `bun install` in the given directory.
 pub async fn bun_install(app_dir: &Path) -> Result<(), String> {
     let bun = Bun::new().await?;
     tracing::debug!(app_dir = %app_dir.display(), "Running bun install");
@@ -283,12 +298,12 @@ pub async fn generate_version_file(
     let version = match uv.tool_run(app_dir, "uv-dynamic-versioning").await {
         Ok(output) if output.exit_code == Some(0) => {
             let v = output.stdout.trim().to_string();
-            if !v.is_empty() {
-                tracing::debug!("uv-dynamic-versioning returned version: {}", v);
-                v
-            } else {
+            if v.is_empty() {
                 tracing::warn!("uv-dynamic-versioning returned empty output, using fallback");
                 "0.0.0".to_string()
+            } else {
+                tracing::debug!("uv-dynamic-versioning returned version: {}", v);
+                v
             }
         }
         Ok(output) => {
@@ -307,7 +322,7 @@ pub async fn generate_version_file(
     // Write the version file
     let content = format!("version = \"{version}\"\n");
     tracing::debug!("Writing version file to {}", version_path.display());
-    std::fs::write(&version_path, content)
+    fs::write(&version_path, content)
         .map_err(|err| format!("Failed to write version file: {err}"))?;
 
     tracing::debug!("Version file written successfully");
@@ -318,12 +333,19 @@ pub async fn generate_version_file(
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct PreflightResult {
+    /// Parsed project metadata.
     pub metadata: ProjectMetadata,
+    /// Time spent verifying project layout (ms).
     pub layout_ms: u128,
+    /// Time spent running `uv sync` (ms).
     pub uv_sync_ms: u128,
+    /// Time spent generating the OpenAPI client (ms).
     pub openapi_ms: u128,
+    /// Time spent generating the version file (ms).
     pub version_ms: u128,
+    /// Time spent running `bun install` (ms), or `None` if skipped.
     pub bun_install_ms: Option<u128>,
+    /// Whether the project has a UI directory.
     pub has_ui: bool,
 }
 
@@ -367,12 +389,12 @@ pub async fn run_preflight_checks(app_dir: &Path) -> Result<PreflightResult, Str
     // Step 5: Run bun install if node_modules is missing (only for projects with UI)
     let bun_install_ms = if metadata.has_ui() {
         let node_modules_dir = app_dir.join("node_modules");
-        if !node_modules_dir.exists() {
+        if node_modules_dir.exists() {
+            None
+        } else {
             let bun_start = Instant::now();
             bun_install(app_dir).await?;
             Some(bun_start.elapsed().as_millis())
-        } else {
-            None
         }
     } else {
         None
@@ -422,12 +444,13 @@ pub fn spinner_for_mode(message: &str, mode: OutputMode) -> ProgressBar {
 
 // Spinner utilities for CLI operations
 #[allow(clippy::print_stdout)]
+/// Create a visible CLI spinner with the given message.
 pub fn spinner(message: &str) -> ProgressBar {
     let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::with_template("{spinner} {msg}")
-            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
-    );
+    #[allow(clippy::literal_string_with_formatting_args)]
+    let style = ProgressStyle::with_template("{spinner} {msg}")
+        .unwrap_or_else(|_| ProgressStyle::default_spinner());
+    spinner.set_style(style);
     spinner.enable_steady_tick(Duration::from_millis(80));
     spinner.set_message(message.to_string());
     spinner
@@ -436,7 +459,9 @@ pub fn spinner(message: &str) -> ProgressBar {
 /// Output captured from a streaming command.
 #[derive(Debug, Default)]
 pub struct StreamingOutput {
+    /// Captured standard output.
     pub stdout: String,
+    /// Captured standard error.
     pub stderr: String,
 }
 
@@ -511,11 +536,11 @@ pub async fn run_command_streaming_with_output(
         let mut full_error = format!("{error_msg}: exit code {}", status.code().unwrap_or(-1));
 
         if !output.stderr.is_empty() {
-            full_error.push_str(&format!("\n\nStderr:\n{}", output.stderr));
+            let _ = write!(full_error, "\n\nStderr:\n{}", output.stderr);
         }
 
         if !output.stdout.is_empty() {
-            full_error.push_str(&format!("\n\nStdout:\n{}", output.stdout));
+            let _ = write!(full_error, "\n\nStdout:\n{}", output.stdout);
         }
 
         return Err(full_error);
@@ -524,6 +549,7 @@ pub async fn run_command_streaming_with_output(
     Ok(output)
 }
 
+/// Format elapsed time since `start` as a human-readable string (e.g. "1s 234ms").
 pub fn format_elapsed_ms(start: Instant) -> String {
     let elapsed = start.elapsed();
     if elapsed.as_secs() == 0 {
@@ -535,6 +561,7 @@ pub fn format_elapsed_ms(start: Instant) -> String {
 }
 
 #[allow(clippy::print_stdout)]
+/// Run a synchronous closure with a spinner, printing the success message on completion.
 pub fn run_with_spinner<F>(description: &str, success_message: &str, f: F) -> Result<(), String>
 where
     F: FnOnce() -> Result<(), String>,
@@ -550,6 +577,7 @@ where
 }
 
 #[allow(clippy::print_stdout)]
+/// Run an async closure with a spinner, printing the success message on completion.
 pub async fn run_with_spinner_async<F, Fut>(
     description: &str,
     success_message: &str,
@@ -557,7 +585,7 @@ pub async fn run_with_spinner_async<F, Fut>(
 ) -> Result<(), String>
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
+    Fut: Future<Output = Result<(), String>>,
 {
     let spinner = spinner(description);
     let start = Instant::now();

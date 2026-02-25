@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 
 static APP_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+/// Set the global application directory (once). Returns an error if already set to a different path.
 pub fn set_app_dir(app_dir: PathBuf) -> Result<(), String> {
     if let Some(existing) = APP_DIR.get() {
         if existing != &app_dir {
@@ -18,6 +19,7 @@ pub fn set_app_dir(app_dir: PathBuf) -> Result<(), String> {
         .map_err(|_| "Failed to set app directory".to_string())
 }
 
+/// Get the global application directory, if it has been set.
 pub fn get_app_dir() -> Option<PathBuf> {
     APP_DIR.get().cloned()
 }

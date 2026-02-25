@@ -341,7 +341,7 @@ mod tests {
     use crate::tools::ToolResultExt;
     use rmcp::model::CallToolResult;
 
-    fn parse_test_spec(json: serde_json::Value) -> OpenApiSpec {
+    fn parse_test_spec(json: Value) -> OpenApiSpec {
         serde_json::from_value(json).unwrap()
     }
 

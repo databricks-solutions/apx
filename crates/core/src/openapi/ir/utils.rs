@@ -74,8 +74,7 @@ pub fn needs_bracket_notation(name: &str) -> bool {
         || !name
             .chars()
             .next()
-            .map(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
-            .unwrap_or(false)
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
         || !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
@@ -134,12 +133,7 @@ pub fn sanitize_ts_identifier(name: &str) -> String {
     }
 
     // Prepend underscore if starts with digit
-    if result
-        .chars()
-        .next()
-        .map(|c| c.is_ascii_digit())
-        .unwrap_or(false)
-    {
+    if result.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         result = format!("_{result}");
     }
 

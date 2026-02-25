@@ -3,11 +3,16 @@ use std::path::PathBuf;
 use crate::config_parser::ConfigParser;
 use crate::error::{DatabricksError, Result};
 
+/// Resolved Databricks workspace configuration for a single profile.
 #[derive(Debug, Clone)]
 pub struct DatabricksConfig {
+    /// Profile name (e.g. `"DEFAULT"`, `"staging"`).
     pub profile: String,
+    /// Normalized workspace host URL (e.g. `"https://adb-123.4.azuredatabricks.net"`).
     pub host: String,
+    /// Optional product name for the User-Agent header.
     pub product: Option<String>,
+    /// Optional product version for the User-Agent header.
     pub product_version: Option<String>,
 }
 
@@ -32,6 +37,10 @@ fn normalize_host(host: &str) -> String {
 }
 
 /// List just the profile names (section headers) from `~/.databrickscfg`.
+///
+/// # Errors
+///
+/// Returns an error if the config file path cannot be determined or the file cannot be parsed.
 pub fn list_profile_names() -> Result<Vec<String>> {
     let path = config_file_path()?;
     let config = ConfigParser::parse(&path)?;
@@ -44,6 +53,11 @@ pub fn list_profile_names() -> Result<Vec<String>> {
 /// 1. Explicit `profile_name` argument (if non-empty)
 /// 2. `DATABRICKS_CONFIG_PROFILE` env var
 /// 3. `"DEFAULT"`
+///
+/// # Errors
+///
+/// Returns an error if the config file cannot be read, the profile is not found,
+/// or the profile has no host configured.
 pub fn resolve_config(profile_name: &str) -> Result<DatabricksConfig> {
     let profile = if !profile_name.is_empty() {
         profile_name.to_string()
@@ -67,8 +81,7 @@ pub fn resolve_config(profile_name: &str) -> Result<DatabricksConfig> {
     let host = normalize_host(&found.host);
     if host.is_empty() {
         return Err(DatabricksError::Config(format!(
-            "profile '{}' has no host configured",
-            profile
+            "profile '{profile}' has no host configured"
         )));
     }
 

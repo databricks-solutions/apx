@@ -50,11 +50,17 @@ struct HealthResponse {
 /// All values needed to start the dev server's Axum instance + process manager.
 #[derive(Debug)]
 pub struct ServerConfig {
+    /// Application directory.
     pub app_dir: PathBuf,
+    /// Pre-bound TCP listener for the main server port.
     pub listener: tokio::net::TcpListener,
+    /// Port assigned to the backend (uvicorn) subprocess.
     pub backend_port: u16,
+    /// Port assigned to the frontend subprocess, if the project has a UI.
     pub frontend_port: Option<u16>,
+    /// Port assigned to the embedded database subprocess.
     pub db_port: u16,
+    /// Authentication token for dev control endpoints.
     pub dev_token: String,
 }
 
@@ -96,24 +102,21 @@ pub async fn run_server(config: ServerConfig) -> Result<(), String> {
 
     // Resolve Databricks profile from env or .env file
     let profile = resolve_databricks_profile(&app_dir);
-    let databricks_client = match &profile {
-        Some(p) => {
-            match DatabricksClient::with_product(p, "apx", env!("CARGO_PKG_VERSION")).await {
-                Ok(client) => Some(client),
-                Err(err) => {
-                    warn!(
-                        "Failed to create Databricks client: {err}. API proxy will not forward authentication headers."
-                    );
-                    None
-                }
+    let databricks_client = if let Some(p) = &profile {
+        match DatabricksClient::with_product(p, "apx", env!("CARGO_PKG_VERSION")).await {
+            Ok(client) => Some(client),
+            Err(err) => {
+                warn!(
+                    "Failed to create Databricks client: {err}. API proxy will not forward authentication headers."
+                );
+                None
             }
         }
-        None => {
-            warn!(
-                "No Databricks profile configured. API proxy will not forward authentication headers."
-            );
-            None
-        }
+    } else {
+        warn!(
+            "No Databricks profile configured. API proxy will not forward authentication headers."
+        );
+        None
     };
 
     // Compute forwarded user header once at startup
@@ -228,11 +231,12 @@ pub async fn run_server(config: ServerConfig) -> Result<(), String> {
                 Ok(Shutdown::Stop) => {
                     debug!("Stop signal received, shutting down server.");
                     // Give process_manager.stop() a hard deadline to prevent indefinite hangs
-                    match tokio::time::timeout(Duration::from_secs(10), process_manager.stop())
-                        .await
+                    if let Err(_elapsed) =
+                        tokio::time::timeout(Duration::from_secs(10), process_manager.stop()).await
                     {
-                        Ok(()) => debug!("Process shutdown complete."),
-                        Err(_) => warn!("Process shutdown timed out after 10s, forcing exit."),
+                        warn!("Process shutdown timed out after 10s, forcing exit.");
+                    } else {
+                        debug!("Process shutdown complete.");
                     }
 
                     // Remove lock file after processes are stopped

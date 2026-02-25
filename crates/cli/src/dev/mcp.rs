@@ -25,26 +25,21 @@ pub async fn run(_args: McpArgs) -> i32 {
 
         // Get SDK version via subprocess before spawning async task
         const DEFAULT_SDK_VERSION: &str = "0.89.0";
-        let sdk_version = match get_databricks_sdk_version(None).await {
-            Ok(Some(v)) => {
-                tracing::info!("Found Databricks SDK version: {}", v);
-                v
-            }
-            Ok(None) | Err(_) => {
-                tracing::info!("SDK not detected locally, fetching latest version from GitHub");
-                match fetch_latest_sdk_version().await {
-                    Ok(v) => {
-                        tracing::info!("Latest SDK version from GitHub: {}", v);
-                        v
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to fetch latest SDK version: {}. Using default {}",
-                            e,
-                            DEFAULT_SDK_VERSION
-                        );
-                        DEFAULT_SDK_VERSION.to_string()
-                    }
+        let sdk_version = if let Ok(Some(v)) = get_databricks_sdk_version(None).await {
+            tracing::info!("Found Databricks SDK version: {v}");
+            v
+        } else {
+            tracing::info!("SDK not detected locally, fetching latest version from GitHub");
+            match fetch_latest_sdk_version().await {
+                Ok(v) => {
+                    tracing::info!("Latest SDK version from GitHub: {v}");
+                    v
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to fetch latest SDK version: {e}. Using default {DEFAULT_SDK_VERSION}"
+                    );
+                    DEFAULT_SDK_VERSION.to_string()
                 }
             }
         };

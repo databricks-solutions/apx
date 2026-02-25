@@ -192,7 +192,7 @@ fn parse_formatters(
     for (name, formatter_value) in table {
         let formatter_table = formatter_value
             .as_table()
-            .ok_or_else(|| format!("formatter '{}' must be a table", name))?;
+            .ok_or_else(|| format!("formatter '{name}' must be a table"))?;
 
         let format = formatter_table
             .get("format")
@@ -233,13 +233,13 @@ fn parse_handlers(value: Option<&toml::Value>) -> Result<HashMap<String, Handler
     for (name, handler_value) in table {
         let handler_table = handler_value
             .as_table()
-            .ok_or_else(|| format!("handler '{}' must be a table", name))?;
+            .ok_or_else(|| format!("handler '{name}' must be a table"))?;
 
         let class_name = handler_table
             .get("class")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| format!("handler '{}' must have a 'class' field", name))?;
+            .ok_or_else(|| format!("handler '{name}' must have a 'class' field"))?;
 
         let level = handler_table
             .get("level")
@@ -296,7 +296,7 @@ fn parse_loggers(value: Option<&toml::Value>) -> Result<HashMap<String, LoggerCo
     for (name, logger_value) in table {
         let logger_table = logger_value
             .as_table()
-            .ok_or_else(|| format!("logger '{}' must be a table", name))?;
+            .ok_or_else(|| format!("logger '{name}' must be a table"))?;
 
         let handlers = logger_table.get("handlers").and_then(|v| {
             v.as_array().map(|arr| {
@@ -498,7 +498,7 @@ pub fn merge_with_default(user_config: &LoggingConfig, app_slug: &str) -> Loggin
 
     // Override root if user provided one
     if user_config.root.is_some() {
-        config.root = user_config.root.clone();
+        config.root.clone_from(&user_config.root);
     }
 
     // Use user's disable_existing_loggers if they explicitly set it
@@ -650,9 +650,10 @@ version = 1
         // Create a temp file to simulate the external config existing
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join("logging.py");
-        if std::fs::write(&temp_file, "# logging config").is_err() {
-            panic!("failed to write temp file");
-        }
+        assert!(
+            std::fs::write(&temp_file, "# logging config").is_ok(),
+            "failed to write temp file"
+        );
 
         let result = parse_dev_config(&value, &temp_dir);
         assert!(result.is_err());
@@ -839,8 +840,7 @@ console = { class = "logging.StreamHandler", formatter = "custom", stream = "ext
                 "python",
                 "-c",
                 &format!(
-                    "import json, logging.config; logging.config.dictConfig(json.load(open('{}')))",
-                    config_path
+                    "import json, logging.config; logging.config.dictConfig(json.load(open('{config_path}')))"
                 ),
             ])
             .output()
@@ -849,8 +849,7 @@ console = { class = "logging.StreamHandler", formatter = "custom", stream = "ext
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             panic!(
-                "Default logging config failed Python validation:\n{}\n\nConfig JSON:\n{}",
-                stderr, json
+                "Default logging config failed Python validation:\n{stderr}\n\nConfig JSON:\n{json}"
             );
         }
     }

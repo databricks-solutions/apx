@@ -34,7 +34,7 @@ pub async fn wait_for_healthy_with_logs(
                 debug!("Received Ctrl+C, aborting startup");
                 return Err("Startup interrupted by user".to_string());
             }
-            _ = tokio::time::sleep(Duration::from_millis(config.retry_delay_ms)) => {
+            () = tokio::time::sleep(Duration::from_millis(config.retry_delay_ms)) => {
                 log_streamer.print_new_logs().await;
                 attempt_count += 1;
                 let elapsed_ms = start_time.elapsed().as_millis();

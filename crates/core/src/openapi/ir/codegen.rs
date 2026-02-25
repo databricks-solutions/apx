@@ -5,12 +5,14 @@
 //! strings via SWC's codegen.
 
 use swc_common::DUMMY_SP;
+#[allow(clippy::wildcard_imports)]
 use swc_ecma_ast::*;
 
 use super::api::{
     ApiIR, BodyContentType, FetchArgIR, FetchIR, HookIR, HookKind, OperationIR, ParamsIR,
     QueryKeyIR, ResponseContentType, UrlPart,
 };
+#[allow(clippy::wildcard_imports)]
 use super::builders::*;
 use super::types::{TsType as IrTsType, TypeRef};
 use super::utils::{escape_js_string, needs_bracket_notation};
@@ -543,10 +545,7 @@ fn response_data_expr(content_type: ResponseContentType) -> Expr {
 }
 
 /// Resolve the SWC type for a response based on content type.
-fn resolve_content_type(
-    content_type: ResponseContentType,
-    ty: &TypeRef,
-) -> Box<swc_ecma_ast::TsType> {
+fn resolve_content_type(content_type: ResponseContentType, ty: &TypeRef) -> Box<TsType> {
     match content_type {
         ResponseContentType::Text => ts_kw!(string),
         ResponseContentType::Blob => ts_type_ref("Blob"),
@@ -556,10 +555,10 @@ fn resolve_content_type(
 }
 
 /// Check if an SWC type is the `void` keyword.
-fn is_void_type(ty: &swc_ecma_ast::TsType) -> bool {
+fn is_void_type(ty: &TsType) -> bool {
     matches!(
         ty,
-        swc_ecma_ast::TsType::TsKeywordType(swc_ecma_ast::TsKeywordType {
+        TsType::TsKeywordType(TsKeywordType {
             kind: TsKeywordTypeKind::TsVoidKeyword,
             ..
         })
@@ -580,8 +579,7 @@ fn build_path_template(template: &[UrlPart]) -> String {
                 }
             }
         })
-        .collect::<Vec<_>>()
-        .join("")
+        .collect::<String>()
 }
 
 /// Build template literal quasis and expressions for a URL template.
@@ -666,7 +664,7 @@ fn codegen_hook(hook: &HookIR) -> ModuleItem {
     let response_swc_type = resolve_content_type(hook.response_content_type, &hook.response_type);
     let is_void = is_void_type(&response_swc_type);
 
-    let wrapped_type: Box<swc_ecma_ast::TsType> = if is_void {
+    let wrapped_type: Box<TsType> = if is_void {
         ts_kw!(void)
     } else if hook.response_has_void_status {
         ts_union(vec![data_wrapper_type(response_swc_type), ts_kw!(void)])
@@ -681,10 +679,7 @@ fn codegen_hook(hook: &HookIR) -> ModuleItem {
 }
 
 /// Build `Omit<OptionsType<Wrapped, ApiError, TData>, "queryKey" | "queryFn">`.
-fn omit_query_opts(
-    options_type: &str,
-    wrapped: &swc_ecma_ast::TsType,
-) -> Box<swc_ecma_ast::TsType> {
+fn omit_query_opts(options_type: &str, wrapped: &TsType) -> Box<TsType> {
     let opts = ts_type_ref_with_params(
         options_type,
         vec![
@@ -701,7 +696,7 @@ fn omit_query_opts(
 
 /// Generate a query hook (useQuery or useSuspenseQuery).
 #[allow(clippy::expect_used)]
-fn codegen_query_hook(hook: &HookIR, wrapped_type: Box<swc_ecma_ast::TsType>) -> ModuleItem {
+fn codegen_query_hook(hook: &HookIR, wrapped_type: Box<TsType>) -> ModuleItem {
     let key_fn = hook
         .query_key_fn
         .as_ref()
@@ -792,12 +787,11 @@ fn codegen_query_hook(hook: &HookIR, wrapped_type: Box<swc_ecma_ast::TsType>) ->
 }
 
 /// Generate a mutation hook.
-fn codegen_mutation_hook(hook: &HookIR, wrapped_type: Box<swc_ecma_ast::TsType>) -> ModuleItem {
+fn codegen_mutation_hook(hook: &HookIR, wrapped_type: Box<TsType>) -> ModuleItem {
     let vars_swc_type = hook
         .vars_type
         .as_ref()
-        .map(ir_typeref_to_swc)
-        .unwrap_or_else(|| ts_kw!(void));
+        .map_or_else(|| ts_kw!(void), ir_typeref_to_swc);
 
     // Build mutation function expression
     let mutation_fn = if let Some(vars) = &hook.vars_type {

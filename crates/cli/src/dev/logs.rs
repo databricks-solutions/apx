@@ -50,11 +50,11 @@ async fn run_async(args: LogsArgs) -> Result<(), String> {
 
     // Check if dev server is running (optional - logs may exist even if server stopped)
     let lock_path = lock_path(&app_dir);
-    if !lock_path.exists() {
-        debug!("No dev server lockfile found, but will still try to read logs.");
-    } else {
+    if lock_path.exists() {
         let lock = read_lock(&lock_path)?;
         debug!(port = lock.port, "Dev server running at port.");
+    } else {
+        debug!("No dev server lockfile found, but will still try to read logs.");
     }
 
     // Check if database exists
@@ -148,7 +148,7 @@ async fn follow_logs(
                 }
                 break;
             }
-            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+            () = tokio::time::sleep(Duration::from_millis(200)) => {
                 let current_time_ms = Utc::now().timestamp_millis();
 
                 // Flush expired aggregations

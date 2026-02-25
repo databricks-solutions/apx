@@ -37,15 +37,14 @@ async fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
     set_app_dir(args.app_dir.clone())?;
 
     // Read dev token from env (set by parent process in spawn_server)
-    let dev_token = match std::env::var(token::DEV_TOKEN_ENV) {
-        Ok(t) => t,
-        Err(_) => {
-            warn!(
-                "{} not set, generating ephemeral token (stop via lock file will not work)",
-                token::DEV_TOKEN_ENV
-            );
-            token::generate()
-        }
+    let dev_token = if let Ok(t) = std::env::var(token::DEV_TOKEN_ENV) {
+        t
+    } else {
+        warn!(
+            "{} not set, generating ephemeral token (stop via lock file will not work)",
+            token::DEV_TOKEN_ENV
+        );
+        token::generate()
     };
 
     // Validate credentials before starting server (warn if skipped or failed)

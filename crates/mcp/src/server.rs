@@ -12,12 +12,18 @@ use crate::tools::registry::{
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::*;
+use rmcp::model::{
+    CallToolResult, ErrorData, Implementation, ListResourceTemplatesResult, ListResourcesResult,
+    PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResult,
+    ServerCapabilities, ServerInfo,
+};
 use rmcp::{RoleServer, ServerHandler, service::RequestContext, tool, tool_handler, tool_router};
 use std::sync::Arc;
 
+/// The MCP server that routes tool calls to handler methods.
 #[derive(Clone)]
 pub struct ApxServer {
+    /// Shared application context (DB, indexes, Databricks clients).
     pub ctx: Arc<AppContext>,
     tool_router: ToolRouter<Self>,
 }
@@ -32,6 +38,7 @@ impl std::fmt::Debug for ApxServer {
 // Heavy logic is delegated to handler methods in tools/*.rs modules.
 #[tool_router]
 impl ApxServer {
+    /// Create a new MCP server, starting background index initialization.
     pub fn new(ctx: AppContext, sdk_params: Option<SdkIndexParams>) -> Self {
         // Initialize all indexes in background
         let shutdown_rx = ctx.shutdown_tx.subscribe();
@@ -53,7 +60,7 @@ impl ApxServer {
     async fn start(
         &self,
         Parameters(args): Parameters<AppPathArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_start(args).await
     }
 
@@ -69,7 +76,7 @@ impl ApxServer {
     async fn stop(
         &self,
         Parameters(args): Parameters<AppPathArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_stop(args).await
     }
 
@@ -81,7 +88,7 @@ impl ApxServer {
     async fn restart(
         &self,
         Parameters(args): Parameters<AppPathArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_restart(args).await
     }
 
@@ -93,7 +100,7 @@ impl ApxServer {
     async fn logs(
         &self,
         Parameters(args): Parameters<LogsToolArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_logs(args).await
     }
 
@@ -107,7 +114,7 @@ impl ApxServer {
     async fn check(
         &self,
         Parameters(args): Parameters<AppPathArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_check(args).await
     }
 
@@ -123,7 +130,7 @@ impl ApxServer {
     async fn refresh_openapi(
         &self,
         Parameters(args): Parameters<AppPathArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_refresh_openapi(args).await
     }
 
@@ -135,7 +142,7 @@ impl ApxServer {
     async fn get_route_info(
         &self,
         Parameters(args): Parameters<GetRouteInfoArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_get_route_info(args).await
     }
 
@@ -147,7 +154,7 @@ impl ApxServer {
     async fn routes(
         &self,
         Parameters(args): Parameters<AppPathArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_routes(args).await
     }
 
@@ -161,7 +168,7 @@ impl ApxServer {
     async fn databricks_apps_logs(
         &self,
         Parameters(args): Parameters<DatabricksAppsLogsArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_databricks_apps_logs(args).await
     }
 
@@ -175,7 +182,7 @@ impl ApxServer {
     async fn search_registry_components(
         &self,
         Parameters(args): Parameters<SearchRegistryComponentsArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_search_registry_components(args).await
     }
 
@@ -187,7 +194,7 @@ impl ApxServer {
     async fn add_component(
         &self,
         Parameters(args): Parameters<AddComponentArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_add_component(args).await
     }
 
@@ -199,7 +206,7 @@ impl ApxServer {
     async fn list_registry_components(
         &self,
         Parameters(args): Parameters<ListRegistryComponentsArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_list_registry_components(args).await
     }
 
@@ -213,8 +220,8 @@ impl ApxServer {
     async fn feedback_prepare(
         &self,
         Parameters(args): Parameters<FeedbackPrepareArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        self.handle_feedback_prepare(args).await
+    ) -> Result<CallToolResult, ErrorData> {
+        self.handle_feedback_prepare(args)
     }
 
     #[tool(
@@ -225,7 +232,7 @@ impl ApxServer {
     async fn feedback_submit(
         &self,
         Parameters(args): Parameters<FeedbackSubmitArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_feedback_submit(args).await
     }
 
@@ -239,7 +246,7 @@ impl ApxServer {
     async fn docs(
         &self,
         Parameters(args): Parameters<DocsArgs>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         self.handle_docs(args).await
     }
 }
@@ -271,7 +278,7 @@ impl ServerHandler for ApxServer {
         &self,
         _request: Option<PaginatedRequestParams>,
         _ctx: RequestContext<RoleServer>,
-    ) -> Result<ListResourcesResult, rmcp::ErrorData> {
+    ) -> Result<ListResourcesResult, ErrorData> {
         Ok(ListResourcesResult {
             resources: crate::resources::list_resources(),
             next_cursor: None,
@@ -283,7 +290,7 @@ impl ServerHandler for ApxServer {
         &self,
         _request: Option<PaginatedRequestParams>,
         _ctx: RequestContext<RoleServer>,
-    ) -> Result<ListResourceTemplatesResult, rmcp::ErrorData> {
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
         Ok(ListResourceTemplatesResult {
             resource_templates: crate::resources::list_resource_templates(),
             next_cursor: None,
@@ -295,23 +302,27 @@ impl ServerHandler for ApxServer {
         &self,
         request: ReadResourceRequestParams,
         _ctx: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, rmcp::ErrorData> {
+    ) -> Result<ReadResourceResult, ErrorData> {
         let uri = request.uri.as_str();
 
         if let Some(app_path) = uri.strip_prefix("apx://project/") {
             return crate::resources::read_project_resource(app_path)
                 .await
                 .map_err(|e| {
-                    rmcp::ErrorData::resource_not_found(e, Some(serde_json::json!({ "uri": uri })))
+                    ErrorData::resource_not_found(e, Some(serde_json::json!({ "uri": uri })))
                 });
         }
 
-        crate::resources::read_resource(uri).map_err(|e| {
-            rmcp::ErrorData::resource_not_found(e, Some(serde_json::json!({ "uri": uri })))
-        })
+        crate::resources::read_resource(uri)
+            .map_err(|e| ErrorData::resource_not_found(e, Some(serde_json::json!({ "uri": uri }))))
     }
 }
 
+/// Start the MCP server on stdio and block until it shuts down.
+///
+/// # Errors
+///
+/// Returns an error string if the server fails to initialize or encounters a fatal error.
 pub async fn run_server(ctx: AppContext, sdk_params: Option<SdkIndexParams>) -> Result<(), String> {
     use rmcp::ServiceExt;
 

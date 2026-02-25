@@ -8,16 +8,21 @@ use std::fmt;
 /// ```
 #[derive(Debug)]
 pub struct UserAgent {
+    /// Sanitized product name.
     product: String,
+    /// Sanitized product version.
     product_version: String,
+    /// Optional authentication type tag.
     auth_type: Option<String>,
+    /// Additional key/value pairs appended to the header.
     extras: Vec<(String, String)>,
 }
 
 impl UserAgent {
-    /// Create a new UserAgent with the given product name and version.
+    /// Create a new `UserAgent` with the given product name and version.
     ///
     /// Both values are sanitized — only `[a-zA-Z0-9_.+-]` chars are kept.
+    #[must_use]
     pub fn new(product: &str, product_version: &str) -> Self {
         Self {
             product: sanitize(product),
@@ -28,6 +33,7 @@ impl UserAgent {
     }
 
     /// Set the authentication type (e.g. "databricks-cli").
+    #[must_use]
     pub fn with_auth(mut self, auth_type: &str) -> Self {
         self.auth_type = Some(sanitize(auth_type));
         self
@@ -35,6 +41,7 @@ impl UserAgent {
 
     /// Add an extra key/value pair to the User-Agent string.
     #[allow(dead_code)]
+    #[must_use]
     pub fn with_extra(mut self, key: &str, value: &str) -> Self {
         self.extras.push((sanitize(key), sanitize(value)));
         self

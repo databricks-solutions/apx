@@ -54,18 +54,16 @@ impl StartupLogStreamer {
     /// Print any new logs since the last call.
     /// Returns the number of new log lines printed.
     pub async fn print_new_logs(&mut self) -> usize {
-        let storage = match &self.storage {
-            Some(s) => s,
-            None => return 0,
+        let Some(storage) = &self.storage else {
+            return 0;
         };
 
         // Query logs since last ID
-        let records = match storage
+        let Ok(records) = storage
             .query_logs_after_id(Some(&self.app_path), self.last_log_id)
             .await
-        {
-            Ok(r) => r,
-            Err(_) => return 0,
+        else {
+            return 0;
         };
 
         let mut count = 0;

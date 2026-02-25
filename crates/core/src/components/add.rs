@@ -10,12 +10,16 @@ use super::{
 };
 use crate::components::utils::format_relative_path;
 
-#[derive(Debug)]
+/// Outcome of attempting to write a single file.
+#[derive(Debug, Clone, Copy)]
 pub enum WriteResult {
+    /// File was written (new or overwritten).
     Written,
+    /// File content was identical; no write needed.
     Unchanged,
 }
 
+/// Write a planned file to disk if its content differs from the existing file.
 pub fn write_file_if_changed(
     file: &PlannedFile,
     force: bool,
@@ -51,11 +55,14 @@ pub fn write_file_if_changed(
 /// Input for adding a component via the API
 #[derive(Debug, Clone)]
 pub struct ComponentInput {
+    /// Component name (e.g. `button`, `dialog`).
     pub name: String,
+    /// Optional registry name override.
     pub registry: Option<String>,
 }
 
 impl ComponentInput {
+    /// Create a new input for the default registry.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -63,6 +70,7 @@ impl ComponentInput {
         }
     }
 
+    /// Create a new input targeting a specific registry.
     pub fn with_registry(name: impl Into<String>, registry: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -74,11 +82,17 @@ impl ComponentInput {
 /// Result of adding components via the API
 #[derive(Debug, Default)]
 pub struct AddComponentsResult {
+    /// Paths of files that were written.
     pub written_paths: Vec<PathBuf>,
+    /// Paths of files that were unchanged.
     pub unchanged_paths: Vec<PathBuf>,
+    /// npm packages that were installed.
     pub dependencies_installed: Vec<String>,
+    /// Dependencies auto-detected from source files.
     pub auto_detected_deps: Vec<String>,
+    /// Path to the CSS file that was updated, if any.
     pub css_updated_path: Option<String>,
+    /// Warnings produced during the operation.
     pub warnings: Vec<String>,
 }
 
@@ -112,7 +126,7 @@ pub async fn add_components(
     let mut all_deps: BTreeSet<String> = BTreeSet::new();
     let mut all_resolved: Vec<ResolvedComponent> = Vec::new();
     let mut all_warnings: Vec<String> = Vec::new();
-    let mut seen_files: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut seen_files: HashSet<PathBuf> = HashSet::new();
 
     for input in components {
         // Parse component name to extract registry prefix if present (e.g., @animate-ui/button)
@@ -208,9 +222,8 @@ fn read_package_json_deps(app_dir: &Path) -> HashSet<String> {
     let pkg_path = app_dir.join("package.json");
     let mut deps = HashSet::new();
 
-    let content = match std::fs::read_to_string(&pkg_path) {
-        Ok(c) => c,
-        Err(_) => return deps,
+    let Ok(content) = std::fs::read_to_string(&pkg_path) else {
+        return deps;
     };
 
     let value: serde_json::Value = match serde_json::from_str(&content) {
@@ -229,6 +242,7 @@ fn read_package_json_deps(app_dir: &Path) -> HashSet<String> {
     deps
 }
 
+/// Install npm packages via bun into the project.
 pub async fn bun_add(app_dir: &Path, deps: &[String]) -> Result<(), String> {
     if deps.is_empty() {
         return Ok(());

@@ -1,9 +1,10 @@
 use crate::server::ApxServer;
 use crate::tools::{AppPathArgs, ToolError, ToolResultExt};
 use crate::validation::validated_app_path;
-use rmcp::model::*;
+use rmcp::model::{CallToolResult, Content, ErrorData};
 use rmcp::schemars;
 
+/// Arguments for the `logs` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct LogsToolArgs {
     /// Absolute path to the project directory
@@ -18,7 +19,8 @@ fn default_logs_duration() -> String {
 }
 
 impl ApxServer {
-    pub async fn handle_start(&self, args: AppPathArgs) -> Result<CallToolResult, rmcp::ErrorData> {
+    /// Handle the `start` tool call (start dev server).
+    pub async fn handle_start(&self, args: AppPathArgs) -> Result<CallToolResult, ErrorData> {
         let path = validated_app_path(&args.app_path)?;
 
         use apx_core::common::OutputMode;
@@ -33,7 +35,8 @@ impl ApxServer {
         }
     }
 
-    pub async fn handle_stop(&self, args: AppPathArgs) -> Result<CallToolResult, rmcp::ErrorData> {
+    /// Handle the `stop` tool call (stop dev server).
+    pub async fn handle_stop(&self, args: AppPathArgs) -> Result<CallToolResult, ErrorData> {
         let path = validated_app_path(&args.app_path)?;
 
         use apx_core::common::OutputMode;
@@ -50,10 +53,8 @@ impl ApxServer {
         }
     }
 
-    pub async fn handle_restart(
-        &self,
-        args: AppPathArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    /// Handle the `restart` tool call (restart dev server).
+    pub async fn handle_restart(&self, args: AppPathArgs) -> Result<CallToolResult, ErrorData> {
         let path = validated_app_path(&args.app_path)?;
 
         use apx_core::common::OutputMode;
@@ -68,7 +69,8 @@ impl ApxServer {
         }
     }
 
-    pub async fn handle_logs(&self, args: LogsToolArgs) -> Result<CallToolResult, rmcp::ErrorData> {
+    /// Handle the `logs` tool call (fetch dev server logs).
+    pub async fn handle_logs(&self, args: LogsToolArgs) -> Result<CallToolResult, ErrorData> {
         let path = validated_app_path(&args.app_path)?;
 
         use apx_core::ops::logs::fetch_logs_structured;

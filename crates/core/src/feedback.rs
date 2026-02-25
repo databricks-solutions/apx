@@ -1,4 +1,5 @@
 use std::fmt;
+use std::fmt::Write;
 
 use crate::external::CommandError;
 use crate::external::gh::Gh;
@@ -8,16 +9,22 @@ const GITHUB_REPO: &str = "databricks-solutions/apx";
 /// Metadata auto-collected for feedback issues.
 #[derive(Debug, Clone)]
 pub struct FeedbackMetadata {
+    /// apx version string.
     pub apx_version: String,
+    /// Operating system name.
     pub os: String,
+    /// CPU architecture.
     pub arch: String,
 }
 
 /// Prepared feedback ready for preview and submission.
 #[derive(Debug, Clone)]
 pub struct PreparedFeedback {
+    /// Issue title.
     pub title: String,
+    /// Issue body in Markdown.
     pub body: String,
+    /// Pre-filled GitHub new-issue URL for manual submission.
     pub browser_url: String,
 }
 
@@ -25,11 +32,17 @@ pub struct PreparedFeedback {
 #[derive(Debug)]
 pub enum FeedbackResult {
     /// Successfully created a GitHub issue.
-    Submitted { url: String },
+    Submitted {
+        /// URL of the created issue.
+        url: String,
+    },
     /// Could not submit automatically; includes fallback info.
     Fallback {
+        /// Issue title.
         title: String,
+        /// Issue body.
         body: String,
+        /// Pre-filled browser URL.
         url: String,
     },
 }
@@ -37,7 +50,9 @@ pub enum FeedbackResult {
 /// Errors from `gh` CLI submission.
 #[derive(Debug)]
 pub enum FeedbackError {
+    /// The `gh` CLI binary was not found.
     GhNotFound,
+    /// The `gh` CLI command failed.
     GhFailed(String),
 }
 
@@ -97,7 +112,7 @@ pub fn format_issue_body(
     if let Some(cat) = category
         && !cat.is_empty()
     {
-        body.push_str(&format!("**Category**: {cat}\n\n"));
+        let _ = write!(body, "**Category**: {cat}\n\n");
     }
 
     body.push_str(message);
@@ -105,9 +120,9 @@ pub fn format_issue_body(
     if let Some(meta) = metadata {
         body.push_str("\n\n---\n");
         body.push_str("**Metadata** (auto-collected)\n");
-        body.push_str(&format!("- apx version: {}\n", meta.apx_version));
-        body.push_str(&format!("- OS: {}\n", meta.os));
-        body.push_str(&format!("- Arch: {}\n", meta.arch));
+        let _ = writeln!(body, "- apx version: {}", meta.apx_version);
+        let _ = writeln!(body, "- OS: {}", meta.os);
+        let _ = writeln!(body, "- Arch: {}", meta.arch);
     }
 
     body
@@ -129,11 +144,11 @@ pub fn github_new_issue_url(title: &str, body: &str) -> String {
         for b in s.bytes() {
             match b {
                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    out.push(b as char)
+                    out.push(b as char);
                 }
                 _ => {
                     out.push('%');
-                    out.push_str(&format!("{b:02X}"));
+                    let _ = write!(out, "{b:02X}");
                 }
             }
         }

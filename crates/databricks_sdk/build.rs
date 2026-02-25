@@ -1,3 +1,4 @@
+//! Build script for apx-databricks-sdk.
 fn main() {
     let version = std::process::Command::new("rustc")
         .arg("--version")
@@ -7,7 +8,7 @@ fn main() {
         .and_then(|s| {
             s.strip_prefix("rustc ")
                 .and_then(|v| v.split_whitespace().next())
-                .map(|v| v.to_string())
+                .map(ToString::to_string)
         })
         .unwrap_or_else(|| "unknown".to_string());
 

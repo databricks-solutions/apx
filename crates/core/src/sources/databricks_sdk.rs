@@ -13,10 +13,11 @@ use std::path::{Path, PathBuf};
 const GITHUB_REPO: &str = "databricks/databricks-sdk-py";
 
 /// SDK documentation source enum
-#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Copy, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum SDKSource {
     #[serde(rename = "databricks-sdk-python")]
+    /// Databricks SDK for Python.
     DatabricksSdkPython,
 }
 
@@ -115,14 +116,14 @@ pub async fn download_and_extract_sdk(version: &str) -> Result<PathBuf, String> 
     );
 
     // Find root folder name
-    let root_folder = if !archive.is_empty() {
+    let root_folder = if archive.is_empty() {
+        return Err("Empty ZIP archive".to_string());
+    } else {
         let first_file = archive
             .by_index(0)
             .map_err(|e| format!("Failed to read first file: {e}"))?;
         let name = first_file.name();
         name.split('/').next().unwrap_or("").to_string()
-    } else {
-        return Err("Empty ZIP archive".to_string());
     };
 
     // Extract docs/ folder
@@ -331,17 +332,17 @@ fn parse_rst_content(rst_content: &str) -> (String, String, String, String, Vec<
                 if entity.is_empty()
                     && let Some(e) = parsed.entity
                 {
-                    entity = e.clone();
+                    entity.clone_from(&e);
                     symbols.push(e);
                 }
                 if let Some(s) = parsed.service {
                     if service.is_empty() {
-                        service = s.clone();
+                        service.clone_from(&s);
                     }
                     symbols.push(s);
                 }
                 if let Some(op) = parsed.operation {
-                    operation = op.clone(); // Keep last operation (methods come after class)
+                    operation.clone_from(&op); // Keep last operation (methods come after class)
                     symbols.push(op);
                 }
             }
@@ -352,7 +353,7 @@ fn parse_rst_content(rst_content: &str) -> (String, String, String, String, Vec<
         if let Some(stripped) = trimmed.strip_prefix(':') {
             if let Some(colon_end) = stripped.find(':') {
                 let field_name = &stripped[..colon_end];
-                let field_value = trimmed.get(colon_end + 2..).map(|s| s.trim()).unwrap_or("");
+                let field_value = trimmed.get(colon_end + 2..).map_or("", |s| s.trim());
 
                 let text = match field_name {
                     f if f.starts_with("param ") => {
@@ -372,7 +373,7 @@ fn parse_rst_content(rst_content: &str) -> (String, String, String, String, Vec<
                     }
                     "returns" if !field_value.is_empty() => format!("returns {field_value}"),
                     "value" if !field_value.is_empty() => format!("value {field_value}"),
-                    "members" | "undoc-members" => continue, // Skip directive options
+                    // Skip directive options
                     _ => continue,
                 };
                 output.push(text);

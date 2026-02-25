@@ -171,12 +171,9 @@ pub fn ensure_running() -> Result<(), String> {
 ///
 /// Stops the running flux daemon and removes the lock file.
 pub fn stop() -> Result<(), String> {
-    let lock = match read_lock()? {
-        Some(l) => l,
-        None => {
-            debug!("Flux is not running (no lock file)");
-            return Ok(());
-        }
+    let Some(lock) = read_lock()? else {
+        debug!("Flux is not running (no lock file)");
+        return Ok(());
     };
 
     if !is_flux_listening(lock.port) {

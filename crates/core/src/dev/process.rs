@@ -24,6 +24,7 @@ use crate::dev::embedded_db::EmbeddedDb;
 use crate::dev::frontend::{Frontend, FrontendConfig};
 use crate::dotenv::DotenvFile;
 
+/// Manages the lifecycle of dev server child processes (backend, frontend, db).
 #[derive(Debug)]
 pub struct ProcessManager {
     frontend: Option<Arc<Frontend>>,
@@ -57,7 +58,7 @@ impl ProcessManager {
         let dotenv_vars = Arc::new(Mutex::new(dotenv.get_vars()));
         let app_slug = metadata.app_slug.clone();
         let app_entrypoint = metadata.app_entrypoint.clone();
-        let dev_config = metadata.dev_config.clone();
+        let dev_config = metadata.dev_config;
 
         let app_dir = app_dir
             .canonicalize()
@@ -168,10 +169,12 @@ impl ProcessManager {
         });
     }
 
+    /// Return the dev authentication token.
     pub fn dev_token(&self) -> &str {
         self.backend.dev_token()
     }
 
+    /// Return the application directory.
     #[allow(dead_code)]
     pub fn app_dir(&self) -> &Path {
         &self.app_dir
@@ -262,6 +265,7 @@ impl ProcessManager {
         self.frontend.is_some()
     }
 
+    /// Restart the backend (uvicorn) process with updated environment variables.
     pub async fn restart_uvicorn_with_env(
         &self,
         new_vars: HashMap<String, String>,
@@ -300,7 +304,7 @@ impl ProcessManager {
                     match child.wait().await {
                         Ok(status) => debug!(process = name, ?status, "Child process exited."),
                         Err(err) => {
-                            warn!(error = %err, process = name, "Failed to wait for child.")
+                            warn!(error = %err, process = name, "Failed to wait for child.");
                         }
                     }
                 }
@@ -410,7 +414,7 @@ impl ProcessManager {
     /// Async wrapper for send_signal_to_tree that runs on a blocking thread.
     async fn send_signal_to_tree(pid: u32, signal: Signal, label: String) {
         let _ = tokio::task::spawn_blocking(move || {
-            Self::send_signal_to_tree_blocking(pid, signal, &label)
+            Self::send_signal_to_tree_blocking(pid, signal, &label);
         })
         .await;
     }

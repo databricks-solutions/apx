@@ -118,7 +118,11 @@ pub fn init_all_indexes(
     });
 }
 
-/// Rebuild the search index from registry.json files (async)
+/// Rebuild the component search index from cached registry JSON files.
+///
+/// # Errors
+///
+/// Returns an error string if index creation or building fails.
 pub async fn rebuild_search_index(pool: SqlitePool) -> Result<(), String> {
     let index = ComponentIndex::new(pool)?;
     index.build_index_from_registries().await
@@ -174,20 +178,20 @@ pub async fn wait_for_index_ready(
     );
 
     // Wait with timeout
-    match tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), notified).await {
-        Ok(_) => {
-            tracing::debug!("{} index is now ready", index_name);
-            Ok(false)
-        }
-        Err(_) => {
-            tracing::warn!(
-                "{} index not ready after {}s timeout",
-                index_name,
-                TIMEOUT_SECS
-            );
-            Err(format!(
-                "{index_name} index is not yet ready, please rerun the query in 5 seconds"
-            ))
-        }
+    if tokio::time::timeout(Duration::from_secs(TIMEOUT_SECS), notified)
+        .await
+        .is_ok()
+    {
+        tracing::debug!("{} index is now ready", index_name);
+        Ok(false)
+    } else {
+        tracing::warn!(
+            "{} index not ready after {}s timeout",
+            index_name,
+            TIMEOUT_SECS
+        );
+        Err(format!(
+            "{index_name} index is not yet ready, please rerun the query in 5 seconds"
+        ))
     }
 }

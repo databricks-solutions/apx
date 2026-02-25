@@ -95,17 +95,19 @@ pub async fn run_build_with_spinner(
             .map_err(|err| format!("Failed to run frontend build: {err}"))?;
 
         if output.exit_code != Some(0) {
+            use std::fmt::Write;
+
             let mut error_msg = format!(
                 "Frontend build failed with status {}",
                 output.exit_code.unwrap_or(-1)
             );
 
             if !output.stderr.is_empty() {
-                error_msg.push_str(&format!("\n\nStderr:\n{}", output.stderr.trim()));
+                let _ = write!(error_msg, "\n\nStderr:\n{}", output.stderr.trim());
             }
 
             if !output.stdout.is_empty() {
-                error_msg.push_str(&format!("\n\nStdout:\n{}", output.stdout.trim()));
+                let _ = write!(error_msg, "\n\nStdout:\n{}", output.stdout.trim());
             }
 
             return Err(error_msg);

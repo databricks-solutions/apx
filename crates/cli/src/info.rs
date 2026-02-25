@@ -35,8 +35,10 @@ async fn run_inner() -> Result<(), String> {
         .parse::<i64>()
         .ok()
         .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .map_or_else(
+            || "unknown".to_string(),
+            |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        );
 
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -56,9 +58,11 @@ async fn run_inner() -> Result<(), String> {
         DatabricksCli::info(),
     );
 
-    for entry in [uv, bun, git, gh, databricks] {
-        print_tool_entry(&entry);
-    }
+    print_tool_entry(&uv);
+    print_tool_entry(&bun);
+    print_tool_entry(&git);
+    print_tool_entry(&gh);
+    print_tool_entry(&databricks);
 
     println!();
     Ok(())

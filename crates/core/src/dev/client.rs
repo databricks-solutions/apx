@@ -44,14 +44,13 @@ pub enum HealthError {
 impl std::fmt::Display for HealthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ConnectionFailed(msg) => write!(f, "{msg}"),
-            Self::ServerError(msg) => write!(f, "{msg}"),
+            Self::ConnectionFailed(msg) | Self::ServerError(msg) => write!(f, "{msg}"),
         }
     }
 }
 
 /// Configuration for health check waiting behavior
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct HealthCheckConfig {
     /// Total timeout for health checks (in seconds)
     pub timeout_secs: u64,
@@ -112,13 +111,18 @@ pub async fn wait_for_healthy(port: u16, config: &HealthCheckConfig) -> Result<(
     ))
 }
 
+/// Response from the dev server status endpoint.
 #[derive(Debug, Deserialize)]
 pub struct StatusResponse {
+    /// Overall server status.
     pub status: String,
+    /// Frontend process status.
     pub frontend_status: String,
+    /// Backend process status.
     pub backend_status: String,
+    /// Embedded database status.
     pub db_status: String,
-    /// True if any critical process (frontend/backend) has permanently failed and cannot recover
+    /// True if any critical process (frontend/backend) has permanently failed and cannot recover.
     pub failed: bool,
 }
 
@@ -126,6 +130,7 @@ fn build_url(host: &str, port: u16, path: &str) -> String {
     format!("http://{host}:{port}{path}")
 }
 
+/// Check if the dev server at the given port is healthy.
 pub async fn health(port: u16) -> Result<bool, String> {
     let url = build_url(CLIENT_HOST, port, "/_apx/health");
     debug!(%url, "Sending dev server health request.");

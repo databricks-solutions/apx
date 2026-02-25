@@ -25,9 +25,13 @@ pub struct ComponentRecord {
 /// Search result with component details
 #[derive(Debug, Clone)]
 pub struct SearchResult {
+    /// Unique component identifier.
     pub id: String,
+    /// Human-readable component name.
     pub name: String,
+    /// Registry the component belongs to.
     pub registry: String,
+    /// FTS5 relevance score (lower is more relevant).
     pub score: f32,
 }
 
@@ -253,7 +257,7 @@ mod tests {
         fts.create_or_replace().await.unwrap();
         let mut tx = fts.begin().await.unwrap();
         for (id, name, registry, text) in rows {
-            fts.insert_str(&mut tx, &[id, name, registry, text])
+            fts.insert_str(&mut tx, &[*id, *name, *registry, *text])
                 .await
                 .unwrap();
         }
@@ -301,8 +305,7 @@ mod tests {
         assert!(!results.is_empty());
 
         // Both buttons should be in results, card should not
-        let button_results: Vec<_> = results.iter().filter(|r| r.name == "button").collect();
-        assert_eq!(button_results.len(), 2);
+        assert_eq!(results.iter().filter(|r| r.name == "button").count(), 2);
 
         // Default registry button should have higher score than custom
         let default_btn = results.iter().find(|r| r.id == "button").unwrap();

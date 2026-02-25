@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// A parsed `.env` file that supports reading, updating, and writing back.
 #[derive(Debug, Clone)]
 pub struct DotenvFile {
     path: PathBuf,
@@ -20,6 +21,7 @@ enum DotenvLine {
 }
 
 impl DotenvFile {
+    /// Read and parse a `.env` file. Returns an empty instance if the file does not exist.
     pub fn read(path: &Path) -> Result<Self, String> {
         if !path.exists() {
             return Ok(Self {
@@ -60,6 +62,7 @@ impl DotenvFile {
         })
     }
 
+    /// Return all variables as a key-value map.
     pub fn get_vars(&self) -> HashMap<String, String> {
         let mut vars = HashMap::new();
         for line in &self.lines {
@@ -70,6 +73,7 @@ impl DotenvFile {
         vars
     }
 
+    /// Set a variable (insert or update) and write the file back to disk.
     pub fn update(&mut self, key: &str, value: &str) -> Result<(), String> {
         if !is_valid_key(key) {
             return Err(format!("Invalid dotenv variable name '{key}'"));
@@ -118,9 +122,8 @@ impl DotenvFile {
             .lines
             .iter()
             .map(|line| match line {
-                DotenvLine::Comment(raw) => raw.as_str(),
                 DotenvLine::Empty => "",
-                DotenvLine::Variable { raw, .. } => raw.as_str(),
+                DotenvLine::Comment(raw) | DotenvLine::Variable { raw, .. } => raw.as_str(),
             })
             .collect::<Vec<&str>>()
             .join("\n");
@@ -170,9 +173,8 @@ fn parse_line(line: &str) -> Result<DotenvLine, String> {
 
     let mut value = export_stripped[eq_index + 1..].to_string();
     if value.starts_with('"') || value.starts_with('\'') {
-        let quote = match value.chars().next() {
-            Some(q) => q,
-            None => return Err("Invalid empty quoted value".to_string()),
+        let Some(quote) = value.chars().next() else {
+            return Err("Invalid empty quoted value".to_string());
         };
         if !value.ends_with(quote) || value.len() == 1 {
             return Err("Invalid quoted value".to_string());

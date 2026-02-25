@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fmt;
 
 use biome_css_parser::{CssParserOptions, parse_css};
-use biome_css_syntax::*;
+use biome_css_syntax::CssRoot;
 use biome_rowan::AstNode;
 
 /// Errors that can occur while parsing or updating CSS.
@@ -11,6 +11,7 @@ use biome_rowan::AstNode;
 /// under strong invariants (valid CSS, shadcn-initialized project).
 #[derive(Debug)]
 pub enum CssUpdateError {
+    /// The CSS input could not be parsed.
     ParseError(String),
 }
 
@@ -31,16 +32,26 @@ type Result<T> = std::result::Result<T, CssUpdateError>;
 #[derive(Debug)]
 pub enum CssMutation {
     /// Add a raw at-rule block (e.g. `@layer base`, `@keyframes foo`)
-    AddCssBlock { at_rule: String, body: String },
+    AddCssBlock {
+        /// The at-rule identifier (e.g. `@layer base`, `@keyframes foo`).
+        at_rule: String,
+        /// The rule body content.
+        body: String,
+    },
 
-    /// Add CSS variables to a selector (`:root`, `.dark`)
+    /// Add CSS variables to a selector (`:root`, `.dark`).
     AddCssVars {
+        /// CSS selector to target.
         selector: String,
+        /// Variable name-value pairs to add.
         vars: Vec<(String, String)>,
     },
 
-    /// Add mappings inside `@theme inline`
-    AddThemeMappings { vars: Vec<(String, String)> },
+    /// Add mappings inside `@theme inline`.
+    AddThemeMappings {
+        /// Theme variable name-value pairs.
+        vars: Vec<(String, String)>,
+    },
 }
 
 /// Append-only CSS updater.
@@ -59,6 +70,7 @@ pub struct CssUpdater {
 }
 
 impl CssUpdater {
+    /// Parse CSS source into an updater.
     pub fn new(source: &str) -> Result<Self> {
         let parsed = parse_css(source, CssParserOptions::default());
 
@@ -139,6 +151,7 @@ impl CssUpdater {
         Ok(changed)
     }
 
+    /// Consume the updater and return the final CSS source.
     pub fn finish(self) -> String {
         self.source
     }

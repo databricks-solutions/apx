@@ -79,28 +79,45 @@ pub enum Shutdown {
     Stop,
 }
 
+/// Directory name for the dev lock file.
 pub const DEV_LOCK_DIR: &str = ".apx";
+/// Lock file name within the dev lock directory.
 pub const DEV_LOCK_FILE: &str = "dev.lock";
+/// Start of the frontend port range.
 pub const FRONTEND_PORT_START: u16 = 5000;
+/// End of the frontend port range.
 pub const FRONTEND_PORT_END: u16 = 5999;
+/// Start of the backend port range.
 pub const BACKEND_PORT_START: u16 = 8000;
+/// End of the backend port range.
 pub const BACKEND_PORT_END: u16 = 8999;
+/// Start of the dev server port range.
 pub const DEV_PORT_START: u16 = 9000;
+/// Start of the embedded database port range.
 pub const DB_PORT_START: u16 = 4000;
+/// End of the embedded database port range.
 pub const DB_PORT_END: u16 = 4999;
 
+/// Serialized lock file for a running dev server instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevLock {
+    /// OS process ID of the dev server.
     pub pid: u32,
+    /// RFC 3339 timestamp of when the server started.
     pub started_at: String,
+    /// Port the dev server is listening on.
     pub port: u16,
+    /// Command string used to start the server.
     pub command: String,
+    /// Absolute path to the application directory.
     pub app_dir: String,
+    /// Authentication token for control endpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
 
 impl DevLock {
+    /// Create a new lock with the current UTC timestamp.
     pub fn new(pid: u32, port: u16, command: String, app_dir: &Path, token: String) -> Self {
         let started_at: DateTime<Utc> = Utc::now();
         Self {
@@ -114,20 +131,24 @@ impl DevLock {
     }
 }
 
+/// Return the `.apx` lock directory for the given app.
 pub fn lock_dir(app_dir: &Path) -> PathBuf {
     app_dir.join(DEV_LOCK_DIR)
 }
 
+/// Return the full path to the dev lock file for the given app.
 pub fn lock_path(app_dir: &Path) -> PathBuf {
     lock_dir(app_dir).join(DEV_LOCK_FILE)
 }
 
+/// Read and deserialize a dev lock file.
 pub fn read_lock(path: &Path) -> Result<DevLock, String> {
     let contents =
         fs::read_to_string(path).map_err(|err| format!("Failed to read lockfile: {err}"))?;
     serde_json::from_str(&contents).map_err(|err| format!("Invalid lockfile JSON: {err}"))
 }
 
+/// Serialize and write a dev lock file, creating parent directories if needed.
 pub fn write_lock(path: &Path, lock: &DevLock) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
@@ -137,6 +158,7 @@ pub fn write_lock(path: &Path, lock: &DevLock) -> Result<(), String> {
     fs::write(path, contents).map_err(|err| format!("Failed to write lockfile: {err}"))
 }
 
+/// Remove a dev lock file if it exists.
 pub fn remove_lock(path: &Path) -> Result<(), String> {
     if path.exists() {
         fs::remove_file(path).map_err(|err| format!("Failed to remove lockfile: {err}"))?;
@@ -205,7 +227,7 @@ pub(crate) async fn stop_child_tree(name: &str, child: &Arc<Mutex<Option<Child>>
         match timeout(Duration::from_secs(2), child.wait()).await {
             Ok(Ok(status)) => debug!(process = name, ?status, "Child process exited."),
             Ok(Err(err)) => {
-                warn!(error = %err, process = name, "Failed to wait for child process.")
+                warn!(error = %err, process = name, "Failed to wait for child process.");
             }
             Err(_) => warn!(
                 process = name,

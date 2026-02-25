@@ -6,10 +6,11 @@ use crate::tools::openapi::{
 use crate::tools::{AppPathArgs, ToolError, ToolResultExt};
 use crate::validation::validated_app_path;
 use apx_core::openapi::spec::OpenApiSpec;
-use rmcp::model::*;
+use rmcp::model::{CallToolResult, Content, ErrorData};
 use rmcp::schemars;
 use serde_json::Value;
 
+/// Arguments for the `get_route_info` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetRouteInfoArgs {
     /// Absolute path to the project directory
@@ -19,7 +20,8 @@ pub struct GetRouteInfoArgs {
 }
 
 impl ApxServer {
-    pub async fn handle_check(&self, args: AppPathArgs) -> Result<CallToolResult, rmcp::ErrorData> {
+    /// Handle the `check` tool call (TypeScript + Python type checks).
+    pub async fn handle_check(&self, args: AppPathArgs) -> Result<CallToolResult, ErrorData> {
         let path = validated_app_path(&args.app_path)?;
 
         use apx_core::common::OutputMode;
@@ -51,10 +53,11 @@ impl ApxServer {
         }
     }
 
+    /// Handle the `refresh_openapi` tool call.
     pub async fn handle_refresh_openapi(
         &self,
         args: AppPathArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let path = validated_app_path(&args.app_path)?;
 
         match apx_core::api_generator::generate_openapi(&path).await {
@@ -65,10 +68,11 @@ impl ApxServer {
         }
     }
 
+    /// Handle the `get_route_info` tool call.
     pub async fn handle_get_route_info(
         &self,
         args: GetRouteInfoArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let path = validated_app_path(&args.app_path)?;
 
         use apx_core::common::read_project_metadata;
@@ -141,15 +145,12 @@ impl ApxServer {
             }
         }
 
-        let (route_path, method, parameters, body_schema, resp_schema) = match found {
-            Some(f) => f,
-            None => {
-                return ToolError::OperationFailed(format!(
-                    "Operation ID '{}' not found in OpenAPI schema",
-                    args.operation_id
-                ))
-                .into_result();
-            }
+        let Some((route_path, method, parameters, body_schema, resp_schema)) = found else {
+            return ToolError::OperationFailed(format!(
+                "Operation ID '{}' not found in OpenAPI schema",
+                args.operation_id
+            ))
+            .into_result();
         };
 
         let example = if method == "GET" {
@@ -196,10 +197,8 @@ impl ApxServer {
         Ok(CallToolResult::from_serializable(&response))
     }
 
-    pub async fn handle_routes(
-        &self,
-        args: AppPathArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    /// Handle the `routes` tool call.
+    pub async fn handle_routes(&self, args: AppPathArgs) -> Result<CallToolResult, ErrorData> {
         let path = validated_app_path(&args.app_path)?;
 
         use apx_core::common::read_project_metadata;

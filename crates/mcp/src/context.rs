@@ -7,10 +7,12 @@ use apx_core::search::docs_index::SDKDocsIndex;
 use apx_db::DevDb;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast};
 
-/// Parameters for SDK indexing, pre-computed synchronously to avoid Python GIL issues
+/// Parameters for SDK indexing, pre-computed synchronously to avoid Python GIL issues.
 #[derive(Debug)]
 pub struct SdkIndexParams {
+    /// Detected Databricks SDK version string.
     pub sdk_version: String,
+    /// Shared handle to the SDK docs index (populated after bootstrap).
     pub sdk_doc_index: Arc<Mutex<Option<SDKDocsIndex>>>,
 }
 
@@ -39,17 +41,25 @@ impl Default for IndexState {
 }
 
 impl IndexState {
+    /// Create a new `IndexState` with all indexes marked as not ready.
     pub fn new() -> Self {
         Self::default()
     }
 }
 
+/// Global application context shared across all MCP handlers.
 #[derive(Debug)]
 pub struct AppContext {
+    /// Development database handle.
     pub dev_db: DevDb,
+    /// Shared SDK documentation search index.
     pub sdk_doc_index: Arc<Mutex<Option<SDKDocsIndex>>>,
+    /// Shared component cache state.
     pub cache_state: SharedCacheState,
+    /// Readiness state for background indexes.
     pub index_state: IndexState,
+    /// Broadcast channel to signal server shutdown.
     pub shutdown_tx: broadcast::Sender<()>,
+    /// Cached Databricks API clients keyed by profile name.
     pub databricks_clients: RwLock<HashMap<String, apx_databricks_sdk::DatabricksClient>>,
 }

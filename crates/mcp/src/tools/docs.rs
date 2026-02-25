@@ -3,10 +3,11 @@ use crate::server::ApxServer;
 use crate::tools::{ToolError, ToolResultExt};
 use apx_core::databricks_sdk_doc::SDKSource;
 use apx_core::interop::get_databricks_sdk_version;
-use rmcp::model::*;
+use rmcp::model::{CallToolResult, ErrorData};
 use rmcp::schemars;
 use serde::Serialize;
 
+/// Arguments for the `docs` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct DocsArgs {
     /// Documentation source (currently only "databricks-sdk-python" is supported)
@@ -26,7 +27,8 @@ fn default_docs_limit() -> usize {
 }
 
 impl ApxServer {
-    pub async fn handle_docs(&self, args: DocsArgs) -> Result<CallToolResult, rmcp::ErrorData> {
+    /// Handle the `docs` tool call (search SDK documentation).
+    pub async fn handle_docs(&self, args: DocsArgs) -> Result<CallToolResult, ErrorData> {
         let ctx = &self.ctx;
 
         // Wait for SDK index to be ready (15 second timeout)
@@ -44,15 +46,11 @@ impl ApxServer {
         // Get the SDK doc index
         let mut index_guard = ctx.sdk_doc_index.lock().await;
 
-        let index = match index_guard.as_mut() {
-            Some(idx) => idx,
-            None => {
-                return ToolError::NotConfigured(
-                    "SDK documentation is not available. The index failed to bootstrap."
-                        .to_string(),
-                )
-                .into_result();
-            }
+        let Some(index) = index_guard.as_mut() else {
+            return ToolError::NotConfigured(
+                "SDK documentation is not available. The index failed to bootstrap.".to_string(),
+            )
+            .into_result();
         };
 
         // If app_path is provided, detect that project's SDK version and switch if different

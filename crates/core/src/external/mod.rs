@@ -5,13 +5,19 @@
 //! automatic resolution and optional download, and [`ToolCommand`] which wraps
 //! `tokio::process::Command` with tool-name context and ergonomic terminal methods.
 
+/// Bun JavaScript runtime tool.
 pub mod bun;
+/// Databricks CLI tool.
 pub mod databricks;
+/// GitHub CLI (`gh`) tool.
 pub mod gh;
+/// Git version control tool.
 pub mod git;
+/// uv Python package manager tool.
 pub mod uv;
 
 use std::ffi::OsStr;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -29,14 +35,18 @@ pub use uv::{Uv, UvTool};
 // ---------------------------------------------------------------------------
 
 /// Where a binary was found.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum BinarySource {
+    /// Found via an environment variable override.
     EnvOverride,
+    /// Found on the system PATH.
     SystemPath,
+    /// Downloaded and managed by apx in `~/.apx/bin/`.
     ApxManaged,
 }
 
 impl BinarySource {
+    /// Human-readable label for this binary source.
     pub fn source_label(&self) -> &'static str {
         match self {
             BinarySource::EnvOverride => "env-override",
@@ -49,11 +59,14 @@ impl BinarySource {
 /// A resolved binary path with its source.
 #[derive(Debug, Clone)]
 pub struct ResolvedBinary {
+    /// Absolute path to the resolved binary.
     pub path: PathBuf,
+    /// How the binary was found.
     pub source: BinarySource,
 }
 
 impl ResolvedBinary {
+    /// Human-readable label for the resolution source.
     pub fn source_label(&self) -> &'static str {
         self.source.source_label()
     }
@@ -83,21 +96,25 @@ impl ToolCommand {
         }
     }
 
+    /// Append a single argument.
     pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
         self.inner.arg(arg);
         self
     }
 
+    /// Append multiple arguments.
     pub fn args(mut self, args: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Self {
         self.inner.args(args);
         self
     }
 
+    /// Set an environment variable.
     pub fn env(mut self, key: impl AsRef<OsStr>, val: impl AsRef<OsStr>) -> Self {
         self.inner.env(key, val);
         self
     }
 
+    /// Set multiple environment variables.
     pub fn envs(
         mut self,
         vars: impl IntoIterator<Item = (impl AsRef<OsStr>, impl AsRef<OsStr>)>,
@@ -106,21 +123,25 @@ impl ToolCommand {
         self
     }
 
+    /// Set the working directory.
     pub fn cwd(mut self, dir: impl Into<PathBuf>) -> Self {
         self.inner.current_dir(dir.into());
         self
     }
 
+    /// Configure stdin handling.
     pub fn stdin(mut self, cfg: Stdio) -> Self {
         self.inner.stdin(cfg);
         self
     }
 
+    /// Configure stdout handling.
     pub fn stdout(mut self, cfg: Stdio) -> Self {
         self.inner.stdout(cfg);
         self
     }
 
+    /// Configure stderr handling.
     pub fn stderr(mut self, cfg: Stdio) -> Self {
         self.inner.stderr(cfg);
         self
@@ -168,8 +189,11 @@ impl ToolCommand {
 /// Captured output from an external command.
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
+    /// Captured standard output.
     pub stdout: String,
+    /// Captured standard error.
     pub stderr: String,
+    /// Process exit code, if available.
     pub exit_code: Option<i32>,
 }
 
@@ -211,26 +235,40 @@ impl CommandOutput {
 /// Unified error type for all external command failures.
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
+    /// The tool binary was not found on the system.
     #[error("{tool} not found — {hint}")]
     NotFound {
+        /// Tool name.
         tool: &'static str,
+        /// Human-readable install hint.
         hint: &'static str,
     },
+    /// Failed to spawn the tool process.
     #[error("failed to spawn {tool}: {source}")]
     Spawn {
+        /// Tool name.
         tool: &'static str,
+        /// Underlying I/O error.
         source: std::io::Error,
     },
+    /// The tool exited with a non-zero status code.
     #[error("{tool} failed (exit {code}):\n{stderr}")]
     Failed {
+        /// Tool name.
         tool: &'static str,
+        /// Exit code.
         code: i32,
+        /// Captured stdout.
         stdout: String,
+        /// Captured stderr.
         stderr: String,
     },
+    /// The tool did not complete within the allowed time.
     #[error("{tool} timed out after {timeout_secs}s")]
     Timeout {
+        /// Tool name.
         tool: &'static str,
+        /// Timeout duration in seconds.
         timeout_secs: f64,
     },
 }
@@ -262,8 +300,11 @@ impl From<CommandError> for String {
 /// Provides identity (name, path, source) for a resolved tool. Concrete types
 /// expose `cmd() -> ToolCommand` and public domain methods instead.
 pub trait ExternalTool: std::fmt::Debug + Send + Sync {
+    /// Human-readable tool name.
     const NAME: &'static str;
+    /// Absolute path to the resolved binary.
     fn binary_path(&self) -> &Path;
+    /// How the binary was resolved.
     fn source(&self) -> &BinarySource;
 }
 
@@ -302,7 +343,7 @@ pub trait Resolvable: ExternalTool + Sized {
     /// Auto-download and install the tool. Returns the resolved binary on success.
     ///
     /// Default implementation returns an error (for tools that are not auto-downloaded).
-    fn download() -> impl std::future::Future<Output = Result<ResolvedBinary, String>> + Send {
+    fn download() -> impl Future<Output = Result<ResolvedBinary, String>> + Send {
         async {
             Err(format!(
                 "Cannot auto-download {}. {}",
@@ -391,17 +432,24 @@ pub async fn resolve_with_download<T: Resolvable>() -> Result<ResolvedBinary, St
 /// A single entry for `apx info` output.
 #[derive(Debug)]
 pub struct ToolInfoEntry {
+    /// Display emoji for the tool.
     pub emoji: &'static str,
+    /// Tool name.
     pub name: &'static str,
+    /// Resolved version string, if available.
     pub version: Option<String>,
+    /// Resolved binary path, if available.
     pub path: Option<String>,
+    /// Resolution source label, if available.
     pub source: Option<String>,
+    /// Error message if resolution failed.
     pub error: Option<String>,
 }
 
 /// Trait for tools that can report their info for `apx info`.
 pub trait ToolInfo {
-    fn info() -> impl std::future::Future<Output = ToolInfoEntry> + Send;
+    /// Collect tool version and path info for display.
+    fn info() -> impl Future<Output = ToolInfoEntry> + Send;
 }
 
 /// Run `<binary> --version` and return the trimmed stdout, or `"unknown"`.
@@ -413,6 +461,5 @@ pub(crate) async fn get_version(path: &Path) -> String {
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .map_or_else(|| "unknown".to_string(), |s| s.trim().to_string())
 }

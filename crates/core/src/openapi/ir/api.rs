@@ -22,7 +22,7 @@ pub enum HttpMethod {
 }
 
 impl HttpMethod {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             HttpMethod::Get => "GET",
             HttpMethod::Post => "POST",
@@ -32,7 +32,7 @@ impl HttpMethod {
         }
     }
 
-    pub fn is_query(&self) -> bool {
+    pub fn is_query(self) -> bool {
         matches!(self, HttpMethod::Get)
     }
 }

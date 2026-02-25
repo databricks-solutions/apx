@@ -4,13 +4,14 @@ use std::time::Duration;
 
 use apx_core::dotenv::DotenvFile;
 use apx_databricks_sdk::{AppLogsArgs, DatabricksClient, LogEntry};
-use rmcp::model::*;
+use rmcp::model::{CallToolResult, ErrorData};
 use rmcp::schemars;
 
 use crate::server::ApxServer;
 use crate::tools::{ToolError, ToolResultExt};
 use crate::validation::validated_app_path;
 
+/// Arguments for the `databricks_apps_logs` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct DatabricksAppsLogsArgs {
     /// Absolute path to the project directory
@@ -24,7 +25,7 @@ pub struct DatabricksAppsLogsArgs {
     /// Search string to filter logs
     #[serde(default)]
     pub search: Option<String>,
-    /// Log sources to include (e.g. ["APP"], ["SYSTEM"], or ["APP", "SYSTEM"])
+    /// Log sources to include (e.g. `["APP"]`, `["SYSTEM"]`, or `["APP", "SYSTEM"]`)
     #[serde(default)]
     pub source: Option<Vec<String>>,
     /// Databricks CLI profile
@@ -44,10 +45,11 @@ fn default_timeout_seconds() -> f64 {
 }
 
 impl ApxServer {
+    /// Handle the `databricks_apps_logs` tool call.
     pub async fn handle_databricks_apps_logs(
         &self,
         args: DatabricksAppsLogsArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         let cwd = validated_app_path(&args.app_path)?;
 
         // Load env vars from .env if present
@@ -130,10 +132,7 @@ struct ResolvedAppName {
     from_yml: bool,
 }
 
-fn resolve_app_name(
-    args: &DatabricksAppsLogsArgs,
-    cwd: &Path,
-) -> std::result::Result<ResolvedAppName, String> {
+fn resolve_app_name(args: &DatabricksAppsLogsArgs, cwd: &Path) -> Result<ResolvedAppName, String> {
     match args.app_name.as_ref() {
         Some(name) if !name.trim().is_empty() => Ok(ResolvedAppName {
             name: name.trim().to_string(),
@@ -152,7 +151,7 @@ fn resolve_app_name(
 async fn get_or_create_client(
     cache: &tokio::sync::RwLock<HashMap<String, DatabricksClient>>,
     profile: &str,
-) -> std::result::Result<DatabricksClient, apx_databricks_sdk::DatabricksError> {
+) -> Result<DatabricksClient, apx_databricks_sdk::DatabricksError> {
     // Fast path: read lock
     {
         let clients = cache.read().await;

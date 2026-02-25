@@ -88,7 +88,7 @@ fn discover_apx_project(root: &Path) -> Result<PathBuf, String> {
 }
 
 /// Check whether a `pyproject.toml` file contains a `[tool.apx]` section.
-pub(crate) fn has_apx_config(pyproject_path: &Path) -> bool {
+pub fn has_apx_config(pyproject_path: &Path) -> bool {
     fs::read_to_string(pyproject_path)
         .ok()
         .and_then(|s| s.parse::<toml::Value>().ok())
@@ -97,7 +97,7 @@ pub(crate) fn has_apx_config(pyproject_path: &Path) -> bool {
 }
 
 /// Read, mutate, and write back a `pyproject.toml` via `toml_edit`.
-pub(crate) fn modify_pyproject(
+pub fn modify_pyproject(
     path: &Path,
     f: impl FnOnce(&mut DocumentMut) -> Result<(), String>,
 ) -> Result<(), String> {
@@ -112,7 +112,7 @@ pub(crate) fn modify_pyproject(
 }
 
 /// Check whether a `pyproject.toml` file contains a `[tool.apx.ui]` section.
-pub(crate) fn has_ui_config(pyproject_path: &Path) -> bool {
+pub fn has_ui_config(pyproject_path: &Path) -> bool {
     fs::read_to_string(pyproject_path)
         .ok()
         .and_then(|s| s.parse::<toml::Value>().ok())

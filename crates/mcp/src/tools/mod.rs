@@ -35,13 +35,21 @@ macro_rules! tool_response {
 }
 
 // Submodules declared after macro so they can use `tool_response!`.
+/// Databricks Apps log-fetching tool handler.
 pub mod databricks;
+/// Dev server lifecycle tools (start, stop, restart, logs).
 pub mod devserver;
+/// SDK documentation search tool handler.
 pub mod docs;
+/// Domain error types for MCP tool handlers.
 pub mod error;
+/// User feedback (prepare + submit) tool handlers.
 pub mod feedback;
+/// OpenAPI spec parsing, route extraction, and code-example generation.
 pub mod openapi;
+/// Project tools (check, routes, route info, OpenAPI refresh).
 pub mod project;
+/// UI component registry tools (search, add, list).
 pub mod registry;
 
 pub use error::ToolError;
@@ -59,7 +67,9 @@ pub struct AppPathArgs {
 
 /// Extension trait for building `CallToolResult` from serializable values.
 pub trait ToolResultExt {
+    /// Build a success result with structured JSON content.
     fn from_serializable(value: &impl StructuredObject) -> Self;
+    /// Build an error result with structured JSON content.
     fn from_serializable_error(value: &impl StructuredObject) -> Self;
 }
 

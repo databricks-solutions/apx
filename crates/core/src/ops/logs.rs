@@ -7,6 +7,7 @@ use apx_common::format::{format_aggregated_record, format_log_record, format_tim
 use apx_common::{AggregatedRecord, LogAggregator, LogRecord, should_skip_log, source_label};
 use apx_db::LogsDb;
 
+/// Default duration string for log queries (10 minutes).
 pub const DEFAULT_LOG_DURATION: &str = "10m";
 
 // ---------------------------------------------------------------------------
@@ -79,11 +80,16 @@ pub async fn fetch_logs(app_dir: &Path, duration: &str) -> Result<String, String
     Ok(output.join("\n"))
 }
 
+/// A structured log entry for programmatic consumption.
 #[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
+    /// Formatted timestamp string.
     pub timestamp: String,
+    /// Log source label (e.g. `"backend"`, `"frontend"`).
     pub source: String,
+    /// Severity level (e.g. `"ERROR"`, `"INFO"`).
     pub severity: Option<String>,
+    /// Log message body.
     pub message: String,
 }
 
@@ -141,6 +147,7 @@ fn aggregated_record_to_entry(agg: &AggregatedRecord) -> LogEntry {
 // format_log_record, format_aggregated_record, and format_timestamp are
 // re-exported from apx_common::format (imported above).
 
+/// Parse a human-friendly duration string (e.g. `"30s"`, `"10m"`, `"1h"`, `"2d"`).
 pub fn parse_duration(input: &str) -> Result<Duration, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -175,6 +182,7 @@ pub fn parse_duration(input: &str) -> Result<Duration, String> {
     Ok(Duration::from_secs(seconds))
 }
 
+/// Compute a nanosecond-precision UNIX timestamp for `now - duration`.
 pub fn since_timestamp_nanos(duration: Duration) -> i64 {
     let now_ms = Utc::now().timestamp_millis() as u64;
     let now_ns = now_ms * 1_000_000;

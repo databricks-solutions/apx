@@ -144,9 +144,8 @@ fn find_wheel_file(build_dir: &Path) -> Result<String, String> {
 }
 
 async fn get_base_version(app_path: &Path) -> String {
-    let uv = match Uv::new().await {
-        Ok(uv) => uv,
-        Err(_) => return DEFAULT_FALLBACK_VERSION.to_string(),
+    let Ok(uv) = Uv::new().await else {
+        return DEFAULT_FALLBACK_VERSION.to_string();
     };
     match uv.run_hatch_version(app_path).await {
         Ok(version) if !version.is_empty() => version,

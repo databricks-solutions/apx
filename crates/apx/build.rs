@@ -1,3 +1,4 @@
+//! Build script for apx-bin.
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,14 +49,11 @@ fn copy_agent_binary(
     target_os: &str,
     target_arch: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let agent_src_name = match agent_binary_name(target_os, target_arch) {
-        Some(name) => name,
-        None => {
-            println!(
-                "cargo:warning=Agent binary not available for {target_os}-{target_arch}, skipping"
-            );
-            return Ok(());
-        }
+    let Some(agent_src_name) = agent_binary_name(target_os, target_arch) else {
+        println!(
+            "cargo:warning=Agent binary not available for {target_os}-{target_arch}, skipping"
+        );
+        return Ok(());
     };
 
     let agent_source = workspace_root.join(".bins/agent").join(agent_src_name);

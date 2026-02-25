@@ -1,3 +1,9 @@
+//! Command-line interface for the apx toolkit.
+//!
+//! This crate implements the `apx` CLI, providing subcommands for project
+//! initialization, building, development server management, frontend tooling,
+//! and more.
+
 pub(crate) mod __generate_openapi;
 pub(crate) mod build;
 pub(crate) mod bun;
@@ -8,11 +14,13 @@ pub(crate) mod feedback;
 pub(crate) mod flux;
 pub(crate) mod frontend;
 pub(crate) mod info;
+/// Project initialization wizard and template rendering.
 pub mod init;
 pub(crate) mod skill;
 pub(crate) mod upgrade;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use std::future::Future;
 
 #[derive(Parser)]
 #[command(
@@ -110,6 +118,9 @@ enum FluxCommands {
     Stop(flux::stop::StopArgs),
 }
 
+/// Parse CLI arguments and execute the corresponding subcommand.
+///
+/// Returns an exit code (0 for success, non-zero for failure).
 pub fn run_cli(args: Vec<String>) -> i32 {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -185,10 +196,13 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
     }
 }
 
+/// Run an async closure and convert its `Result` into an exit code.
+///
+/// Returns 0 on success. On error, prints the message to stderr and returns 1.
 pub async fn run_cli_async_helper<F, Fut>(f: F) -> i32
 where
     F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
+    Fut: Future<Output = Result<(), String>>,
 {
     match f().await {
         Ok(()) => 0,

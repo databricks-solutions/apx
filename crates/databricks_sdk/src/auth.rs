@@ -23,7 +23,7 @@ pub(crate) struct CachedToken {
 const STALENESS_BUFFER_SECS: i64 = 40;
 
 impl CachedToken {
-    pub fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         let buffer = Duration::seconds(STALENESS_BUFFER_SECS);
         Utc::now() + buffer < self.expires_at
     }

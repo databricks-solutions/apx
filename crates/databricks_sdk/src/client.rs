@@ -18,6 +18,7 @@ struct Inner {
     cached_token: RwLock<Option<CachedToken>>,
 }
 
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for Inner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Inner")
@@ -27,6 +28,10 @@ impl std::fmt::Debug for Inner {
     }
 }
 
+/// Authenticated HTTP client for the Databricks REST API.
+///
+/// Tokens are acquired lazily via the Databricks CLI and cached with
+/// automatic refresh before expiry.
 #[derive(Debug, Clone)]
 pub struct DatabricksClient {
     inner: Arc<Inner>,
@@ -35,12 +40,22 @@ pub struct DatabricksClient {
 impl DatabricksClient {
     /// Create a new client by resolving the given profile from `~/.databrickscfg`.
     /// Does not eagerly fetch a token.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the profile cannot be resolved from the config file.
+    #[allow(clippy::unused_async)]
     pub async fn new(profile: &str) -> Result<Self> {
         let config = resolve_config(profile)?;
         Ok(Self::from_config(config))
     }
 
     /// Create a new client with explicit product info for the User-Agent header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the profile cannot be resolved from the config file.
+    #[allow(clippy::unused_async)]
     pub async fn with_product(profile: &str, product: &str, product_version: &str) -> Result<Self> {
         let mut config = resolve_config(profile)?;
         config.product = Some(product.to_string());
@@ -49,6 +64,7 @@ impl DatabricksClient {
     }
 
     /// Create a client from an already-resolved config.
+    #[must_use]
     pub fn from_config(config: DatabricksConfig) -> Self {
         let product = config.product.as_deref().unwrap_or("unknown");
         let product_version = config.product_version.as_deref().unwrap_or("0.0.0");
@@ -81,20 +97,28 @@ impl DatabricksClient {
             }
         }
 
-        // Slow path: write lock + acquire
-        let mut guard = self.inner.cached_token.write().await;
-
-        // Double-check after acquiring write lock
-        if let Some(ref token) = *guard
-            && token.is_valid()
+        // Slow path: check under write lock, but drop it before the async acquire.
         {
-            return Ok(token.access_token.clone());
+            let guard = self.inner.cached_token.write().await;
+            // Double-check after acquiring write lock
+            if let Some(ref token) = *guard
+                && token.is_valid()
+            {
+                return Ok(token.access_token.clone());
+            }
+            // Drop the write lock before the potentially long token acquisition.
+            drop(guard);
         }
 
         debug!(profile = %self.inner.config.profile, "Token expired or missing, acquiring new token");
         let new_token = acquire_token(&self.inner.config.profile).await?;
         let access_token = new_token.access_token.clone();
-        *guard = Some(new_token);
+
+        // Re-acquire write lock to store the new token.
+        {
+            let mut guard = self.inner.cached_token.write().await;
+            *guard = Some(new_token);
+        }
         Ok(access_token)
     }
 
@@ -110,7 +134,7 @@ impl DatabricksClient {
 
     /// Perform an authenticated POST request and deserialize the JSON response.
     #[allow(dead_code)]
-    pub(crate) async fn post<B: Serialize, T: DeserializeOwned>(
+    pub(crate) async fn post<B: Serialize + Send + Sync, T: DeserializeOwned>(
         &self,
         path: &str,
         body: &B,
@@ -131,23 +155,35 @@ impl DatabricksClient {
     }
 
     /// Get a raw access token for proxy forwarding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the token cannot be acquired or refreshed.
     pub async fn access_token(&self) -> Result<String> {
         self.get_token().await
     }
 
+    /// The normalized Databricks workspace host URL.
+    #[must_use]
     pub fn host(&self) -> &str {
         &self.inner.config.host
     }
 
+    /// The Databricks CLI profile name used by this client.
+    #[must_use]
     pub fn profile(&self) -> &str {
         &self.inner.config.profile
     }
 
-    pub fn apps(&self) -> AppsApi<'_> {
+    /// Access the Databricks Apps API.
+    #[must_use]
+    pub const fn apps(&self) -> AppsApi<'_> {
         AppsApi::new(self)
     }
 
-    pub fn current_user(&self) -> CurrentUserApi<'_> {
+    /// Access the SCIM current-user API.
+    #[must_use]
+    pub const fn current_user(&self) -> CurrentUserApi<'_> {
         CurrentUserApi::new(self)
     }
 }

@@ -14,36 +14,52 @@ use crate::error::{DatabricksError, Result};
 // REST types for GET /api/2.0/apps/{name}
 // ---------------------------------------------------------------------------
 
+/// Metadata for a Databricks App returned by the REST API.
 #[derive(Debug, Clone, Deserialize)]
 pub struct App {
+    /// Application name (unique within the workspace).
     pub name: String,
+    /// Public URL of the deployed app, if available.
     #[serde(default)]
     pub url: Option<String>,
+    /// Current compute status of the app.
     #[serde(default)]
     pub compute_status: Option<ComputeStatus>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// Lifecycle state of a Databricks App's compute resources.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ComputeState {
+    /// The app is running and serving requests.
     Active,
+    /// The app's compute is starting up.
     Starting,
+    /// The app's compute is shutting down.
     Stopping,
+    /// The app's compute is fully stopped.
     Stopped,
+    /// The app is being deleted.
     Deleting,
+    /// The app is in an error state.
     Error,
+    /// An unrecognized state (forward-compatible).
     #[serde(other)]
     Unknown,
 }
 
 impl ComputeState {
-    pub fn is_terminal(&self) -> bool {
+    /// Returns `true` if the app is in a terminal state (stopped, deleting, or error).
+    #[must_use]
+    pub const fn is_terminal(&self) -> bool {
         matches!(self, Self::Stopped | Self::Deleting | Self::Error)
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// Wrapper carrying the current [`ComputeState`] of an app.
+#[derive(Debug, Copy, Clone, Deserialize)]
 pub struct ComputeStatus {
+    /// Current lifecycle state.
     pub state: ComputeState,
 }
 
@@ -51,10 +67,14 @@ pub struct ComputeStatus {
 // WebSocket log entry
 // ---------------------------------------------------------------------------
 
+/// A single log line received over the WebSocket log stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
+    /// Log source (e.g. `"APP"`, `"SYSTEM"`).
     pub source: String,
+    /// Unix timestamp in seconds (with fractional milliseconds).
     pub timestamp: f64,
+    /// The log message text.
     pub message: String,
 }
 
@@ -62,13 +82,20 @@ pub struct LogEntry {
 // Input parameters
 // ---------------------------------------------------------------------------
 
+/// Parameters for fetching app logs via WebSocket.
 #[derive(Debug)]
 pub struct AppLogsArgs<'a> {
+    /// Name of the Databricks app.
     pub app_name: &'a str,
+    /// Maximum number of log lines to return (ring-buffer).
     pub tail_lines: usize,
+    /// Optional search string sent to the log stream.
     pub search: Option<&'a str>,
+    /// Optional filter on log sources (e.g. `["APP"]`).
     pub sources: Option<&'a [String]>,
+    /// Overall timeout for the WebSocket connection.
     pub timeout: Duration,
+    /// Idle timeout after receiving the first log line.
     pub idle_timeout: Option<Duration>,
 }
 
@@ -76,22 +103,32 @@ pub struct AppLogsArgs<'a> {
 // AppsApi
 // ---------------------------------------------------------------------------
 
+/// API handle for Databricks Apps operations (metadata + log streaming).
 #[derive(Debug)]
 pub struct AppsApi<'a> {
     client: &'a DatabricksClient,
 }
 
 impl<'a> AppsApi<'a> {
-    pub(crate) fn new(client: &'a DatabricksClient) -> Self {
+    pub(crate) const fn new(client: &'a DatabricksClient) -> Self {
         Self { client }
     }
 
     /// Fetch app metadata via REST API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP request fails or the response cannot be deserialized.
     pub async fn get(&self, name: &str) -> Result<App> {
         self.client.get(&format!("/api/2.0/apps/{name}")).await
     }
 
     /// Fetch app logs via WebSocket.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the app is in a terminal state, the WebSocket connection
+    /// fails, or log frames cannot be read.
     pub async fn logs(&self, args: &AppLogsArgs<'_>) -> Result<Vec<LogEntry>> {
         let app = self.get(args.app_name).await?;
         let app_url = validate_app(&app)?;
@@ -227,9 +264,10 @@ async fn collect_logs(mut stream: WsStream, args: &AppLogsArgs<'_>) -> Result<Ve
     // Close the stream gracefully regardless of outcome.
     let _ = stream.close(None).await;
 
-    match result {
-        Ok(inner) => inner?,
-        Err(_) => debug!("Log stream timed out after {:?}", args.timeout),
+    if let Ok(inner) = result {
+        inner?;
+    } else {
+        debug!("Log stream timed out after {:?}", args.timeout);
     }
 
     Ok(buffer.into())
@@ -257,9 +295,9 @@ async fn read_frames(
                         received_any = true;
                         parse_and_buffer(text.as_ref(), args, buffer);
                     }
-                    Message::Binary(data) if data.as_ref() == HEARTBEAT => continue,
+                    Message::Binary(data) if data.as_ref() == HEARTBEAT => {}
                     Message::Close(_) => break,
-                    _ => continue,
+                    _ => {}
                 }
             }
             Ok(None) => break, // stream ended
@@ -270,7 +308,6 @@ async fn read_frames(
                     break;
                 }
                 // Haven't received any logs yet — keep waiting (outer timeout guards)
-                continue;
             }
         }
     }
@@ -510,7 +547,7 @@ mod tests {
         let json = r#"{"source":"APP","timestamp":1700000000.123,"message":"hello world"}"#;
         let entry: LogEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.source, "APP");
-        assert!((entry.timestamp - 1700000000.123).abs() < f64::EPSILON);
+        assert!((entry.timestamp - 1_700_000_000.123).abs() < f64::EPSILON);
         assert_eq!(entry.message, "hello world");
     }
 

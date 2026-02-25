@@ -17,10 +17,10 @@ pub struct InstallArgs {
 }
 
 pub async fn run(args: InstallArgs) -> i32 {
-    run_cli_async_helper(|| run_inner(args)).await
+    run_cli_async_helper(|| async { run_inner(args) }).await
 }
 
-async fn run_inner(args: InstallArgs) -> Result<(), String> {
+fn run_inner(args: InstallArgs) -> Result<(), String> {
     let base_dir = if args.global {
         home_dir()?
     } else {
@@ -71,7 +71,7 @@ pub fn install_skills_to(base_dir: &Path, skill_path: &str) -> Result<Vec<String
         // Determine output path based on file type
         let output_rel = if let Some(skill_rel) = rel.strip_prefix(skill_source_prefix) {
             // Skill markdown files: rebase from .claude/skills/apx/ to skill_path/
-            format!("{}/{}", skill_path, skill_rel)
+            format!("{skill_path}/{skill_rel}")
         } else if rel == ".mcp.json" {
             ".mcp.json".to_string()
         } else {

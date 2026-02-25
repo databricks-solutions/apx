@@ -7,6 +7,8 @@
 //! 3. Codegen: ApiIR -> swc_ecma_ast::Module
 //! 4. Emit: Module -> String (via SWC's Emitter)
 
+use std::rc::Rc;
+
 use swc_common::SourceMap;
 use swc_common::sync::Lrc;
 use swc_ecma_ast::Module;
@@ -32,14 +34,14 @@ pub fn generate(openapi_json: &str) -> Result<String, String> {
 
 /// Emit a SWC Module to a TypeScript string.
 fn emit_module(module: &Module) -> Result<String, String> {
-    let cm: Lrc<SourceMap> = Default::default();
+    let cm: Lrc<SourceMap> = Rc::default();
     let mut buf = vec![];
     {
         let mut emitter = SwcEmitter {
             cfg: Config::default().with_ascii_only(false),
             cm: cm.clone(),
             comments: None,
-            wr: JsWriter::new(cm.clone(), "\n", &mut buf, None),
+            wr: JsWriter::new(cm, "\n", &mut buf, None),
         };
         emitter
             .emit_module(module)

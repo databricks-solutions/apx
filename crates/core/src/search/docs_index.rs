@@ -37,8 +37,11 @@ pub struct DocChunk {
 /// Search result with score
 #[derive(Debug, Clone, Serialize)]
 pub struct DocSearchResult {
+    /// Matched documentation text.
     pub text: String,
+    /// Path of the source file containing this result.
     pub source_file: String,
+    /// FTS5 relevance score (lower is more relevant).
     pub score: f32,
 }
 
@@ -131,8 +134,7 @@ fn chunk_text(
             // Find last space before end
             enriched_text[start..end]
                 .rfind(' ')
-                .map(|pos| start + pos)
-                .unwrap_or(end)
+                .map_or(end, |pos| start + pos)
         } else {
             end
         };

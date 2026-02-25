@@ -1,1 +1,1 @@
-pub(crate) mod install;
+pub mod install;

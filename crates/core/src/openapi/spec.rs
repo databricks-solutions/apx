@@ -9,7 +9,9 @@ use std::collections::HashMap;
 /// Root OpenAPI specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenApiSpec {
+    /// Map of URL paths to their operations.
     pub paths: HashMap<String, PathItem>,
+    /// Reusable schema components.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub components: Option<Components>,
 }
@@ -17,6 +19,7 @@ pub struct OpenApiSpec {
 /// Components section containing reusable schemas.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Components {
+    /// Named schemas that can be referenced via `$ref`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schemas: Option<HashMap<String, Schema>>,
 }
@@ -24,18 +27,25 @@ pub struct Components {
 /// A path item containing operations for different HTTP methods.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PathItem {
+    /// GET operation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub get: Option<Operation>,
+    /// POST operation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post: Option<Operation>,
+    /// PUT operation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub put: Option<Operation>,
+    /// PATCH operation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patch: Option<Operation>,
+    /// DELETE operation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delete: Option<Operation>,
+    /// HEAD operation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub head: Option<Operation>,
+    /// OPTIONS operation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Operation>,
     /// Path-level parameters shared by all operations.
@@ -47,16 +57,22 @@ pub struct PathItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Operation {
+    /// Unique operation identifier.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+    /// Short summary of the operation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Detailed description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Operation-level parameters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<Vec<Parameter>>,
+    /// Request body definition.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_body: Option<RequestBody>,
+    /// Map of HTTP status codes to response definitions.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub responses: HashMap<String, Response>,
 }
@@ -64,13 +80,18 @@ pub struct Operation {
 /// A parameter (query, path, or header).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Parameter {
+    /// Parameter name.
     pub name: String,
+    /// Parameter location (`"query"`, `"path"`, `"header"`).
     #[serde(rename = "in")]
     pub location: String,
+    /// Whether the parameter is required.
     #[serde(default)]
     pub required: bool,
+    /// Parameter schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<Schema>,
+    /// Parameter description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
@@ -78,8 +99,10 @@ pub struct Parameter {
 /// A request body definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestBody {
+    /// Whether the request body is required.
     #[serde(default)]
     pub required: bool,
+    /// Content types and their schemas.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<HashMap<String, MediaType>>,
 }
@@ -87,8 +110,10 @@ pub struct RequestBody {
 /// A response definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
+    /// Response description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Content types and their schemas.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<HashMap<String, MediaType>>,
 }
@@ -96,6 +121,7 @@ pub struct Response {
 /// Media type content (e.g., application/json).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaType {
+    /// Schema for this media type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<Schema>,
 }
@@ -218,10 +244,15 @@ pub struct Schema {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum EnumValue {
+    /// A string variant.
     String(String),
+    /// An integer variant.
     Integer(i64),
+    /// A floating-point variant.
     Float(f64),
+    /// A boolean variant.
     Bool(bool),
+    /// A null variant.
     Null,
 }
 
@@ -240,7 +271,9 @@ pub struct Discriminator {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SchemaType {
+    /// A single type name (e.g. `"string"`).
     Single(String),
+    /// Multiple types (e.g. `["string", "null"]`).
     Multiple(Vec<String>),
 }
 
@@ -248,7 +281,9 @@ pub enum SchemaType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AdditionalProperties {
+    /// Boolean flag (true = any additional properties allowed).
     Bool(bool),
+    /// Schema describing additional property values.
     Schema(Box<Schema>),
 }
 

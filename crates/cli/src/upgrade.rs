@@ -190,9 +190,8 @@ fn version_gte(current: &str, latest: &str) -> bool {
             // Same base: compare pre-release
             // No pre-release > any pre-release (stable beats RC)
             match (cur_pre, lat_pre) {
-                (None, None) => true,     // equal
-                (None, Some(_)) => true,  // stable > rc
-                (Some(_), None) => false, // rc < stable
+                (None, None | Some(_)) => true, // equal or stable > rc
+                (Some(_), None) => false,       // rc < stable
                 (Some(a), Some(b)) => a >= b,
             }
         }
@@ -223,7 +222,7 @@ fn compare_base(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
         let va = a.get(i).copied().unwrap_or(0);
         let vb = b.get(i).copied().unwrap_or(0);
         match va.cmp(&vb) {
-            std::cmp::Ordering::Equal => continue,
+            std::cmp::Ordering::Equal => {}
             other => return other,
         }
     }

@@ -85,13 +85,16 @@ use apx_core::external::git::Git;
 use apx_core::interop::{get_template_content, list_template_files};
 use std::time::Instant;
 
+/// Arguments for the `apx init` command.
 #[derive(Args, Debug, Clone)]
 pub struct InitArgs {
+    /// Optional path where the app will be created.
     #[arg(
         value_name = "APP_PATH",
         help = "The path to the app. Defaults to current working directory"
     )]
     pub app_path: Option<PathBuf>,
+    /// Project name (prompted interactively if omitted).
     #[arg(
         long = "name",
         short = 'n',
@@ -109,12 +112,14 @@ pub struct InitArgs {
     /// Shorthand for --addons=none (backend-only, no addons)
     #[arg(long = "no-addons", conflicts_with = "addons")]
     pub no_addons: bool,
+    /// Databricks CLI profile name (prompted interactively if omitted).
     #[arg(
         long,
         short = 'p',
         help = "The Databricks profile to use. Will prompt if not provided"
     )]
     pub profile: Option<String>,
+    /// Initialize as a uv workspace member at the given relative path.
     #[arg(
         long = "as-member",
         value_name = "MEMBER_PATH",
@@ -125,6 +130,7 @@ pub struct InitArgs {
     pub as_member: Option<PathBuf>,
 }
 
+/// Execute the `apx init` command.
 pub async fn run(args: InitArgs) -> i32 {
     run_cli_async_helper(|| run_inner(args)).await
 }
@@ -174,7 +180,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
     let app_name_raw = args.app_name.take().unwrap_or_default();
     let app_name = normalize_app_name(&app_name_raw)?;
-    let app_slug = app_name.replace("-", "_");
+    let app_slug = app_name.replace('-', "_");
 
     // ─── Discover all available addons ─────────────────────
     let all_addons = discover_all_addons();
@@ -256,7 +262,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
                     .get(group_name)
                     .cloned()
                     .unwrap_or_else(|| capitalize_first(group_name));
-                labels.push(format!("{}{}", HEADER_MARKER, header_label));
+                labels.push(format!("{HEADER_MARKER}{header_label}"));
                 defaults.push(false);
                 is_header.push(true);
                 addon_for_index.push(None);
@@ -312,7 +318,23 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
     if args.profile.is_none() {
         let available_profiles = list_profiles()?;
-        if !available_profiles.is_empty() {
+        if available_profiles.is_empty() {
+            println!("No Databricks profiles found in ~/.databrickscfg");
+            let should_prompt = Confirm::new()
+                .with_prompt("Would you like to specify a profile name?")
+                .default(false)
+                .interact()
+                .map_err(|err| format!("Failed to read profile choice: {err}"))?;
+            if should_prompt {
+                let profile = Input::<String>::new()
+                    .with_prompt("Enter profile name")
+                    .interact_text()
+                    .map_err(|err| format!("Failed to read profile: {err}"))?;
+                args.profile = Some(profile);
+            } else {
+                args.profile = None;
+            }
+        } else {
             let mut items: Vec<String> = available_profiles.clone();
             items.push("Enter manually".into());
             items.push("Skip".into());
@@ -336,22 +358,6 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
                 args.profile = Some(profile);
             } else {
                 args.profile = Some(available_profiles[selection].clone());
-            }
-        } else {
-            println!("No Databricks profiles found in ~/.databrickscfg");
-            let should_prompt = Confirm::new()
-                .with_prompt("Would you like to specify a profile name?")
-                .default(false)
-                .interact()
-                .map_err(|err| format!("Failed to read profile choice: {err}"))?;
-            if should_prompt {
-                let profile = Input::<String>::new()
-                    .with_prompt("Enter profile name")
-                    .interact_text()
-                    .map_err(|err| format!("Failed to read profile: {err}"))?;
-                args.profile = Some(profile);
-            } else {
-                args.profile = None;
             }
         }
     }
@@ -389,7 +395,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
 
             // Apply all selected addon files
             for addon_name in &selected_addons {
-                let prefix = format!("addons/{}/", addon_name);
+                let prefix = format!("addons/{addon_name}/");
                 render_embedded_templates(&prefix, &app_path, &app_name, &app_slug)?;
 
                 // Apply Python AST edits and install skills from manifest
@@ -422,9 +428,7 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     } else {
         &app_path
     };
-    if !Git::is_available().await {
-        println!("⚠️  Git is not available - skipping git initialization");
-    } else {
+    if Git::is_available().await {
         let git = Git::new().map_err(|e| e.to_string())?;
         let inside =
             git.is_inside_work_tree(git_dir).await.unwrap_or(false) || has_git_dir(git_dir);
@@ -454,6 +458,8 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
                 println!("   Continuing with project setup...");
             }
         }
+    } else {
+        println!("⚠️  Git is not available - skipping git initialization");
     }
 
     // Manifest-driven component installation
@@ -555,7 +561,7 @@ fn ensure_dir(path: &Path) -> Result<(), String> {
 /// Paths containing `/base/` or starting with `base/` have `base` replaced with `app_slug`.
 /// Files ending in `.jinja2` are rendered through Tera; others are copied verbatim.
 /// `addon.toml` files are skipped (internal metadata, not user-facing).
-pub(crate) fn render_embedded_templates(
+pub fn render_embedded_templates(
     prefix: &str,
     target_dir: &Path,
     app_name: &str,
@@ -622,7 +628,7 @@ pub(crate) fn render_embedded_templates(
 
 /// Programmatically add `[tool.apx.ui]` config and hatch build exclude to pyproject.toml.
 /// Idempotent — skips if already configured.
-pub(crate) fn merge_ui_pyproject_config(app_dir: &Path, app_slug: &str) -> Result<(), String> {
+pub fn merge_ui_pyproject_config(app_dir: &Path, app_slug: &str) -> Result<(), String> {
     use toml_edit::{Item, Table};
 
     let pyproject_path = app_dir.join("pyproject.toml");
@@ -636,7 +642,7 @@ pub(crate) fn merge_ui_pyproject_config(app_dir: &Path, app_slug: &str) -> Resul
         }
 
         let mut ui = Table::new();
-        ui["root"] = Item::Value(format!("src/{}/ui", app_slug).into());
+        ui["root"] = Item::Value(format!("src/{app_slug}/ui").into());
 
         let mut registries = Table::new();
         registries["@animate-ui"] = Item::Value("https://animate-ui.com/r/{name}.json".into());
@@ -653,14 +659,12 @@ pub(crate) fn merge_ui_pyproject_config(app_dir: &Path, app_slug: &str) -> Resul
             .as_table_mut()
             .ok_or("tool.hatch.build is not a table")?;
 
-        let exclude = build_table["exclude"].or_insert(Item::Value(toml_edit::Value::Array(
-            toml_edit::Array::new(),
-        )));
+        let exclude = build_table["exclude"].or_insert(Item::Value(Value::Array(Array::new())));
         let exclude_arr = exclude
             .as_array_mut()
             .ok_or("tool.hatch.build.exclude is not an array")?;
 
-        let ui_exclude = format!("src/{}/ui", app_slug);
+        let ui_exclude = format!("src/{app_slug}/ui");
         let already = exclude_arr
             .iter()
             .any(|v| v.as_str() == Some(ui_exclude.as_str()));
@@ -693,7 +697,7 @@ fn ensure_workspace_config(root_pyproject: &Path, member_path: &Path) -> Result<
     let member_str = member_path.to_string_lossy().replace('\\', "/");
     let member_glob = match member_str.rsplit_once('/') {
         Some((parent, _)) => format!("{parent}/*"),
-        None => member_str.to_string(),
+        None => member_str.clone(),
     };
 
     if !root_pyproject.exists() {
@@ -854,8 +858,7 @@ members = ["libs/*"]
             let hatch = tool["hatch"].or_insert(Item::Table(Table::new()));
             let build = hatch["build"].or_insert(Item::Table(Table::new()));
             let build_table = build.as_table_mut().ok_or("not a table")?;
-            build_table["artifacts"] =
-                Item::Value(toml_edit::Value::Array(toml_edit::Array::new()));
+            build_table["artifacts"] = Item::Value(Value::Array(Array::new()));
             Ok(())
         })
         .unwrap();

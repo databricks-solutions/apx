@@ -1,4 +1,4 @@
-//! Type-safe FTS5 abstraction for SQLite full-text search.
+//! Type-safe FTS5 abstraction for `SQLite` full-text search.
 //!
 //! Provides [`Fts5Table`] as a builder/handle for FTS5 virtual tables,
 //! eliminating raw SQL construction from domain modules.
@@ -6,7 +6,7 @@
 use sqlx::sqlite::{SqlitePool, SqliteRow};
 
 /// Column definition for an FTS5 table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Fts5Column {
     /// Column name (must be alphanumeric + underscore).
     pub name: &'static str,
@@ -26,6 +26,11 @@ pub struct Fts5Table {
 
 impl Fts5Table {
     /// Construct with validated table name (alphanumeric + underscore only).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table name or any column name contains invalid
+    /// characters, or if the column list is empty.
     pub fn new(
         pool: SqlitePool,
         table_name: &str,
@@ -48,27 +53,38 @@ impl Fts5Table {
 
     /// Set a custom tokenizer (default: `"porter unicode61"`).
     #[allow(dead_code)]
+    #[must_use]
     pub fn with_tokenizer(mut self, tokenizer: &str) -> Self {
         self.tokenizer = tokenizer.to_string();
         self
     }
 
     /// Get the table name.
+    #[must_use]
     pub fn table_name(&self) -> &str {
         &self.table_name
     }
 
     /// Get a reference to the underlying connection pool.
-    pub fn pool(&self) -> &SqlitePool {
+    #[must_use]
+    pub const fn pool(&self) -> &SqlitePool {
         &self.pool
     }
 
     /// Check if the table exists in the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the existence check query fails.
     pub async fn exists(&self) -> Result<bool, String> {
         super::dev::table_exists(&self.pool, &self.table_name).await
     }
 
     /// `DROP TABLE IF EXISTS` + `CREATE VIRTUAL TABLE`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the drop or create query fails.
     pub async fn create_or_replace(&self) -> Result<(), String> {
         let drop_sql = format!("DROP TABLE IF EXISTS \"{}\"", self.table_name);
         sqlx::query(&drop_sql)
@@ -104,6 +120,10 @@ impl Fts5Table {
     }
 
     /// Begin a transaction on the underlying pool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction cannot be started.
     pub async fn begin(&self) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>, String> {
         self.pool
             .begin()
@@ -114,6 +134,10 @@ impl Fts5Table {
     /// Insert a row of string values into the FTS5 table.
     ///
     /// `values` must have the same length as the number of columns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the value count mismatches or the insert fails.
     pub async fn insert_str(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -155,6 +179,11 @@ impl Fts5Table {
     /// `bm25_weights` must have one entry per **indexed** column (in column
     /// definition order).  Non-indexed columns are automatically assigned
     /// weight `0.0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if column names are unknown, weight counts mismatch,
+    /// or the query fails.
     pub async fn search_bm25(
         &self,
         match_expr: &str,
@@ -205,15 +234,23 @@ impl Fts5Table {
             self.table_name, self.table_name, self.table_name,
         );
 
+        // Limit values are small positive numbers; truncation to i64 is safe.
+        #[allow(clippy::cast_possible_wrap)]
+        let limit_i64 = limit as i64;
+
         sqlx::query(&sql)
             .bind(match_expr)
-            .bind(limit as i64)
+            .bind(limit_i64)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| format!("Query error: {e}"))
     }
 
     /// FTS5 MATCH search using the built-in `rank` column.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if column names are unknown or the query fails.
     pub async fn search(
         &self,
         match_expr: &str,
@@ -237,9 +274,13 @@ impl Fts5Table {
             self.table_name, self.table_name,
         );
 
+        // Limit values are small positive numbers; truncation to i64 is safe.
+        #[allow(clippy::cast_possible_wrap)]
+        let limit_i64 = limit as i64;
+
         sqlx::query(&sql)
             .bind(match_expr)
-            .bind(limit as i64)
+            .bind(limit_i64)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| format!("Query error: {e}"))
@@ -256,6 +297,7 @@ impl Fts5Table {
 /// (except `_`, `-`, `.`) and wrapped in double quotes.  Empty tokens are
 /// dropped.  The caller is responsible for joining the terms (e.g. with
 /// ` OR `).
+#[must_use]
 pub fn sanitize_fts5_terms(query: &str) -> Vec<String> {
     query
         .split_whitespace()
@@ -278,6 +320,7 @@ pub fn sanitize_fts5_terms(query: &str) -> Vec<String> {
 /// Wraps each whitespace-separated term in double quotes for safe literal
 /// matching.  Terms are joined with `OR` so that partial matches are returned —
 /// FTS5 ranking naturally scores documents with more matching terms higher.
+#[must_use]
 pub fn sanitize_fts5_query(query: &str) -> String {
     sanitize_fts5_terms(query).join(" OR ")
 }
@@ -287,9 +330,10 @@ pub fn sanitize_fts5_query(query: &str) -> String {
 /// Accepts individually quoted terms (e.g. `['"GenieAttachment"', '"fields"']`)
 /// and returns a single FTS5 MATCH expression joined with `OR`.
 ///
-/// - If a term is PascalCase, an extra `entity:<term>` clause is added.
+/// - If a term is `PascalCase`, an extra `entity:<term>` clause is added.
 /// - Hint words like "fields" / "attributes" are stripped (they only guide
 ///   boosting).
+#[must_use]
 pub fn enhance_fts5_query(terms: &[String]) -> String {
     let hint_words: &[&str] = &["fields", "attributes", "members", "properties"];
 
@@ -303,10 +347,8 @@ pub fn enhance_fts5_query(terms: &[String]) -> String {
         }
         if is_pascal_case(clean) {
             entity_terms.push(format!("entity:{token}"));
-            regular_terms.push(token.clone());
-        } else {
-            regular_terms.push(token.clone());
         }
+        regular_terms.push(token.clone());
     }
 
     let mut parts = entity_terms;
@@ -314,7 +356,8 @@ pub fn enhance_fts5_query(terms: &[String]) -> String {
     parts.join(" OR ")
 }
 
-/// Check if a string looks like PascalCase (starts with uppercase, contains lowercase).
+/// Check if a string looks like `PascalCase` (starts with uppercase, contains lowercase).
+#[must_use]
 pub fn is_pascal_case(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {

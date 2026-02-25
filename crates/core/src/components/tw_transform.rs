@@ -532,7 +532,7 @@ struct Span {
 impl Span {
     /// Convert this span into a `Region` borrowing from `source`.
     /// Returns `None` if the span is empty (start == end).
-    fn into_region<'a>(self, source: &'a str) -> Option<Region<'a>> {
+    fn into_region(self, source: &str) -> Option<Region<'_>> {
         if self.end > self.start {
             Some(Region {
                 text: &source[self.start..self.end],
@@ -748,7 +748,7 @@ fn rfind_variant_colon(token: &str) -> Option<VariantSplit<'_>> {
             Some(CssSyntax::OpenBracket | CssSyntax::OpenParen) => depth -= 1,
             Some(CssSyntax::Colon) if depth == 0 => {
                 return Some(VariantSplit {
-                    prefix: &token[..pos + 1],
+                    prefix: &token[..=pos],
                     after_colon: &token[pos + 1..],
                 });
             }

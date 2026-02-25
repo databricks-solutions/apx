@@ -29,6 +29,7 @@ fn prepare_app_dir(app_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Check for an existing healthy dev server and return its port, cleaning up stale locks.
 pub async fn resolve_existing_server(
     app_dir: &Path,
     mode: OutputMode,
@@ -46,13 +47,12 @@ pub async fn resolve_existing_server(
         return Ok(None);
     }
 
-    match health(lock.port).await {
-        Ok(true) => Ok(Some(lock.port)),
-        Ok(false) | Err(_) => {
-            emit(mode, "🧹 Cleaning up stale lock file...");
-            remove_lock(&lock_path)?;
-            Ok(None)
-        }
+    if health(lock.port).await == Ok(true) {
+        Ok(Some(lock.port))
+    } else {
+        emit(mode, "🧹 Cleaning up stale lock file...");
+        remove_lock(&lock_path)?;
+        Ok(None)
     }
 }
 
@@ -151,10 +151,15 @@ async fn wait_for_port_available(port: u16, mode: OutputMode) -> Result<(), Stri
 /// Shared by all `ServerLauncher` implementations.
 #[derive(Debug)]
 pub struct PreparedServer {
+    /// Allocated port for the dev server.
     pub port: u16,
+    /// Authentication token for control endpoints.
     pub dev_token: String,
+    /// Path to the lock file.
     pub lock_path: PathBuf,
+    /// Canonicalized application directory.
     pub canonical_app_dir: PathBuf,
+    /// Human-readable command description for display.
     pub command_display: String,
 }
 
@@ -210,30 +215,41 @@ pub enum ServerLauncher {
     /// Spawns a background child process (`apx dev __internal__run_server`).
     /// Returns after healthcheck confirms the server is ready.
     Detached {
+        /// Application directory.
         app_dir: PathBuf,
+        /// Skip Databricks credentials validation.
         skip_credentials_validation: bool,
+        /// Maximum seconds to wait for healthy status.
         timeout_secs: u64,
+        /// Skip the health check entirely.
         skip_healthcheck: bool,
+        /// Output mode for progress messages.
         mode: OutputMode,
     },
     /// Runs the Axum dev server in-process as an async task.
     /// Subprocess logs stream directly to the terminal. Returns after shutdown.
     Attached {
+        /// Application directory.
         app_dir: PathBuf,
+        /// Skip Databricks credentials validation.
         skip_credentials_validation: bool,
     },
 }
 
 /// Result of a server launch.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum LaunchOutcome {
     /// Server is running in the background. Port is ready.
-    Running { port: u16 },
+    Running {
+        /// The port the server is listening on.
+        port: u16,
+    },
     /// Server ran in-process and has shut down.
     Shutdown,
 }
 
 impl ServerLauncher {
+    /// Execute the launch strategy with the given prepared server configuration.
     pub async fn launch(self, server: PreparedServer) -> Result<LaunchOutcome, String> {
         match self {
             Self::Detached {
@@ -278,7 +294,7 @@ async fn launch_detached(
         spawn_detached_child(app_dir, skip_credentials_validation, &server).await?;
 
     if skip_healthcheck {
-        return finalize_skip_healthcheck(app_dir, mode, &server, &command, &mut child, start_time);
+        return finalize_skip_healthcheck(app_dir, mode, &server, &command, &child, start_time);
     }
 
     wait_for_healthy_or_cleanup(
@@ -349,7 +365,7 @@ fn finalize_skip_healthcheck(
     mode: OutputMode,
     server: &PreparedServer,
     command: &str,
-    child: &mut tokio::process::Child,
+    child: &tokio::process::Child,
     start_time: Instant,
 ) -> Result<LaunchOutcome, String> {
     let pid = child.id().ok_or("Failed to get child process ID")?;
@@ -488,7 +504,6 @@ async fn launch_attached(
             Err(e) if is_port_error(&e) && attempt < MAX_PORT_RETRIES => {
                 warn!(attempt, error = %e, "Subprocess port conflict, retrying with new ports");
                 last_error = e;
-                continue;
             }
             Err(e) => {
                 let _ = remove_lock(&server.lock_path);

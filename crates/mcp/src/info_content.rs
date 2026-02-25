@@ -1,3 +1,7 @@
+/// Static informational content describing the apx toolkit.
+///
+/// Covers project structure, key patterns, and available tools.
+/// Served as the `apx://info` resource and included in the server's `instructions` field.
 pub const APX_INFO_CONTENT: &str = r#"
 This project uses apx toolkit to build a Databricks app.
 apx bundles together a set of tools and libraries to help you with the complete app development lifecycle: develop, build and deploy.

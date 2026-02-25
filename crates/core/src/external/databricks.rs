@@ -22,7 +22,7 @@ pub struct DatabricksCli {
 impl DatabricksCli {
     /// Resolve `databricks` from PATH via the [`Resolvable`] trait.
     pub fn new() -> Result<Self, CommandError> {
-        super::resolve_local::<Self>()
+        resolve_local::<Self>()
             .map(Self::from_resolved)
             .map_err(|_| CommandError::NotFound {
                 tool: "databricks",

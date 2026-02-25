@@ -1,8 +1,9 @@
 use crate::server::ApxServer;
 use crate::tools::{ToolError, ToolResultExt};
-use rmcp::model::*;
+use rmcp::model::{CallToolResult, ErrorData};
 use rmcp::schemars;
 
+/// Arguments for the `feedback_prepare` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct FeedbackPrepareArgs {
     /// The feedback message
@@ -18,6 +19,7 @@ pub struct FeedbackPrepareArgs {
     pub include_metadata: bool,
 }
 
+/// Arguments for the `feedback_submit` tool.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct FeedbackSubmitArgs {
     /// The exact issue title (from feedback_prepare response)
@@ -35,10 +37,11 @@ fn default_true() -> bool {
 }
 
 impl ApxServer {
-    pub async fn handle_feedback_prepare(
+    /// Handle the `feedback_prepare` tool call.
+    pub fn handle_feedback_prepare(
         &self,
         args: FeedbackPrepareArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         if args.message.trim().is_empty() {
             return ToolError::InvalidInput("Feedback message cannot be empty".to_string())
                 .into_result();
@@ -74,10 +77,11 @@ impl ApxServer {
         }))
     }
 
+    /// Handle the `feedback_submit` tool call.
     pub async fn handle_feedback_submit(
         &self,
         args: FeedbackSubmitArgs,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
+    ) -> Result<CallToolResult, ErrorData> {
         if args.title.trim().is_empty() || args.body.trim().is_empty() {
             return ToolError::InvalidInput(
                 "Title and body are required. Call feedback_prepare first.".to_string(),

@@ -46,7 +46,7 @@ const DEBOUNCE_MS: u64 = 150;
 
 /// All immutable and shared-state values needed to construct a [`Backend`].
 /// Avoids a 12-parameter positional constructor.
-pub(crate) struct BackendConfig {
+pub struct BackendConfig {
     pub app_dir: PathBuf,
     pub app_slug: String,
     pub app_entrypoint: String,
@@ -67,7 +67,7 @@ pub(crate) struct BackendConfig {
 
 /// Self-contained backend (uvicorn) lifecycle manager.
 /// `ProcessManager` interacts only through this API.
-pub(crate) struct Backend {
+pub struct Backend {
     child: Arc<Mutex<Option<Child>>>,
     cfg: BackendConfig,
 }

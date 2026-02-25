@@ -6,6 +6,12 @@ resolver = "2"
 version = "0.2.7"
 edition = "2024"
 rust-version = "1.92"
+description = "APX application framework"
+repository = "https://github.com/databricks-solutions/apx"
+license = "Databricks License"
+readme = "README.md"
+keywords = ["databricks", "apps", "framework"]
+categories = ["development-tools"]
 
 [workspace.dependencies]
 # Internal crates
@@ -106,17 +112,99 @@ which = "7"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 warnings = "deny"
+
+# Correctness
 unused_must_use = "deny"
 dead_code = "deny"
+unused_imports = "deny"
+unused_variables = "deny"
+unused_qualifications = "deny"
+unused_extern_crates = "deny"
+# unreachable_pub = "deny"  # too many existing items to fix at once
+
+# API hygiene
+missing_docs = "deny"
 missing_debug_implementations = "deny"
+missing_copy_implementations = "deny"
+
+# Safety paranoia
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+elided_lifetimes_in_paths = "deny"
+explicit_outlives_requirements = "deny"
+
+# Idioms
+rust_2018_idioms = { level = "deny", priority = -1 }
 
 [workspace.lints.clippy]
-unwrap_used = "warn"
-expect_used = "warn"
-panic = "warn"
+
+# Base strictness
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+
+# Transitive dependency version conflicts we cannot control
+multiple_crate_versions = "allow"
+
+# Panic policy
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+panic_in_result_fn = "deny"
+
+# Debug leftovers
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+
+# API discipline
+# missing_const_for_fn = "deny"
+# missing_panics_doc = "deny"
+# missing_errors_doc = "deny"
+
+# Performance paranoia
+implicit_clone = "deny"
+inefficient_to_string = "deny"
+redundant_clone = "deny"
+large_enum_variant = "deny"
+
+# Complexity
+cognitive_complexity = "allow"  # many existing functions exceed threshold; refactor incrementally
+# too_many_lines = "deny"
+# too_many_arguments = "deny"
+
+# Pedantic lints that are too noisy for this codebase
+module_name_repetitions = "allow"
+similar_names = "allow"
+significant_drop_tightening = "allow"
+doc_markdown = "allow"           # 129 items — too pervasive to fix at once
+missing_errors_doc = "allow"     # 126 items — add incrementally
+must_use_candidate = "allow"     # 66 items — add incrementally
+return_self_not_must_use = "allow"
+missing_const_for_fn = "allow"   # 30 items — add incrementally
+redundant_closure_for_method_calls = "allow"  # 36 items — stylistic preference
+option_if_let_else = "allow"     # 18 items — often less readable
+unnecessary_wraps = "allow"
+items_after_statements = "allow"
+unnecessary_box_returns = "allow" # 26 items — deliberate design choice
+cast_possible_wrap = "allow"     # integer casts are intentional
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+struct_field_names = "allow"     # same as module_name_repetitions for fields
+pub_use = "allow"
+use_self = "allow"               # 30 items — Self vs TypeName is stylistic
+case_sensitive_file_extension_comparisons = { level = "allow", priority = 1 } # not relevant on our target platforms
+too_many_lines = "allow"
+missing_fields_in_debug = "allow" # deliberate Debug impls that hide fields
+needless_pass_by_value = "allow" # 3 items — often needed for API compatibility
+trivial_regex = "allow"
+needless_raw_string_hashes = "allow"   # cosmetic; many test strings use r#"..."#
+iter_without_into_iter = "allow"
+
+# Style
+wildcard_imports = "deny"
 
 [profile.release]
 lto = "thin"

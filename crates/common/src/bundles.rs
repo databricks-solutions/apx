@@ -1,28 +1,40 @@
+//! Databricks bundle configuration parsing and app name resolution.
+
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use serde::Deserialize;
 
+/// Filename for Databricks bundle configuration.
 const DATABRICKS_YML: &str = "databricks.yml";
 
+/// Parsed representation of a `databricks.yml` configuration file.
 #[derive(Debug, Deserialize)]
 pub struct BundleConfig {
+    /// Top-level resources section of the bundle.
     #[serde(default)]
     pub resources: BundleResources,
 }
 
+/// Resources section of a Databricks bundle configuration.
 #[derive(Debug, Default, Deserialize)]
 pub struct BundleResources {
+    /// Map of app resource keys to their definitions.
     #[serde(default)]
     pub apps: HashMap<String, AppResource>,
 }
 
+/// A single Databricks App resource definition.
 #[derive(Debug, Deserialize)]
 pub struct AppResource {
+    /// Display name of the app.
     pub name: String,
 }
 
 impl BundleConfig {
+    /// # Errors
+    ///
+    /// Returns an error if `databricks.yml` is missing or cannot be parsed.
     pub fn from_path(dir: &Path) -> Result<Self, String> {
         let yml_path = dir.join(DATABRICKS_YML);
         if !yml_path.exists() {
@@ -38,10 +50,14 @@ impl BundleConfig {
         Self::from_yaml(&contents)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the YAML content cannot be parsed.
     pub fn from_yaml(yaml: &str) -> Result<Self, String> {
         serde_yaml::from_str(yaml).map_err(|e| format!("Failed to parse databricks.yml: {e}"))
     }
 
+    /// Return sorted, deduplicated app names from the bundle configuration.
     pub fn app_names(&self) -> Vec<String> {
         let names: BTreeSet<&str> = self
             .resources
@@ -54,6 +70,9 @@ impl BundleConfig {
     }
 }
 
+/// # Errors
+///
+/// Returns an error if zero or more than one app is defined in `databricks.yml`.
 pub fn resolve_single_app_name(project_dir: &Path) -> Result<String, String> {
     let config = BundleConfig::from_path(project_dir)?;
     let names = config.app_names();
@@ -74,7 +93,11 @@ pub fn resolve_single_app_name(project_dir: &Path) -> Result<String, String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::needless_raw_string_hashes
+)]
 mod tests {
     use super::*;
 
@@ -82,13 +105,13 @@ mod tests {
 
     #[test]
     fn parse_single_app() {
-        let yaml = r#"
+        let yaml = r"
 resources:
   apps:
     my_app:
       name: my-cool-app
       source_code_path: ./src
-"#;
+";
         let config = BundleConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.resources.apps.len(), 1);
         assert_eq!(config.resources.apps["my_app"].name, "my-cool-app");
@@ -139,40 +162,40 @@ resources:
 
     #[test]
     fn app_names_single() {
-        let yaml = r#"
+        let yaml = r"
 resources:
   apps:
     app1:
       name: alpha
-"#;
+";
         let config = BundleConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.app_names(), vec!["alpha"]);
     }
 
     #[test]
     fn app_names_multiple_sorted() {
-        let yaml = r#"
+        let yaml = r"
 resources:
   apps:
     z_app:
       name: zulu
     a_app:
       name: alpha
-"#;
+";
         let config = BundleConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.app_names(), vec!["alpha", "zulu"]);
     }
 
     #[test]
     fn app_names_deduplicates() {
-        let yaml = r#"
+        let yaml = r"
 resources:
   apps:
     app1:
       name: same-name
     app2:
       name: same-name
-"#;
+";
         let config = BundleConfig::from_yaml(yaml).unwrap();
         assert_eq!(config.app_names(), vec!["same-name"]);
     }

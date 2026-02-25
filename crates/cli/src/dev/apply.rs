@@ -18,7 +18,7 @@ use apx_core::interop::{get_template_content, list_template_files};
 
 #[derive(serde::Deserialize, Default)]
 #[allow(dead_code)]
-pub(crate) struct AddonManifest {
+pub struct AddonManifest {
     #[serde(default)]
     pub addon: AddonInfo,
     #[serde(default)]
@@ -33,7 +33,7 @@ pub(crate) struct AddonManifest {
 
 #[derive(serde::Deserialize, Default)]
 #[allow(dead_code)]
-pub(crate) struct AddonInfo {
+pub struct AddonInfo {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -55,7 +55,7 @@ pub(crate) struct AddonInfo {
 }
 
 #[derive(serde::Deserialize, Default)]
-pub(crate) struct PythonMeta {
+pub struct PythonMeta {
     #[serde(default)]
     pub dependencies: Vec<String>,
     #[serde(default)]
@@ -63,7 +63,7 @@ pub(crate) struct PythonMeta {
 }
 
 #[derive(serde::Deserialize, Default)]
-pub(crate) struct PythonEdits {
+pub struct PythonEdits {
     #[serde(default)]
     pub exports: Vec<String>,
     #[serde(default)]
@@ -73,7 +73,7 @@ pub(crate) struct PythonEdits {
 }
 
 #[derive(serde::Deserialize)]
-pub(crate) struct AliasEntry {
+pub struct AliasEntry {
     pub code: String,
     #[serde(default)]
     pub doc: Option<String>,
@@ -81,33 +81,33 @@ pub(crate) struct AliasEntry {
 
 #[derive(serde::Deserialize, Default)]
 #[allow(dead_code)]
-pub(crate) struct TypeScriptMeta {
+pub struct TypeScriptMeta {
     #[serde(default)]
     pub dependencies: Vec<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
-pub(crate) struct ComponentsMeta {
+pub struct ComponentsMeta {
     #[serde(default)]
     pub install: Vec<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
-pub(crate) struct ConfigMeta {
+pub struct ConfigMeta {
     #[serde(default)]
     pub requires_bun: bool,
 }
 
 /// Read and parse the `addon.toml` manifest for an addon.
-pub(crate) fn read_addon_manifest(addon_dir_name: &str) -> Option<AddonManifest> {
-    let path = format!("addons/{}/addon.toml", addon_dir_name);
+pub fn read_addon_manifest(addon_dir_name: &str) -> Option<AddonManifest> {
+    let path = format!("addons/{addon_dir_name}/addon.toml");
     let content = get_template_content(&path).ok()?;
     toml::from_str(&content).ok()
 }
 
 /// Discover all available addons by scanning embedded template files for `addon.toml`.
 /// Returns a list of (directory_name, manifest) pairs.
-pub(crate) fn discover_all_addons() -> Vec<(String, AddonManifest)> {
+pub fn discover_all_addons() -> Vec<(String, AddonManifest)> {
     let all_files = list_template_files("addons/");
     let mut seen = std::collections::HashSet::new();
     let mut addons = Vec::new();
@@ -266,11 +266,13 @@ impl FileChange {
             return None;
         }
 
+        use std::fmt::Write;
+
         let diff = TextDiff::from_lines(existing, &self.new_content);
         let mut output = String::new();
 
-        output.push_str(&format!("\x1b[1m--- {} (current)\x1b[0m\n", self.rel_path));
-        output.push_str(&format!("\x1b[1m+++ {} (new)\x1b[0m\n", self.rel_path));
+        let _ = writeln!(output, "\x1b[1m--- {} (current)\x1b[0m", self.rel_path);
+        let _ = writeln!(output, "\x1b[1m+++ {} (new)\x1b[0m", self.rel_path);
 
         for (idx, group) in diff.grouped_ops(3).iter().enumerate() {
             if idx > 0 {
@@ -327,10 +329,7 @@ async fn apply_single_addon(
     if let Some(ref manifest) = manifest {
         for dep in &manifest.addon.depends_on {
             if !is_addon_applied(dep, app_dir)? {
-                println!(
-                    "📦 Addon '{}' requires '{}' — applying it first...\n",
-                    addon_name, dep
-                );
+                println!("📦 Addon '{addon_name}' requires '{dep}' — applying it first...\n");
                 Box::pin(apply_single_addon(dep, yes, app_dir, app_name, app_slug)).await?;
                 println!();
             }
@@ -392,19 +391,17 @@ fn apply_file_addon_by_name(
     app_name: &str,
     app_slug: &str,
 ) -> Result<(), String> {
-    let addon_prefix = format!("addons/{}/", addon_name);
+    let addon_prefix = format!("addons/{addon_name}/");
     let addon_files = list_template_files(&addon_prefix);
 
     if addon_files.is_empty() {
         return Err(format!(
-            "Addon '{}' not found (no embedded templates with prefix '{}')",
-            addon_name, addon_prefix,
+            "Addon '{addon_name}' not found (no embedded templates with prefix '{addon_prefix}')",
         ));
     }
 
     println!(
-        "Applying {} addon to {}...\n",
-        addon_name,
+        "Applying {addon_name} addon to {}...\n",
         app_dir
             .canonicalize()
             .unwrap_or_else(|_| app_dir.to_path_buf())
@@ -444,14 +441,14 @@ fn apply_file_addon_by_name(
         println!("\x1b[1m--- Diffs ---\x1b[0m\n");
         for file in &modified_files {
             if let Some(diff) = file.generate_diff() {
-                println!("{}", diff);
+                println!("{diff}");
                 println!();
             }
         }
     }
 
     if unchanged_count > 0 {
-        println!("\x1b[90m{} file(s) unchanged\x1b[0m\n", unchanged_count);
+        println!("\x1b[90m{unchanged_count} file(s) unchanged\x1b[0m\n");
     }
 
     // Summary line
@@ -505,8 +502,7 @@ fn apply_file_addon_by_name(
     }
 
     println!(
-        "\n\x1b[32m✓\x1b[0m Applied {} addon: {} file(s) created, {} file(s) modified",
-        addon_name, created, modified
+        "\n\x1b[32m✓\x1b[0m Applied {addon_name} addon: {created} file(s) created, {modified} file(s) modified"
     );
 
     Ok(())
@@ -516,7 +512,7 @@ fn apply_file_addon_by_name(
 ///
 /// Called by both `init` (after `render_embedded_templates`) and `apply_backend_addon`.
 /// Returns the number of AST edits applied.
-pub(crate) fn apply_python_edits(
+pub fn apply_python_edits(
     manifest: &AddonManifest,
     app_dir: &Path,
     app_slug: &str,
@@ -592,8 +588,7 @@ pub(crate) fn apply_python_edits(
             for dep in &manifest.python.dependencies {
                 let already = deps.iter().any(|v| {
                     v.as_str()
-                        .map(|s| s.starts_with(dep.split('>').next().unwrap_or(dep)))
-                        .unwrap_or(false)
+                        .is_some_and(|s| s.starts_with(dep.split('>').next().unwrap_or(dep)))
                 });
                 if !already {
                     deps.push(dep.as_str());
@@ -615,8 +610,7 @@ fn apply_backend_addon(
     app_slug: &str,
 ) -> Result<(), String> {
     println!(
-        "Applying {} backend addon to {}...\n",
-        addon_dir,
+        "Applying {addon_dir} backend addon to {}...\n",
         app_dir
             .canonicalize()
             .unwrap_or_else(|_| app_dir.to_path_buf())
@@ -624,7 +618,7 @@ fn apply_backend_addon(
     );
 
     // 1. Copy template files from addon (embedded)
-    let addon_prefix = format!("addons/{}/", addon_dir);
+    let addon_prefix = format!("addons/{addon_dir}/");
     let addon_files = list_template_files(&addon_prefix);
     let mut copied_files = Vec::new();
     for file_path in &addon_files {
@@ -688,10 +682,8 @@ fn apply_backend_addon(
     }
 
     println!(
-        "\n\x1b[32m✓\x1b[0m Applied {} backend addon: {} file(s) copied, {} AST edit(s) applied",
-        addon_dir,
-        copied_files.len(),
-        ast_edits_applied
+        "\n\x1b[32m✓\x1b[0m Applied {addon_dir} backend addon: {} file(s) copied, {ast_edits_applied} AST edit(s) applied",
+        copied_files.len()
     );
 
     Ok(())

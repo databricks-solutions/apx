@@ -16,6 +16,7 @@ use crate::external::uv::Uv;
 use crate::interop::generate_openapi_spec;
 use crate::openapi;
 
+/// Generate the OpenAPI spec and TypeScript client for a project.
 pub async fn generate_openapi(project_root: &Path) -> Result<(), String> {
     let metadata = read_project_metadata(project_root)?;
     let app_slug = metadata.app_slug.clone();

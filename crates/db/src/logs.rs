@@ -1,4 +1,4 @@
-//! Async logs database operations using SQLx.
+//! Async logs database operations using `SQLx`.
 //!
 //! Provides [`LogsDb`] for all CRUD operations on the OTLP logs table
 //! at `~/.apx/logs/db`.
@@ -22,12 +22,22 @@ pub struct LogsDb {
 
 impl LogsDb {
     /// Open or create the database at the default location (`~/.apx/logs/db`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database path cannot be determined or the database
+    /// cannot be opened.
     pub async fn open() -> Result<Self, String> {
         let path = super::logs_db_path()?;
         Self::open_at(&path).await
     }
 
     /// Open or create the database at a specific path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created, the database cannot
+    /// be opened, or schema initialization fails.
     pub async fn open_at(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -54,7 +64,7 @@ impl LogsDb {
     /// Initialize the database schema.
     async fn init_schema(&self) -> Result<(), String> {
         sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS logs (
+            r"CREATE TABLE IF NOT EXISTS logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp_ns INTEGER NOT NULL,
                 observed_timestamp_ns INTEGER NOT NULL,
@@ -68,7 +78,7 @@ impl LogsDb {
                 trace_id TEXT,
                 span_id TEXT,
                 created_at INTEGER DEFAULT (strftime('%s', 'now'))
-            )"#,
+            )",
         )
         .execute(&self.pool)
         .await
@@ -91,6 +101,10 @@ impl LogsDb {
     }
 
     /// Insert a batch of log records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction fails or any insert fails.
     pub async fn insert_logs(&self, records: &[LogRecord]) -> Result<usize, String> {
         if records.is_empty() {
             return Ok(0);
@@ -105,11 +119,11 @@ impl LogsDb {
         let mut count = 0;
         for record in records {
             sqlx::query(
-                r#"INSERT INTO logs (
+                r"INSERT INTO logs (
                     timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
                     body, service_name, app_path, resource_attributes, log_attributes,
                     trace_id, span_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(record.timestamp_ns)
             .bind(record.observed_timestamp_ns)
@@ -135,6 +149,10 @@ impl LogsDb {
     }
 
     /// Query logs for a specific app path since a given timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub async fn query_logs(
         &self,
         app_path: Option<&str>,
@@ -145,40 +163,40 @@ impl LogsDb {
 
         let sql = match (app_path, limit) {
             (Some(_), Some(lim)) => format!(
-                r#"SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
+                r"SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
                        body, service_name, app_path, resource_attributes, log_attributes,
                        trace_id, span_id
                 FROM logs
                 WHERE (app_path LIKE ?1 OR ?1 LIKE '%' || app_path || '%')
                   AND {effective_ts} >= ?2
                 ORDER BY {effective_ts} ASC
-                LIMIT {lim}"#
+                LIMIT {lim}"
             ),
             (Some(_), None) => format!(
-                r#"SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
+                r"SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
                        body, service_name, app_path, resource_attributes, log_attributes,
                        trace_id, span_id
                 FROM logs
                 WHERE (app_path LIKE ?1 OR ?1 LIKE '%' || app_path || '%')
                   AND {effective_ts} >= ?2
-                ORDER BY {effective_ts} ASC"#
+                ORDER BY {effective_ts} ASC"
             ),
             (None, Some(lim)) => format!(
-                r#"SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
+                r"SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
                        body, service_name, app_path, resource_attributes, log_attributes,
                        trace_id, span_id
                 FROM logs
                 WHERE {effective_ts} >= ?1
                 ORDER BY {effective_ts} ASC
-                LIMIT {lim}"#
+                LIMIT {lim}"
             ),
             (None, None) => format!(
-                r#"SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
+                r"SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
                        body, service_name, app_path, resource_attributes, log_attributes,
                        trace_id, span_id
                 FROM logs
                 WHERE {effective_ts} >= ?1
-                ORDER BY {effective_ts} ASC"#
+                ORDER BY {effective_ts} ASC"
             ),
         };
 
@@ -199,6 +217,10 @@ impl LogsDb {
     }
 
     /// Get the latest log ID for change detection in follow mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub async fn get_latest_id(&self) -> Result<i64, String> {
         let row = sqlx::query("SELECT COALESCE(MAX(id), 0) as max_id FROM logs")
             .fetch_one(&self.pool)
@@ -209,6 +231,10 @@ impl LogsDb {
     }
 
     /// Query logs newer than a given ID (for follow mode).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub async fn query_logs_after_id(
         &self,
         app_path: Option<&str>,
@@ -219,24 +245,24 @@ impl LogsDb {
         let (sql, has_app_path) = if app_path.is_some() {
             (
                 format!(
-                    r#"SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
+                    r"SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
                            body, service_name, app_path, resource_attributes, log_attributes,
                            trace_id, span_id
                     FROM logs
                     WHERE id > ?1 AND (app_path LIKE ?2 OR ?2 LIKE '%' || app_path || '%')
-                    ORDER BY {effective_ts} ASC"#
+                    ORDER BY {effective_ts} ASC"
                 ),
                 true,
             )
         } else {
             (
                 format!(
-                    r#"SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
+                    r"SELECT timestamp_ns, observed_timestamp_ns, severity_number, severity_text,
                            body, service_name, app_path, resource_attributes, log_attributes,
                            trace_id, span_id
                     FROM logs
                     WHERE id > ?1
-                    ORDER BY {effective_ts} ASC"#
+                    ORDER BY {effective_ts} ASC"
                 ),
                 false,
             )
@@ -259,10 +285,14 @@ impl LogsDb {
     }
 
     /// Delete logs older than the retention period (7 days).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the delete query fails.
     pub async fn cleanup_old_logs(&self) -> Result<usize, String> {
         let cutoff = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64 - RETENTION_SECONDS)
+            .map(|d| d.as_secs().cast_signed() - RETENTION_SECONDS)
             .unwrap_or(0);
 
         let result = sqlx::query("DELETE FROM logs WHERE created_at < ?")
@@ -271,6 +301,9 @@ impl LogsDb {
             .await
             .map_err(|e| format!("Delete error: {e}"))?;
 
+        // rows_affected() returns u64; on 32-bit targets this could truncate,
+        // but the log table will never have more rows than usize::MAX.
+        #[allow(clippy::cast_possible_truncation)]
         let deleted = result.rows_affected() as usize;
         if deleted > 0 {
             debug!("Cleaned up {} old log records", deleted);
@@ -279,6 +312,10 @@ impl LogsDb {
     }
 
     /// Get the total count of logs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     #[allow(dead_code)]
     pub async fn count_logs(&self) -> Result<i64, String> {
         let row = sqlx::query("SELECT COUNT(*) as cnt FROM logs")
@@ -290,7 +327,7 @@ impl LogsDb {
     }
 }
 
-/// Map a SQLx row to a LogRecord.
+/// Map a `SQLx` row to a `LogRecord`.
 fn row_to_log_record(row: &sqlx::sqlite::SqliteRow) -> LogRecord {
     LogRecord {
         timestamp_ns: row.get("timestamp_ns"),
@@ -330,8 +367,8 @@ mod tests {
         let db = temp_db().await;
 
         let record = LogRecord {
-            timestamp_ns: 1234567890000000000,
-            observed_timestamp_ns: 1234567890000000000,
+            timestamp_ns: 1_234_567_890_000_000_000,
+            observed_timestamp_ns: 1_234_567_890_000_000_000,
             severity_number: Some(9),
             severity_text: Some("INFO".to_string()),
             body: Some("Test log message".to_string()),
@@ -355,8 +392,8 @@ mod tests {
         let db = temp_db().await;
 
         let record = LogRecord {
-            timestamp_ns: 1234567890000000000,
-            observed_timestamp_ns: 1234567890000000000,
+            timestamp_ns: 1_234_567_890_000_000_000,
+            observed_timestamp_ns: 1_234_567_890_000_000_000,
             severity_number: Some(9),
             severity_text: Some("INFO".to_string()),
             body: Some("Test log message".to_string()),
@@ -380,8 +417,8 @@ mod tests {
         let db = temp_db().await;
 
         let record = LogRecord {
-            timestamp_ns: 1234567890000000000,
-            observed_timestamp_ns: 1234567890000000000,
+            timestamp_ns: 1_234_567_890_000_000_000,
+            observed_timestamp_ns: 1_234_567_890_000_000_000,
             severity_number: Some(9),
             severity_text: Some("INFO".to_string()),
             body: Some("First".to_string()),
@@ -397,8 +434,8 @@ mod tests {
         let id = db.get_latest_id().await.unwrap();
 
         let record2 = LogRecord {
-            timestamp_ns: 1234567891000000000,
-            observed_timestamp_ns: 1234567891000000000,
+            timestamp_ns: 1_234_567_891_000_000_000,
+            observed_timestamp_ns: 1_234_567_891_000_000_000,
             severity_number: Some(9),
             severity_text: Some("INFO".to_string()),
             body: Some("Second".to_string()),
