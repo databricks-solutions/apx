@@ -118,6 +118,10 @@ enum FluxCommands {
     Stop(flux::stop::StopArgs),
 }
 
+/// Standard Unix exit code for processes terminated by SIGINT (128 + signal number 2).
+/// Used when the top-level Ctrl+C handler cancels the running command.
+const EXIT_CODE_SIGINT: i32 = 130;
+
 /// Parse CLI arguments and execute the corresponding subcommand.
 ///
 /// Returns an exit code (0 for success, non-zero for failure).
@@ -137,16 +141,32 @@ pub fn run_cli(args: Vec<String>) -> i32 {
 }
 
 async fn run_cli_async(args: Vec<String>) -> i32 {
-    // Restore terminal cursor visibility on Ctrl+C (SIGINT).
-    // dialoguer hides the cursor during interactive widgets; if the process
-    // is killed by a signal before cleanup runs, the cursor stays hidden.
-    tokio::spawn(async {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = console::Term::stderr().show_cursor();
-            std::process::exit(130);
-        }
-    });
+    // Handle Ctrl+C at the top level instead of in a spawned background task.
+    //
+    // `tokio::signal::ctrl_c()` permanently replaces the OS default SIGINT handler,
+    // so the process will NOT self-terminate on Ctrl+C — we must handle it explicitly.
+    //
+    // Using `select!` here (rather than a competing `tokio::spawn`) avoids a race:
+    // when SIGINT arrives, the command future is dropped cooperatively at its next
+    // `.await` point, and `run_cli_async` returns normally. This lets the parent
+    // process (`uv run`) call `waitpid()` cleanly instead of getting ESRCH.
+    //
+    // Command-level Ctrl+C handlers (in `follow_logs`, `bun`, `server`, etc.) still
+    // work: if their inner `select!` processes the signal first, the command future
+    // completes and this outer `select!` takes the `run_command` branch instead.
+    let exit_code = tokio::select! {
+        code = run_command(args) => code,
+        _ = tokio::signal::ctrl_c() => EXIT_CODE_SIGINT,
+    };
 
+    // Restore cursor visibility — covers both normal exit and Ctrl+C.
+    // dialoguer hides the cursor during interactive widgets; this ensures
+    // it reappears regardless of which select! branch won.
+    let _ = console::Term::stderr().show_cursor();
+    exit_code
+}
+
+async fn run_command(args: Vec<String>) -> i32 {
     match Cli::try_parse_from(args) {
         Ok(cli) => match cli.command {
             Some(Commands::Init(init_args)) => init::run(init_args).await,
