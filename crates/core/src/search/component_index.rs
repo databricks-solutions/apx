@@ -70,12 +70,6 @@ impl ComponentIndex {
         Ok(Self { fts })
     }
 
-    /// Create with a specific pool (for testing or custom setups)
-    #[allow(dead_code)]
-    pub fn with_pool(pool: SqlitePool) -> Result<Self, String> {
-        Self::new(pool)
-    }
-
     /// Get the FTS table name
     pub fn table_name() -> &'static str {
         TABLE_NAME
@@ -247,6 +241,13 @@ impl ComponentIndex {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    impl ComponentIndex {
+        /// Create with a specific pool (for testing)
+        pub fn with_pool(pool: SqlitePool) -> Result<Self, String> {
+            Self::new(pool)
+        }
+    }
 
     async fn test_index() -> ComponentIndex {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();

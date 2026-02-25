@@ -17,14 +17,11 @@ use apx_core::interop::{get_template_content, list_template_files};
 // ─── Addon manifest types ───────────────────────────────
 
 #[derive(serde::Deserialize, Default)]
-#[allow(dead_code)]
 pub struct AddonManifest {
     #[serde(default)]
     pub addon: AddonInfo,
     #[serde(default)]
     pub python: PythonMeta,
-    #[serde(default)]
-    pub typescript: TypeScriptMeta,
     #[serde(default)]
     pub components: ComponentsMeta,
     #[serde(default)]
@@ -32,10 +29,7 @@ pub struct AddonManifest {
 }
 
 #[derive(serde::Deserialize, Default)]
-#[allow(dead_code)]
 pub struct AddonInfo {
-    #[serde(default)]
-    pub name: String,
     #[serde(default)]
     pub display_name: String,
     #[serde(default)]
@@ -77,13 +71,6 @@ pub struct AliasEntry {
     pub code: String,
     #[serde(default)]
     pub doc: Option<String>,
-}
-
-#[derive(serde::Deserialize, Default)]
-#[allow(dead_code)]
-pub struct TypeScriptMeta {
-    #[serde(default)]
-    pub dependencies: Vec<String>,
 }
 
 #[derive(serde::Deserialize, Default)]

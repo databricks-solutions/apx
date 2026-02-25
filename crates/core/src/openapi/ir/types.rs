@@ -5,9 +5,6 @@
 //! all code-level AST (expressions, statements, functions) is now handled
 //! directly by SWC's `swc_ecma_ast`.
 
-// Allow dead code for IR types that are part of the design but not yet fully utilized.
-#![allow(dead_code)]
-
 /// Reference to a type - either inline or named
 #[derive(Debug, Clone)]
 pub enum TypeRef {

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::RwLock;
 use tracing::debug;
@@ -131,28 +130,6 @@ impl DatabricksClient {
         let url = format!("{}{}", self.inner.config.host, path);
 
         let response = self.inner.http.get(&url).bearer_auth(&token).send().await?;
-
-        handle_response(response).await
-    }
-
-    /// Perform an authenticated POST request and deserialize the JSON response.
-    #[allow(dead_code)]
-    pub(crate) async fn post<B: Serialize + Send + Sync, T: DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &B,
-    ) -> Result<T> {
-        let token = self.get_token().await?;
-        let url = format!("{}{}", self.inner.config.host, path);
-
-        let response = self
-            .inner
-            .http
-            .post(&url)
-            .bearer_auth(&token)
-            .json(body)
-            .send()
-            .await?;
 
         handle_response(response).await
     }

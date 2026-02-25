@@ -8,8 +8,6 @@ use crate::error::{DatabricksError, Result};
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CliTokenResponse {
     pub access_token: String,
-    #[allow(dead_code)]
-    pub token_type: String,
     pub expiry: String,
 }
 

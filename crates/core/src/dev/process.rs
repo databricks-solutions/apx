@@ -174,12 +174,6 @@ impl ProcessManager {
         self.backend.dev_token()
     }
 
-    /// Return the application directory.
-    #[allow(dead_code)]
-    pub fn app_dir(&self) -> &Path {
-        &self.app_dir
-    }
-
     /// Stop all managed processes using a phased shutdown approach:
     /// 1. Send SIGTERM to allow graceful shutdown
     /// 2. Wait briefly for processes to exit

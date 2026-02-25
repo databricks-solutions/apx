@@ -268,13 +268,7 @@ pub struct RegistryFile {
     /// File content.
     pub content: String,
 
-    /// Some registry items include "target" (often empty). Keep it optional.
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub target: Option<String>,
-
     /// Optional file type hint.
-    #[allow(dead_code)]
     #[serde(default, rename = "type")]
     pub file_type: Option<String>,
 }

@@ -2122,15 +2122,6 @@ mod tests {
         );
     }
 
-    /// Helper that generates TypeScript code from OpenAPI JSON without tsc validation.
-    /// Use this for negative tests or tests that only check generation logic.
-    #[allow(dead_code, clippy::panic)]
-    fn generate_only(openapi_json: &str) -> String {
-        let result = generate(openapi_json);
-        assert!(result.is_ok(), "Generation failed: {:?}", result.err());
-        result.unwrap()
-    }
-
     // =========================================================================
     // TypeScript compilation infrastructure (requires bun to be available on PATH)
     // =========================================================================

@@ -1292,7 +1292,6 @@ mod tests {
         RegistryFile {
             path: path.to_string(),
             content: String::new(),
-            target: None,
             file_type: Some(file_type.to_string()),
         }
     }

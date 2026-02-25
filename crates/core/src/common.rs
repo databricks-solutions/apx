@@ -331,7 +331,6 @@ pub async fn generate_version_file(
 
 /// Result of preflight check with timing information.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct PreflightResult {
     /// Parsed project metadata.
     pub metadata: ProjectMetadata,

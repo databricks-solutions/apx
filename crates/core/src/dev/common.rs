@@ -38,12 +38,11 @@ pub(crate) static HEALTH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 });
 
 /// Result of an HTTP health probe against a backend/frontend service.
-#[allow(dead_code)]
 pub(crate) enum ProbeResult {
-    /// Service responded with the given HTTP status code — it is up.
-    Responded(u16),
+    /// Service responded with an HTTP status code — it is up.
+    Responded,
     /// Connection or timeout error — service is not ready yet.
-    Failed(String),
+    Failed,
 }
 
 /// Probe a service by making an HTTP GET request to its root path.
@@ -61,12 +60,12 @@ pub(crate) async fn http_health_probe(host: &str, port: u16) -> ProbeResult {
             } else {
                 warn!(url = %url, status, elapsed_ms, "Health probe returned non-200");
             }
-            ProbeResult::Responded(status)
+            ProbeResult::Responded
         }
         Err(err) => {
             let elapsed_ms = start.elapsed().as_millis();
             debug!(url = %url, error = %err, elapsed_ms, "Health probe failed");
-            ProbeResult::Failed(err.to_string())
+            ProbeResult::Failed
         }
     }
 }

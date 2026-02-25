@@ -60,9 +60,6 @@ pub fn class_body_indent(source: &str, class_def: &StmtClassDef) -> String {
 
 /// Info about a found function call expression.
 pub struct CallInfo {
-    /// The full range of the call expression.
-    #[allow(dead_code)]
-    pub range: TextRange,
     /// Existing keyword arguments.
     pub keywords: Vec<KeywordInfo>,
     /// The range of the arguments (inside the parentheses).
@@ -71,8 +68,6 @@ pub struct CallInfo {
 
 pub struct KeywordInfo {
     pub name: String,
-    #[allow(dead_code)]
-    pub range: TextRange,
     /// If the keyword value is a list, the range of that list expression.
     pub list_range: Option<TextRange>,
 }
@@ -120,7 +115,6 @@ fn find_call_in_expr(expr: &Expr, call_target: &str) -> Option<CallInfo> {
                 .collect();
 
             return Some(CallInfo {
-                range: call.range,
                 keywords,
                 args_end: usize::from(call.range.end()) - 1, // position of closing `)`
             });
@@ -136,11 +130,7 @@ fn keyword_info(kw: &Keyword) -> Option<KeywordInfo> {
     } else {
         None
     };
-    Some(KeywordInfo {
-        name,
-        range: kw.range,
-        list_range,
-    })
+    Some(KeywordInfo { name, list_range })
 }
 
 fn expr_name(expr: &Expr) -> String {

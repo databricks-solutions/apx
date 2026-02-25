@@ -149,18 +149,6 @@ impl Registry {
 
         Err("No available ports".to_string())
     }
-
-    /// Get the number of registered servers
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.data.servers.len()
-    }
-
-    /// Check if the registry is empty
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.data.servers.is_empty()
-    }
 }
 
 #[cfg(test)]

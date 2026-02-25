@@ -51,14 +51,6 @@ impl Fts5Table {
         })
     }
 
-    /// Set a custom tokenizer (default: `"porter unicode61"`).
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn with_tokenizer(mut self, tokenizer: &str) -> Self {
-        self.tokenizer = tokenizer.to_string();
-        self
-    }
-
     /// Get the table name.
     #[must_use]
     pub fn table_name(&self) -> &str {

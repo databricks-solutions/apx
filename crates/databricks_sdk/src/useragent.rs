@@ -38,14 +38,6 @@ impl UserAgent {
         self.auth_type = Some(sanitize(auth_type));
         self
     }
-
-    /// Add an extra key/value pair to the User-Agent string.
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn with_extra(mut self, key: &str, value: &str) -> Self {
-        self.extras.push((sanitize(key), sanitize(value)));
-        self
-    }
 }
 
 impl fmt::Display for UserAgent {
@@ -147,6 +139,16 @@ fn detect_cicd() -> Option<&'static str> {
         return Some("teamcity");
     }
     None
+}
+
+#[cfg(test)]
+impl UserAgent {
+    /// Add an extra key/value pair to the User-Agent string.
+    #[must_use]
+    pub fn with_extra(mut self, key: &str, value: &str) -> Self {
+        self.extras.push((sanitize(key), sanitize(value)));
+        self
+    }
 }
 
 #[cfg(test)]

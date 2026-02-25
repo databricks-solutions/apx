@@ -333,8 +333,8 @@ impl DevProcess for Backend {
         drop(guard);
 
         match http_health_probe(CLIENT_HOST, self.cfg.backend_port).await {
-            ProbeResult::Responded(_) => "healthy",
-            ProbeResult::Failed(_) => "starting",
+            ProbeResult::Responded => "healthy",
+            ProbeResult::Failed => "starting",
         }
     }
 }

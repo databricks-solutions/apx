@@ -184,15 +184,6 @@ impl SDKDocsIndex {
         }
     }
 
-    /// Create with a specific pool (for testing or custom setups)
-    #[allow(dead_code)]
-    pub fn with_pool(pool: SqlitePool) -> Self {
-        Self {
-            pool,
-            version: None,
-        }
-    }
-
     /// Get table name for a version
     pub fn table_name(version: &str) -> String {
         format!(
@@ -455,6 +446,16 @@ mod tests {
         assert_eq!(svc, "clusters");
         assert_eq!(ent, "ClustersAPI");
         assert_eq!(op, "create");
+    }
+
+    impl SDKDocsIndex {
+        /// Create with a specific pool (for testing)
+        pub fn with_pool(pool: SqlitePool) -> Self {
+            Self {
+                pool,
+                version: None,
+            }
+        }
     }
 
     #[test]

@@ -509,12 +509,7 @@ fn normalize_operation(
 
     Ok(OperationIR {
         name,
-        kind,
-        path: path.to_string(),
-        method,
         params,
-        body,
-        response,
         fetch,
         hooks,
         query_key,

@@ -309,13 +309,11 @@ impl LogsDb {
         }
         Ok(deleted)
     }
+}
 
+#[cfg(test)]
+impl LogsDb {
     /// Get the total count of logs.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database query fails.
-    #[allow(dead_code)]
     pub async fn count_logs(&self) -> Result<i64, String> {
         let row = sqlx::query("SELECT COUNT(*) as cnt FROM logs")
             .fetch_one(&self.pool)
