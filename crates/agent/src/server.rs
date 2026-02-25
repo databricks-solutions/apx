@@ -53,38 +53,26 @@ pub async fn run_server() -> Result<(), String> {
     run_http_server(storage).await
 }
 
+/// Log the result of a cleanup operation.
+fn log_cleanup_result(result: Result<usize, impl std::fmt::Display>, label: &str) {
+    match result {
+        Ok(deleted) if deleted > 0 => info!("{label}: removed {deleted} old log records"),
+        Ok(_) => debug!("{label}: no old records to remove"),
+        Err(e) => error!("{label} failed: {e}"),
+    }
+}
+
 /// Periodic cleanup loop that runs within the daemon process.
 /// Deletes logs older than 7 days every hour.
-// The function is straightforward despite its measured complexity — it's just
-// an init step followed by a loop, both doing the same match.
-#[allow(clippy::cognitive_complexity)]
 async fn run_cleanup_loop(storage: LogsDb) {
-    // Cleanup interval: 1 hour
     let interval = Duration::from_secs(60 * 60);
-
     info!("Cleanup scheduler started (interval: 1 hour, retention: 7 days)");
 
-    // Run initial cleanup
-    match storage.cleanup_old_logs().await {
-        Ok(deleted) if deleted > 0 => info!("Initial cleanup: removed {} old log records", deleted),
-        Ok(_) => debug!("Initial cleanup: no old records to remove"),
-        Err(e) => error!("Initial cleanup failed: {}", e),
-    }
+    log_cleanup_result(storage.cleanup_old_logs().await, "Initial cleanup");
 
     loop {
         tokio::time::sleep(interval).await;
-
-        match storage.cleanup_old_logs().await {
-            Ok(deleted) if deleted > 0 => {
-                info!("Cleanup: removed {} old log records", deleted);
-            }
-            Ok(_) => {
-                debug!("Cleanup: no old records to remove");
-            }
-            Err(e) => {
-                error!("Cleanup failed: {}", e);
-            }
-        }
+        log_cleanup_result(storage.cleanup_old_logs().await, "Cleanup");
     }
 }
 
@@ -116,9 +104,16 @@ async fn health_check() -> impl IntoResponse {
     StatusCode::OK
 }
 
+/// Dispatch log parsing based on content type.
+fn parse_request_logs(content_type: &str, body: &[u8]) -> Result<Vec<LogRecord>, String> {
+    if content_type.contains("application/x-protobuf") {
+        parse_protobuf_logs(body)
+    } else {
+        parse_json_logs(body)
+    }
+}
+
 /// Handle incoming OTLP logs (JSON or Protobuf).
-// Complexity is inherent to dispatching between JSON/protobuf and storing results.
-#[allow(clippy::cognitive_complexity)]
 async fn handle_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -129,22 +124,11 @@ async fn handle_logs(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/json");
 
-    let records = if content_type.contains("application/x-protobuf") {
-        match parse_protobuf_logs(&body) {
-            Ok(r) => r,
-            Err(e) => {
-                error!("Failed to parse protobuf logs: {}", e);
-                return StatusCode::BAD_REQUEST;
-            }
-        }
-    } else {
-        // Default to JSON
-        match parse_json_logs(&body) {
-            Ok(r) => r,
-            Err(e) => {
-                error!("Failed to parse JSON logs: {}", e);
-                return StatusCode::BAD_REQUEST;
-            }
+    let records = match parse_request_logs(content_type, &body) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to parse logs: {e}");
+            return StatusCode::BAD_REQUEST;
         }
     };
 
@@ -160,7 +144,7 @@ async fn handle_logs(
             StatusCode::OK
         }
         Err(e) => {
-            error!("Failed to store logs: {}", e);
+            error!("Failed to store logs: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
