@@ -11,7 +11,7 @@ use apx_core::dev::common::{
     BACKEND_PORT_END, BACKEND_PORT_START, DB_PORT_END, DB_PORT_START, FRONTEND_PORT_END,
     FRONTEND_PORT_START, find_random_port_in_range,
 };
-use apx_core::dev::server::{ServerConfig, run_server};
+use apx_core::dev::server::{ServerConfig, resolve_databricks_profile, run_server};
 use apx_core::dev::token;
 
 /// Maximum number of retries for subprocess port allocation
@@ -51,7 +51,7 @@ async fn run_inner(args: InternalRunServerArgs) -> Result<(), String> {
     if args.skip_credentials_validation {
         warn!("Credentials validation skipped. API proxy may not work correctly.");
     } else {
-        let profile = std::env::var("DATABRICKS_CONFIG_PROFILE").unwrap_or_default();
+        let profile = resolve_databricks_profile(&args.app_dir).unwrap_or_default();
         if let Err(err) = apx_databricks_sdk::validate_credentials(&profile).await {
             warn!("Credentials validation failed: {err}. API proxy may not work correctly.");
         }
