@@ -487,6 +487,8 @@ async fn launch_attached(
         validate_credentials(app_dir).await;
     }
 
+    crate::tracing_init::enable_dev_format();
+
     let mut last_error = String::new();
 
     for attempt in 1..=MAX_PORT_RETRIES {
