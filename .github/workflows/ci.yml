@@ -92,7 +92,7 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-          arguments: licenses
+          command-arguments: "licenses"
 
       - name: Cargo fmt
         run: cargo fmt --all -- --check
