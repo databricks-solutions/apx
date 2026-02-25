@@ -1,3 +1,5 @@
+//! APX Studio - Convenient and simple UI to develop with `apx` framework.
+
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;

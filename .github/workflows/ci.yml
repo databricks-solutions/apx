@@ -87,6 +87,9 @@ jobs:
       # Run checks
       - name: Cargo check
         run: cargo check --workspace --exclude apx-studio --all-targets
+      
+      - name: Cargo deny check
+        run: cargo deny check licenses
 
       - name: Cargo fmt
         run: cargo fmt --all -- --check
