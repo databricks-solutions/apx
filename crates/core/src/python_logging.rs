@@ -536,6 +536,7 @@ pub async fn resolve_log_config(
 }
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;

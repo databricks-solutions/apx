@@ -6,6 +6,7 @@
 
 use swc_atoms::Atom;
 use swc_common::{DUMMY_SP, SyntaxContext};
+// Reason: builder module uses most items from parent; explicit list would be unwieldy
 #[allow(clippy::wildcard_imports)]
 use swc_ecma_ast::*;
 

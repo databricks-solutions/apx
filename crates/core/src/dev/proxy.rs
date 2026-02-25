@@ -264,6 +264,7 @@ async fn ui_proxy_handler(State(state): State<UiProxyState>, req: Request<Body>)
     .await
 }
 
+// Reason: proxy forwarding inherently requires many context parameters
 #[allow(clippy::too_many_arguments)]
 async fn proxy_request(
     req: Request<Body>,
@@ -301,6 +302,7 @@ async fn proxy_request(
     .await
 }
 
+// Reason: proxy forwarding inherently requires many context parameters
 #[allow(clippy::too_many_arguments)]
 async fn proxy_http(
     req: Request<Body>,

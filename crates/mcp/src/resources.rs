@@ -194,6 +194,7 @@ fn scan_backend_files(project_root: &std::path::Path, app_slug: &str) -> Vec<Str
 }
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

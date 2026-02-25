@@ -20,8 +20,8 @@ use std::time::Duration;
 
 // Re-export commonly used types
 pub use storage::{
-    AggregatedRecord, LogAggregator, LogRecord, flux_dir, get_aggregation_key, should_skip_log,
-    should_skip_log_message, source_label,
+    AggregatedRecord, LogAggregator, LogRecord, ServiceKind, flux_dir, get_aggregation_key,
+    should_skip_log, should_skip_log_message, source_label,
 };
 
 /// Version of the apx-common crate, used for agent version matching.

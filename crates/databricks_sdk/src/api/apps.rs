@@ -342,6 +342,7 @@ fn parse_and_buffer(text: &str, args: &AppLogsArgs<'_>, buffer: &mut VecDeque<Lo
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

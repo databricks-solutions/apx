@@ -30,6 +30,7 @@ pub fn validated_app_path(s: &str) -> Result<PathBuf, rmcp::ErrorData> {
 }
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

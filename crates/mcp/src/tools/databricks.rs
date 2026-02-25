@@ -190,6 +190,7 @@ fn resolve_profile(args: &DatabricksAppsLogsArgs, dotenv_vars: &HashMap<String, 
 }
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;

@@ -18,6 +18,7 @@ struct Inner {
     cached_token: RwLock<Option<CachedToken>>,
 }
 
+// Reason: token field is sensitive and must not appear in debug output
 #[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for Inner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -44,6 +45,7 @@ impl DatabricksClient {
     /// # Errors
     ///
     /// Returns an error if the profile cannot be resolved from the config file.
+    // Reason: async signature required by trait interface
     #[allow(clippy::unused_async)]
     pub async fn new(profile: &str) -> Result<Self> {
         let config = resolve_config(profile)?;
@@ -55,6 +57,7 @@ impl DatabricksClient {
     /// # Errors
     ///
     /// Returns an error if the profile cannot be resolved from the config file.
+    // Reason: async signature required by trait interface
     #[allow(clippy::unused_async)]
     pub async fn with_product(profile: &str, product: &str, product_version: &str) -> Result<Self> {
         let mut config = resolve_config(profile)?;

@@ -421,6 +421,7 @@ fn get_metadata_string(metadata: &toml::Value, key: &str) -> Result<String, Stri
 }
 
 /// Print a message to stdout (Interactive) or stderr (Quiet).
+// Reason: spinner output is intentional user-facing display
 #[allow(clippy::print_stdout)]
 pub fn emit(mode: OutputMode, msg: &str) {
     match mode {
@@ -443,10 +444,12 @@ pub fn spinner_for_mode(message: &str, mode: OutputMode) -> ProgressBar {
 }
 
 // Spinner utilities for CLI operations
+// Reason: spinner output is intentional user-facing display
 #[allow(clippy::print_stdout)]
 /// Create a visible CLI spinner with the given message.
 pub fn spinner(message: &str) -> ProgressBar {
     let spinner = ProgressBar::new_spinner();
+    // Reason: literal braces in spinner template, not format arguments
     #[allow(clippy::literal_string_with_formatting_args)]
     let style = ProgressStyle::with_template("{spinner} {msg}")
         .unwrap_or_else(|_| ProgressStyle::default_spinner());
@@ -560,6 +563,7 @@ pub fn format_elapsed_ms(start: Instant) -> String {
     format!("{seconds}s {remaining_ms}ms")
 }
 
+// Reason: direct stdout is required for progress display
 #[allow(clippy::print_stdout)]
 /// Run a synchronous closure with a spinner, printing the success message on completion.
 pub fn run_with_spinner<F>(description: &str, success_message: &str, f: F) -> Result<(), String>
@@ -576,6 +580,7 @@ where
     result
 }
 
+// Reason: direct stdout is required for progress display
 #[allow(clippy::print_stdout)]
 /// Run an async closure with a spinner, printing the success message on completion.
 pub async fn run_with_spinner_async<F, Fut>(
@@ -644,6 +649,7 @@ impl Timer {
 }
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

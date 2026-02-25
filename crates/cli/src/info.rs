@@ -25,6 +25,7 @@ pub async fn run(_args: InfoArgs) -> i32 {
     run_cli_async_helper(run_inner).await
 }
 
+// Reason: direct stdout is required for info display
 #[allow(clippy::print_stdout)]
 async fn run_inner() -> Result<(), String> {
     // --- apx section ---
@@ -68,6 +69,7 @@ async fn run_inner() -> Result<(), String> {
     Ok(())
 }
 
+// Reason: direct stdout is required for info display
 #[allow(clippy::print_stdout)]
 fn print_tool_entry(entry: &ToolInfoEntry) {
     println!();

@@ -358,7 +358,7 @@ fn get_registry_index_url(
                 RegistryConfig::Template(t) => t.clone(),
                 RegistryConfig::Advanced(a) => a.url.clone(),
             };
-            // Replace {name} with "registry" and remove {style} if present
+            // Reason: literal braces in URL template, not format arguments
             #[allow(clippy::literal_string_with_formatting_args)]
             let url = template
                 .replace("{name}", "registry")

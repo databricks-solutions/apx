@@ -4,6 +4,7 @@
 //! at every stage of the project lifecycle.
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::path::Path;

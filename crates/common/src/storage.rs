@@ -53,22 +53,54 @@ impl LogRecord {
     /// Derive a short source label from `service_name`.
     #[must_use]
     pub fn source_label(&self) -> &'static str {
-        source_label(self.service_name.as_deref().unwrap_or("unknown"))
+        ServiceKind::from_service_name(self.service_name.as_deref().unwrap_or("unknown")).label()
+    }
+}
+
+/// Fixed set of service kinds for display and color-coding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceKind {
+    /// Backend application service (`_app` suffix).
+    App,
+    /// Frontend UI service (`_ui` suffix).
+    Ui,
+    /// Database proxy service (`_db` suffix).
+    Db,
+    /// Any other service.
+    Other,
+}
+
+impl ServiceKind {
+    /// Classify a service name by its `_app` / `_ui` / `_db` suffix.
+    #[must_use]
+    pub fn from_service_name(name: &str) -> Self {
+        if name.ends_with("_app") {
+            Self::App
+        } else if name.ends_with("_ui") {
+            Self::Ui
+        } else if name.ends_with("_db") {
+            Self::Db
+        } else {
+            Self::Other
+        }
+    }
+
+    /// Short display label: `"app"`, `"ui"`, `"db"`, or `"apx"`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::App => "app",
+            Self::Ui => "ui",
+            Self::Db => "db",
+            Self::Other => "apx",
+        }
     }
 }
 
 /// Derive a short source label from a service name string.
 #[must_use]
 pub fn source_label(service_name: &str) -> &'static str {
-    if service_name.ends_with("_app") {
-        "app"
-    } else if service_name.ends_with("_ui") {
-        "ui"
-    } else if service_name.ends_with("_db") {
-        "db"
-    } else {
-        "apx"
-    }
+    ServiceKind::from_service_name(service_name).label()
 }
 
 // ---------------------------------------------------------------------------

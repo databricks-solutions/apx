@@ -13,6 +13,7 @@ pub use emitter::generate;
 pub use ir::utils::capitalize_first;
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)]
 mod tests {
     use super::*;
@@ -2274,6 +2275,7 @@ mod tests {
 
     /// Helper that generates TypeScript code from OpenAPI JSON and verifies it compiles with tsc.
     /// Use this ONLY for positive tests where generated code should be valid TypeScript.
+    // Reason: panicking on failure is idiomatic in tests
     #[allow(clippy::panic)]
     fn generate_and_verify(openapi_json: &str) -> String {
         let result = generate(openapi_json);

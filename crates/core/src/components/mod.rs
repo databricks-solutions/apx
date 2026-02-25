@@ -331,6 +331,7 @@ pub fn resolve_component_request(
     let style = cfg.style();
 
     // 2) Default registry: shadcn/ui
+    // Reason: literal braces in user-facing message, not format arguments
     #[allow(clippy::literal_string_with_formatting_args)]
     if registry.is_none() {
         let url_candidate = SHADCN_REGISTRY_ITEM_TEMPLATE
@@ -872,6 +873,7 @@ fn rewrite_registry_imports(content: &str) -> String {
     tw_transform::transform_tailwind_v3_to_v4(&result)
 }
 
+// Reason: literal braces in code template, not format arguments
 #[allow(clippy::literal_string_with_formatting_args)]
 fn apply_placeholders(template: &str, name: &str, style: &str) -> Result<String, String> {
     if !template.contains("{name}") {

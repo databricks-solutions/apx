@@ -139,6 +139,53 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     // Eagerly resolve uv (always needed)
     let _uv = apx_core::external::Uv::new().await?;
 
+    let (workspace_root, app_path, is_member) = resolve_app_path(&mut args)?;
+
+    println!("Welcome to apx 🚀\n");
+
+    let (app_name, app_slug) = resolve_app_name(&mut args)?;
+
+    let all_addons = discover_all_addons();
+    let addon_names: Vec<String> = all_addons.iter().map(|(name, _)| name.clone()).collect();
+    let selected_addons = select_addons(&args, &addon_names, &all_addons)?;
+
+    let ui_enabled = selected_addons.iter().any(|a| a == "ui");
+
+    select_profile(&mut args)?;
+
+    // Resolve bun only for UI-enabled projects
+    if ui_enabled {
+        let _bun = Bun::new().await?;
+    }
+
+    println!(
+        "\nInitializing app {} in {}\n",
+        app_name,
+        app_path
+            .canonicalize()
+            .unwrap_or_else(|_| app_path.clone())
+            .display()
+    );
+
+    scaffold_project(
+        &app_path,
+        &app_name,
+        &app_slug,
+        &selected_addons,
+        args.profile.as_deref(),
+    )?;
+
+    init_git_repo(&workspace_root, &app_path, is_member).await;
+
+    install_addon_components(&app_path, &selected_addons).await?;
+
+    print_success(&app_name, &workspace_root, &app_path, is_member);
+
+    Ok(())
+}
+
+/// Resolve the workspace root, app path, and whether we are in member mode.
+fn resolve_app_path(args: &mut InitArgs) -> Result<(PathBuf, PathBuf, bool), String> {
     let workspace_root = resolve_app_dir(args.app_path.take());
 
     // Auto-detect member mode: if CWD has pyproject.toml without [tool.apx],
@@ -166,8 +213,11 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
         workspace_root.clone()
     };
 
-    println!("Welcome to apx 🚀\n");
+    Ok((workspace_root, app_path, is_member))
+}
 
+/// Prompt for or normalize the app name, returning `(app_name, app_slug)`.
+fn resolve_app_name(args: &mut InitArgs) -> Result<(String, String), String> {
     if args.app_name.is_none() {
         let default_name = random_name();
         let name = Input::<String>::new()
@@ -181,209 +231,211 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     let app_name_raw = args.app_name.take().unwrap_or_default();
     let app_name = normalize_app_name(&app_name_raw)?;
     let app_slug = app_name.replace('-', "_");
+    Ok((app_name, app_slug))
+}
 
-    // ─── Discover all available addons ─────────────────────
-    let all_addons = discover_all_addons();
-    let addon_names: Vec<String> = all_addons.iter().map(|(name, _)| name.clone()).collect();
+/// Discover, validate, and interactively select addons to enable.
+fn select_addons(
+    args: &InitArgs,
+    addon_names: &[String],
+    all_addons: &[(String, crate::dev::apply::AddonManifest)],
+) -> Result<Vec<String>, String> {
+    if args.no_addons {
+        return Ok(Vec::new());
+    }
 
-    // ─── Resolve addons ─────────────────────────────────────
-    let selected_addons: Vec<String> = if args.no_addons {
-        // --no-addons → backend-only
-        Vec::new()
-    } else if let Some(ref addons) = args.addons {
-        // --addons=none → backend-only; --addons=ui,sidebar → explicit list
+    if let Some(ref addons) = args.addons {
         if addons.len() == 1 && addons[0] == "none" {
-            Vec::new()
-        } else {
-            // Validate addon names
-            for a in addons {
-                if !addon_names.contains(a) {
-                    return Err(format!(
-                        "Unknown addon '{}'. Available addons: {}",
-                        a,
-                        addon_names.join(", ")
-                    ));
-                }
+            return Ok(Vec::new());
+        }
+        // Validate addon names
+        for a in addons {
+            if !addon_names.contains(a) {
+                return Err(format!(
+                    "Unknown addon '{}'. Available addons: {}",
+                    a,
+                    addon_names.join(", ")
+                ));
             }
-            addons.clone()
+        }
+        return Ok(addons.clone());
+    }
+
+    // Interactive grouped multi-select
+    // Group addons by their group field, ordered: ui, backend, assistants, then rest
+    let group_order = ["ui", "backend", "assistants"];
+    let mut groups: BTreeMap<String, Vec<AddonEntry>> = BTreeMap::new();
+    let mut group_display_names: BTreeMap<String, String> = BTreeMap::new();
+    for (name, manifest) in all_addons {
+        let group = if manifest.addon.group.is_empty() {
+            "common".to_string()
+        } else {
+            manifest.addon.group.clone()
+        };
+        if !manifest.addon.group_display_name.is_empty() {
+            group_display_names
+                .entry(group.clone())
+                .or_insert_with(|| manifest.addon.group_display_name.clone());
+        }
+        groups.entry(group).or_default().push((
+            name.clone(),
+            manifest.addon.display_name.clone(),
+            manifest.addon.description.clone(),
+            manifest.addon.default,
+            manifest.addon.order,
+        ));
+    }
+    // Sort addons within each group by order
+    for group_addons in groups.values_mut() {
+        group_addons.sort_by_key(|(_, _, _, _, order)| *order);
+    }
+
+    let mut ordered_groups: Vec<String> = Vec::new();
+    for g in &group_order {
+        if groups.contains_key(*g) {
+            ordered_groups.push(g.to_string());
+        }
+    }
+    for g in groups.keys() {
+        if !ordered_groups.contains(g) {
+            ordered_groups.push(g.clone());
+        }
+    }
+
+    // Build flat list with header items interleaved
+    let mut labels: Vec<String> = Vec::new();
+    let mut defaults: Vec<bool> = Vec::new();
+    let mut is_header: Vec<bool> = Vec::new();
+    let mut addon_for_index: Vec<Option<String>> = Vec::new();
+
+    for group_name in &ordered_groups {
+        if let Some(group_addons) = groups.get(group_name) {
+            // Group header (non-selectable visually)
+            let header_label = group_display_names
+                .get(group_name)
+                .cloned()
+                .unwrap_or_else(|| capitalize_first(group_name));
+            labels.push(format!("{HEADER_MARKER}{header_label}"));
+            defaults.push(false);
+            is_header.push(true);
+            addon_for_index.push(None);
+
+            for (name, display_name, desc, default, _order) in group_addons {
+                let label_name = if display_name.is_empty() {
+                    name.as_str()
+                } else {
+                    display_name.as_str()
+                };
+                let label = if desc.is_empty() {
+                    label_name.to_string()
+                } else {
+                    format!("{label_name} — {desc}")
+                };
+                labels.push(label);
+                defaults.push(*default);
+                is_header.push(false);
+                addon_for_index.push(Some(name.clone()));
+            }
+        }
+    }
+
+    let label_refs: Vec<&str> = labels.iter().map(|l| l.as_str()).collect();
+    let theme = GroupedTheme::new();
+    let selections = MultiSelect::with_theme(&theme)
+        .with_prompt(
+            "Which addons would you like to enable? (space = toggle, enter = confirm, a = all)",
+        )
+        .items(&label_refs)
+        .defaults(&defaults)
+        .report(false)
+        .interact()
+        .map_err(|err| format!("Failed to select addons: {err}"))?;
+
+    // Filter out header indices and map to addon names
+    let selected: Vec<String> = selections
+        .into_iter()
+        .filter(|&i| !is_header[i])
+        .filter_map(|i| addon_for_index[i].clone())
+        .collect();
+
+    if selected.is_empty() {
+        println!("  Addons: none");
+    } else {
+        println!("  Addons: {}", selected.join(", "));
+    }
+
+    Ok(selected)
+}
+
+/// Prompt the user to select a Databricks CLI profile.
+fn select_profile(args: &mut InitArgs) -> Result<(), String> {
+    if args.profile.is_some() {
+        return Ok(());
+    }
+
+    let available_profiles = list_profiles()?;
+    if available_profiles.is_empty() {
+        println!("No Databricks profiles found in ~/.databrickscfg");
+        let should_prompt = Confirm::new()
+            .with_prompt("Would you like to specify a profile name?")
+            .default(false)
+            .interact()
+            .map_err(|err| format!("Failed to read profile choice: {err}"))?;
+        if should_prompt {
+            let profile = Input::<String>::new()
+                .with_prompt("Enter profile name")
+                .interact_text()
+                .map_err(|err| format!("Failed to read profile: {err}"))?;
+            args.profile = Some(profile);
+        } else {
+            args.profile = None;
         }
     } else {
-        // Interactive grouped multi-select
-        // Group addons by their group field, ordered: ui, backend, assistants, then rest
-        let group_order = ["ui", "backend", "assistants"];
-        let mut groups: BTreeMap<String, Vec<AddonEntry>> = BTreeMap::new();
-        let mut group_display_names: BTreeMap<String, String> = BTreeMap::new();
-        for (name, manifest) in &all_addons {
-            let group = if manifest.addon.group.is_empty() {
-                "common".to_string()
-            } else {
-                manifest.addon.group.clone()
-            };
-            if !manifest.addon.group_display_name.is_empty() {
-                group_display_names
-                    .entry(group.clone())
-                    .or_insert_with(|| manifest.addon.group_display_name.clone());
-            }
-            groups.entry(group).or_default().push((
-                name.clone(),
-                manifest.addon.display_name.clone(),
-                manifest.addon.description.clone(),
-                manifest.addon.default,
-                manifest.addon.order,
-            ));
-        }
-        // Sort addons within each group by order
-        for group_addons in groups.values_mut() {
-            group_addons.sort_by_key(|(_, _, _, _, order)| *order);
-        }
+        let mut items: Vec<String> = available_profiles.clone();
+        items.push("Enter manually".into());
+        items.push("Skip".into());
 
-        let mut ordered_groups: Vec<String> = Vec::new();
-        for g in &group_order {
-            if groups.contains_key(*g) {
-                ordered_groups.push(g.to_string());
-            }
-        }
-        for g in groups.keys() {
-            if !ordered_groups.contains(g) {
-                ordered_groups.push(g.clone());
-            }
-        }
-
-        // Build flat list with header items interleaved
-        let mut labels: Vec<String> = Vec::new();
-        let mut defaults: Vec<bool> = Vec::new();
-        let mut is_header: Vec<bool> = Vec::new();
-        let mut addon_for_index: Vec<Option<String>> = Vec::new();
-
-        for group_name in &ordered_groups {
-            if let Some(group_addons) = groups.get(group_name) {
-                // Group header (non-selectable visually)
-                let header_label = group_display_names
-                    .get(group_name)
-                    .cloned()
-                    .unwrap_or_else(|| capitalize_first(group_name));
-                labels.push(format!("{HEADER_MARKER}{header_label}"));
-                defaults.push(false);
-                is_header.push(true);
-                addon_for_index.push(None);
-
-                for (name, display_name, desc, default, _order) in group_addons {
-                    let label_name = if display_name.is_empty() {
-                        name.as_str()
-                    } else {
-                        display_name.as_str()
-                    };
-                    let label = if desc.is_empty() {
-                        label_name.to_string()
-                    } else {
-                        format!("{label_name} — {desc}")
-                    };
-                    labels.push(label);
-                    defaults.push(*default);
-                    is_header.push(false);
-                    addon_for_index.push(Some(name.clone()));
-                }
-            }
-        }
-
-        let label_refs: Vec<&str> = labels.iter().map(|l| l.as_str()).collect();
-        let theme = GroupedTheme::new();
-        let selections = MultiSelect::with_theme(&theme)
-            .with_prompt(
-                "Which addons would you like to enable? (space = toggle, enter = confirm, a = all)",
-            )
-            .items(&label_refs)
-            .defaults(&defaults)
-            .report(false)
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Which Databricks profile would you like to use?")
+            .items(&items)
+            .default(0)
             .interact()
-            .map_err(|err| format!("Failed to select addons: {err}"))?;
+            .map_err(|err| format!("Failed to read profile: {err}"))?;
 
-        // Filter out header indices and map to addon names
-        let selected: Vec<String> = selections
-            .into_iter()
-            .filter(|&i| !is_header[i])
-            .filter_map(|i| addon_for_index[i].clone())
-            .collect();
-
-        if selected.is_empty() {
-            println!("  Addons: none");
-        } else {
-            println!("  Addons: {}", selected.join(", "));
-        }
-
-        selected
-    };
-
-    let ui_enabled = selected_addons.iter().any(|a| a == "ui");
-
-    if args.profile.is_none() {
-        let available_profiles = list_profiles()?;
-        if available_profiles.is_empty() {
-            println!("No Databricks profiles found in ~/.databrickscfg");
-            let should_prompt = Confirm::new()
-                .with_prompt("Would you like to specify a profile name?")
-                .default(false)
-                .interact()
-                .map_err(|err| format!("Failed to read profile choice: {err}"))?;
-            if should_prompt {
-                let profile = Input::<String>::new()
-                    .with_prompt("Enter profile name")
-                    .interact_text()
-                    .map_err(|err| format!("Failed to read profile: {err}"))?;
-                args.profile = Some(profile);
-            } else {
-                args.profile = None;
-            }
-        } else {
-            let mut items: Vec<String> = available_profiles.clone();
-            items.push("Enter manually".into());
-            items.push("Skip".into());
-
-            let selection = Select::with_theme(&ColorfulTheme::default())
-                .with_prompt("Which Databricks profile would you like to use?")
-                .items(&items)
-                .default(0)
-                .interact()
+        if selection == items.len() - 1 {
+            // "Skip"
+            args.profile = None;
+        } else if selection == items.len() - 2 {
+            // "Enter manually"
+            let profile = Input::<String>::new()
+                .with_prompt("Enter profile name")
+                .interact_text()
                 .map_err(|err| format!("Failed to read profile: {err}"))?;
-
-            if selection == items.len() - 1 {
-                // "Skip"
-                args.profile = None;
-            } else if selection == items.len() - 2 {
-                // "Enter manually"
-                let profile = Input::<String>::new()
-                    .with_prompt("Enter profile name")
-                    .interact_text()
-                    .map_err(|err| format!("Failed to read profile: {err}"))?;
-                args.profile = Some(profile);
-            } else {
-                args.profile = Some(available_profiles[selection].clone());
-            }
+            args.profile = Some(profile);
+        } else {
+            args.profile = Some(available_profiles[selection].clone());
         }
     }
 
-    // Resolve bun only for UI-enabled projects
-    if ui_enabled {
-        let _bun = Bun::new().await?;
-    }
+    Ok(())
+}
 
-    println!(
-        "\nInitializing app {} in {}\n",
-        app_name,
-        app_path
-            .canonicalize()
-            .unwrap_or_else(|_| app_path.clone())
-            .display()
-    );
-
+/// Create directories, render templates, apply addons, and set the profile.
+fn scaffold_project(
+    app_path: &Path,
+    app_name: &str,
+    app_slug: &str,
+    selected_addons: &[String],
+    profile: Option<&str>,
+) -> Result<(), String> {
     run_with_spinner(
         "📁 Preparing project layout...",
         "✅ Project layout prepared",
         || {
-            ensure_dir(&app_path)?;
-            render_embedded_templates("base/", &app_path, &app_name, &app_slug)?;
+            ensure_dir(app_path)?;
+            render_embedded_templates("base/", app_path, app_name, app_slug)?;
 
-            let dist_dir = app_path.join("src").join(&app_slug).join("__dist__");
+            let dist_dir = app_path.join("src").join(app_slug).join("__dist__");
             ensure_dir(&dist_dir)?;
             fs::write(dist_dir.join(".gitignore"), "*\n")
                 .map_err(|err| format!("Failed to write dist .gitignore: {err}"))?;
@@ -394,42 +446,47 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
                 .map_err(|err| format!("Failed to write .build .gitignore: {err}"))?;
 
             // Apply all selected addon files
-            for addon_name in &selected_addons {
+            for addon_name in selected_addons {
                 let prefix = format!("addons/{addon_name}/");
-                render_embedded_templates(&prefix, &app_path, &app_name, &app_slug)?;
+                render_embedded_templates(&prefix, app_path, app_name, app_slug)?;
 
                 // Apply Python AST edits and install skills from manifest
                 if let Some(manifest) = read_addon_manifest(addon_name) {
                     if let Some(ref skill_path) = manifest.addon.skill_path {
-                        crate::skill::install::install_skills_to(&app_path, skill_path)?;
+                        crate::skill::install::install_skills_to(app_path, skill_path)?;
                     }
-                    apply_python_edits(&manifest, &app_path, &app_slug)?;
+                    apply_python_edits(&manifest, app_path, app_slug)?;
                 }
 
                 // Handle UI addon's pyproject merge
                 if addon_name == "ui" {
-                    merge_ui_pyproject_config(&app_path, &app_slug)?;
+                    merge_ui_pyproject_config(app_path, app_slug)?;
                 }
             }
 
             // Set profile AFTER addon templates, since addons may overwrite .env
-            if let Some(profile) = args.profile.as_deref() {
+            if let Some(profile) = profile {
                 let mut dotenv = DotenvFile::read(&app_path.join(".env"))?;
                 dotenv.update("DATABRICKS_CONFIG_PROFILE", profile)?;
             }
 
             Ok(())
         },
-    )?;
+    )
+}
 
-    // Git initialization logic (always operates at the workspace root)
-    let git_dir = if is_member {
-        &workspace_root
-    } else {
-        &app_path
-    };
+/// Initialize a git repository at the workspace root (or app path if not a member).
+async fn init_git_repo(workspace_root: &Path, app_path: &Path, is_member: bool) {
+    let git_dir = if is_member { workspace_root } else { app_path };
     if Git::is_available().await {
-        let git = Git::new().map_err(|e| e.to_string())?;
+        let git = match Git::new().map_err(|e| e.to_string()) {
+            Ok(g) => g,
+            Err(err) => {
+                println!("⚠️  Git initialization failed: {err}");
+                println!("   Continuing with project setup...");
+                return;
+            }
+        };
         let inside =
             git.is_inside_work_tree(git_dir).await.unwrap_or(false) || has_git_dir(git_dir);
         if inside {
@@ -461,53 +518,66 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     } else {
         println!("⚠️  Git is not available - skipping git initialization");
     }
+}
 
-    // Manifest-driven component installation
-    if !selected_addons.is_empty() {
-        let mut all_components: Vec<ComponentInput> = Vec::new();
-        for addon_name in &selected_addons {
-            if let Some(manifest) = read_addon_manifest(addon_name) {
-                for comp in &manifest.components.install {
-                    all_components.push(ComponentInput::new(comp));
-                }
-            }
-        }
+/// Install components declared in addon manifests.
+async fn install_addon_components(
+    app_path: &Path,
+    selected_addons: &[String],
+) -> Result<(), String> {
+    if selected_addons.is_empty() {
+        return Ok(());
+    }
 
-        if !all_components.is_empty() {
-            let components_start = Instant::now();
-            let sp = spinner("🎨 Adding components...");
-
-            let result = add_components(&app_path, &all_components, true).await?;
-
-            sp.finish_and_clear();
-            println!(
-                "✅ Components added ({})",
-                format_elapsed_ms(components_start)
-            );
-
-            if !result.warnings.is_empty() {
-                for warning in &result.warnings {
-                    eprintln!("   ⚠️  {warning}");
-                }
+    let mut all_components: Vec<ComponentInput> = Vec::new();
+    for addon_name in selected_addons {
+        if let Some(manifest) = read_addon_manifest(addon_name) {
+            for comp in &manifest.components.install {
+                all_components.push(ComponentInput::new(comp));
             }
         }
     }
 
+    if !all_components.is_empty() {
+        let components_start = Instant::now();
+        let sp = spinner("🎨 Adding components...");
+
+        let result = add_components(app_path, &all_components, true).await?;
+
+        sp.finish_and_clear();
+        println!(
+            "✅ Components added ({})",
+            format_elapsed_ms(components_start)
+        );
+
+        if !result.warnings.is_empty() {
+            for warning in &result.warnings {
+                eprintln!("   ⚠️  {warning}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Print the final success message with instructions.
+fn print_success(app_name: &str, workspace_root: &Path, app_path: &Path, is_member: bool) {
     println!();
     println!("✨ Project {app_name} initialized successfully!");
     let run_from = if is_member {
         workspace_root
             .canonicalize()
-            .unwrap_or_else(|_| workspace_root.clone())
+            .unwrap_or_else(|_| workspace_root.to_path_buf())
     } else {
-        app_path.canonicalize().unwrap_or_else(|_| app_path.clone())
+        app_path
+            .canonicalize()
+            .unwrap_or_else(|_| app_path.to_path_buf())
     };
     println!(
         "🚀 Run `cd {} && apx dev start` to get started!",
         run_from.display()
     );
     println!("   (Dependencies will be installed automatically on first run)");
-    Ok(())
 }
 
 fn normalize_app_name(app_name: &str) -> Result<String, String> {
@@ -738,6 +808,7 @@ fn ensure_workspace_config(root_pyproject: &Path, member_path: &Path) -> Result<
 }
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;

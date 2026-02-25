@@ -5,7 +5,27 @@
 
 use chrono::{Local, TimeZone, Utc};
 
-use crate::{AggregatedRecord, LogRecord, source_label};
+use crate::{AggregatedRecord, LogRecord, ServiceKind};
+
+// ANSI color codes for terminal output.
+const ANSI_CYAN: &str = "\x1b[36m";
+const ANSI_MAGENTA: &str = "\x1b[35m";
+const ANSI_GREEN: &str = "\x1b[32m";
+const ANSI_YELLOW: &str = "\x1b[33m";
+const ANSI_RESET: &str = "\x1b[0m";
+
+impl ServiceKind {
+    /// ANSI color escape for this service kind.
+    #[must_use]
+    pub const fn ansi_color(self) -> &'static str {
+        match self {
+            Self::App => ANSI_CYAN,
+            Self::Ui => ANSI_MAGENTA,
+            Self::Db => ANSI_GREEN,
+            Self::Other => ANSI_YELLOW,
+        }
+    }
+}
 
 /// Format a timestamp in milliseconds to `YYYY-MM-DD HH:MM:SS.mmm` in local timezone.
 #[must_use]
@@ -34,52 +54,33 @@ pub fn format_short_timestamp(timestamp_ms: i64) -> String {
 /// Output: `2026-01-28 16:09:02.413 | app | <message>`
 #[must_use]
 pub fn format_log_record(record: &LogRecord, colorize: bool) -> String {
-    let timestamp = format_timestamp(record.effective_timestamp_ms());
-    let src = record.source_label();
-    let padded_src = format!("{src:>3}");
-    let message = record.body.as_deref().unwrap_or("");
-
-    if colorize {
-        let color_code = source_color(src);
-        let reset = "\x1b[0m";
-        format!("{color_code}{timestamp} | {padded_src} | {message}{reset}")
-    } else {
-        format!("{timestamp} | {padded_src} | {message}")
-    }
+    let kind = ServiceKind::from_service_name(record.service_name.as_deref().unwrap_or("unknown"));
+    format_line(
+        &format_timestamp(record.effective_timestamp_ms()),
+        kind,
+        record.body.as_deref().unwrap_or(""),
+        colorize,
+    )
 }
 
 /// Format an aggregated record for terminal display.
 #[must_use]
 pub fn format_aggregated_record(agg: &AggregatedRecord, colorize: bool) -> String {
-    let timestamp = format_timestamp(agg.timestamp_ms);
-    let src = source_label(&agg.service_name);
-    let padded_src = format!("{src:>3}");
+    let kind = ServiceKind::from_service_name(&agg.service_name);
     let message = format!("[{}] {}", agg.count, agg.template);
-
-    if colorize {
-        let color_code = source_color(src);
-        let reset = "\x1b[0m";
-        format!("{color_code}{timestamp} | {padded_src} | {message}{reset}")
-    } else {
-        format!("{timestamp} | {padded_src} | {message}")
-    }
+    format_line(
+        &format_timestamp(agg.timestamp_ms),
+        kind,
+        &message,
+        colorize,
+    )
 }
 
 /// Format a log record for startup display (compact timestamp, always colorized, with channel).
 #[must_use]
 pub fn format_startup_log(record: &LogRecord) -> String {
     let timestamp = format_timestamp(record.effective_timestamp_ms());
-
-    let service_name = record.service_name.as_deref().unwrap_or("unknown");
-    let source = if service_name.ends_with("_app") {
-        "app"
-    } else if service_name.ends_with("_ui") {
-        " ui"
-    } else if service_name.ends_with("_db") {
-        " db"
-    } else {
-        "apx"
-    };
+    let kind = ServiceKind::from_service_name(record.service_name.as_deref().unwrap_or("unknown"));
 
     let severity = record.severity_text.as_deref().unwrap_or("INFO");
     let channel = match severity.to_uppercase().as_str() {
@@ -88,16 +89,10 @@ pub fn format_startup_log(record: &LogRecord) -> String {
     };
 
     let message = record.body.as_deref().unwrap_or("");
+    let label = kind.label();
+    let color = kind.ansi_color();
 
-    let color_code = match source {
-        "app" => "\x1b[36m", // cyan
-        " ui" => "\x1b[35m", // magenta
-        " db" => "\x1b[32m", // green
-        _ => "\x1b[33m",     // yellow
-    };
-    let reset = "\x1b[0m";
-
-    format!("{color_code}{timestamp} | {source} | {channel} | {message}{reset}")
+    format!("{color}{timestamp} | {label:>3} | {channel} | {message}{ANSI_RESET}")
 }
 
 /// Format a subprocess log line with local timestamp and source prefix.
@@ -114,10 +109,21 @@ pub fn format_process_log_line(source: &str, message: &str) -> String {
 #[must_use]
 pub fn source_color(src: &str) -> &'static str {
     match src {
-        "app" => "\x1b[36m",
-        "ui" => "\x1b[35m",
-        "db" => "\x1b[32m",
-        _ => "\x1b[33m",
+        "app" => ANSI_CYAN,
+        "ui" => ANSI_MAGENTA,
+        "db" => ANSI_GREEN,
+        _ => ANSI_YELLOW,
+    }
+}
+
+/// Shared formatter for `timestamp | src | message` lines.
+fn format_line(timestamp: &str, kind: ServiceKind, message: &str, colorize: bool) -> String {
+    let label = kind.label();
+    if colorize {
+        let color = kind.ansi_color();
+        format!("{color}{timestamp} | {label:>3} | {message}{ANSI_RESET}")
+    } else {
+        format!("{timestamp} | {label:>3} | {message}")
     }
 }
 

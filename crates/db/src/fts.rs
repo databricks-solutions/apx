@@ -234,7 +234,7 @@ impl Fts5Table {
             self.table_name, self.table_name, self.table_name,
         );
 
-        // Limit values are small positive numbers; truncation to i64 is safe.
+        // Reason: row count fits in i64
         #[allow(clippy::cast_possible_wrap)]
         let limit_i64 = limit as i64;
 
@@ -274,7 +274,7 @@ impl Fts5Table {
             self.table_name, self.table_name,
         );
 
-        // Limit values are small positive numbers; truncation to i64 is safe.
+        // Reason: row count fits in i64
         #[allow(clippy::cast_possible_wrap)]
         let limit_i64 = limit as i64;
 
@@ -382,6 +382,7 @@ fn validate_identifier(name: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

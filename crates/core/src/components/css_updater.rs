@@ -28,6 +28,7 @@ impl std::error::Error for CssUpdateError {}
 type Result<T> = std::result::Result<T, CssUpdateError>;
 
 /// High-level mutations requested by registry items.
+// Reason: CSS operation names naturally share the 'Css' domain prefix
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 pub enum CssMutation {

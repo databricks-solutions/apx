@@ -76,6 +76,7 @@ pub async fn table_exists(pool: &SqlitePool, table_name: &str) -> Result<bool, S
 }
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

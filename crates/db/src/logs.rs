@@ -301,8 +301,7 @@ impl LogsDb {
             .await
             .map_err(|e| format!("Delete error: {e}"))?;
 
-        // rows_affected() returns u64; on 32-bit targets this could truncate,
-        // but the log table will never have more rows than usize::MAX.
+        // Reason: severity_number is always 0..21 which fits in i32
         #[allow(clippy::cast_possible_truncation)]
         let deleted = result.rows_affected() as usize;
         if deleted > 0 {
@@ -345,6 +344,7 @@ fn row_to_log_record(row: &sqlx::sqlite::SqliteRow) -> LogRecord {
 }
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

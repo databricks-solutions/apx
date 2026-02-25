@@ -5,6 +5,7 @@
 //! strings via SWC's codegen.
 
 use swc_common::DUMMY_SP;
+// Reason: codegen module uses most items from parent; explicit list would be unwieldy
 #[allow(clippy::wildcard_imports)]
 use swc_ecma_ast::*;
 
@@ -12,6 +13,7 @@ use super::api::{
     ApiIR, BodyContentType, FetchArgIR, FetchIR, HookIR, HookKind, OperationIR, ParamsIR,
     QueryKeyIR, ResponseContentType, UrlPart,
 };
+// Reason: codegen module uses most items from parent; explicit list would be unwieldy
 #[allow(clippy::wildcard_imports)]
 use super::builders::*;
 use super::types::{TsType as IrTsType, TypeRef};
@@ -695,6 +697,7 @@ fn omit_query_opts(options_type: &str, wrapped: &TsType) -> Box<TsType> {
 }
 
 /// Generate a query hook (useQuery or useSuspenseQuery).
+// Reason: template rendering is infallible for known-good templates
 #[allow(clippy::expect_used)]
 fn codegen_query_hook(hook: &HookIR, wrapped_type: Box<TsType>) -> ModuleItem {
     let key_fn = hook
@@ -881,6 +884,7 @@ fn codegen_mutation_hook(hook: &HookIR, wrapped_type: Box<TsType>) -> ModuleItem
 }
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::super::api::*;

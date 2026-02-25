@@ -595,6 +595,7 @@ pub fn load_doc_files(docs_path: &Path) -> Result<Vec<ParsedDocFile>, String> {
 }
 
 #[cfg(test)]
+// Reason: panicking on failure is idiomatic in tests
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
