@@ -167,51 +167,57 @@ async fn run_cli_async(args: Vec<String>) -> i32 {
 }
 
 async fn run_command(args: Vec<String>) -> i32 {
-    match Cli::try_parse_from(args) {
-        Ok(cli) => match cli.command {
-            Some(Commands::Init(init_args)) => init::run(init_args).await,
-            Some(Commands::Build(build_args)) => build::run(build_args).await,
-            Some(Commands::Bun(bun_args)) => bun::run(bun_args).await,
-            Some(Commands::Components(components_cmd)) => match components_cmd {
-                ComponentsCommands::Add(args) => components::add::run(args).await,
-            },
-            Some(Commands::Frontend(frontend_cmd)) => match frontend_cmd {
-                FrontendCommands::Dev(args) => frontend::dev::run(args).await,
-                FrontendCommands::Build(args) => frontend::build::run(args).await,
-            },
-            Some(Commands::Mcp) => dev::mcp::run(dev::mcp::McpArgs {}).await,
-            Some(Commands::Dev(dev_cmd)) => match dev_cmd {
-                DevCommands::Start(args) => dev::start::run(args).await,
-                DevCommands::Status(args) => dev::status::run(args).await,
-                DevCommands::Stop(args) => dev::stop::run(args).await,
-                DevCommands::Restart(args) => dev::restart::run(args).await,
-                DevCommands::Logs(args) => dev::logs::run(args).await,
-                DevCommands::Check(args) => dev::check::run(args).await,
-                DevCommands::Apply(args) => dev::apply::run(args).await,
-                DevCommands::InternalRunServer(args) => dev::__internal_run_server::run(args).await,
-            },
-            Some(Commands::Flux(flux_cmd)) => match flux_cmd {
-                FluxCommands::Start(args) => flux::start::run(args).await,
-                FluxCommands::Stop(args) => flux::stop::run(args).await,
-            },
-            Some(Commands::Skill(skill_cmd)) => match skill_cmd {
-                SkillCommands::Install(args) => skill::install::run(args).await,
-            },
-            Some(Commands::Feedback(args)) => feedback::run(args).await,
-            Some(Commands::Info(args)) => info::run(args).await,
-            Some(Commands::Upgrade) => upgrade::run().await,
-            Some(Commands::GenerateOpenapi(args)) => __generate_openapi::run(args).await,
-            None => {
-                let mut cmd = Cli::command();
-                let _ = cmd.print_help();
-                println!();
-                0
-            }
-        },
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
         Err(e) => {
             let code = e.exit_code();
             let _ = e.print();
-            code
+            return code;
+        }
+    };
+
+    if !matches!(cli.command, Some(Commands::Upgrade)) {
+        upgrade::check_upgrade_available().await;
+    }
+
+    match cli.command {
+        Some(Commands::Init(init_args)) => init::run(init_args).await,
+        Some(Commands::Build(build_args)) => build::run(build_args).await,
+        Some(Commands::Bun(bun_args)) => bun::run(bun_args).await,
+        Some(Commands::Components(components_cmd)) => match components_cmd {
+            ComponentsCommands::Add(args) => components::add::run(args).await,
+        },
+        Some(Commands::Frontend(frontend_cmd)) => match frontend_cmd {
+            FrontendCommands::Dev(args) => frontend::dev::run(args).await,
+            FrontendCommands::Build(args) => frontend::build::run(args).await,
+        },
+        Some(Commands::Mcp) => dev::mcp::run(dev::mcp::McpArgs {}).await,
+        Some(Commands::Dev(dev_cmd)) => match dev_cmd {
+            DevCommands::Start(args) => dev::start::run(args).await,
+            DevCommands::Status(args) => dev::status::run(args).await,
+            DevCommands::Stop(args) => dev::stop::run(args).await,
+            DevCommands::Restart(args) => dev::restart::run(args).await,
+            DevCommands::Logs(args) => dev::logs::run(args).await,
+            DevCommands::Check(args) => dev::check::run(args).await,
+            DevCommands::Apply(args) => dev::apply::run(args).await,
+            DevCommands::InternalRunServer(args) => dev::__internal_run_server::run(args).await,
+        },
+        Some(Commands::Flux(flux_cmd)) => match flux_cmd {
+            FluxCommands::Start(args) => flux::start::run(args).await,
+            FluxCommands::Stop(args) => flux::stop::run(args).await,
+        },
+        Some(Commands::Skill(skill_cmd)) => match skill_cmd {
+            SkillCommands::Install(args) => skill::install::run(args).await,
+        },
+        Some(Commands::Feedback(args)) => feedback::run(args).await,
+        Some(Commands::Info(args)) => info::run(args).await,
+        Some(Commands::Upgrade) => upgrade::run().await,
+        Some(Commands::GenerateOpenapi(args)) => __generate_openapi::run(args).await,
+        None => {
+            let mut cmd = Cli::command();
+            let _ = cmd.print_help();
+            println!();
+            0
         }
     }
 }

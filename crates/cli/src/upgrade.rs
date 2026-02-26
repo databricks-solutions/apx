@@ -1,11 +1,39 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use apx_core::common::{format_elapsed_ms, spinner};
 
 use crate::run_cli_async_helper;
 
+/// Maximum time to wait for the upgrade check before giving up.
+const UPGRADE_CHECK_TIMEOUT: Duration = Duration::from_millis(200);
+
 /// GitHub repository for release lookups.
 const GITHUB_REPO: &str = "databricks-solutions/apx";
+
+pub async fn check_upgrade_available() {
+    let result = tokio::time::timeout(UPGRADE_CHECK_TIMEOUT, fetch_latest_tag()).await;
+
+    let latest_tag = match result {
+        Ok(Ok(tag)) => tag,
+        Ok(Err(e)) => {
+            tracing::debug!("Upgrade check failed: {e}");
+            return;
+        }
+        Err(_) => {
+            tracing::debug!("Upgrade check timed out");
+            return;
+        }
+    };
+
+    let current = env!("CARGO_PKG_VERSION");
+    let latest = latest_tag.strip_prefix('v').unwrap_or(&latest_tag);
+
+    if !version_gte(current, latest) {
+        eprintln!(
+            "⬆️  \x1b[2mNew version of `apx` is available, run `apx upgrade` to stay up-to-date\x1b[0m"
+        );
+    }
+}
 
 pub async fn run() -> i32 {
     run_cli_async_helper(run_inner).await
