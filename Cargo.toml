@@ -106,6 +106,9 @@ swc_atoms = "9"
 # Temporary files
 tempfile = "3.15"
 
+# Test utilities
+wiremock = "0.6"
+
 # Embedded resources
 which = "7"
 

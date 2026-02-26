@@ -10,6 +10,11 @@ const UPGRADE_CHECK_TIMEOUT: Duration = Duration::from_millis(200);
 /// GitHub repository for release lookups.
 const GITHUB_REPO: &str = "databricks-solutions/apx";
 
+/// The upgrade nudge message shown when a newer version is available.
+const UPGRADE_NUDGE: &str =
+    "⬆️  \x1b[2mNew version of `apx` is available, run `apx upgrade` to stay up-to-date\x1b[0m";
+
+/// Check whether a newer version is available and print a nudge to stderr.
 pub async fn check_upgrade_available() {
     let result = tokio::time::timeout(UPGRADE_CHECK_TIMEOUT, fetch_latest_tag()).await;
 
@@ -25,13 +30,19 @@ pub async fn check_upgrade_available() {
         }
     };
 
-    let current = env!("CARGO_PKG_VERSION");
-    let latest = latest_tag.strip_prefix('v').unwrap_or(&latest_tag);
+    if let Some(msg) = upgrade_nudge_message(env!("CARGO_PKG_VERSION"), &latest_tag) {
+        eprintln!("{msg}");
+    }
+}
 
-    if !version_gte(current, latest) {
-        eprintln!(
-            "⬆️  \x1b[2mNew version of `apx` is available, run `apx upgrade` to stay up-to-date\x1b[0m"
-        );
+/// Return the nudge message if `current_version` is older than `latest_tag`, or `None` if
+/// already up-to-date.
+fn upgrade_nudge_message(current_version: &str, latest_tag: &str) -> Option<&'static str> {
+    let latest = latest_tag.strip_prefix('v').unwrap_or(latest_tag);
+    if version_gte(current_version, latest) {
+        None
+    } else {
+        Some(UPGRADE_NUDGE)
     }
 }
 
@@ -90,9 +101,16 @@ async fn run_inner() -> Result<(), String> {
 /// Fetch the latest release tag from the GitHub API.
 async fn fetch_latest_tag() -> Result<String, String> {
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+    fetch_latest_tag_from(&url).await
+}
+
+/// Fetch the latest release tag from an arbitrary URL.
+///
+/// Separated from [`fetch_latest_tag`] so tests can point at a mock server.
+async fn fetch_latest_tag_from(url: &str) -> Result<String, String> {
     let client = reqwest::Client::new();
     let resp = client
-        .get(&url)
+        .get(url)
         .header("User-Agent", "apx-cli")
         .send()
         .await
@@ -320,5 +338,97 @@ mod tests {
         assert_eq!(humanize_bytes(1024), "1.0 KB");
         assert_eq!(humanize_bytes(1024 * 1024), "1.0 MB");
         assert_eq!(humanize_bytes(15 * 1024 * 1024), "15.0 MB");
+    }
+
+    // -- upgrade nudge message (pure logic) ----------------------------------
+
+    #[test]
+    fn test_nudge_shown_when_newer_version_available() {
+        let msg = upgrade_nudge_message("0.1.0", "v0.2.0");
+        assert!(msg.is_some());
+        let text = msg.unwrap_or_default();
+        assert!(text.contains("apx upgrade"));
+    }
+
+    #[test]
+    fn test_nudge_hidden_when_up_to_date() {
+        assert!(upgrade_nudge_message("0.3.0", "v0.3.0").is_none());
+    }
+
+    #[test]
+    fn test_nudge_hidden_when_ahead() {
+        assert!(upgrade_nudge_message("0.4.0", "v0.3.0").is_none());
+    }
+
+    #[test]
+    fn test_nudge_strips_v_prefix() {
+        // With and without the `v` prefix should behave identically.
+        assert!(upgrade_nudge_message("0.1.0", "v0.2.0").is_some());
+        assert!(upgrade_nudge_message("0.1.0", "0.2.0").is_some());
+    }
+
+    // -- fetch_latest_tag_from (HTTP layer via wiremock) ----------------------
+
+    #[tokio::test]
+    async fn test_fetch_parses_github_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/releases/latest"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"tag_name": "v1.2.3"})),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/releases/latest", server.uri());
+        let result = fetch_latest_tag_from(&url).await;
+        assert_eq!(result, Ok("v1.2.3".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_returns_error_on_404() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/releases/latest"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/releases/latest", server.uri());
+        let result = fetch_latest_tag_from(&url).await;
+        assert!(result.is_err());
+        let err = result.err().unwrap_or_default();
+        assert!(err.contains("404"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_returns_error_when_tag_name_missing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/releases/latest"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"name": "Release 1.0"})),
+            )
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/releases/latest", server.uri());
+        let result = fetch_latest_tag_from(&url).await;
+        assert!(result.is_err());
+        let err = result.err().unwrap_or_default();
+        assert!(err.contains("missing tag_name"));
     }
 }
