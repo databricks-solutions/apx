@@ -1,4 +1,4 @@
-//! Logging types for browser log forwarding to flux.
+//! Logging types for browser log forwarding to the OTEL collector.
 
 use serde::Deserialize;
 

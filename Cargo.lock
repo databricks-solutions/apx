@@ -136,25 +136,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
-name = "apx-agent"
-version = "0.3.8"
-dependencies = [
- "apx-common",
- "apx-db",
- "axum",
- "chrono",
- "clap",
- "hex",
- "opentelemetry-proto 0.31.0",
- "prost 0.14.3",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "apx-bin"
 version = "0.3.8"
 dependencies = [
@@ -206,10 +187,10 @@ dependencies = [
 name = "apx-core"
 version = "0.3.8"
 dependencies = [
- "apx-agent",
  "apx-common",
  "apx-databricks-sdk",
  "apx-db",
+ "apx-tracing",
  "axum",
  "biome_css_parser",
  "biome_css_syntax",
@@ -315,6 +296,25 @@ dependencies = [
  "tauri",
  "tauri-build",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "apx-tracing"
+version = "0.3.8"
+dependencies = [
+ "apx-common",
+ "apx-db",
+ "axum",
+ "chrono",
+ "clap",
+ "hex",
+ "opentelemetry-proto 0.31.0",
+ "prost 0.14.3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -63,7 +63,7 @@ impl Frontend {
     /// Spawn the frontend dev server (`apx frontend dev` via uv).
     ///
     /// Frontend logs are NOT piped through apx stdout/stderr — the frontend
-    /// process sends logs directly to flux via OTEL SDK. See entrypoint.ts.
+    /// process sends logs directly to the collector via OTEL SDK. See entrypoint.ts.
     pub async fn spawn(&self) -> Result<(), String> {
         let cmd = self.build_command().await?;
         let child = cmd.spawn().map_err(String::from)?;
@@ -97,10 +97,14 @@ impl Frontend {
             .env("APX_APP_NAME", &cfg.app_slug)
             .env("APX_APP_PATH", cfg.app_dir.display().to_string())
             .env("APX_FRONTEND_PORT", cfg.frontend_port.to_string())
-            // OpenTelemetry configuration — frontend sends logs directly to flux
+            // OpenTelemetry configuration — frontend sends logs directly to the collector
             .env(
                 "OTEL_EXPORTER_OTLP_ENDPOINT",
-                format!("http://{}:{}", CLIENT_HOST, crate::flux::FLUX_PORT),
+                format!(
+                    "http://{}:{}",
+                    CLIENT_HOST,
+                    crate::collector::COLLECTOR_PORT
+                ),
             )
             .env(apx_common::hosts::ENV_FRONTEND_HOST, CLIENT_HOST)
             .env("OTEL_SERVICE_NAME", format!("{}_ui", cfg.app_slug));

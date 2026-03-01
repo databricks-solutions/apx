@@ -25,7 +25,7 @@ async fn main() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_env("APX_LOG")
-                .unwrap_or_else(|_| "apx_agent=info".into()),
+                .unwrap_or_else(|_| "apx_tracing=info".into()),
         )
         .with(
             tracing_subscriber::fmt::layer()
@@ -39,7 +39,7 @@ async fn main() {
     let _args = Args::parse();
 
     // Run server (default behavior regardless of subcommand)
-    if let Err(e) = apx_agent::run_server().await {
+    if let Err(e) = apx_tracing::run_server().await {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }

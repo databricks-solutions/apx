@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/common", "crates/agent", "crates/studio", "crates/core", "crates/mcp", "crates/cli", "crates/databricks_sdk", "crates/apx", "crates/db"]
+members = ["crates/common", "crates/tracing", "crates/studio", "crates/core", "crates/mcp", "crates/cli", "crates/databricks_sdk", "crates/apx", "crates/db"]
 resolver = "2"
 
 [workspace.package]
@@ -16,7 +16,7 @@ categories = ["development-tools"]
 [workspace.dependencies]
 # Internal crates
 apx-common = { path = "crates/common" }
-apx-agent = { path = "crates/agent" }
+apx-tracing = { path = "crates/tracing" }
 apx-core = { path = "crates/core" }
 apx-mcp = { path = "crates/mcp" }
 apx-cli = { path = "crates/cli" }

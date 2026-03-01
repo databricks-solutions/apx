@@ -4,6 +4,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::app_state::set_app_dir;
+use crate::collector;
 use crate::common::{
     OutputMode, emit, ensure_dir, format_elapsed_ms, read_project_metadata, run_preflight_checks,
     spinner_for_mode,
@@ -17,7 +18,6 @@ use crate::dev::common::{
 use crate::dev::server::{ServerConfig, run_server};
 use crate::dev::token;
 use crate::external::uv::ApxTool;
-use crate::flux;
 use crate::ops::healthcheck::wait_for_healthy_with_logs;
 use crate::registry::Registry;
 use apx_common::hosts::{BIND_HOST, BROWSER_HOST};
@@ -163,7 +163,7 @@ pub struct PreparedServer {
     pub command_display: String,
 }
 
-/// Run preflight checks, start flux, allocate a stable port.
+/// Run preflight checks, start the collector, allocate a stable port.
 /// Returns a `PreparedServer` ready for any launch mode.
 pub async fn prepare_server_launch(
     app_dir: &Path,
@@ -175,8 +175,8 @@ pub async fn prepare_server_launch(
 
     emit(mode, "🚀 Starting dev server...");
 
-    if let Err(e) = flux::ensure_running() {
-        debug!("Failed to start flux: {e}. Logs may not be collected.");
+    if let Err(e) = collector::ensure_running() {
+        debug!("Failed to start collector: {e}. Logs may not be collected.");
     }
 
     let mut registry = Registry::load()?;

@@ -1,4 +1,4 @@
-//! Pure types and logic for flux OTEL logs.
+//! Pure types and logic for OTEL log collector records.
 //!
 //! This module contains log record types, filtering, and aggregation logic.
 //! Database operations have been moved to the `apx-db` crate.
@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Directory for flux data (~/.apx/logs)
-const FLUX_DIR: &str = ".apx/logs";
+/// Directory for collector data (~/.apx/logs)
+const COLLECTOR_DIR: &str = ".apx/logs";
 
 /// A log record to be inserted into the database.
 #[derive(Debug, Clone)]
@@ -313,12 +313,12 @@ impl LogAggregator {
     }
 }
 
-/// Get the flux directory path (`~/.apx/logs`).
+/// Get the collector directory path (`~/.apx/logs`).
 ///
 /// # Errors
 ///
 /// Returns an error if the home directory cannot be determined.
-pub fn flux_dir() -> Result<PathBuf, String> {
+pub fn collector_dir() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("Could not determine home directory")?;
-    Ok(home.join(FLUX_DIR))
+    Ok(home.join(COLLECTOR_DIR))
 }

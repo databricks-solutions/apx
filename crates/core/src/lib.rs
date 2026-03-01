@@ -5,12 +5,12 @@
 
 #![deny(clippy::print_stdout)]
 
-/// Agent integration utilities.
-pub mod agent;
 /// OpenAPI spec generation and TypeScript client codegen.
 pub mod api_generator;
 /// Global application directory state.
 pub mod app_state;
+/// OTEL log collector integration.
+pub mod collector;
 /// Common types, project metadata, and CLI utilities.
 pub mod common;
 /// UI component registry operations (search, add, CSS updates).
@@ -27,8 +27,6 @@ pub mod download;
 pub mod external;
 /// User feedback issue creation (GitHub).
 pub mod feedback;
-/// Flux log collector integration.
-pub mod flux;
 /// Frontend build and scaffolding utilities.
 pub mod frontend;
 /// Python interop (OpenAPI generation, SDK version detection).
@@ -41,6 +39,8 @@ pub mod py_edit;
 pub mod resources;
 /// Full-text search indexes (component search, SDK docs).
 pub mod search;
+/// Tracing collector binary management.
+pub mod tracing_binary;
 /// Tracing / logging initialization.
 pub mod tracing_init;
 

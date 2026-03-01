@@ -1,9 +1,9 @@
-//! OTLP HTTP receiver server for flux.
+//! OTLP HTTP receiver server for the tracing collector.
 //!
 //! This module implements an Axum HTTP server that receives OpenTelemetry logs
 //! via OTLP HTTP protocol, supporting both JSON and Protobuf content types.
 
-use apx_common::{FLUX_PORT, LogRecord};
+use apx_common::{COLLECTOR_PORT, LogRecord};
 use apx_db::LogsDb;
 use axum::{
     Router,
@@ -25,7 +25,7 @@ struct AppState {
     storage: LogsDb,
 }
 
-/// Run the flux server (entry point for `apx-agent`).
+/// Run the collector server (entry point for `apx-agent`).
 ///
 /// This function initializes storage, starts the cleanup scheduler,
 /// and runs the HTTP server. It blocks forever (or until error).
@@ -35,7 +35,7 @@ struct AppState {
 /// Returns an error if storage initialization fails or the HTTP server
 /// cannot bind to the configured address.
 pub async fn run_server() -> Result<(), String> {
-    info!("Flux daemon starting...");
+    info!("Collector daemon starting...");
 
     // Open storage
     let storage = LogsDb::open()
@@ -76,7 +76,7 @@ async fn run_cleanup_loop(storage: LogsDb) {
     }
 }
 
-/// Start the flux HTTP server with the given storage.
+/// Start the collector HTTP server with the given storage.
 async fn run_http_server(storage: LogsDb) -> Result<(), String> {
     let state = AppState { storage };
 
@@ -85,8 +85,8 @@ async fn run_http_server(storage: LogsDb) -> Result<(), String> {
         .route("/health", get(health_check))
         .with_state(state);
 
-    let addr = format!("{}:{FLUX_PORT}", apx_common::hosts::BIND_HOST);
-    info!("Starting flux OTLP receiver on {}", addr);
+    let addr = format!("{}:{COLLECTOR_PORT}", apx_common::hosts::BIND_HOST);
+    info!("Starting OTLP collector on {}", addr);
 
     let listener = TcpListener::bind(&addr)
         .await

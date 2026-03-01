@@ -1,4 +1,4 @@
-//! Shared types and utilities for APX flux system
+//! Shared types and utilities for APX tracing collector
 //!
 //! This crate contains shared functionality used by both the main `apx` CLI
 //! and the standalone `apx-agent` binary.
@@ -9,7 +9,7 @@ pub mod bundles;
 pub mod format;
 /// Network host constants for binding, client connections, and browser URLs.
 pub mod hosts;
-/// Pure types and logic for flux OTEL log records, filtering, and aggregation.
+/// Pure types and logic for OTEL log records, filtering, and aggregation.
 pub mod storage;
 
 use serde::{Deserialize, Serialize};
@@ -20,15 +20,15 @@ use std::time::Duration;
 
 // Re-export commonly used types
 pub use storage::{
-    AggregatedRecord, LogAggregator, LogRecord, ServiceKind, flux_dir, get_aggregation_key,
+    AggregatedRecord, LogAggregator, LogRecord, ServiceKind, collector_dir, get_aggregation_key,
     should_skip_log, should_skip_log_message, source_label,
 };
 
 /// Version of the apx-common crate, used for agent version matching.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Flux port for OTLP HTTP receiver
-pub const FLUX_PORT: u16 = 11111;
+/// Collector port for OTLP HTTP receiver
+pub const COLLECTOR_PORT: u16 = 11111;
 
 /// Lock filename
 const LOCK_FILENAME: &str = "agent.lock";
@@ -38,7 +38,7 @@ const LOG_FILENAME: &str = "agent.log";
 
 /// Lock file contents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FluxLock {
+pub struct CollectorLock {
     /// OS process ID of the running agent.
     pub pid: u32,
     /// TCP port the agent listens on.
@@ -50,7 +50,7 @@ pub struct FluxLock {
     pub version: Option<String>,
 }
 
-impl FluxLock {
+impl CollectorLock {
     /// Create a new lock for the current process.
     #[must_use]
     pub fn new(pid: u32) -> Self {
@@ -61,7 +61,7 @@ impl FluxLock {
 
         Self {
             pid,
-            port: FLUX_PORT,
+            port: COLLECTOR_PORT,
             started_at,
             version: Some(VERSION.to_string()),
         }
@@ -74,7 +74,7 @@ impl FluxLock {
 ///
 /// Returns an error if the home directory cannot be determined.
 pub fn lock_path() -> Result<PathBuf, String> {
-    Ok(flux_dir()?.join(LOCK_FILENAME))
+    Ok(collector_dir()?.join(LOCK_FILENAME))
 }
 
 /// Get the daemon log file path (`~/.apx/logs/agent.log`).
@@ -83,7 +83,7 @@ pub fn lock_path() -> Result<PathBuf, String> {
 ///
 /// Returns an error if the home directory cannot be determined.
 pub fn log_path() -> Result<PathBuf, String> {
-    Ok(flux_dir()?.join(LOG_FILENAME))
+    Ok(collector_dir()?.join(LOG_FILENAME))
 }
 
 /// Read the lock file if it exists.
@@ -91,17 +91,17 @@ pub fn log_path() -> Result<PathBuf, String> {
 /// # Errors
 ///
 /// Returns an error if the lock file exists but cannot be read or parsed.
-pub fn read_lock() -> Result<Option<FluxLock>, String> {
+pub fn read_lock() -> Result<Option<CollectorLock>, String> {
     let path = lock_path()?;
     if !path.exists() {
         return Ok(None);
     }
 
-    let contents =
-        fs::read_to_string(&path).map_err(|e| format!("Failed to read flux lock file: {e}"))?;
+    let contents = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read collector lock file: {e}"))?;
 
-    let lock: FluxLock = serde_json::from_str(&contents)
-        .map_err(|e| format!("Failed to parse flux lock file: {e}"))?;
+    let lock: CollectorLock = serde_json::from_str(&contents)
+        .map_err(|e| format!("Failed to parse collector lock file: {e}"))?;
 
     Ok(Some(lock))
 }
@@ -111,7 +111,7 @@ pub fn read_lock() -> Result<Option<FluxLock>, String> {
 /// # Errors
 ///
 /// Returns an error if the lock file cannot be written.
-pub fn write_lock(lock: &FluxLock) -> Result<(), String> {
+pub fn write_lock(lock: &CollectorLock) -> Result<(), String> {
     let path = lock_path()?;
 
     // Ensure parent directory exists
@@ -122,7 +122,7 @@ pub fn write_lock(lock: &FluxLock) -> Result<(), String> {
     let contents =
         serde_json::to_string_pretty(lock).map_err(|e| format!("Failed to serialize lock: {e}"))?;
 
-    fs::write(&path, contents).map_err(|e| format!("Failed to write flux lock file: {e}"))
+    fs::write(&path, contents).map_err(|e| format!("Failed to write collector lock file: {e}"))
 }
 
 /// Remove the lock file.
@@ -133,20 +133,20 @@ pub fn write_lock(lock: &FluxLock) -> Result<(), String> {
 pub fn remove_lock() -> Result<(), String> {
     let path = lock_path()?;
     if path.exists() {
-        fs::remove_file(&path).map_err(|e| format!("Failed to remove flux lock file: {e}"))?;
+        fs::remove_file(&path).map_err(|e| format!("Failed to remove collector lock file: {e}"))?;
     }
     Ok(())
 }
 
-/// Check if flux is accepting connections at the given port.
+/// Check if the collector is accepting connections at the given port.
 #[must_use]
-pub fn is_flux_listening(port: u16) -> bool {
+pub fn is_collector_listening(port: u16) -> bool {
     let addr = std::net::SocketAddr::from((hosts::CLIENT_HOST_OCTETS, port));
     TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
 }
 
-/// Check if flux is currently running by testing TCP connectivity.
+/// Check if the collector is currently running by testing TCP connectivity.
 #[must_use]
 pub fn is_running() -> bool {
-    is_flux_listening(FLUX_PORT)
+    is_collector_listening(COLLECTOR_PORT)
 }

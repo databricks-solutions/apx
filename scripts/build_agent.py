@@ -153,7 +153,7 @@ def build_target(target: Target, output_dir: Path, release: bool = True) -> None
         build_cmd,
         "build",
         "-p",
-        "apx-agent",
+        "apx-tracing",
         "--target",
         target.rust_target,
     ]

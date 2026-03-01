@@ -1,4 +1,4 @@
-//! Agent binary management module.
+//! Tracing collector binary management module.
 //!
 //! The agent binary is embedded in the apx binary via `include_bytes!` and
 //! extracted to `~/.apx/apx-agent` on first use. Version management is handled

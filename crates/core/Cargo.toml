@@ -15,7 +15,7 @@ workspace = true
 
 [dependencies]
 apx-common.workspace = true
-apx-agent.workspace = true
+apx-tracing.workspace = true
 apx-databricks-sdk.workspace = true
 dirs.workspace = true
 indicatif.workspace = true

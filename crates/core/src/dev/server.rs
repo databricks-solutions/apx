@@ -1,4 +1,4 @@
-//! APX dev server with flux-based logging.
+//! APX dev server with OTEL collector-based logging.
 
 use axum::Json;
 use axum::Router;
@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 use apx_databricks_sdk::DatabricksClient;
 
 use crate::api_generator::start_openapi_watcher;
+use crate::collector;
 use crate::dev::common::{Shutdown, lock_path, remove_lock};
 use crate::dev::logging::BrowserLogPayload;
 use crate::dev::otel::build_otlp_log_payload_from_ms;
@@ -23,7 +24,6 @@ use crate::dev::process::ProcessManager;
 use crate::dev::proxy;
 use crate::dev::watcher::{PollingWatcher, spawn_polling_watcher};
 use crate::dotenv::DotenvFile;
-use crate::flux;
 
 /// Shared application state for the dev server.
 #[derive(Clone)]
@@ -31,7 +31,7 @@ struct AppState {
     /// Broadcast sender for shutdown signals - the single authority for shutdown coordination.
     shutdown_tx: broadcast::Sender<Shutdown>,
     process_manager: Arc<ProcessManager>,
-    /// HTTP client for forwarding browser logs to flux
+    /// HTTP client for forwarding browser logs to the collector
     http_client: reqwest::Client,
     /// App directory path for resource attributes
     app_dir: PathBuf,
@@ -75,10 +75,10 @@ pub async fn run_server(config: ServerConfig) -> Result<(), String> {
         db_port,
         dev_token,
     } = config;
-    // Ensure flux is running for log collection
-    if let Err(e) = flux::ensure_running() {
+    // Ensure the collector is running for log collection
+    if let Err(e) = collector::ensure_running() {
         warn!(
-            "Failed to start flux: {}. Logging may not work correctly.",
+            "Failed to start collector: {}. Logging may not work correctly.",
             e
         );
     }
@@ -418,7 +418,7 @@ async fn browser_logs(
         message.push_str(&stack);
     }
 
-    // Forward to flux via OTLP HTTP using shared otel module
+    // Forward to the collector via OTLP HTTP using shared otel module
     let otlp_payload = build_otlp_log_payload_from_ms(
         &message,
         &payload.level,
@@ -430,7 +430,7 @@ async fn browser_logs(
     let endpoint = format!(
         "http://{}:{}/v1/logs",
         apx_common::hosts::CLIENT_HOST,
-        flux::FLUX_PORT
+        collector::COLLECTOR_PORT
     );
     let result = state
         .http_client
@@ -441,7 +441,7 @@ async fn browser_logs(
         .await;
 
     if let Err(e) = result {
-        debug!("Failed to forward browser log to flux: {}", e);
+        debug!("Failed to forward browser log to collector: {}", e);
     }
 
     StatusCode::OK

@@ -21,7 +21,7 @@ use tracing::{info, warn};
 
 use crate::dev::common::{DevProcess, ProbeResult, http_health_probe, stop_child_tree};
 use crate::dev::embedded_db::EmbeddedDb;
-use crate::dev::otel::forward_log_to_flux;
+use crate::dev::otel::forward_log_to_collector;
 use crate::dev::token;
 use crate::dotenv::DotenvFile;
 use crate::external::uv::UvTool;
@@ -264,7 +264,7 @@ impl Backend {
 
     // -- private: log forwarding --
 
-    /// Spawn tasks to read stdout/stderr, prefix with source, and forward to flux.
+    /// Spawn tasks to read stdout/stderr, prefix with source, and forward to the collector.
     fn attach_log_forwarders(&self, child: &mut Child) {
         let service_name = format!("{}_app", self.cfg.app_slug);
         let app_path = self.cfg.app_dir.display().to_string();
@@ -279,7 +279,7 @@ impl Backend {
                         "{}",
                         apx_common::format::format_process_log_line("app", &line)
                     );
-                    forward_log_to_flux(&line, "INFO", &svc, &path).await;
+                    forward_log_to_collector(&line, "INFO", &svc, &path).await;
                 }
             });
         }
@@ -293,7 +293,7 @@ impl Backend {
                         apx_common::format::format_process_log_line("app", &line)
                     );
                     let severity = apx_common::format::parse_python_severity(&line);
-                    forward_log_to_flux(&line, severity, &service_name, &app_path).await;
+                    forward_log_to_collector(&line, severity, &service_name, &app_path).await;
                 }
             });
         }

@@ -6,7 +6,7 @@ pub mod common;
 pub(crate) mod embedded_db;
 pub(crate) mod frontend;
 pub mod logging;
-/// OpenTelemetry log forwarding to the flux collector.
+/// OpenTelemetry log forwarding to the OTEL collector.
 pub mod otel;
 /// Subprocess management for backend and frontend processes.
 pub mod process;

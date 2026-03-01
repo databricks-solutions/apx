@@ -11,12 +11,12 @@ pub(crate) mod common;
 pub(crate) mod components;
 pub(crate) mod dev;
 pub(crate) mod feedback;
-pub(crate) mod flux;
 pub(crate) mod frontend;
 pub(crate) mod info;
 /// Project initialization wizard and template rendering.
 pub mod init;
 pub(crate) mod skill;
+pub(crate) mod tracing_cmd;
 pub(crate) mod upgrade;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -52,9 +52,9 @@ enum Commands {
     /// 🚀 Development server commands
     #[command(subcommand)]
     Dev(DevCommands),
-    /// 📊 Flux OTEL collector commands
+    /// 📊 Tracing OTEL collector commands
     #[command(subcommand)]
-    Flux(FluxCommands),
+    Tracing(TracingCommands),
     /// 🧠 Skill commands (Claude Code integration)
     #[command(subcommand)]
     Skill(SkillCommands),
@@ -111,11 +111,11 @@ enum SkillCommands {
 }
 
 #[derive(Subcommand)]
-enum FluxCommands {
-    /// Start the flux OTEL collector daemon
-    Start(flux::start::StartArgs),
-    /// Stop the flux OTEL collector daemon
-    Stop(flux::stop::StopArgs),
+enum TracingCommands {
+    /// Start the tracing OTEL collector daemon
+    Start(tracing_cmd::start::StartArgs),
+    /// Stop the tracing OTEL collector daemon
+    Stop(tracing_cmd::stop::StopArgs),
 }
 
 /// Standard Unix exit code for processes terminated by SIGINT (128 + signal number 2).
@@ -202,9 +202,9 @@ async fn run_command(args: Vec<String>) -> i32 {
             DevCommands::Apply(args) => dev::apply::run(args).await,
             DevCommands::InternalRunServer(args) => dev::__internal_run_server::run(args).await,
         },
-        Some(Commands::Flux(flux_cmd)) => match flux_cmd {
-            FluxCommands::Start(args) => flux::start::run(args).await,
-            FluxCommands::Stop(args) => flux::stop::run(args).await,
+        Some(Commands::Tracing(cmd)) => match cmd {
+            TracingCommands::Start(args) => tracing_cmd::start::run(args).await,
+            TracingCommands::Stop(args) => tracing_cmd::stop::run(args).await,
         },
         Some(Commands::Skill(skill_cmd)) => match skill_cmd {
             SkillCommands::Install(args) => skill::install::run(args).await,

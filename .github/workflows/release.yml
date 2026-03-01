@@ -85,7 +85,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .bins/agent
-          key: apx-agent-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('crates/agent/**', 'crates/common/**', 'Cargo.lock') }}
+          key: apx-agent-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('crates/tracing/**', 'crates/common/**', 'Cargo.lock') }}
 
       # Map matrix target to Rust target for agent build
       - name: Build apx-agent (Linux x86_64)
@@ -223,7 +223,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: .bins/agent
-          key: apx-agent-${{ runner.os }}-${{ matrix.rust_target }}-${{ hashFiles('crates/agent/**', 'crates/common/**', 'Cargo.lock') }}
+          key: apx-agent-${{ runner.os }}-${{ matrix.rust_target }}-${{ hashFiles('crates/tracing/**', 'crates/common/**', 'Cargo.lock') }}
 
       - name: Build apx-agent (native)
         if: steps.cache-agent.outputs.cache-hit != 'true' && !matrix.cross

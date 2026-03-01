@@ -20,7 +20,7 @@ Fixed a critical bug where newly generated projects failed to start because the 
 
 1. **Redirect policy** (`crates/core/src/dev/process.rs`): Added `.redirect(reqwest::redirect::Policy::none())` to `HEALTH_CLIENT`. A 302 is a valid HTTP response proving the server is listening -- no need to follow it.
 
-2. **Log path canonicalization** (`crates/core/src/dev/process.rs`): `ProcessManager::new()` now canonicalizes `app_dir` so that `forward_log_to_flux()` uses the same path as `StartupLogStreamer`. On macOS, `/tmp/foo` canonicalizes to `/private/tmp/foo`, and the mismatch caused startup logs to appear empty.
+2. **Log path canonicalization** (`crates/core/src/dev/process.rs`): `ProcessManager::new()` now canonicalizes `app_dir` so that `forward_log_to_collector()` uses the same path as `StartupLogStreamer`. On macOS, `/tmp/foo` canonicalizes to `/private/tmp/foo`, and the mismatch caused startup logs to appear empty.
 
 3. **Module extraction**: Moved `wait_for_healthy_with_logs()` from `ops/dev.rs` to new `ops/healthcheck.rs` for better separation of concerns.
 

@@ -40,7 +40,7 @@ apx <command>
 | `skill`      | Install apx skill files           |
 | `mcp`        | Start the MCP server              |
 | `bun`        | Run a command using bun           |
-| `flux`       | Flux OTEL collector commands      |
+| `tracing`    | Tracing OTEL collector commands   |
 | `upgrade`    | Self-update to the latest version |
 
 ---
@@ -421,31 +421,31 @@ apx bun <ARGS>
 
 ---
 
-## flux
+## tracing
 
 OpenTelemetry collector commands for observability.
 
 <Callout type="info">
-  **Note:** You typically don't need to use flux commands directly. When you run
+  **Note:** You typically don't need to use tracing commands directly. When you run
   `apx dev start`, apx automatically starts the log collector and keeps it
-  running alongside your development servers. The flux commands are provided for
+  running alongside your development servers. The tracing commands are provided for
   advanced use cases where you need manual control over the collector.
 </Callout>
 
-### flux start
+### tracing start
 
-Start the Flux OTEL collector daemon.
+Start the tracing OTEL collector daemon.
 
 ```bash
-apx flux start
+apx tracing start
 ```
 
-### flux stop
+### tracing stop
 
-Stop the Flux OTEL collector daemon.
+Stop the tracing OTEL collector daemon.
 
 ```bash
-apx flux stop
+apx tracing stop
 ```
 
 ---

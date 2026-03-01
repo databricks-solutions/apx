@@ -1,4 +1,4 @@
-//! Flux: Native Rust OTEL Collector
+//! Native Rust OTEL Log Collector
 //!
 //! This module provides a native OpenTelemetry log collector that replaces
 //! the external otelcol binary. It stores logs in SQLite, runs as a detached
@@ -7,18 +7,18 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use apx::flux;
+//! use apx::collector;
 //!
-//! // Ensure flux is running (starts if not)
-//! flux::ensure_running()?;
+//! // Ensure the collector is running (starts if not)
+//! collector::ensure_running()?;
 //!
-//! // Check if flux is running
-//! if flux::is_running() {
-//!     println!("Flux is running");
+//! // Check if the collector is running
+//! if collector::is_running() {
+//!     println!("Collector is running");
 //! }
 //!
-//! // Stop flux
-//! flux::stop()?;
+//! // Stop the collector
+//! collector::stop()?;
 //! ```
 
 use std::fs;
@@ -28,15 +28,15 @@ use tracing::{debug, info, warn};
 
 // Re-export from apx-common crate
 pub use apx_common::{
-    FLUX_PORT, FluxLock, flux_dir, is_flux_listening, is_running, log_path, read_lock, remove_lock,
-    write_lock,
+    COLLECTOR_PORT, CollectorLock, collector_dir, is_collector_listening, is_running, log_path,
+    read_lock, remove_lock, write_lock,
 };
 
 // ============================================================================
 // Daemon management
 // ============================================================================
 
-/// Spawn flux as a detached daemon process using the apx-agent binary.
+/// Spawn the collector as a detached daemon process using the apx-agent binary.
 fn spawn_daemon() -> Result<u32, String> {
     let log_file = log_path()?;
 
@@ -57,9 +57,9 @@ fn spawn_daemon() -> Result<u32, String> {
         .map_err(|e| format!("Failed to clone log file handle: {e}"))?;
 
     // Get the agent binary path (installs if needed)
-    let agent_path = crate::agent::ensure_installed()?;
+    let agent_path = crate::tracing_binary::ensure_installed()?;
 
-    debug!("Spawning flux daemon: {}", agent_path.display());
+    debug!("Spawning collector daemon: {}", agent_path.display());
 
     let child = std::process::Command::new(&agent_path)
         .stdin(Stdio::null())
@@ -69,130 +69,131 @@ fn spawn_daemon() -> Result<u32, String> {
         .map_err(|e| format!("Failed to spawn agent: {e}"))?;
 
     let pid = child.id();
-    info!("Spawned flux daemon with pid={}", pid);
+    info!("Spawned collector daemon with pid={}", pid);
 
     Ok(pid)
 }
 
-/// Wait for flux to start accepting connections.
+/// Wait for the collector to start accepting connections.
 fn wait_for_ready(timeout_ms: u64) -> Result<(), String> {
     let start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
 
     while start.elapsed() < timeout {
-        let addr = std::net::SocketAddr::from((apx_common::hosts::CLIENT_HOST_OCTETS, FLUX_PORT));
+        let addr =
+            std::net::SocketAddr::from((apx_common::hosts::CLIENT_HOST_OCTETS, COLLECTOR_PORT));
         if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    Err(format!("Flux did not start within {timeout_ms}ms"))
+    Err(format!("Collector did not start within {timeout_ms}ms"))
 }
 
-/// Start flux daemon.
+/// Start the collector daemon.
 ///
-/// Spawns a new flux daemon process if one is not already running.
-/// Returns an error if flux cannot be started.
+/// Spawns a new collector daemon process if one is not already running.
+/// Returns an error if the collector cannot be started.
 pub fn start() -> Result<(), String> {
-    // Create the flux directory if it doesn't exist
-    let dir = flux_dir()?;
-    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create flux directory: {e}"))?;
+    // Create the collector directory if it doesn't exist
+    let dir = collector_dir()?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create collector directory: {e}"))?;
 
     // Check if already running via lock file
     if let Some(lock) = read_lock()? {
-        if is_flux_listening(lock.port) {
+        if is_collector_listening(lock.port) {
             debug!(
-                "Flux already running (pid={}, port={})",
+                "Collector already running (pid={}, port={})",
                 lock.pid, lock.port
             );
             return Ok(());
         }
 
         // Stale lock - clean up
-        debug!("Stale flux lock found, cleaning up");
+        debug!("Stale collector lock found, cleaning up");
         remove_lock()?;
     }
 
     // Check if something else is using the port
-    if is_flux_listening(FLUX_PORT) {
+    if is_collector_listening(COLLECTOR_PORT) {
         warn!(
-            "Port {} is in use but no valid lock file found. Assuming flux is running.",
-            FLUX_PORT
+            "Port {} is in use but no valid lock file found. Assuming collector is running.",
+            COLLECTOR_PORT
         );
         return Ok(());
     }
 
     // Start the daemon
-    info!("Starting flux daemon on port {}", FLUX_PORT);
+    info!("Starting collector daemon on port {}", COLLECTOR_PORT);
     let pid = spawn_daemon()?;
 
     // Wait for it to be ready
     wait_for_ready(5000)?;
 
     // Write lock file
-    let lock = FluxLock::new(pid);
+    let lock = CollectorLock::new(pid);
     write_lock(&lock)?;
 
-    info!("Flux daemon started successfully (pid={})", pid);
+    info!("Collector daemon started successfully (pid={})", pid);
     Ok(())
 }
 
-/// Ensure flux is running, starting it if necessary.
+/// Ensure the collector is running, starting it if necessary.
 ///
 /// This is the main API for callers like `apx dev start` that need to ensure
-/// flux is running before proceeding. Also checks that the running daemon
+/// the collector is running before proceeding. Also checks that the running daemon
 /// matches the current apx version — restarts on mismatch.
 pub fn ensure_running() -> Result<(), String> {
     if is_running() {
         // Check version from lock file
         if let Some(lock) = read_lock()? {
             if lock.version.as_deref() == Some(apx_common::VERSION) {
-                debug!("Flux is already running (version matches)");
+                debug!("Collector is already running (version matches)");
                 return Ok(());
             }
             // Version mismatch or old lock without version — restart
             info!(
-                "Flux version mismatch (running: {:?}, expected: {}), restarting",
+                "Collector version mismatch (running: {:?}, expected: {}), restarting",
                 lock.version,
                 apx_common::VERSION
             );
             stop()?;
             // Fall through to start()
         } else {
-            debug!("Flux is already running (no lock file to check version)");
+            debug!("Collector is already running (no lock file to check version)");
             return Ok(());
         }
     }
     start()
 }
 
-/// Stop flux daemon.
+/// Stop the collector daemon.
 ///
-/// Stops the running flux daemon and removes the lock file.
+/// Stops the running collector daemon and removes the lock file.
 pub fn stop() -> Result<(), String> {
     let Some(lock) = read_lock()? else {
-        debug!("Flux is not running (no lock file)");
+        debug!("Collector is not running (no lock file)");
         return Ok(());
     };
 
-    if !is_flux_listening(lock.port) {
-        debug!("Flux is not listening, cleaning up stale lock");
+    if !is_collector_listening(lock.port) {
+        debug!("Collector is not listening, cleaning up stale lock");
         remove_lock()?;
         return Ok(());
     }
 
-    info!("Stopping flux daemon (pid={})", lock.pid);
+    info!("Stopping collector daemon (pid={})", lock.pid);
 
     // Kill the process tree
-    if let Err(e) = crate::dev::common::kill_process_tree(lock.pid, "flux-daemon") {
-        warn!("Failed to kill flux process tree: {}", e);
+    if let Err(e) = crate::dev::common::kill_process_tree(lock.pid, "collector-daemon") {
+        warn!("Failed to kill collector process tree: {}", e);
     }
 
     // Wait a bit for the process to exit
     std::thread::sleep(Duration::from_millis(500));
 
     remove_lock()?;
-    info!("Flux daemon stopped");
+    info!("Collector daemon stopped");
     Ok(())
 }

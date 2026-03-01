@@ -18,7 +18,7 @@ use tokio::time::{Duration, timeout};
 use tracing::{debug, warn};
 
 use crate::dev::common::DevProcess;
-use crate::dev::otel::forward_log_to_flux;
+use crate::dev::otel::forward_log_to_collector;
 use crate::dev::token;
 use crate::external::ExternalTool;
 use crate::external::bun::Bun;
@@ -139,7 +139,7 @@ impl EmbeddedDb {
             .spawn()
             .map_err(|err| format!("Failed to start embedded database: {err}"))?;
 
-        // Forward stdout/stderr to flux with "db" source prefix
+        // Forward stdout/stderr to the collector with "db" source prefix
         let service_name = format!("{app_slug}_db");
         let app_path = app_dir.display().to_string();
 
@@ -154,7 +154,7 @@ impl EmbeddedDb {
                         "{}",
                         apx_common::format::format_process_log_line("db", &line)
                     );
-                    forward_log_to_flux(&line, "INFO", &svc, &path).await;
+                    forward_log_to_collector(&line, "INFO", &svc, &path).await;
                 }
             });
         }
@@ -169,7 +169,7 @@ impl EmbeddedDb {
                         apx_common::format::format_process_log_line("db", &line)
                     );
                     let severity = apx_common::format::parse_python_severity(&line);
-                    forward_log_to_flux(&line, severity, &service_name, &app_path).await;
+                    forward_log_to_collector(&line, severity, &service_name, &app_path).await;
                 }
             });
         }

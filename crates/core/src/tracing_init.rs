@@ -156,7 +156,7 @@ fn init_tracing_with_otel(
     let endpoint = format!(
         "http://{}:{}/v1/logs",
         apx_common::hosts::CLIENT_HOST,
-        crate::flux::FLUX_PORT
+        crate::collector::COLLECTOR_PORT
     );
 
     let exporter = opentelemetry_otlp::LogExporter::builder()

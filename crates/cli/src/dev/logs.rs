@@ -1,6 +1,6 @@
-//! Log viewer for APX dev server using flux SQLite storage.
+//! Log viewer for APX dev server using the OTEL collector SQLite storage.
 //!
-//! Reads logs from ~/.apx/logs/db which is maintained by flux.
+//! Reads logs from ~/.apx/logs/db which is maintained by the collector.
 
 use clap::Args;
 use std::path::PathBuf;
