@@ -2,3 +2,5 @@
 pub mod apps;
 /// SCIM current-user (`/Me`) endpoint.
 pub mod current_user;
+/// Serving Endpoints REST API.
+pub mod serving_endpoints;

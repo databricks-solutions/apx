@@ -6,6 +6,7 @@ use tracing::debug;
 
 use crate::api::apps::AppsApi;
 use crate::api::current_user::CurrentUserApi;
+use crate::api::serving_endpoints::ServingEndpointsApi;
 use crate::auth::{CachedToken, acquire_token};
 use crate::config::{DatabricksConfig, resolve_config};
 use crate::error::{DatabricksError, Result};
@@ -14,6 +15,7 @@ use crate::useragent::UserAgent;
 struct Inner {
     config: DatabricksConfig,
     http: reqwest::Client,
+    user_agent: String,
     cached_token: RwLock<Option<CachedToken>>,
 }
 
@@ -72,9 +74,10 @@ impl DatabricksClient {
         let product_version = config.product_version.as_deref().unwrap_or("0.0.0");
 
         let ua = UserAgent::new(product, product_version).with_auth("databricks-cli");
+        let ua_string = ua.to_string();
 
         let http = reqwest::Client::builder()
-            .user_agent(ua.to_string())
+            .user_agent(&ua_string)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -82,6 +85,7 @@ impl DatabricksClient {
             inner: Arc::new(Inner {
                 config,
                 http,
+                user_agent: ua_string,
                 cached_token: RwLock::new(None),
             }),
         }
@@ -155,6 +159,26 @@ impl DatabricksClient {
         &self.inner.config.profile
     }
 
+    /// The User-Agent header value used by this client.
+    #[must_use]
+    pub fn user_agent(&self) -> &str {
+        &self.inner.user_agent
+    }
+
+    /// Build a `reqwest::Client` configured with the same User-Agent as this
+    /// SDK client. No auth headers are included — use [`access_token()`](Self::access_token)
+    /// separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying `reqwest::ClientBuilder` fails to build.
+    pub fn http_client(&self) -> Result<reqwest::Client> {
+        reqwest::Client::builder()
+            .user_agent(&self.inner.user_agent)
+            .build()
+            .map_err(Into::into)
+    }
+
     /// Access the Databricks Apps API.
     #[must_use]
     pub const fn apps(&self) -> AppsApi<'_> {
@@ -165,6 +189,51 @@ impl DatabricksClient {
     #[must_use]
     pub const fn current_user(&self) -> CurrentUserApi<'_> {
         CurrentUserApi::new(self)
+    }
+
+    /// Access the Serving Endpoints API.
+    #[must_use]
+    pub const fn serving_endpoints(&self) -> ServingEndpointsApi<'_> {
+        ServingEndpointsApi::new(self)
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl DatabricksClient {
+    /// Build a client with a pre-populated static token (bypasses CLI auth).
+    ///
+    /// Intended for wiremock-based tests in downstream crates.
+    #[must_use]
+    pub fn with_static_token(host: &str, token: &str) -> Self {
+        let config = DatabricksConfig {
+            profile: "test".to_string(),
+            host: host.to_string(),
+            product: Some("apx-test".to_string()),
+            product_version: Some("0.0.0".to_string()),
+        };
+
+        let ua = UserAgent::new("apx-test", "0.0.0").with_auth("static-token");
+        let ua_string = ua.to_string();
+
+        let http = reqwest::Client::builder()
+            .user_agent(&ua_string)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        let far_future = chrono::Utc::now() + chrono::Duration::hours(24);
+        let cached = CachedToken {
+            access_token: token.to_string(),
+            expires_at: far_future,
+        };
+
+        Self {
+            inner: Arc::new(Inner {
+                config,
+                http,
+                user_agent: ua_string,
+                cached_token: RwLock::new(Some(cached)),
+            }),
+        }
     }
 }
 
@@ -182,4 +251,23 @@ async fn handle_response<T: DeserializeOwned>(response: reqwest::Response) -> Re
 
     let body = response.text().await?;
     serde_json::from_str(&body).map_err(Into::into)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_client_builds_successfully() {
+        let client = DatabricksClient::with_static_token("https://test.databricks.com", "tok");
+        assert!(client.http_client().is_ok());
+    }
+
+    #[test]
+    fn user_agent_contains_product() {
+        let client = DatabricksClient::with_static_token("https://test.databricks.com", "tok");
+        assert!(client.user_agent().contains("apx-test"));
+        assert!(client.user_agent().contains("apx-databricks-sdk-rust"));
+    }
 }

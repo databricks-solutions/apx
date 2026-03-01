@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/common", "crates/tracing", "crates/studio", "crates/core", "crates/mcp", "crates/cli", "crates/databricks_sdk", "crates/apx", "crates/db"]
+members = ["crates/common", "crates/tracing", "crates/studio", "crates/core", "crates/mcp", "crates/cli", "crates/databricks_sdk", "crates/apx", "crates/db", "crates/agent"]
 resolver = "2"
 
 [workspace.package]
@@ -21,6 +21,7 @@ apx-core = { path = "crates/core" }
 apx-mcp = { path = "crates/mcp" }
 apx-cli = { path = "crates/cli" }
 apx-databricks-sdk = { path = "crates/databricks_sdk" }
+apx-agent = { path = "crates/agent" }
 apx-db = { path = "crates/db" }
 
 # Serialization
@@ -38,6 +39,9 @@ tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "sync", "pr
 tokio-stream = "0.1.17"
 futures-util = "0.3.31"
 rmcp = { version = "0.15", features = ["server", "transport-io", "schemars"] }
+
+# AI / LLM
+rig-core = { version = "0.31", default-features = false, features = ["reqwest-rustls"] }
 
 # Web server
 axum = { version = "0.8.8", features = ["ws"] }

@@ -20,6 +20,9 @@ pub mod useragent;
 
 pub use api::apps::{App, AppLogsArgs, ComputeState, LogEntry};
 pub use api::current_user::{User, UserEmail, UserName};
+pub use api::serving_endpoints::{
+    EndpointConfig, EndpointReadyState, EndpointState, ServedEntity, ServingEndpoint,
+};
 pub use client::DatabricksClient;
 pub use config::{DatabricksConfig, list_profile_names, resolve_config};
 pub use config_parser::ConfigParser;
