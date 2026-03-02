@@ -9,6 +9,8 @@ pub mod bundles;
 pub mod format;
 /// Network host constants for binding, client connections, and browser URLs.
 pub mod hosts;
+/// Databricks CLI profile resolution.
+pub mod profile;
 /// Pure types and logic for OTEL log records, filtering, and aggregation.
 pub mod storage;
 
@@ -19,6 +21,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 // Re-export commonly used types
+pub use profile::EnvProfile;
 pub use storage::{
     AggregatedRecord, LogAggregator, LogRecord, ServiceKind, collector_dir, get_aggregation_key,
     should_skip_log, should_skip_log_message, source_label,

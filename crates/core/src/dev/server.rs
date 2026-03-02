@@ -13,6 +13,7 @@ use tokio::sync::broadcast;
 use tokio::time::Duration;
 use tracing::{debug, info, warn};
 
+use apx_common::EnvProfile;
 use apx_databricks_sdk::DatabricksClient;
 
 use crate::api_generator::start_openapi_watcher;
@@ -464,9 +465,14 @@ async fn stop(headers: HeaderMap, State(state): State<AppState>) -> StatusCode {
 
 /// Resolve the Databricks profile name from env var or `.env` file.
 pub fn resolve_databricks_profile(app_dir: &std::path::Path) -> Option<String> {
-    std::env::var("DATABRICKS_CONFIG_PROFILE").ok().or_else(|| {
-        DotenvFile::read(&app_dir.join(".env"))
-            .ok()
-            .and_then(|d| d.get_vars().get("DATABRICKS_CONFIG_PROFILE").cloned())
-    })
+    let dotenv_vars = DotenvFile::read(&app_dir.join(".env"))
+        .ok()
+        .map(|d| d.get_vars())
+        .unwrap_or_default();
+    let profile = EnvProfile::new(&dotenv_vars).retrieve(None);
+    if profile.is_empty() {
+        None
+    } else {
+        Some(profile)
+    }
 }

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
+use apx_common::EnvProfile;
 use apx_core::dotenv::DotenvFile;
 use apx_databricks_sdk::{AppLogsArgs, DatabricksClient, LogEntry};
 use rmcp::model::{CallToolResult, ErrorData};
@@ -172,21 +173,7 @@ async fn get_or_create_client(
 }
 
 fn resolve_profile(args: &DatabricksAppsLogsArgs, dotenv_vars: &HashMap<String, String>) -> String {
-    if let Some(ref p) = args.profile {
-        let trimmed = p.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-
-    if let Some(p) = dotenv_vars.get("DATABRICKS_CONFIG_PROFILE") {
-        let trimmed = p.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-
-    String::new()
+    EnvProfile::new(dotenv_vars).retrieve(args.profile.as_deref())
 }
 
 #[cfg(test)]
