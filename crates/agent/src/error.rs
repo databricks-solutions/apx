@@ -15,6 +15,9 @@ pub enum AgentError {
     /// A completion request failed.
     #[error("completion error: {0}")]
     Completion(String),
+    /// Session storage error.
+    #[error("session error: {0}")]
+    Session(String),
 }
 
 /// Convenience alias for `Result<T, AgentError>`.

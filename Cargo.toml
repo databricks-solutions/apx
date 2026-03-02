@@ -38,6 +38,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "signal", "io-std", "net"] }
 tokio-stream = "0.1.17"
 futures-util = "0.3.31"
+async-stream = "0.3"
 rmcp = { version = "0.15", features = ["server", "transport-io", "schemars"] }
 
 # AI / LLM
@@ -81,6 +82,9 @@ sha2 = "0.10"
 tar = "0.4"
 rayon = "1.11.0"
 similar = "2.7"
+nanoid = "0.4"
+ratatui = "0.30"
+crossterm = { version = "0.28", features = ["event-stream"] }
 
 # System
 sysinfo = "0.33.1"

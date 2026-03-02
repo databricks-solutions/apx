@@ -5,6 +5,7 @@
 //! and more.
 
 pub(crate) mod __generate_openapi;
+pub(crate) mod agent;
 pub(crate) mod build;
 pub(crate) mod bun;
 pub(crate) mod common;
@@ -62,6 +63,9 @@ enum Commands {
     Feedback(feedback::FeedbackArgs),
     /// ℹ️  Show environment and version info
     Info(info::InfoArgs),
+    /// 🤖 Agent commands
+    #[command(subcommand)]
+    Agent(agent::AgentCommands),
     /// ⬆️  Upgrade apx to the latest version
     Upgrade,
     /// Internal: generate OpenAPI schema and client
@@ -208,6 +212,9 @@ async fn run_command(args: Vec<String>) -> i32 {
         },
         Some(Commands::Skill(skill_cmd)) => match skill_cmd {
             SkillCommands::Install(args) => skill::install::run(args).await,
+        },
+        Some(Commands::Agent(agent_cmd)) => match agent_cmd {
+            agent::AgentCommands::Chat(args) => agent::chat::run(args).await,
         },
         Some(Commands::Feedback(args)) => feedback::run(args).await,
         Some(Commands::Info(args)) => info::run(args).await,

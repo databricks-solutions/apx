@@ -14,6 +14,7 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
+apx-agent.workspace = true
 apx-common.workspace = true
 apx-core = { path = "../core" , version = "0.3.8" }
 apx-db.workspace = true
@@ -35,6 +36,9 @@ chrono.workspace = true
 reqwest.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

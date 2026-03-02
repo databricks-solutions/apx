@@ -20,6 +20,11 @@ reqwest.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+sqlx.workspace = true
+futures-util.workspace = true
+async-stream.workspace = true
+dirs.workspace = true
+nanoid.workspace = true
 
 [dev-dependencies]
 apx-databricks-sdk = { workspace = true, features = ["testing"] }
