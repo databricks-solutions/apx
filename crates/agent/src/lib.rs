@@ -7,6 +7,8 @@
 pub mod chat;
 /// Agent client for model discovery and completions.
 pub mod client;
+/// Slash-command parsing for TUI input.
+pub mod command;
 /// Error types for the agent crate.
 pub mod error;
 /// Model reference types and filtering utilities.
@@ -18,6 +20,7 @@ pub mod session_sqlite;
 
 pub use chat::{ChatEvent, ChatMessage, Role, now_secs};
 pub use client::AgentClient;
+pub use command::{CommandArgs, CommandName, ParsedInput, parse_input};
 pub use error::{AgentError, Result};
 pub use model::{ModelRef, chat_models};
 pub use session::{Session, SessionStore};

@@ -1,6 +1,7 @@
 //! Agent commands — interactive chat with Databricks-hosted models.
 
 pub mod chat;
+mod commands;
 pub mod tui;
 
 use clap::Subcommand;

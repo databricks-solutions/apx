@@ -39,4 +39,10 @@ pub trait SessionStore: Send + Sync {
         &self,
         session_id: &str,
     ) -> impl Future<Output = Result<Vec<ChatMessage>>> + Send;
+    /// Update the model name for an existing session.
+    fn update_model(
+        &self,
+        session_id: &str,
+        model_name: &str,
+    ) -> impl Future<Output = Result<()>> + Send;
 }

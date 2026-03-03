@@ -3,8 +3,11 @@
 use std::time::Duration;
 
 use apx_agent::{
-    AgentClient, ChatEvent, ChatMessage, Role, Session, SessionStore, SqliteSessionStore, now_secs,
+    AgentClient, ChatEvent, ChatMessage, ParsedInput, Role, Session, SessionStore,
+    SqliteSessionStore, now_secs, parse_input,
 };
+
+use super::commands::{self, CommandContext, CommandOutcome};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures_util::StreamExt;
 use ratatui::Frame;
@@ -14,9 +17,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
+/// The kind of message shown in the chat area.
+enum MessageKind {
+    Chat(Role),
+    Info,
+}
+
 /// A message displayed in the chat area.
 struct DisplayMessage {
-    role: Role,
+    kind: MessageKind,
     content: String,
 }
 
@@ -27,6 +36,7 @@ struct App {
     scroll_offset: u16,
     streaming: bool,
     should_quit: bool,
+    needs_reinit: bool,
     model_name: String,
     session: Session,
 }
@@ -39,6 +49,7 @@ impl App {
             scroll_offset: 0,
             streaming: false,
             should_quit: false,
+            needs_reinit: false,
             model_name: model_name.into(),
             session,
         }
@@ -104,6 +115,12 @@ async fn run_event_loop(
             _ = tick.tick() => {}
         }
 
+        // Re-enter TUI after a command that suspended raw mode (e.g. /model).
+        if app.needs_reinit {
+            *terminal = ratatui::init();
+            app.needs_reinit = false;
+        }
+
         if app.should_quit {
             break;
         }
@@ -125,7 +142,7 @@ async fn handle_key(
             app.should_quit = true;
         }
         (KeyCode::Enter, _) if !app.streaming && !app.input.is_empty() => {
-            send_message(app, client, store, chat_tx).await?;
+            handle_enter(app, client, store, chat_tx).await?;
         }
         (KeyCode::Char(c), _) if !app.streaming => {
             app.input.push(c);
@@ -142,6 +159,23 @@ async fn handle_key(
         _ => {}
     }
     Ok(())
+}
+
+/// Route user input to either the chat stream or the command dispatcher.
+async fn handle_enter(
+    app: &mut App,
+    client: &AgentClient,
+    store: &SqliteSessionStore,
+    chat_tx: &mpsc::Sender<ChatEvent>,
+) -> Result<(), String> {
+    match parse_input(&app.input) {
+        ParsedInput::Message(_) => send_message(app, client, store, chat_tx).await,
+        ParsedInput::Command { name, args } => {
+            app.input.clear();
+            handle_command(app, &name, &args, client, store).await;
+            Ok(())
+        }
+    }
 }
 
 /// Send the current input as a user message and start streaming the response.
@@ -165,13 +199,13 @@ async fn send_message(
         .await
         .map_err(|e| format!("save message: {e}"))?;
     app.messages.push(DisplayMessage {
-        role: Role::User,
+        kind: MessageKind::Chat(Role::User),
         content,
     });
 
     // Add empty assistant placeholder
     app.messages.push(DisplayMessage {
-        role: Role::Assistant,
+        kind: MessageKind::Chat(Role::Assistant),
         content: String::new(),
     });
     app.streaming = true;
@@ -249,6 +283,63 @@ async fn handle_chat_event(
     Ok(())
 }
 
+/// Handle a parsed slash command.
+///
+/// Commands that need interactive prompts (e.g. `/model`) suspend raw mode
+/// so that `dialoguer` can function, then signal the event loop to re-init
+/// the terminal.
+async fn handle_command(
+    app: &mut App,
+    name: &apx_agent::CommandName,
+    args: &apx_agent::CommandArgs,
+    client: &AgentClient,
+    store: &SqliteSessionStore,
+) {
+    let suspended = commands::needs_terminal_suspend(name);
+    if suspended {
+        ratatui::restore();
+    }
+
+    let ctx = CommandContext { client };
+    let outcome = commands::dispatch(name, args, ctx).await;
+    apply_outcome(app, outcome, store).await;
+
+    app.needs_reinit = suspended;
+}
+
+/// Apply a [`CommandOutcome`] to application state.
+///
+/// All app mutations from command results happen here — handlers stay pure.
+async fn apply_outcome(app: &mut App, outcome: CommandOutcome, store: &SqliteSessionStore) {
+    match outcome {
+        CommandOutcome::Quit => {
+            app.should_quit = true;
+        }
+        CommandOutcome::ModelChanged(name) => {
+            app.model_name.clone_from(&name);
+            // Best-effort persist; display the change even if the DB write fails.
+            let _ = store.update_model(&app.session.id, &name).await;
+            app.messages.push(DisplayMessage {
+                kind: MessageKind::Info,
+                content: format!("Model changed to {name}"),
+            });
+        }
+        CommandOutcome::Info(text) => {
+            app.messages.push(DisplayMessage {
+                kind: MessageKind::Info,
+                content: text.to_string(),
+            });
+        }
+        CommandOutcome::CommandError(text) => {
+            app.messages.push(DisplayMessage {
+                kind: MessageKind::Info,
+                content: format!("Error: {text}"),
+            });
+        }
+    }
+    app.scroll_offset = 0;
+}
+
 /// Render the TUI.
 fn draw(f: &mut Frame<'_>, app: &App) {
     let chunks = Layout::vertical([
@@ -290,14 +381,15 @@ fn draw_status_bar(f: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
 fn draw_messages(f: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
     let mut lines: Vec<Line<'_>> = Vec::new();
     for msg in &app.messages {
-        let (prefix, style) = match msg.role {
-            Role::User => (
+        let (prefix, style) = match &msg.kind {
+            MessageKind::Chat(Role::User) => (
                 "You: ",
                 Style::default()
                     .fg(Color::Blue)
                     .add_modifier(Modifier::BOLD),
             ),
-            Role::Assistant => ("AI:  ", Style::default().fg(Color::Green)),
+            MessageKind::Chat(Role::Assistant) => ("AI:  ", Style::default().fg(Color::Green)),
+            MessageKind::Info => ("  >  ", Style::default().fg(Color::Yellow)),
         };
 
         let prefix_span = Span::styled(prefix, style);
@@ -340,7 +432,7 @@ fn draw_input(f: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title("Send (Enter) | Quit (Ctrl+C)");
+        .title("Send (Enter) | /help | Quit (Ctrl+C)");
     let paragraph = Paragraph::new(text).block(block);
     f.render_widget(paragraph, area);
 

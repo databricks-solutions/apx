@@ -197,6 +197,18 @@ impl SessionStore for SqliteSessionStore {
             })
             .collect()
     }
+
+    async fn update_model(&self, session_id: &str, model_name: &str) -> Result<()> {
+        let now = now_secs();
+        sqlx::query("UPDATE sessions SET model_name = ?, updated_at = ? WHERE id = ?")
+            .bind(model_name)
+            .bind(now)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AgentError::Session(format!("update model: {e}")))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -318,6 +330,19 @@ mod tests {
         let session = store.create_session("model-z").await.unwrap();
         let messages = store.load_messages(&session.id).await.unwrap();
         assert!(messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_model_changes_model_name() {
+        let store = temp_store().await;
+        let session = store.create_session("old-model").await.unwrap();
+        assert_eq!(session.model_name, "old-model");
+
+        store.update_model(&session.id, "new-model").await.unwrap();
+
+        let updated = store.get_session(&session.id).await.unwrap().unwrap();
+        assert_eq!(updated.model_name, "new-model");
+        assert!(updated.updated_at >= session.updated_at);
     }
 
     #[tokio::test]
