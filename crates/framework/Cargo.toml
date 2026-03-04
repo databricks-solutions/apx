@@ -1,0 +1,41 @@
+[package]
+name = "apx-framework"
+version = "0.3.8"
+edition.workspace = true
+rust-version.workspace = true
+description = "Python framework embedding via PyO3 for apx"
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+pyo3.workspace = true
+pyo3-async-runtimes.workspace = true
+tokio.workspace = true
+axum.workspace = true
+socket2.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+rmp-serde.workspace = true
+tempfile.workspace = true
+form_urlencoded.workspace = true
+http.workspace = true
+bytes.workspace = true
+http-body-util.workspace = true
+sysinfo.workspace = true
+futures-core.workspace = true
+tokio-stream.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }

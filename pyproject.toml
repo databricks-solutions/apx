@@ -5,7 +5,7 @@ description = "apx is the toolkit for building Databricks Apps"
 readme = { file = "README.md", content-type = "text/markdown" }
 authors = [{ name = "renardeinside", email = "polarpersonal@gmail.com" }]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["pydantic>=2.0"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -14,6 +14,9 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Framework :: Hatch",
 ]
+
+[project.scripts]
+apx = "apx:_main"
 
 [dependency-groups]
 dev = [
@@ -61,12 +64,12 @@ exclude = ['venv', '.venv', 'src/apx/templates', 'node_modules', 'experiments']
 
 
 [tool.maturin]
-bindings = "bin"
+bindings = "pyo3"
+module-name = "apx._core"
 manifest-path = "crates/apx/Cargo.toml"
 python-packages = ["apx"]
 python-source = "src"
 strip = true
-include = ["**/apx/binaries/*"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]

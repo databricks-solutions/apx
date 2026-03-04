@@ -16,6 +16,7 @@ pub(crate) mod frontend;
 pub(crate) mod info;
 /// Project initialization wizard and template rendering.
 pub mod init;
+pub(crate) mod serve;
 pub(crate) mod skill;
 pub(crate) mod upgrade;
 
@@ -58,6 +59,8 @@ enum Commands {
     /// 🧠 Skill commands (Claude Code integration)
     #[command(subcommand)]
     Skill(SkillCommands),
+    /// 🏗️  Serve the app with the apx framework runtime
+    Serve(serve::ServeArgs),
     /// 💬 Send feedback to the apx team
     Feedback(feedback::FeedbackArgs),
     /// ℹ️  Show environment and version info
@@ -209,6 +212,7 @@ async fn run_command(args: Vec<String>) -> i32 {
         Some(Commands::Skill(skill_cmd)) => match skill_cmd {
             SkillCommands::Install(args) => skill::install::run(args).await,
         },
+        Some(Commands::Serve(args)) => serve::run(args).await,
         Some(Commands::Feedback(args)) => feedback::run(args).await,
         Some(Commands::Info(args)) => info::run(args).await,
         Some(Commands::Upgrade) => upgrade::run().await,

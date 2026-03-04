@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/common", "crates/agent", "crates/studio", "crates/core", "crates/mcp", "crates/cli", "crates/databricks_sdk", "crates/apx", "crates/db"]
+members = ["crates/common", "crates/agent", "crates/studio", "crates/core", "crates/mcp", "crates/cli", "crates/databricks_sdk", "crates/apx", "crates/db", "crates/framework"]
 resolver = "2"
 
 [workspace.package]
@@ -22,6 +22,7 @@ apx-mcp = { path = "crates/mcp" }
 apx-cli = { path = "crates/cli" }
 apx-databricks-sdk = { path = "crates/databricks_sdk" }
 apx-db = { path = "crates/db" }
+apx-framework = { path = "crates/framework" }
 
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
@@ -36,6 +37,7 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 # Async runtime
 tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "signal", "io-std", "net"] }
 tokio-stream = "0.1.17"
+futures-core = "0.3.31"
 futures-util = "0.3.31"
 rmcp = { version = "0.15", features = ["server", "transport-io", "schemars"] }
 
@@ -112,8 +114,31 @@ wiremock = "0.6"
 # Embedded resources
 which = "7"
 
+# Python embedding (framework)
+# IMPORTANT: No "auto-initialize" feature. Without it, accidental PyO3 use in
+# the supervisor path panics with "Python is not initialized" — a loud failure
+# instead of silent interpreter corruption in the multi-worker fork model.
+# NOTE: "extension-module" is NOT set here — it is set only in crates/apx
+# (the cdylib). Library crates need to link against libpython for `cargo test`.
+pyo3 = { version = "0.28.2", features = ["macros"] }
+pyo3-async-runtimes = { version = "0.28.0", features = ["tokio-runtime"] }
+socket2 = "0.6.2"
+
+# Framework: admission control + HTTP middleware
+tower = { version = "0.5", features = ["timeout", "limit"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "normalize-path", "request-id"] }
+
+# Framework: IPC serialization (msgpack)
+rmp-serde = "1"
+
+# Framework: explicit deps used directly in types (not via transitive re-export from axum)
+form_urlencoded = "1"
+http = "1"
+bytes = "1"
+http-body-util = "0.1"
+
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 warnings = "deny"
 
 # Correctness

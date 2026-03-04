@@ -13,10 +13,12 @@ categories.workspace = true
 [lints]
 workspace = true
 
-[[bin]]
-name = "apx"
-path = "src/main.rs"
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
 
 [dependencies]
 apx-cli.workspace = true
 apx-core.workspace = true
+apx-framework.workspace = true
+pyo3 = { workspace = true, features = ["extension-module"] }

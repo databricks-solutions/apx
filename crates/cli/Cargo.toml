@@ -17,6 +17,7 @@ workspace = true
 apx-common.workspace = true
 apx-core = { path = "../core" , version = "0.3.8" }
 apx-db.workspace = true
+apx-framework.workspace = true
 apx-databricks-sdk = { path = "../databricks_sdk" , version = "0.3.8" }
 apx-mcp = { path = "../mcp" , version = "0.3.8" }
 clap.workspace = true
