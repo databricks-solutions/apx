@@ -54,7 +54,7 @@ pub fn bind_routes(
     let mut bound = Vec::with_capacity(manifest.routes.len());
 
     for rm in &manifest.routes {
-        let method_str = super::http_method_str(rm.method);
+        let method_str = rm.method.as_str();
         let key = (rm.path.as_str().to_owned(), method_str.to_owned());
         let handler = endpoint_map
             .get(&key)

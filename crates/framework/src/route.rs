@@ -244,6 +244,25 @@ pub enum HttpMethod {
     Patch,
 }
 
+impl HttpMethod {
+    /// Uppercase HTTP method string.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Delete => "DELETE",
+            Self::Patch => "PATCH",
+        }
+    }
+}
+
+impl fmt::Display for HttpMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// What kind of handler this route uses.
 ///
 /// Determines which [`HandlerDispatch`](crate::bridge::dispatch::HandlerDispatch)

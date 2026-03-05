@@ -44,7 +44,7 @@ fn validate_path_params_match(manifest: &AppManifest) -> ValidationCheck {
             if !declared_params.contains(tp) {
                 mismatches.push(format!(
                     "{} {}: template param '{{{}}}' has no Path param",
-                    format_method(route.method),
+                    route.method.as_str(),
                     route.path,
                     tp
                 ));
@@ -54,7 +54,7 @@ fn validate_path_params_match(manifest: &AppManifest) -> ValidationCheck {
             if !template_params.contains(*dp) {
                 mismatches.push(format!(
                     "{} {}: Path param '{}' not in template",
-                    format_method(route.method),
+                    route.method.as_str(),
                     route.path,
                     dp
                 ));
@@ -93,7 +93,7 @@ fn validate_no_duplicate_routes(manifest: &AppManifest) -> ValidationCheck {
     for route in &manifest.routes {
         let key = (route.method, route.path.as_str());
         if !seen.insert(key) {
-            dupes.push(format!("{} {}", format_method(route.method), route.path));
+            dupes.push(format!("{} {}", route.method.as_str(), route.path));
         }
     }
     if dupes.is_empty() {
@@ -120,16 +120,6 @@ fn fail(name: &str, detail: &str) -> ValidationCheck {
         name: name.to_owned(),
         passed: false,
         detail: Some(detail.to_owned()),
-    }
-}
-
-fn format_method(method: crate::route::HttpMethod) -> &'static str {
-    match method {
-        crate::route::HttpMethod::Get => "GET",
-        crate::route::HttpMethod::Post => "POST",
-        crate::route::HttpMethod::Put => "PUT",
-        crate::route::HttpMethod::Delete => "DELETE",
-        crate::route::HttpMethod::Patch => "PATCH",
     }
 }
 

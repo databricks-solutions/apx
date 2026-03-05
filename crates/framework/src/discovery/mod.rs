@@ -59,18 +59,6 @@ pub fn parse_http_method(s: &str) -> Result<crate::route::HttpMethod, DiscoveryE
     }
 }
 
-/// Return the uppercase string for an [`HttpMethod`].
-pub fn http_method_str(m: crate::route::HttpMethod) -> &'static str {
-    use crate::route::HttpMethod;
-    match m {
-        HttpMethod::Get => "GET",
-        HttpMethod::Post => "POST",
-        HttpMethod::Put => "PUT",
-        HttpMethod::Delete => "DELETE",
-        HttpMethod::Patch => "PATCH",
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -100,10 +88,10 @@ mod tests {
         assert!(matches!(err, DiscoveryError::InvalidRoute(_)));
     }
 
-    // ── http_method_str ──────────────────────────────────────────────────
+    // ── HttpMethod::as_str roundtrip ────────────────────────────────────
 
     #[test]
-    fn http_method_str_roundtrip() {
+    fn http_method_as_str_roundtrip() {
         use crate::route::HttpMethod;
         for m in [
             HttpMethod::Get,
@@ -112,8 +100,7 @@ mod tests {
             HttpMethod::Delete,
             HttpMethod::Patch,
         ] {
-            let s = http_method_str(m);
-            assert_eq!(parse_http_method(s).unwrap(), m);
+            assert_eq!(parse_http_method(m.as_str()).unwrap(), m);
         }
     }
 
