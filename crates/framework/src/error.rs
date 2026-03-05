@@ -97,15 +97,6 @@ pub fn find_in_error_chain<T: std::error::Error + 'static>(
     None
 }
 
-/// Map axum/hyper body errors to [`BodyParseKind`] by error type, not string content.
-#[cfg(test)]
-pub(crate) fn map_body_error(err: axum::Error) -> AppError {
-    if find_in_error_chain::<http_body_util::LengthLimitError>(&err).is_some() {
-        return AppError::BodyParse(BodyParseKind::BodyTooLarge);
-    }
-    AppError::BodyParse(BodyParseKind::InvalidJson)
-}
-
 // ── Application error enum ──────────────────────────────────────────────
 
 /// Application error that converts to RFC 9457 responses.
@@ -377,29 +368,6 @@ mod tests {
         let lle = make_length_limit_boxed_error().await;
         let err = Outer(Inner(lle));
         assert!(find_in_error_chain::<http_body_util::LengthLimitError>(&err).is_some());
-    }
-
-    // ── map_body_error ───────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn map_body_error_body_too_large() {
-        let lle = make_length_limit_boxed_error().await;
-        let err = axum::Error::new(lle);
-        let app_err = map_body_error(err);
-        assert!(matches!(
-            app_err,
-            AppError::BodyParse(BodyParseKind::BodyTooLarge)
-        ));
-    }
-
-    #[test]
-    fn map_body_error_invalid_json() {
-        let err = axum::Error::new(std::io::Error::other("bad json"));
-        let app_err = map_body_error(err);
-        assert!(matches!(
-            app_err,
-            AppError::BodyParse(BodyParseKind::InvalidJson)
-        ));
     }
 
     // ── BodyParseKind::detail ────────────────────────────────────────────
