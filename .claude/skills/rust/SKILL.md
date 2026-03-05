@@ -147,6 +147,8 @@ impl ExternalCommand for Git { ... }
 impl ExternalCommand for Uv { ... }
 ```
 
+*See also [Service & middleware](#service--middleware) and [Trait object plugin](#trait-object-plugin) in Ecosystem patterns.*
+
 ### Modules as bounded contexts
 
 Each Rust module is a bounded context. Types and functions within a module share a domain model; the module boundary is the public API. Keep internal helpers private.
@@ -219,6 +221,402 @@ Use `String::with_capacity()` / `Vec::with_capacity()` when the final size is kn
 
 When hitting a bug, write a failing test that reproduces it first. Only then write the fix. Tests document the exact failure mode and prevent regressions.
 
+## Ecosystem patterns
+
+Production Rust relies on patterns popularized by Tokio, Axum, Tower, and Serde. These bridge the gap between the micro-level code patterns above and full application architecture.
+
+### Builder
+
+*Source: [Rust API Guidelines C-BUILDER](https://rust-lang.github.io/api-guidelines/type-safety.html#builders-enable-construction-of-complex-values-c-builder)*
+
+Separate construction from representation. A builder accumulates configuration through method chaining and produces the final value in a terminal `.build()` call that can validate and fail.
+
+> *Expands API design rule: "Builder pattern for complex initialization."*
+
+```rust
+pub struct ServerConfig {
+    bind_addr: SocketAddr,
+    workers: usize,
+    tls: Option<TlsConfig>,
+}
+
+pub struct ServerConfigBuilder {
+    bind_addr: Option<SocketAddr>,
+    workers: usize,
+    tls: Option<TlsConfig>,
+}
+
+impl ServerConfigBuilder {
+    pub fn new() -> Self {
+        Self { bind_addr: None, workers: 1, tls: None }
+    }
+
+    pub fn bind_addr(mut self, addr: SocketAddr) -> Self {
+        self.bind_addr = Some(addr);
+        self
+    }
+
+    pub fn workers(mut self, n: usize) -> Self {
+        self.workers = n;
+        self
+    }
+
+    pub fn tls(mut self, config: TlsConfig) -> Self {
+        self.tls = Some(config);
+        self
+    }
+
+    pub fn build(self) -> Result<ServerConfig, ConfigError> {
+        let bind_addr = self.bind_addr.ok_or(ConfigError::MissingBindAddr)?;
+        Ok(ServerConfig { bind_addr, workers: self.workers, tls: self.tls })
+    }
+}
+```
+
+**Use when:**
+- A type has 4+ optional configuration fields
+- Construction requires validation that can fail
+- You want to guide callers through configuration step-by-step
+
+**Avoid when:**
+- A simple `new()` with 1-3 required fields suffices
+- The type is a plain data carrier with no invariants
+
+### Newtype
+
+*Source: [Rust Design Patterns — Newtype](https://rust-unofficial.github.io/patterns/patterns/behavioural/newtype.html)*
+
+Wrap a primitive in a single-field tuple struct to enforce domain invariants at construction time. The inner value is private; access goes through validated constructors and accessor methods.
+
+> *Complements Safety rule #9: "Domain types over raw primitives."*
+
+```rust
+// from crates/framework/src/route.rs
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct QualName(String);
+
+#[derive(Debug, thiserror::Error)]
+pub enum QualNameError {
+    #[error("qualified name must not be empty")]
+    Empty,
+    #[error("qualified name has empty segment: {0}")]
+    EmptySegment(String),
+    #[error("invalid qualified name segment: {0}")]
+    InvalidSegment(String),
+}
+
+impl QualName {
+    pub fn new(name: impl Into<String>) -> Result<Self, QualNameError> {
+        let name = name.into();
+        if name.is_empty() {
+            return Err(QualNameError::Empty);
+        }
+        for segment in name.split('.') {
+            if segment.is_empty() {
+                return Err(QualNameError::EmptySegment(name));
+            }
+            // ... validate each segment
+        }
+        Ok(Self(name))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+```
+
+**Use when:**
+- A raw type (`String`, `u64`, `Vec<u8>`) has domain constraints (non-empty, positive, valid format)
+- You need to prevent mixing two semantically different values of the same underlying type
+- The type appears in public APIs and you want compile-time safety
+
+**Avoid when:**
+- The wrapper adds no invariants and just obscures the inner type
+- You only need it in one internal function (use a local `let` binding instead)
+
+### Extension trait
+
+*Source: [Rust API Guidelines C-EXT](https://rust-lang.github.io/api-guidelines/flexibility.html)*
+
+Add methods to a foreign type (one you don't own) by defining a trait and implementing it for that type. Callers `use` the trait to get the new methods.
+
+```rust
+// from crates/mcp/src/tools/mod.rs
+pub trait ToolResultExt {
+    fn from_serializable(value: &impl StructuredObject) -> Self;
+    fn from_serializable_error(value: &impl StructuredObject) -> Self;
+}
+
+impl ToolResultExt for CallToolResult {
+    fn from_serializable(value: &impl StructuredObject) -> Self {
+        build_structured_result(value, false)
+    }
+
+    fn from_serializable_error(value: &impl StructuredObject) -> Self {
+        build_structured_result(value, true)
+    }
+}
+
+// Usage: CallToolResult::from_serializable(&my_response)
+```
+
+**Use when:**
+- You need to add domain-specific methods to a type from an external crate
+- Multiple call sites would otherwise repeat the same conversion/construction logic
+- The methods form a coherent semantic group (name the trait after the capability, e.g. `*Ext`)
+
+**Avoid when:**
+- A free function would be equally clear and doesn't benefit from method syntax
+- You own the type — just add methods directly
+
+### Type-state
+
+*Source: [Cliffle — Rust Typestate Pattern](https://cliffle.com/blog/rust-typestate/)*
+
+Encode protocol states as zero-sized type parameters. Methods that are only valid in a specific state are only available on that parameterization. State transitions consume the old value and return a new one.
+
+```rust
+pub struct Disconnected;
+pub struct Connected;
+
+pub struct Connection<S> {
+    addr: SocketAddr,
+    _state: std::marker::PhantomData<S>,
+}
+
+impl Connection<Disconnected> {
+    pub fn new(addr: SocketAddr) -> Self {
+        Self { addr, _state: PhantomData }
+    }
+
+    pub async fn connect(self) -> Result<Connection<Connected>, io::Error> {
+        // ... establish connection ...
+        Ok(Connection { addr: self.addr, _state: PhantomData })
+    }
+}
+
+impl Connection<Connected> {
+    pub async fn send(&self, data: &[u8]) -> Result<(), io::Error> {
+        // only available when connected
+        Ok(())
+    }
+}
+```
+
+**Use when:**
+- An object has a clear lifecycle with distinct phases (disconnected → connected, unvalidated → validated)
+- Calling methods out of order is a logic error you want to catch at compile time
+- State transitions are linear and well-defined
+
+**Avoid when:**
+- States are dynamic or user-driven (use an enum instead)
+- The number of states or transitions is large — type-state combinatorics explode quickly
+
+### Derive macro
+
+*Source: [The Little Book of Rust Macros](https://veykril.github.io/tlborm/)*
+
+Declarative (`macro_rules!`) or procedural macros that auto-derive trait implementations or generate boilerplate. Used sparingly, they eliminate repetitive patterns that generics and traits alone cannot.
+
+> *Controlled exception to Safety rule #8: "Macros sparingly." Derive macros are acceptable when the pattern is mechanical, repeated across many types, and error-prone to write by hand.*
+
+```rust
+// from crates/mcp/src/tools/mod.rs
+macro_rules! tool_response {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident {
+            $( $(#[$field_meta:meta])* $field_vis:vis $field:ident : $ty:ty ),* $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, serde::Serialize)]
+        $vis struct $name {
+            $( $(#[$field_meta])* $field_vis $field : $ty, )*
+        }
+        impl $crate::tools::StructuredObject for $name {}
+    };
+}
+
+// Usage — every tool response struct gets Serialize + StructuredObject:
+// tool_response! { pub struct MyToolOutput { pub result: String } }
+```
+
+**Use when:**
+- The same trait implementation is mechanically identical across 5+ types
+- Forgetting the impl is a common source of bugs (like the `StructuredObject` marker above)
+- The macro body is short and readable
+
+**Avoid when:**
+- Generics, blanket impls, or `#[derive(...)]` from serde/thiserror already handle it
+- The macro hides non-trivial control flow or business logic
+- Only 1-2 types need the pattern (just write the impls by hand)
+
+### Service & middleware
+
+*Source: [Tower — Service trait](https://docs.rs/tower/latest/tower/trait.Service.html)*
+
+A service is a trait with a single async `call` method that transforms a request into a response. Middleware wraps an inner service, adding cross-cutting behavior (logging, auth, timeouts) without modifying business logic. Services compose into layered stacks.
+
+> *Architectural application of DDD "Traits for open abstractions." See also [Trait object plugin](#trait-object-plugin).*
+
+```rust
+// from crates/framework/src/bridge/dispatch.rs
+// The trait defines the service contract:
+pub trait HandlerDispatch: Send + Sync + std::fmt::Debug {
+    fn handle(
+        &self,
+        route: Arc<BoundRoute>,
+        app_state: Arc<AppState>,
+        request: InboundRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<OutboundResponse, AppError>> + Send>>;
+}
+
+// A concrete service implements the trait:
+pub struct RequestResponseDispatch;
+
+impl HandlerDispatch for RequestResponseDispatch {
+    fn handle(
+        &self,
+        route: Arc<BoundRoute>,
+        app_state: Arc<AppState>,
+        mut request: InboundRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<OutboundResponse, AppError>> + Send>> {
+        Box::pin(async move {
+            let ctx = extract_context(&mut request, &route, &app_state).await?;
+            let result = invoke_handler(&route, &ctx).await?;
+            Python::attach(|py| serialize_result(py, &result, &route))
+        })
+    }
+}
+
+// Layered call chain:
+// axum handler → transport conversion → HandlerDispatch trait → Python bridge
+```
+
+**Use when:**
+- You have cross-cutting concerns (auth, logging, metrics, rate limiting) that apply to many handlers
+- Multiple dispatch strategies share the same request/response contract
+- You want to swap or layer behaviors without modifying core logic
+
+**Avoid when:**
+- There's only one handler and no middleware needed — a plain function is simpler
+- The "service" would only ever have one implementation (use a concrete type)
+
+### Async trait + future abstraction
+
+*Source: [Rust Reference — async fn in traits](https://blog.rust-lang.org/2023/12/21/async-fn-rpit-in-traits.html)*
+
+Before Rust 1.75, async methods in traits required returning `Pin<Box<dyn Future<...> + Send>>` manually. Since 1.75, `async fn` works directly in traits, but boxed futures remain necessary when you need trait objects (`dyn Trait`).
+
+> *See also [Async & concurrency](#async--concurrency).*
+
+```rust
+// Pre-1.75 style (still needed for dyn dispatch):
+// from crates/framework/src/bridge/dispatch.rs
+pub trait HandlerDispatch: Send + Sync {
+    fn handle(
+        &self,
+        route: Arc<BoundRoute>,
+        app_state: Arc<AppState>,
+        request: InboundRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<OutboundResponse, AppError>> + Send>>;
+}
+
+// Post-1.75 style (when dyn dispatch is not needed):
+pub trait Processor: Send + Sync {
+    async fn process(&self, input: &[u8]) -> Result<Vec<u8>>;
+}
+```
+
+**Use when:**
+- The trait will be used as `dyn Trait` (e.g. stored in a `Vec<Box<dyn Trait>>`) — boxed futures are required
+- You need `Send` bounds on the future for multi-threaded runtimes
+
+**Avoid when:**
+- The trait is only used with generics (`impl Trait` / `T: Trait`) — use native `async fn` directly
+- You can use the `async-trait` crate and its overhead is acceptable
+
+### Trait object plugin
+
+*Source: [Rust Design Patterns — Strategy](https://rust-unofficial.github.io/patterns/patterns/behavioural/strategy.html)*
+
+Store `Arc<dyn Trait>` in a registry to support open-ended extension at runtime. Each plugin implements a shared trait. The registry dispatches by name or type, enabling plugin-style architectures.
+
+> *Architectural application of DDD "Traits for open abstractions."*
+
+```rust
+pub trait Plugin: Send + Sync {
+    fn name(&self) -> &str;
+    fn init(&self) -> Result<()>;
+    fn handle(&self, input: &[u8]) -> Result<Vec<u8>>;
+}
+
+pub struct PluginRegistry {
+    plugins: Vec<Arc<dyn Plugin>>,
+}
+
+impl PluginRegistry {
+    pub fn register(&mut self, plugin: Arc<dyn Plugin>) {
+        self.plugins.push(plugin);
+    }
+
+    pub fn dispatch(&self, name: &str, input: &[u8]) -> Result<Vec<u8>> {
+        let plugin = self.plugins.iter()
+            .find(|p| p.name() == name)
+            .ok_or_else(|| anyhow!("unknown plugin: {name}"))?;
+        plugin.handle(input)
+    }
+}
+```
+
+**Use when:**
+- The set of implementations is open-ended and grows over time (plugins, tool handlers, codecs)
+- Implementations are registered at runtime (e.g. from config or feature flags)
+- You need to store heterogeneous implementations in one collection
+
+**Avoid when:**
+- The set of variants is closed and known at compile time — use an enum with `match`
+- Dynamic dispatch overhead matters in a hot loop — use generics or enum dispatch
+
+### RAII guard
+
+*Source: [Rust Book — Drop trait](https://doc.rust-lang.org/book/ch15-03-drop.html)*
+
+Implement `Drop` on a wrapper type to guarantee cleanup when the value goes out of scope — even on panics or early returns. The guard owns the resource and releases it deterministically.
+
+```rust
+// from crates/framework/src/bridge/streaming.rs
+impl Drop for AsgiBodyStream {
+    fn drop(&mut self) {
+        if let Some(task) = self.handler_task.take() {
+            task.abort();
+        }
+    }
+}
+
+// The pattern: wrap a resource in a guard that cleans up on drop
+pub struct TempDir {
+    path: PathBuf,
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+```
+
+**Use when:**
+- A resource must be released regardless of control flow (files, tasks, locks, temp dirs)
+- Forgetting cleanup is a common source of leaks or bugs
+- The resource has a clear owner with a well-defined lifetime
+
+**Avoid when:**
+- The cleanup is optional or caller-dependent — provide an explicit `.close()` method instead
+- Shared ownership (`Arc`) makes the drop point unpredictable — consider explicit shutdown signals
+
 ## Documentation
 
 *Sources: Microsoft M-CANONICAL-DOCS, M-FIRST-DOC-SENTENCE, M-MODULE-DOCS, M-DOC-INLINE*
@@ -241,15 +639,16 @@ When hitting a bug, write a failing test that reproduces it first. Only then wri
 - **No locks across `.await` points.** A `MutexGuard` held across an `.await` can deadlock or block the runtime. Scope the lock, copy data out, then await.
 ```rust
 // bad — guard held across await
-let data = lock.lock().unwrap();
+let data = lock.lock().expect("lock poisoned");
 send(data.clone()).await;
 
 // good — lock released before await
-let data = { lock.lock().unwrap().clone() };
+let data = { lock.lock().expect("lock poisoned").clone() };
 send(data).await;
 ```
 - **Use `tokio::select!` for concurrent operations** with cancellation semantics.
 - **Prefer `std::sync::OnceLock`** over `lazy_static!` or `once_cell::sync::Lazy` for one-time initialization.
+- See also [Async trait + future abstraction](#async-trait--future-abstraction) in Ecosystem patterns.
 
 ## Lints & static analysis
 

@@ -156,7 +156,6 @@ fn resolve_param_value<'py>(
         ParamSource::Cookie => resolve_cookie_param(py, param, ctx),
         ParamSource::Body => resolve_body_param(py, ctx, python_type),
         ParamSource::RawBody => resolve_raw_body(py, ctx),
-        ParamSource::RawRequest => resolve_raw_request(py, ctx),
     }
 }
 
@@ -306,32 +305,6 @@ fn resolve_raw_body<'py>(
     Ok(PyBytes::new(py, body).into_any())
 }
 
-/// Resolve raw request object — constructs the Rust-backed `Request` directly.
-fn resolve_raw_request<'py>(
-    py: Python<'py>,
-    ctx: &RequestContext,
-) -> Result<pyo3::Bound<'py, PyAny>, AppError> {
-    let headers_dict = PyDict::new(py);
-    for (name, value) in &ctx.headers {
-        let _ = headers_dict.set_item(name.as_str(), value.to_str().unwrap_or(""));
-    }
-
-    let body = ctx.body.as_ref().map(Bytes::as_ref).unwrap_or_default();
-
-    let request = crate::pyapi::Request {
-        method: String::new(),
-        path: String::new(),
-        query_string: String::new(),
-        headers: headers_dict.clone().into_any().unbind(),
-        cookies: PyDict::new(py).into_any().unbind(),
-        body_bytes: PyBytes::new(py, body).into_any().unbind(),
-    };
-
-    Py::new(py, request)
-        .map(|obj| obj.into_bound(py).into_any())
-        .map_err(|e| AppError::Internal(format!("construct Request: {e}")))
-}
-
 /// Resolve a header parameter by looking up the wire name in the header map.
 fn resolve_header_param<'py>(
     py: Python<'py>,
@@ -431,12 +404,16 @@ fn serialize_response(
     route: &BoundRoute,
 ) -> Result<OutboundResponse, AppError> {
     match &route.manifest.response_type {
-        ResponseType::Model { .. } => serialize_model_response(py, result),
+        ResponseType::Model { .. } => {
+            serialize_model_response(py, result, route.manifest.status_code)
+        }
         // TODO(phase-7): streaming serialization via AsgiSend
         ResponseType::StreamingResponse => Err(AppError::Internal(
             "streaming responses not yet implemented".to_owned(),
         )),
-        ResponseType::RawResponse => serialize_raw_response(py, result),
+        ResponseType::RawResponse => {
+            serialize_untyped_response(py, result, route.manifest.status_code)
+        }
     }
 }
 
@@ -444,6 +421,7 @@ fn serialize_response(
 fn serialize_model_response(
     py: Python<'_>,
     result: &pyo3::Bound<'_, PyAny>,
+    status_code: u16,
 ) -> Result<OutboundResponse, AppError> {
     let by_alias = PyDict::new(py);
     let _ = by_alias.set_item(c"by_alias", true);
@@ -453,62 +431,67 @@ fn serialize_model_response(
         .and_then(|s| s.extract())
         .map_err(|e| AppError::Internal(format!("model_dump_json: {e}")))?;
 
+    let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK);
     let mut headers = http::HeaderMap::new();
     headers.insert(
         http::header::CONTENT_TYPE,
-        "application/json"
-            .parse()
-            .map_err(|e| AppError::Internal(format!("header value: {e}")))?,
+        http::HeaderValue::from_static("application/json"),
     );
 
     Ok(OutboundResponse {
-        status: StatusCode::OK,
+        status,
         headers,
         body: ResponseBody::Fixed(Bytes::from(json_bytes)),
     })
 }
 
-/// Serialize a raw `Response` object.
-fn serialize_raw_response(
+/// Serialize a handler result that has no declared `response_model`.
+///
+/// Tries Pydantic `model_dump_json` first (handler returned a model without
+/// declaring `response_model=`), then falls back to `json.dumps` for
+/// dicts, lists, and primitives.
+fn serialize_untyped_response(
     py: Python<'_>,
     result: &pyo3::Bound<'_, PyAny>,
+    status_code: u16,
 ) -> Result<OutboundResponse, AppError> {
-    let status: u16 = result
-        .getattr(c"status")
-        .and_then(|s| s.extract())
-        .unwrap_or(200);
+    let json_bytes = try_pydantic_dump(py, result)
+        .or_else(|| try_json_dumps(py, result))
+        .ok_or_else(|| AppError::Internal("failed to serialize handler return value".to_owned()))?;
 
-    let json_body = result
-        .getattr(c"body")
-        .ok()
-        .map(|b| {
-            let json_mod = py
-                .import(c"json")
-                .map_err(|e| AppError::Internal(format!("import json: {e}")))?;
-            let dumped: String = json_mod
-                .call_method1(c"dumps", (&b,))
-                .and_then(|s| s.extract())
-                .map_err(|e| AppError::Internal(format!("json.dumps: {e}")))?;
-            Ok::<_, AppError>(dumped.into_bytes())
-        })
-        .transpose()?
-        .unwrap_or_default();
-
-    let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-
+    let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK);
     let mut headers = http::HeaderMap::new();
     headers.insert(
         http::header::CONTENT_TYPE,
-        "application/json"
-            .parse()
-            .map_err(|e| AppError::Internal(format!("header value: {e}")))?,
+        http::HeaderValue::from_static("application/json"),
     );
 
     Ok(OutboundResponse {
-        status: status_code,
+        status,
         headers,
-        body: ResponseBody::Fixed(Bytes::from(json_body)),
+        body: ResponseBody::Fixed(Bytes::from(json_bytes)),
     })
+}
+
+/// Try serializing via Pydantic `model_dump_json(by_alias=True)`.
+fn try_pydantic_dump(py: Python<'_>, result: &pyo3::Bound<'_, PyAny>) -> Option<Vec<u8>> {
+    let kwargs = PyDict::new(py);
+    let _ = kwargs.set_item(c"by_alias", true);
+    result
+        .call_method(c"model_dump_json", (), Some(&kwargs))
+        .ok()
+        .and_then(|s| s.extract::<Vec<u8>>().ok())
+}
+
+/// Try serializing via `json.dumps`.
+fn try_json_dumps(py: Python<'_>, result: &pyo3::Bound<'_, PyAny>) -> Option<Vec<u8>> {
+    let json_mod = py.import(c"json").ok()?;
+    let dumped: String = json_mod
+        .call_method1(c"dumps", (result,))
+        .ok()?
+        .extract()
+        .ok()?;
+    Some(dumped.into_bytes())
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -827,38 +810,6 @@ mod tests {
             let result = resolve_raw_body(py, &ctx).unwrap();
             let val: Vec<u8> = result.extract().unwrap();
             assert!(val.is_empty());
-        });
-    }
-
-    // ── resolve_raw_request ────────────────────────────────────────────
-
-    #[test]
-    fn resolve_raw_request_with_headers_and_body() {
-        with_py(|py| {
-            let mut headers = http::HeaderMap::new();
-            headers.insert("x-token", "secret".parse().unwrap());
-            let ctx = RequestContext {
-                path_params: Vec::new(),
-                query_params: Vec::new(),
-                headers,
-                body: Some(Bytes::from("body data")),
-            };
-            let result = resolve_raw_request(py, &ctx).unwrap();
-            assert!(result.is_instance_of::<crate::pyapi::Request>());
-        });
-    }
-
-    #[test]
-    fn resolve_raw_request_empty() {
-        with_py(|py| {
-            let ctx = RequestContext {
-                path_params: Vec::new(),
-                query_params: Vec::new(),
-                headers: http::HeaderMap::new(),
-                body: None,
-            };
-            let result = resolve_raw_request(py, &ctx).unwrap();
-            assert!(result.is_instance_of::<crate::pyapi::Request>());
         });
     }
 

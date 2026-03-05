@@ -68,12 +68,10 @@ pub fn bind_routes(
 
         let params = bind_params(py, &rm.params)?;
         let response_model = bind_response_model(py, &rm.response_type)?;
-        let has_body_param = rm.params.iter().any(|p| {
-            matches!(
-                p.source,
-                ParamSource::Body | ParamSource::RawBody | ParamSource::RawRequest
-            )
-        });
+        let has_body_param = rm
+            .params
+            .iter()
+            .any(|p| matches!(p.source, ParamSource::Body | ParamSource::RawBody));
 
         bound.push(BoundRoute {
             manifest: rm.clone(),
@@ -141,12 +139,10 @@ pub fn bind_routes_from_manifest(
         let handler = import_qualified_name(py, rm.handler_qualname.as_str())?;
         let params = bind_params(py, &rm.params)?;
         let response_model = bind_response_model(py, &rm.response_type)?;
-        let has_body_param = rm.params.iter().any(|p| {
-            matches!(
-                p.source,
-                ParamSource::Body | ParamSource::RawBody | ParamSource::RawRequest
-            )
-        });
+        let has_body_param = rm
+            .params
+            .iter()
+            .any(|p| matches!(p.source, ParamSource::Body | ParamSource::RawBody));
 
         bound.push(BoundRoute {
             manifest: rm.clone(),

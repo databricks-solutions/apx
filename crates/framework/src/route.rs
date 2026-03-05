@@ -273,8 +273,6 @@ pub enum ParamSource {
     Body,
     /// Raw request body bytes — no JSON parsing, no Pydantic validation.
     RawBody,
-    /// Full HTTP request object (headers, cookies, body, path, method).
-    RawRequest,
 }
 
 /// Parameter metadata — serializable, uses qualified type name not `Py<PyAny>`.
@@ -786,7 +784,6 @@ mod tests {
             ParamSource::Cookie,
             ParamSource::Body,
             ParamSource::RawBody,
-            ParamSource::RawRequest,
         ];
         for v in variants {
             let json = serde_json::to_string(&v).unwrap_or_default();

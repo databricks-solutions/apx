@@ -58,7 +58,6 @@ pub fn parse_param_source(source: &str) -> Result<crate::route::ParamSource, Dis
         "cookie" => Ok(ParamSource::Cookie),
         "body" => Ok(ParamSource::Body),
         "raw_body" => Ok(ParamSource::RawBody),
-        "raw_request" => Ok(ParamSource::RawRequest),
         other => Err(DiscoveryError::InvalidRoute(format!(
             "unknown param source: {other}"
         ))),
@@ -157,14 +156,6 @@ mod tests {
         assert_eq!(
             parse_param_source("raw_body").unwrap(),
             ParamSource::RawBody
-        );
-    }
-
-    #[test]
-    fn parse_param_source_raw_request() {
-        assert_eq!(
-            parse_param_source("raw_request").unwrap(),
-            ParamSource::RawRequest
         );
     }
 
