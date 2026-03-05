@@ -20,6 +20,7 @@ use axum::{Json, Router};
 use dispatch::{AppState, HandlerDispatch, RequestResponseDispatch};
 use plan_executor::PlanExecutorDispatch;
 use std::collections::HashSet;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -154,9 +155,33 @@ async fn handle_ws_connection(
     let receive = asgi::AsgiWsReceive::new(incoming_rx);
     let send = asgi::AsgiSend::new(outgoing_tx);
 
-    // Build scope and launch handler (GIL held briefly, then released)
-    let result = pyo3::Python::attach(|py| {
-        let scope = asgi::build_ws_scope(py, &inbound)
+    let result = launch_ws_handler(&state, &inbound, receive, send);
+    match result {
+        Ok(future) => {
+            if let Err(e) = future.await {
+                tracing::error!(error = %e, "websocket handler error");
+            }
+        }
+        Err(e) => tracing::error!(error = %e, "websocket handler setup error"),
+    }
+
+    recv_task.abort();
+    send_task.abort();
+}
+
+/// Build ASGI scope and start the Python WebSocket handler coroutine.
+///
+/// Acquires the GIL briefly to construct scope/receive/send and call the
+/// handler. Returns a Rust future that can be awaited with the GIL released.
+fn launch_ws_handler(
+    state: &WsHandlerState,
+    inbound: &crate::transport::types::InboundRequest,
+    receive: asgi::AsgiWsReceive,
+    send: asgi::AsgiSend,
+) -> Result<impl Future<Output = Result<pyo3::Py<pyo3::PyAny>, pyo3::PyErr>>, crate::error::AppError>
+{
+    pyo3::Python::attach(|py| {
+        let scope = asgi::build_ws_scope(py, inbound)
             .map_err(|e| crate::error::AppError::Internal(format!("build ws scope: {e}")))?;
         let receive_obj = pyo3::Py::new(py, receive)
             .map_err(|e| crate::error::AppError::Internal(format!("wrap ws receive: {e}")))?;
@@ -169,21 +194,7 @@ async fn handle_ws_connection(
             .map_err(|e| crate::error::AppError::Internal(format!("ws handler call: {e}")))?;
         pyo3_async_runtimes::tokio::into_future(coro.into_bound(py))
             .map_err(|e| crate::error::AppError::Internal(format!("ws into_future: {e}")))
-    });
-
-    match result {
-        Ok(future) => {
-            if let Err(e) = future.await {
-                tracing::error!(error = %e, "websocket handler error");
-            }
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "websocket handler setup error");
-        }
-    }
-
-    recv_task.abort();
-    send_task.abort();
+    })
 }
 
 /// Forward incoming WebSocket frames from axum to the Python receive channel.
