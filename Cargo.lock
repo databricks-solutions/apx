@@ -299,6 +299,7 @@ dependencies = [
  "bytes",
  "form_urlencoded",
  "futures-core",
+ "futures-util",
  "http",
  "http-body-util",
  "pyo3",

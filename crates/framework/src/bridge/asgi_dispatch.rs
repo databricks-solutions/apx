@@ -8,7 +8,7 @@
 use crate::bridge::asgi::{AsgiEvent, AsgiReceive, AsgiSend, build_http_scope};
 use crate::bridge::dispatch::{AppState, HandlerDispatch};
 use crate::error::{AppError, BodyParseKind};
-use crate::route::BoundRoute;
+use crate::route::{BoundRoute, HandlerKind, ResponseType};
 use crate::transport::types::{InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
 use http::StatusCode;
@@ -81,13 +81,20 @@ impl HandlerDispatch for AsgiBridgeDispatch {
                     .map_err(|e| AppError::Internal(format!("asgi handler failed: {e}")))
             });
 
-            // 5. Collect response events
-            let response = collect_asgi_response(&mut send_rx).await?;
+            // 5. Branch: streaming vs buffered response collection
+            let is_streaming = matches!(route.manifest.kind, HandlerKind::SSE)
+                || matches!(
+                    route.manifest.response_type,
+                    ResponseType::StreamingResponse
+                );
 
-            // Wait for handler to finish (errors already captured through channel)
-            let _ = handler_task.await;
-
-            Ok(response)
+            if is_streaming {
+                super::streaming::stream_asgi_response(send_rx, handler_task).await
+            } else {
+                let response = collect_asgi_response(&mut send_rx).await?;
+                let _ = handler_task.await;
+                Ok(response)
+            }
         })
     }
 }
@@ -115,13 +122,16 @@ pub async fn collect_asgi_response(
 }
 
 /// Receive the `ResponseStart` event from the channel.
-async fn recv_response_start(
+pub(super) async fn recv_response_start(
     rx: &mut mpsc::Receiver<AsgiEvent>,
 ) -> Result<(u16, Vec<(Vec<u8>, Vec<u8>)>), AppError> {
     match rx.recv().await {
         Some(AsgiEvent::ResponseStart { status, headers }) => Ok((status, headers)),
         Some(AsgiEvent::ResponseBody { .. }) => Err(AppError::Internal(
             "ASGI protocol error: received body before response start".to_owned(),
+        )),
+        Some(_) => Err(AppError::Internal(
+            "ASGI protocol error: unexpected event before response start".to_owned(),
         )),
         None => Err(AppError::Internal(
             "ASGI protocol error: channel closed before response start".to_owned(),
@@ -145,13 +155,18 @@ async fn recv_response_body(rx: &mut mpsc::Receiver<AsgiEvent>) -> Result<Bytes,
                     "ASGI protocol error: duplicate response start".to_owned(),
                 ));
             }
+            Some(_) => {
+                return Err(AppError::Internal(
+                    "ASGI protocol error: unexpected event during body collection".to_owned(),
+                ));
+            }
             None => return Ok(Bytes::from(buf)),
         }
     }
 }
 
 /// Convert raw ASGI header byte pairs to an [`http::HeaderMap`].
-fn build_header_map(raw: &[(Vec<u8>, Vec<u8>)]) -> Result<HeaderMap, AppError> {
+pub(super) fn build_header_map(raw: &[(Vec<u8>, Vec<u8>)]) -> Result<HeaderMap, AppError> {
     let mut headers = HeaderMap::with_capacity(raw.len());
     for (name, value) in raw {
         let name = http::HeaderName::from_bytes(name)
@@ -306,5 +321,56 @@ mod tests {
     fn build_header_map_invalid_name() {
         let raw = vec![(b"invalid header\x00".to_vec(), b"value".to_vec())];
         assert!(build_header_map(&raw).is_err());
+    }
+
+    #[tokio::test]
+    async fn collect_asgi_response_buffered_unchanged() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(AsgiEvent::ResponseStart {
+            status: 200,
+            headers: vec![(b"content-type".to_vec(), b"application/json".to_vec())],
+        })
+        .await
+        .unwrap();
+        tx.send(AsgiEvent::ResponseBody {
+            body: Bytes::from(r#"{"ok":true}"#),
+            more_body: false,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let resp = collect_asgi_response(&mut rx).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            resp.headers.get("content-type").unwrap(),
+            "application/json"
+        );
+        match &resp.body {
+            ResponseBody::Fixed(b) => assert_eq!(b.as_ref(), br#"{"ok":true}"#),
+            ResponseBody::Stream(_) => panic!("expected Fixed body"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recv_response_start_pub_super_accessible() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(AsgiEvent::ResponseStart {
+            status: 201,
+            headers: vec![(b"x-test".to_vec(), b"yes".to_vec())],
+        })
+        .await
+        .unwrap();
+
+        let (status, headers) = recv_response_start(&mut rx).await.unwrap();
+        assert_eq!(status, 201);
+        assert_eq!(headers.len(), 1);
+    }
+
+    #[test]
+    fn build_header_map_pub_super_accessible() {
+        let raw = vec![(b"x-test".to_vec(), b"value".to_vec())];
+        let headers = build_header_map(&raw).unwrap();
+        assert_eq!(headers.get("x-test").unwrap(), "value");
     }
 }

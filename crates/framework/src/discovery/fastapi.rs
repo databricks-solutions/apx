@@ -187,9 +187,24 @@ fn extract_routes(
         .and_then(|m| m.getattr(c"APIRoute"))
         .map_err(|e| DiscoveryError::Python(format!("import fastapi.routing.APIRoute: {e}")))?;
 
+    let ws_route_cls = py
+        .import(c"fastapi.routing")
+        .and_then(|m| m.getattr(c"APIWebSocketRoute"))
+        .ok();
+
     let mut manifests = Vec::new();
 
     for route in routes_list {
+        // WebSocket routes
+        if let Some(ref ws_cls) = ws_route_cls
+            && route.is_instance(ws_cls).unwrap_or(false)
+        {
+            if let Some(manifest) = extract_ws_route(py, &route)? {
+                manifests.push(manifest);
+            }
+            continue;
+        }
+
         if !route.is_instance(&api_route_cls).unwrap_or(false) {
             continue;
         }
@@ -242,6 +257,48 @@ fn extract_routes(
     }
 
     Ok(manifests)
+}
+
+/// Extract a WebSocket route from an `APIWebSocketRoute`.
+fn extract_ws_route(
+    py: Python<'_>,
+    route: &Bound<'_, pyo3::PyAny>,
+) -> Result<Option<RouteManifest>, DiscoveryError> {
+    let path: String = extract_attr(route, "path")?;
+
+    let Ok(endpoint) = route.getattr(c"endpoint") else {
+        return Ok(None);
+    };
+
+    let handler_qualname = get_handler_qualname(&endpoint)?;
+
+    let route_path = RoutePath::new(&path)
+        .map_err(|e| DiscoveryError::InvalidRoute(format!("ws path '{path}': {e}")))?;
+
+    let name: Option<String> = route
+        .getattr(c"name")
+        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
+        .ok();
+
+    let _ = py; // suppress unused warning
+
+    Ok(Some(RouteManifest {
+        kind: HandlerKind::WebSocket,
+        method: crate::route::HttpMethod::Get,
+        path: route_path,
+        handler_qualname,
+        params: Vec::new(),
+        response_type: ResponseType::RawResponse,
+        tags: Vec::new(),
+        dispatch_strategy: DispatchStrategy::AsgiBridge,
+        dependency_plan: None,
+        status_code: 101,
+        summary: name,
+        description: None,
+        include_in_schema: false,
+        deprecated: false,
+        operation_id: None,
+    }))
 }
 
 /// Extract a string attribute from a Python object.

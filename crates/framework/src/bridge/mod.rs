@@ -9,8 +9,9 @@ pub mod dispatch;
 
 pub mod asgi_dispatch;
 pub mod plan_executor;
+pub mod streaming;
 
-use crate::route::{BoundRoute, DispatchStrategy, HttpMethod};
+use crate::route::{BoundRoute, DispatchStrategy, HandlerKind, HttpMethod};
 use crate::runtime::lifecycle::LifecycleCache;
 use asgi_dispatch::AsgiBridgeDispatch;
 use axum::extract::ConnectInfo;
@@ -102,6 +103,176 @@ fn dispatch_for(
     }
 }
 
+// ── WebSocket handler ────────────────────────────────────────────────────
+
+/// Per-route state for WebSocket handlers.
+#[derive(Clone)]
+struct WsHandlerState {
+    route: Arc<BoundRoute>,
+    server_addr: SocketAddr,
+}
+
+/// axum handler for WebSocket upgrade.
+async fn ws_handler(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    axum::extract::State(state): axum::extract::State<WsHandlerState>,
+    raw_params: axum::extract::RawPathParams,
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    let path_params = collect_path_params(&raw_params);
+    let inbound = crate::transport::convert::from_axum_request(
+        request,
+        path_params,
+        state.server_addr,
+        Some(client_addr),
+    );
+
+    ws.on_upgrade(move |socket| handle_ws_connection(socket, state, inbound))
+}
+
+/// WebSocket send channel buffer size.
+const WS_CHANNEL_SIZE: usize = 32;
+
+/// Bridge an axum WebSocket to a Python ASGI handler.
+async fn handle_ws_connection(
+    socket: axum::extract::ws::WebSocket,
+    state: WsHandlerState,
+    inbound: crate::transport::types::InboundRequest,
+) {
+    use futures_util::StreamExt;
+    use tokio::sync::mpsc;
+
+    let (ws_tx, ws_rx) = socket.split();
+
+    let (incoming_tx, incoming_rx) = mpsc::channel(WS_CHANNEL_SIZE);
+    let (outgoing_tx, outgoing_rx) = mpsc::channel(WS_CHANNEL_SIZE);
+
+    let recv_task = tokio::spawn(forward_ws_incoming(ws_rx, incoming_tx));
+    let send_task = tokio::spawn(forward_ws_outgoing(outgoing_rx, ws_tx));
+
+    let receive = asgi::AsgiWsReceive::new(incoming_rx);
+    let send = asgi::AsgiSend::new(outgoing_tx);
+
+    // Build scope and launch handler (GIL held briefly, then released)
+    let result = pyo3::Python::attach(|py| {
+        let scope = asgi::build_ws_scope(py, &inbound)
+            .map_err(|e| crate::error::AppError::Internal(format!("build ws scope: {e}")))?;
+        let receive_obj = pyo3::Py::new(py, receive)
+            .map_err(|e| crate::error::AppError::Internal(format!("wrap ws receive: {e}")))?;
+        let send_obj = pyo3::Py::new(py, send)
+            .map_err(|e| crate::error::AppError::Internal(format!("wrap ws send: {e}")))?;
+        let coro = state
+            .route
+            .handler
+            .call(py, (scope, receive_obj, send_obj), None)
+            .map_err(|e| crate::error::AppError::Internal(format!("ws handler call: {e}")))?;
+        pyo3_async_runtimes::tokio::into_future(coro.into_bound(py))
+            .map_err(|e| crate::error::AppError::Internal(format!("ws into_future: {e}")))
+    });
+
+    match result {
+        Ok(future) => {
+            if let Err(e) = future.await {
+                tracing::error!(error = %e, "websocket handler error");
+            }
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "websocket handler setup error");
+        }
+    }
+
+    recv_task.abort();
+    send_task.abort();
+}
+
+/// Forward incoming WebSocket frames from axum to the Python receive channel.
+async fn forward_ws_incoming(
+    mut ws_rx: futures_util::stream::SplitStream<axum::extract::ws::WebSocket>,
+    incoming_tx: tokio::sync::mpsc::Sender<asgi::WsIncomingEvent>,
+) {
+    use futures_util::StreamExt;
+
+    if incoming_tx
+        .send(asgi::WsIncomingEvent::Connect)
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    while let Some(result) = ws_rx.next().await {
+        let Ok(msg) = result else { break };
+        let is_close = matches!(msg, axum::extract::ws::Message::Close(_));
+        let event = match msg {
+            axum::extract::ws::Message::Text(t) => asgi::WsIncomingEvent::Receive {
+                text: Some(t.to_string()),
+                bytes: None,
+            },
+            axum::extract::ws::Message::Binary(b) => asgi::WsIncomingEvent::Receive {
+                text: None,
+                bytes: Some(b.to_vec()),
+            },
+            axum::extract::ws::Message::Close(frame) => {
+                let code = frame.map_or(1000, |f| f.code);
+                asgi::WsIncomingEvent::Disconnect { code }
+            }
+            _ => continue,
+        };
+        if incoming_tx.send(event).await.is_err() {
+            break;
+        }
+        if is_close {
+            break;
+        }
+    }
+}
+
+/// Forward outgoing ASGI events to the axum WebSocket sender.
+async fn forward_ws_outgoing(
+    mut outgoing_rx: tokio::sync::mpsc::Receiver<asgi::AsgiEvent>,
+    mut ws_tx: futures_util::stream::SplitSink<
+        axum::extract::ws::WebSocket,
+        axum::extract::ws::Message,
+    >,
+) {
+    use futures_util::SinkExt;
+
+    while let Some(event) = outgoing_rx.recv().await {
+        match event {
+            asgi::AsgiEvent::WsSend {
+                text: Some(t),
+                bytes: _,
+            } => {
+                if ws_tx
+                    .send(axum::extract::ws::Message::Text(t.into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            asgi::AsgiEvent::WsSend {
+                text: None,
+                bytes: Some(b),
+            } => {
+                if ws_tx
+                    .send(axum::extract::ws::Message::Binary(b.into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            asgi::AsgiEvent::WsClose { .. } => {
+                let _ = ws_tx.close().await;
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Register built-in health probes, skipping paths the user already registered.
 fn register_health_probes(mut router: Router, user_paths: &HashSet<&str>) -> Router {
     if !user_paths.contains("/healthz") {
@@ -128,9 +299,19 @@ fn register_routes(
     lifecycle_cache: &Arc<LifecycleCache>,
 ) -> Router {
     for route in routes {
+        let path = route.manifest.path.as_str().to_owned();
+
+        if route.manifest.kind == HandlerKind::WebSocket {
+            let ws_state = WsHandlerState {
+                route: Arc::new(route),
+                server_addr,
+            };
+            router = router.route(&path, get(ws_handler).with_state(ws_state));
+            continue;
+        }
+
         let dispatch = dispatch_for(&route, lifecycle_cache);
         let method = route.manifest.method;
-        let path = route.manifest.path.as_str().to_owned();
         let state = HandlerState {
             route: Arc::new(route),
             app_state: Arc::clone(app_state),
@@ -365,5 +546,79 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), http::StatusCode::OK);
+    }
+
+    // ── SSE / WebSocket dispatch tests ──────────────────────────────────
+
+    fn make_route_with_kind(kind: HandlerKind) -> BoundRoute {
+        pyo3::Python::initialize();
+        let dispatch = match kind {
+            HandlerKind::WebSocket | HandlerKind::SSE => DispatchStrategy::AsgiBridge,
+            HandlerKind::RequestResponse => DispatchStrategy::Direct,
+        };
+        BoundRoute {
+            manifest: RouteManifest {
+                kind,
+                method: HttpMethod::Get,
+                path: RoutePath::new("/test").unwrap(),
+                handler_qualname: QualName::new("test.handler").unwrap(),
+                params: Vec::new(),
+                response_type: ResponseType::RawResponse,
+                tags: Vec::new(),
+                dispatch_strategy: dispatch,
+                dependency_plan: None,
+                status_code: 200,
+                summary: None,
+                description: None,
+                include_in_schema: true,
+                deprecated: false,
+                operation_id: None,
+            },
+            handler: pyo3::Python::attach(|py| py.None()),
+            params: Vec::new(),
+            response_model: None,
+            has_body_param: false,
+            dependant: None,
+            fastapi_app: None,
+        }
+    }
+
+    #[test]
+    fn dispatch_for_sse_uses_asgi_bridge() {
+        let route = make_route_with_kind(HandlerKind::SSE);
+        let cache = Arc::new(LifecycleCache::empty());
+        let d = dispatch_for(&route, &cache);
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("AsgiBridgeDispatch"));
+    }
+
+    #[test]
+    fn dispatch_for_websocket_uses_asgi_bridge() {
+        let route = make_route_with_kind(HandlerKind::WebSocket);
+        let cache = Arc::new(LifecycleCache::empty());
+        let d = dispatch_for(&route, &cache);
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("AsgiBridgeDispatch"));
+    }
+
+    #[test]
+    fn register_ws_route_uses_get() {
+        // Verify a WebSocket route is registered (doesn't crash)
+        // and goes through the WS path (different state type)
+        let ws_route = make_route_with_kind(HandlerKind::WebSocket);
+        let app_state = Arc::new(AppState {
+            max_body_limit: crate::route::BodyLimit::DEFAULT,
+        });
+        let server_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+        let cache = Arc::new(LifecycleCache::empty());
+
+        // Should not panic — verifies WS routes are registered correctly
+        let _router = register_routes(
+            Router::new(),
+            vec![ws_route],
+            &app_state,
+            server_addr,
+            &cache,
+        );
     }
 }

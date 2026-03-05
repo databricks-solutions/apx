@@ -27,7 +27,8 @@ const DEFAULT_SCHEME: &str = "http";
 /// Parsed ASGI send event (Rust-side representation).
 ///
 /// Pushed through a channel from [`AsgiSend`] (Python side) to the response
-/// collector (Rust side) that assembles the final HTTP response.
+/// collector (Rust side) that assembles the final HTTP response or relays
+/// WebSocket frames.
 #[derive(Debug)]
 pub enum AsgiEvent {
     /// `http.response.start` — status code and headers.
@@ -43,6 +44,25 @@ pub enum AsgiEvent {
         body: Bytes,
         /// Whether more body chunks follow.
         more_body: bool,
+    },
+    /// `websocket.accept` — server accepts the WebSocket connection.
+    WsAccept {
+        /// Optional subprotocol.
+        subprotocol: Option<String>,
+        /// Response headers as raw byte pairs.
+        headers: Vec<(Vec<u8>, Vec<u8>)>,
+    },
+    /// `websocket.send` — server sends a frame to the client.
+    WsSend {
+        /// Text frame payload.
+        text: Option<String>,
+        /// Binary frame payload.
+        bytes: Option<Vec<u8>>,
+    },
+    /// `websocket.close` — server closes the connection.
+    WsClose {
+        /// WebSocket close code (default 1000).
+        code: u16,
     },
 }
 
@@ -151,6 +171,93 @@ impl AsgiSend {
     }
 }
 
+// ── WebSocket incoming events ────────────────────────────────────────────
+
+/// Incoming WebSocket event from the client (axum WS → Python handler).
+#[derive(Debug)]
+pub enum WsIncomingEvent {
+    /// `websocket.connect` — initial connection event.
+    Connect,
+    /// `websocket.receive` — client sent a text or binary frame.
+    Receive {
+        /// Text frame payload.
+        text: Option<String>,
+        /// Binary frame payload.
+        bytes: Option<Vec<u8>>,
+    },
+    /// `websocket.disconnect` — client disconnected.
+    Disconnect {
+        /// WebSocket close code (default 1000).
+        code: u16,
+    },
+}
+
+/// ASGI `receive` callable for WebSocket connections.
+///
+/// Returns ASGI dicts for `websocket.connect`, `websocket.receive`,
+/// and `websocket.disconnect` events by reading from a channel fed
+/// by the axum WebSocket frame forwarder.
+#[pyclass(module = "apx._core")]
+pub struct AsgiWsReceive {
+    rx: Arc<Mutex<mpsc::Receiver<WsIncomingEvent>>>,
+}
+
+impl std::fmt::Debug for AsgiWsReceive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsgiWsReceive").finish_non_exhaustive()
+    }
+}
+
+impl AsgiWsReceive {
+    /// Create a new WebSocket receive callable.
+    pub fn new(rx: mpsc::Receiver<WsIncomingEvent>) -> Self {
+        Self {
+            rx: Arc::new(Mutex::new(rx)),
+        }
+    }
+}
+
+#[pymethods]
+impl AsgiWsReceive {
+    /// Python: `event = await receive()`
+    fn __call__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let rx = Arc::clone(&self.rx);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut guard = rx.lock().await;
+            let event = guard.recv().await;
+            Python::attach(|py| build_ws_receive_event(py, event))
+        })
+    }
+}
+
+/// Build an ASGI WebSocket receive event dict.
+fn build_ws_receive_event(py: Python<'_>, event: Option<WsIncomingEvent>) -> PyResult<Py<PyAny>> {
+    let dict = PyDict::new(py);
+    match event {
+        Some(WsIncomingEvent::Connect) => {
+            dict.set_item("type", "websocket.connect")?;
+        }
+        Some(WsIncomingEvent::Receive { text, bytes }) => {
+            dict.set_item("type", "websocket.receive")?;
+            if let Some(t) = text {
+                dict.set_item("text", t)?;
+            }
+            if let Some(b) = bytes {
+                dict.set_item("bytes", PyBytes::new(py, &b))?;
+            }
+        }
+        Some(WsIncomingEvent::Disconnect { code }) => {
+            dict.set_item("type", "websocket.disconnect")?;
+            dict.set_item("code", code)?;
+        }
+        None => {
+            dict.set_item("type", "websocket.disconnect")?;
+            dict.set_item("code", 1000u16)?;
+        }
+    }
+    Ok(dict.into_any().unbind())
+}
+
 // ── Parse helpers ────────────────────────────────────────────────────────
 
 /// Parse an ASGI send event dict into a typed [`AsgiEvent`].
@@ -163,6 +270,9 @@ fn parse_asgi_send_event(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
     match event_type.as_str() {
         "http.response.start" => parse_response_start(event),
         "http.response.body" => parse_response_body(event),
+        "websocket.accept" => parse_ws_accept(event),
+        "websocket.send" => parse_ws_send(event),
+        "websocket.close" => parse_ws_close(event),
         other => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unsupported ASGI event type: {other}"
         ))),
@@ -197,6 +307,35 @@ fn parse_response_body(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
     })
 }
 
+/// Parse `websocket.accept` — extract optional subprotocol and headers.
+fn parse_ws_accept(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
+    let subprotocol: Option<String> = event
+        .get_item("subprotocol")?
+        .and_then(|v| v.extract().ok());
+    let headers = extract_header_list(event)?;
+    Ok(AsgiEvent::WsAccept {
+        subprotocol,
+        headers,
+    })
+}
+
+/// Parse `websocket.send` — extract text or binary payload.
+fn parse_ws_send(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
+    let text: Option<String> = event.get_item("text")?.and_then(|v| v.extract().ok());
+    let bytes: Option<Vec<u8>> = event.get_item("bytes")?.and_then(|v| v.extract().ok());
+    Ok(AsgiEvent::WsSend { text, bytes })
+}
+
+/// Parse `websocket.close` — extract close code.
+fn parse_ws_close(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
+    let code: u16 = event
+        .get_item("code")?
+        .map(|v| v.extract())
+        .transpose()?
+        .unwrap_or(1000);
+    Ok(AsgiEvent::WsClose { code })
+}
+
 /// Parse ASGI headers list: `[(b"name", b"value"), ...]`.
 fn extract_header_list(event: &Bound<'_, PyDict>) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
     let Some(list) = event.get_item("headers")? else {
@@ -227,6 +366,49 @@ pub fn build_http_scope(py: Python<'_>, request: &InboundRequest) -> PyResult<Py
     set_scope_path_params(py, &dict, request)?;
     dict.set_item("state", PyDict::new(py))?;
     Ok(dict.unbind())
+}
+
+/// Construct an ASGI WebSocket scope dict from an [`InboundRequest`].
+///
+/// Similar to [`build_http_scope`] but sets `type: "websocket"` and `scheme: "ws"`.
+/// No body-related fields.
+pub fn build_ws_scope(py: Python<'_>, request: &InboundRequest) -> PyResult<Py<PyDict>> {
+    let dict = PyDict::new(py);
+    set_ws_scope_metadata(py, &dict)?;
+    set_ws_scope_request_fields(py, &dict, request)?;
+    set_scope_headers(py, &dict, request)?;
+    set_scope_addresses(py, &dict, request)?;
+    set_scope_path_params(py, &dict, request)?;
+    dict.set_item("state", PyDict::new(py))?;
+    Ok(dict.unbind())
+}
+
+/// Default WebSocket scheme.
+const WS_SCHEME: &str = "ws";
+
+/// Set ASGI WebSocket scope metadata fields.
+fn set_ws_scope_metadata(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<()> {
+    dict.set_item("type", "websocket")?;
+    let asgi = PyDict::new(py);
+    asgi.set_item("version", ASGI_VERSION)?;
+    asgi.set_item("spec_version", ASGI_SPEC_VERSION)?;
+    dict.set_item("asgi", asgi)?;
+    dict.set_item("scheme", WS_SCHEME)?;
+    dict.set_item("root_path", "")?;
+    Ok(())
+}
+
+/// Set WebSocket request-specific scope fields.
+fn set_ws_scope_request_fields(
+    py: Python<'_>,
+    dict: &Bound<'_, PyDict>,
+    request: &InboundRequest,
+) -> PyResult<()> {
+    dict.set_item("http_version", request.protocol.as_asgi_version())?;
+    dict.set_item("path", &request.path)?;
+    dict.set_item("raw_path", PyBytes::new(py, request.path.as_bytes()))?;
+    dict.set_item("query_string", PyBytes::new(py, &request.query_string))?;
+    Ok(())
 }
 
 /// Set ASGI scope metadata fields: type, asgi, http_version, scheme, root_path.
@@ -700,7 +882,7 @@ mod tests {
                     assert_eq!(headers[0].0, b"content-type");
                     assert_eq!(headers[0].1, b"text/plain");
                 }
-                AsgiEvent::ResponseBody { .. } => panic!("expected ResponseStart"),
+                other => panic!("expected ResponseStart, got {other:?}"),
             }
         });
     }
@@ -720,7 +902,7 @@ mod tests {
                     assert_eq!(body.as_ref(), b"hello");
                     assert!(!more_body);
                 }
-                AsgiEvent::ResponseStart { .. } => panic!("expected ResponseBody"),
+                other => panic!("expected ResponseBody, got {other:?}"),
             }
         });
     }
@@ -771,6 +953,176 @@ mod tests {
             let dict = PyDict::new(py);
             let result = parse_asgi_send_event(&dict);
             assert!(result.is_err());
+        });
+    }
+
+    // ── WebSocket event parse tests ─────────────────────────────────────
+
+    #[test]
+    fn parse_ws_accept_event() {
+        init_python();
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("type", "websocket.accept").unwrap();
+            dict.set_item("subprotocol", "graphql-ws").unwrap();
+
+            let event = parse_asgi_send_event(&dict).unwrap();
+            match event {
+                AsgiEvent::WsAccept {
+                    subprotocol,
+                    headers,
+                } => {
+                    assert_eq!(subprotocol.as_deref(), Some("graphql-ws"));
+                    assert!(headers.is_empty());
+                }
+                other => panic!("expected WsAccept, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn parse_ws_send_text_event() {
+        init_python();
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("type", "websocket.send").unwrap();
+            dict.set_item("text", "hello").unwrap();
+
+            let event = parse_asgi_send_event(&dict).unwrap();
+            match event {
+                AsgiEvent::WsSend { text, bytes } => {
+                    assert_eq!(text.as_deref(), Some("hello"));
+                    assert!(bytes.is_none());
+                }
+                other => panic!("expected WsSend, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn parse_ws_send_binary_event() {
+        init_python();
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("type", "websocket.send").unwrap();
+            dict.set_item("bytes", PyBytes::new(py, b"\x01\x02\x03"))
+                .unwrap();
+
+            let event = parse_asgi_send_event(&dict).unwrap();
+            match event {
+                AsgiEvent::WsSend { text, bytes } => {
+                    assert!(text.is_none());
+                    assert_eq!(bytes.as_deref(), Some(b"\x01\x02\x03".as_slice()));
+                }
+                other => panic!("expected WsSend, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn parse_ws_close_event() {
+        init_python();
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("type", "websocket.close").unwrap();
+            dict.set_item("code", 1001u16).unwrap();
+
+            let event = parse_asgi_send_event(&dict).unwrap();
+            match event {
+                AsgiEvent::WsClose { code } => {
+                    assert_eq!(code, 1001);
+                }
+                other => panic!("expected WsClose, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn parse_ws_close_default_code() {
+        init_python();
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("type", "websocket.close").unwrap();
+
+            let event = parse_asgi_send_event(&dict).unwrap();
+            match event {
+                AsgiEvent::WsClose { code } => {
+                    assert_eq!(code, 1000);
+                }
+                other => panic!("expected WsClose, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn ws_incoming_event_debug() {
+        let connect = WsIncomingEvent::Connect;
+        assert!(format!("{connect:?}").contains("Connect"));
+
+        let recv = WsIncomingEvent::Receive {
+            text: Some("hello".to_owned()),
+            bytes: None,
+        };
+        assert!(format!("{recv:?}").contains("Receive"));
+
+        let disc = WsIncomingEvent::Disconnect { code: 1000 };
+        assert!(format!("{disc:?}").contains("Disconnect"));
+    }
+
+    #[test]
+    fn asgi_ws_receive_debug() {
+        let (_tx, rx) = mpsc::channel(1);
+        let recv = AsgiWsReceive::new(rx);
+        let dbg = format!("{recv:?}");
+        assert!(dbg.contains("AsgiWsReceive"));
+    }
+
+    // ── build_ws_scope tests ────────────────────────────────────────────
+
+    #[test]
+    fn build_ws_scope_basic() {
+        init_python();
+        let req = make_inbound_request(
+            http::Method::GET,
+            "/ws",
+            b"token=abc",
+            HeaderMap::new(),
+            vec![("room".to_owned(), "main".to_owned())],
+            Some(SocketAddr::from(([10, 0, 0, 1], 5555))),
+        );
+        Python::attach(|py| {
+            let scope = build_ws_scope(py, &req).unwrap();
+            let scope = scope.bind(py);
+
+            let scope_type: String = scope.get_item("type").unwrap().unwrap().extract().unwrap();
+            assert_eq!(scope_type, "websocket");
+
+            let scheme: String = scope
+                .get_item("scheme")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(scheme, "ws");
+
+            let path: String = scope.get_item("path").unwrap().unwrap().extract().unwrap();
+            assert_eq!(path, "/ws");
+
+            let qs: Vec<u8> = scope
+                .get_item("query_string")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(qs, b"token=abc");
+
+            // path params
+            let pp = scope.get_item("path_params").unwrap().unwrap();
+            let room: String = pp.get_item("room").unwrap().extract().unwrap();
+            assert_eq!(room, "main");
+
+            // no 'method' key (WS scope doesn't have method)
+            assert!(scope.get_item("method").unwrap().is_none());
         });
     }
 }
