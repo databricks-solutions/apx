@@ -20,3 +20,4 @@ pub mod transport;
 pub(crate) mod bridge;
 pub(crate) mod discovery;
 pub(crate) mod ipc;
+pub(crate) mod signal;

@@ -1,11 +1,8 @@
 from importlib.metadata import version
 
-from apx._framework.app import App
-from apx._framework import models
-
 __version__ = version("apx")
 
-__all__ = ["App", "models", "__version__"]
+__all__ = ["__version__"]
 
 
 def _main() -> None:

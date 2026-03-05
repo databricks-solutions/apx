@@ -9,56 +9,6 @@ def get_dotenv_vars() -> dict[str, str]: ...
 
 # ── Framework types ──────────────────────────────────────────────────────
 
-class PyHttpMethod:
-    """HTTP method enum."""
-
-    Get: PyHttpMethod
-    Post: PyHttpMethod
-    Put: PyHttpMethod
-    Delete: PyHttpMethod
-    Patch: PyHttpMethod
-
-    @property
-    def value(self) -> str: ...
-
-class ParamInfo:
-    """Parameter metadata extracted from a handler's signature."""
-
-    name: str
-    type_qualname: str
-    source: str
-    required: bool
-
-    def __init__(
-        self,
-        name: str,
-        type_qualname: str,
-        source: str,
-        required: bool,
-    ) -> None: ...
-
-class RouteInfo:
-    """Route metadata extracted from an App decorator."""
-
-    method: PyHttpMethod
-    path: str
-    handler: Any
-    handler_qualname: str
-    params: list[ParamInfo]
-    response_type: str
-    tags: list[str]
-
-    def __init__(
-        self,
-        method: PyHttpMethod,
-        path: str,
-        handler: Any,
-        handler_qualname: str,
-        params: list[ParamInfo] = ...,
-        response_type: str = ...,
-        tags: list[str] = ...,
-    ) -> None: ...
-
 class Request:
     """Full HTTP request object, constructed by Rust for RawRequest injection."""
 

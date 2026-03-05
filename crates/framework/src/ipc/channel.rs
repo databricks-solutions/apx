@@ -124,7 +124,8 @@ compile_error!("Windows IPC (Named Pipes) is not yet implemented. See extensions
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
     use super::*;

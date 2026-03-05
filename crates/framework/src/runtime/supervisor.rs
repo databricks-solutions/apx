@@ -407,31 +407,8 @@ async fn send_signal(pid: u32, signal: Signal) {
     .await;
 }
 
-/// Wait for a SIGTERM or SIGINT signal.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .unwrap_or_else(|e| tracing::error!("ctrl_c handler failed: {e}"));
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        if let Ok(mut sig) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        {
-            sig.recv().await;
-        }
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {},
-        () = terminate => {},
-    }
-}
+/// Re-export shared shutdown signal for supervisor use.
+use crate::signal::shutdown_signal;
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
@@ -440,7 +417,8 @@ async fn shutdown_signal() {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
     /// Verify supervisor.rs does not import pyo3 (architectural boundary).

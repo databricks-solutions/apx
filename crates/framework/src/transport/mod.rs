@@ -13,9 +13,7 @@
 //!       → Application (routing → dispatch → ASGI adapter → Python)
 //! ```
 
-// TODO(phase-2): remove allow once convert module is populated
-#[allow(clippy::missing_docs_in_private_items)]
-mod convert;
+pub(crate) mod convert;
 pub mod tcp;
 pub mod types;
 
@@ -129,7 +127,8 @@ pub trait Listener: Send + Sync + 'static {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
     use super::*;
