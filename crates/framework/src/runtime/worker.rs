@@ -10,7 +10,7 @@ use crate::discovery;
 use crate::ipc::channel::WorkerChannel;
 use crate::ipc::protocol::{BootstrapError, IpcMessage, Nonce, WorkerBootstrap};
 use crate::manifest::ManifestError;
-use crate::runtime::lifecycle::LifecycleCache;
+use crate::runtime::lifecycle::{LifecycleCache, LifecycleError};
 use crate::transport::{Listener, TransportConfig, TransportError};
 use axum::Router;
 use pyo3::Python;
@@ -41,6 +41,10 @@ pub enum WorkerError {
     /// Manifest loading failed.
     #[error("manifest load: {0}")]
     ManifestLoad(#[from] ManifestError),
+
+    /// Lifecycle dependency initialization failed.
+    #[error("lifecycle init: {0}")]
+    Lifecycle(#[from] LifecycleError),
 
     /// Serving requests failed.
     #[error("serve failed: {0}")]
@@ -113,7 +117,7 @@ pub async fn init_worker(
 pub fn load_app(
     bootstrap: &WorkerBootstrap,
     server_addr: std::net::SocketAddr,
-) -> Result<(Router, Arc<AppState>), WorkerError> {
+) -> Result<(Router, Arc<AppState>, Arc<LifecycleCache>), WorkerError> {
     match &bootstrap.manifest_path {
         Some(path) => load_from_manifest(path, server_addr),
         None => load_from_discovery(bootstrap, server_addr),
@@ -124,27 +128,35 @@ pub fn load_app(
 fn load_from_manifest(
     path: &std::path::Path,
     server_addr: std::net::SocketAddr,
-) -> Result<(Router, Arc<AppState>), WorkerError> {
+) -> Result<(Router, Arc<AppState>, Arc<LifecycleCache>), WorkerError> {
     let manifest = crate::manifest::load(path)?;
     crate::manifest::check_version(&manifest)?;
 
-    let lifecycle_cache = Arc::new(LifecycleCache::empty());
-
-    let routes = Python::attach(|py| discovery::bind::bind_routes_from_manifest(py, &manifest))?;
+    let (lifecycle_cache, routes) = Python::attach(|py| {
+        let cache = LifecycleCache::initialize(py, &manifest.lifecycle_deps)?;
+        let routes = discovery::bind::bind_routes_from_manifest(py, &manifest)?;
+        Ok::<_, WorkerError>((cache, routes))
+    })?;
+    let lifecycle_cache = Arc::new(lifecycle_cache);
 
     let app_state = Arc::new(AppState {
         max_body_limit: manifest.max_body_limit,
     });
 
-    let router = build_router(routes, Arc::clone(&app_state), server_addr, lifecycle_cache);
-    Ok((router, app_state))
+    let router = build_router(
+        routes,
+        Arc::clone(&app_state),
+        server_addr,
+        Arc::clone(&lifecycle_cache),
+    );
+    Ok((router, app_state, lifecycle_cache))
 }
 
 /// Load routes via live FastAPI discovery (dev mode).
 fn load_from_discovery(
     bootstrap: &WorkerBootstrap,
     server_addr: std::net::SocketAddr,
-) -> Result<(Router, Arc<AppState>), WorkerError> {
+) -> Result<(Router, Arc<AppState>, Arc<LifecycleCache>), WorkerError> {
     Python::attach(|py| {
         let (routes, manifest) = discovery::discover_and_bind(py, &bootstrap.app_module)?;
 
@@ -152,9 +164,15 @@ fn load_from_discovery(
             max_body_limit: manifest.max_body_limit,
         });
 
+        // Live discovery doesn't extract lifecycle deps yet — use empty cache.
         let lifecycle_cache = Arc::new(LifecycleCache::empty());
-        let router = build_router(routes, Arc::clone(&app_state), server_addr, lifecycle_cache);
-        Ok((router, app_state))
+        let router = build_router(
+            routes,
+            Arc::clone(&app_state),
+            server_addr,
+            Arc::clone(&lifecycle_cache),
+        );
+        Ok((router, app_state, lifecycle_cache))
     })
 }
 
@@ -219,7 +237,7 @@ pub async fn run_worker(
     let mut runtime = init_worker(&bootstrap, channel).await?;
 
     let server_addr = runtime.listener.local_addr();
-    let (router, _app_state) = load_app(&bootstrap, server_addr)?;
+    let (router, _app_state, lifecycle_cache) = load_app(&bootstrap, server_addr)?;
 
     signal_readiness(&mut runtime.channel).await?;
 
@@ -231,6 +249,7 @@ pub async fn run_worker(
 
     let result = serve(runtime.listener, router, timeout).await;
 
+    Python::attach(|py| lifecycle_cache.shutdown(py));
     shutdown_event_loop();
 
     result
@@ -331,5 +350,15 @@ mod tests {
         });
         let msg = format!("{err}");
         assert!(msg.contains("version mismatch"));
+    }
+
+    #[test]
+    fn worker_error_display_lifecycle() {
+        let err = WorkerError::Lifecycle(LifecycleError::Init {
+            qualname: "db.engine".to_owned(),
+            message: "connection refused".to_owned(),
+        });
+        let msg = format!("{err}");
+        assert!(msg.contains("lifecycle init"));
     }
 }
