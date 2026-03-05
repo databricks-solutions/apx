@@ -501,6 +501,7 @@ fn set_scope_path_params(
 mod tests {
     use super::*;
     use crate::transport::types::{BodyStream, ProtocolVersion, TransportKind};
+    use crate::with_py;
     use http::header::HeaderMap;
     use std::net::SocketAddr;
 
@@ -544,11 +545,6 @@ mod tests {
 
     // ── Helper ───────────────────────────────────────────────────────────
 
-    /// Initialize the Python interpreter (idempotent).
-    fn init_python() {
-        Python::initialize();
-    }
-
     fn make_inbound_request(
         method: http::Method,
         path: &str,
@@ -576,7 +572,6 @@ mod tests {
 
     #[test]
     fn scope_basic_fields() {
-        init_python();
         let req = make_inbound_request(
             http::Method::GET,
             "/",
@@ -585,7 +580,7 @@ mod tests {
             Vec::new(),
             Some(SocketAddr::from(([10, 0, 0, 1], 5555))),
         );
-        Python::attach(|py| {
+        with_py(|py| {
             let scope = build_http_scope(py, &req).unwrap();
             let scope = scope.bind(py);
             assert_eq!(
@@ -654,26 +649,25 @@ mod tests {
 
     #[test]
     fn scope_protocol_versions() {
-        init_python();
-        for (version, expected) in [
-            (ProtocolVersion::Http10, "1.0"),
-            (ProtocolVersion::Http11, "1.1"),
-            (ProtocolVersion::H2, "2"),
-        ] {
-            let req = InboundRequest::new(
-                http::Method::GET,
-                "/".to_owned(),
-                Bytes::new(),
-                HeaderMap::new(),
-                BodyStream::Empty,
-                version,
-                TransportKind::Tcp,
-                None,
-                SocketAddr::from(([127, 0, 0, 1], 8080)),
-                Vec::new(),
-                http::Extensions::new(),
-            );
-            Python::attach(|py| {
+        with_py(|py| {
+            for (version, expected) in [
+                (ProtocolVersion::Http10, "1.0"),
+                (ProtocolVersion::Http11, "1.1"),
+                (ProtocolVersion::H2, "2"),
+            ] {
+                let req = InboundRequest::new(
+                    http::Method::GET,
+                    "/".to_owned(),
+                    Bytes::new(),
+                    HeaderMap::new(),
+                    BodyStream::Empty,
+                    version,
+                    TransportKind::Tcp,
+                    None,
+                    SocketAddr::from(([127, 0, 0, 1], 8080)),
+                    Vec::new(),
+                    http::Extensions::new(),
+                );
                 let scope = build_http_scope(py, &req).unwrap();
                 let scope = scope.bind(py);
                 let http_version: String = scope
@@ -683,13 +677,12 @@ mod tests {
                     .extract()
                     .unwrap();
                 assert_eq!(http_version, expected, "version {version:?}");
-            });
-        }
+            }
+        });
     }
 
     #[test]
     fn scope_with_query_string() {
-        init_python();
         let req = make_inbound_request(
             http::Method::GET,
             "/search",
@@ -698,7 +691,7 @@ mod tests {
             Vec::new(),
             None,
         );
-        Python::attach(|py| {
+        with_py(|py| {
             let scope = build_http_scope(py, &req).unwrap();
             let scope = scope.bind(py);
             let qs: Vec<u8> = scope
@@ -713,12 +706,11 @@ mod tests {
 
     #[test]
     fn scope_with_headers() {
-        init_python();
         let mut headers = HeaderMap::new();
         headers.insert("content-type", "application/json".parse().unwrap());
         headers.insert("x-custom", "value".parse().unwrap());
         let req = make_inbound_request(http::Method::POST, "/api", b"", headers, Vec::new(), None);
-        Python::attach(|py| {
+        with_py(|py| {
             let scope = build_http_scope(py, &req).unwrap();
             let scope = scope.bind(py);
             let headers_list = scope.get_item("headers").unwrap().unwrap();
@@ -729,7 +721,6 @@ mod tests {
 
     #[test]
     fn scope_with_path_params() {
-        init_python();
         let req = make_inbound_request(
             http::Method::GET,
             "/items/42",
@@ -738,7 +729,7 @@ mod tests {
             vec![("item_id".to_owned(), "42".to_owned())],
             None,
         );
-        Python::attach(|py| {
+        with_py(|py| {
             let scope = build_http_scope(py, &req).unwrap();
             let scope = scope.bind(py);
             let pp = scope.get_item("path_params").unwrap().unwrap();
@@ -749,7 +740,6 @@ mod tests {
 
     #[test]
     fn scope_with_client_addr() {
-        init_python();
         let req = make_inbound_request(
             http::Method::GET,
             "/",
@@ -758,7 +748,7 @@ mod tests {
             Vec::new(),
             Some(SocketAddr::from(([192, 168, 1, 100], 12345))),
         );
-        Python::attach(|py| {
+        with_py(|py| {
             let scope = build_http_scope(py, &req).unwrap();
             let scope = scope.bind(py);
             let client = scope.get_item("client").unwrap().unwrap();
@@ -771,7 +761,6 @@ mod tests {
 
     #[test]
     fn scope_no_client() {
-        init_python();
         let req = make_inbound_request(
             http::Method::GET,
             "/",
@@ -780,7 +769,7 @@ mod tests {
             Vec::new(),
             None,
         );
-        Python::attach(|py| {
+        with_py(|py| {
             let scope = build_http_scope(py, &req).unwrap();
             let scope = scope.bind(py);
             let client = scope.get_item("client").unwrap().unwrap();
@@ -790,7 +779,6 @@ mod tests {
 
     #[test]
     fn scope_server_addr() {
-        init_python();
         let req = make_inbound_request(
             http::Method::GET,
             "/",
@@ -799,7 +787,7 @@ mod tests {
             Vec::new(),
             None,
         );
-        Python::attach(|py| {
+        with_py(|py| {
             let scope = build_http_scope(py, &req).unwrap();
             let scope = scope.bind(py);
             let server = scope.get_item("server").unwrap().unwrap();
@@ -814,12 +802,11 @@ mod tests {
 
     #[tokio::test]
     async fn receive_http_body_then_disconnect() {
-        init_python();
         let body = Arc::new(Mutex::new(Some(Bytes::from("hello"))));
 
         // First call: http.request with body
         let taken = body.lock().await.take();
-        Python::attach(|py| {
+        with_py(|py| {
             let result = build_receive_event(py, taken).unwrap();
             let dict = result.bind(py);
             let event_type: String = dict.get_item("type").unwrap().extract().unwrap();
@@ -832,7 +819,7 @@ mod tests {
 
         // Second call: http.disconnect
         let taken = body.lock().await.take();
-        Python::attach(|py| {
+        with_py(|py| {
             let result = build_receive_event(py, taken).unwrap();
             let dict = result.bind(py);
             let event_type: String = dict.get_item("type").unwrap().extract().unwrap();
@@ -842,8 +829,7 @@ mod tests {
 
     #[test]
     fn receive_empty_body() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let result = build_receive_event(py, Some(Bytes::new())).unwrap();
             let dict = result.bind(py);
             let event_type: String = dict.get_item("type").unwrap().extract().unwrap();
@@ -857,8 +843,7 @@ mod tests {
 
     #[test]
     fn parse_response_start_event() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let dict = PyDict::new(py);
             dict.set_item("type", "http.response.start").unwrap();
             dict.set_item("status", 200u16).unwrap();
@@ -889,8 +874,7 @@ mod tests {
 
     #[test]
     fn parse_response_body_event() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let dict = PyDict::new(py);
             dict.set_item("type", "http.response.body").unwrap();
             dict.set_item("body", PyBytes::new(py, b"hello")).unwrap();
@@ -935,8 +919,7 @@ mod tests {
 
     #[test]
     fn send_unknown_event_type() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let dict = PyDict::new(py);
             dict.set_item("type", "http.unknown").unwrap();
             let result = parse_asgi_send_event(&dict);
@@ -948,8 +931,7 @@ mod tests {
 
     #[test]
     fn send_missing_type_key() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let dict = PyDict::new(py);
             let result = parse_asgi_send_event(&dict);
             assert!(result.is_err());
@@ -960,8 +942,7 @@ mod tests {
 
     #[test]
     fn parse_ws_accept_event() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let dict = PyDict::new(py);
             dict.set_item("type", "websocket.accept").unwrap();
             dict.set_item("subprotocol", "graphql-ws").unwrap();
@@ -982,8 +963,7 @@ mod tests {
 
     #[test]
     fn parse_ws_send_text_event() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let dict = PyDict::new(py);
             dict.set_item("type", "websocket.send").unwrap();
             dict.set_item("text", "hello").unwrap();
@@ -1001,8 +981,7 @@ mod tests {
 
     #[test]
     fn parse_ws_send_binary_event() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let dict = PyDict::new(py);
             dict.set_item("type", "websocket.send").unwrap();
             dict.set_item("bytes", PyBytes::new(py, b"\x01\x02\x03"))
@@ -1021,8 +1000,7 @@ mod tests {
 
     #[test]
     fn parse_ws_close_event() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let dict = PyDict::new(py);
             dict.set_item("type", "websocket.close").unwrap();
             dict.set_item("code", 1001u16).unwrap();
@@ -1039,8 +1017,7 @@ mod tests {
 
     #[test]
     fn parse_ws_close_default_code() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let dict = PyDict::new(py);
             dict.set_item("type", "websocket.close").unwrap();
 
@@ -1081,7 +1058,6 @@ mod tests {
 
     #[test]
     fn build_ws_scope_basic() {
-        init_python();
         let req = make_inbound_request(
             http::Method::GET,
             "/ws",
@@ -1090,7 +1066,7 @@ mod tests {
             vec![("room".to_owned(), "main".to_owned())],
             Some(SocketAddr::from(([10, 0, 0, 1], 5555))),
         );
-        Python::attach(|py| {
+        with_py(|py| {
             let scope = build_ws_scope(py, &req).unwrap();
             let scope = scope.bind(py);
 
@@ -1130,8 +1106,7 @@ mod tests {
 
     #[test]
     fn build_ws_receive_event_connect() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let result = build_ws_receive_event(py, Some(WsIncomingEvent::Connect)).unwrap();
             let dict = result.bind(py);
             let event_type: String = dict.get_item("type").unwrap().extract().unwrap();
@@ -1141,8 +1116,7 @@ mod tests {
 
     #[test]
     fn build_ws_receive_event_receive_text() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let event = WsIncomingEvent::Receive {
                 text: Some("hello".to_owned()),
                 bytes: None,
@@ -1158,8 +1132,7 @@ mod tests {
 
     #[test]
     fn build_ws_receive_event_receive_bytes() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let event = WsIncomingEvent::Receive {
                 text: None,
                 bytes: Some(vec![0x01, 0x02, 0x03]),
@@ -1175,8 +1148,7 @@ mod tests {
 
     #[test]
     fn build_ws_receive_event_disconnect_with_code() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let event = WsIncomingEvent::Disconnect { code: 1001 };
             let result = build_ws_receive_event(py, Some(event)).unwrap();
             let dict = result.bind(py);
@@ -1189,8 +1161,7 @@ mod tests {
 
     #[test]
     fn build_ws_receive_event_channel_closed() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let result = build_ws_receive_event(py, None).unwrap();
             let dict = result.bind(py);
             let event_type: String = dict.get_item("type").unwrap().extract().unwrap();
@@ -1204,8 +1175,7 @@ mod tests {
 
     #[test]
     fn parse_response_body_missing_body_key() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let dict = PyDict::new(py);
             dict.set_item("type", "http.response.body").unwrap();
             // No "body" key, no "more_body" key — defaults to empty body, more_body=false
@@ -1222,8 +1192,7 @@ mod tests {
 
     #[test]
     fn parse_ws_accept_no_subprotocol() {
-        init_python();
-        Python::attach(|py| {
+        with_py(|py| {
             let dict = PyDict::new(py);
             dict.set_item("type", "websocket.accept").unwrap();
             let event = parse_asgi_send_event(&dict).unwrap();

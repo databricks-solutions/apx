@@ -459,6 +459,7 @@ mod tests {
     use super::*;
     use crate::bridge::context::RequestContext;
     use crate::route::{DependencyPlan, DependencyStep, QualName};
+    use crate::with_py;
     use http::HeaderMap;
 
     fn empty_ctx() -> RequestContext {
@@ -486,7 +487,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_extract_path() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ExtractPath {
                 name: "item_id".to_owned(),
@@ -504,8 +505,8 @@ mod tests {
         };
         let cache = LifecycleCache::empty();
         let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
-        assert!(result.contains_key("item_id"));
-        Python::attach(|py| {
+        with_py(|py| {
+            assert!(result.contains_key("item_id"));
             let val: i64 = result["item_id"].extract(py).unwrap();
             assert_eq!(val, 42);
         });
@@ -513,7 +514,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_extract_query_required() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ExtractQuery {
                 name: "page".to_owned(),
@@ -533,7 +534,7 @@ mod tests {
         };
         let cache = LifecycleCache::empty();
         let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
-        Python::attach(|py| {
+        with_py(|py| {
             let val: i64 = result["page"].extract(py).unwrap();
             assert_eq!(val, 3);
         });
@@ -541,7 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_extract_query_optional_missing() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ExtractQuery {
                 name: "page".to_owned(),
@@ -556,14 +557,14 @@ mod tests {
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
         let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
-        Python::attach(|py| {
+        with_py(|py| {
             assert!(result["page"].bind(py).is_none());
         });
     }
 
     #[tokio::test]
     async fn execute_extract_header() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ExtractHeader {
                 name: "token".to_owned(),
@@ -585,7 +586,7 @@ mod tests {
         };
         let cache = LifecycleCache::empty();
         let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
-        Python::attach(|py| {
+        with_py(|py| {
             let val: String = result["token"].extract(py).unwrap();
             assert_eq!(val, "secret");
         });
@@ -593,7 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_extract_cookie() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ExtractCookie {
                 name: "session".to_owned(),
@@ -614,7 +615,7 @@ mod tests {
         };
         let cache = LifecycleCache::empty();
         let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
-        Python::attach(|py| {
+        with_py(|py| {
             let val: String = result["session"].extract(py).unwrap();
             assert_eq!(val, "abc123");
         });
@@ -622,9 +623,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_resolve_lifecycle() {
-        Python::initialize();
         let mut cache = LifecycleCache::empty();
-        Python::attach(|py| {
+        with_py(|py| {
             // Use private field access in test to populate cache.
             cache.values.insert("my.db.Engine".to_owned(), py.None());
         });
@@ -664,9 +664,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_filter_handler_kwargs() {
-        Python::initialize();
-        let mut resolved = HashMap::new();
-        Python::attach(|py| {
+        with_py(|py| {
+            let mut resolved = HashMap::new();
             resolved.insert("a".to_owned(), py.None());
             resolved.insert("b".to_owned(), py.None());
             resolved.insert("c".to_owned(), py.None());
@@ -690,7 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_extract_path_missing() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ExtractPath {
                 name: "id".to_owned(),
@@ -728,8 +727,7 @@ mod tests {
 
     #[test]
     fn resolve_default_none() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let result = resolve_default(py, None).unwrap();
             assert!(result.bind(py).is_none());
         });
@@ -737,8 +735,7 @@ mod tests {
 
     #[test]
     fn resolve_default_string() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let default = serde_json::Value::String("hello".to_owned());
             let result = resolve_default(py, Some(&default)).unwrap();
             let val: String = result.extract(py).unwrap();
@@ -748,8 +745,7 @@ mod tests {
 
     #[test]
     fn resolve_default_int() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let default = serde_json::json!(42);
             let result = resolve_default(py, Some(&default)).unwrap();
             let val: i64 = result.extract(py).unwrap();
@@ -759,8 +755,7 @@ mod tests {
 
     #[test]
     fn resolve_default_bool() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let default = serde_json::Value::Bool(true);
             let result = resolve_default(py, Some(&default)).unwrap();
             let val: bool = result.extract(py).unwrap();
@@ -770,8 +765,7 @@ mod tests {
 
     #[test]
     fn resolve_default_float() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let default = serde_json::json!(1.5);
             let result = resolve_default(py, Some(&default)).unwrap();
             let val: f64 = result.extract(py).unwrap();
@@ -781,8 +775,7 @@ mod tests {
 
     #[test]
     fn resolve_default_null() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let default = serde_json::Value::Null;
             let result = resolve_default(py, Some(&default)).unwrap();
             assert!(result.bind(py).is_none());
@@ -791,8 +784,7 @@ mod tests {
 
     #[test]
     fn resolve_default_array_falls_back_to_none() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let default = serde_json::json!([1, 2, 3]);
             let result = resolve_default(py, Some(&default)).unwrap();
             assert!(result.bind(py).is_none());
@@ -801,7 +793,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_extract_query_required_missing() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ExtractQuery {
                 name: "page".to_owned(),
@@ -822,7 +814,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_extract_header_missing_required() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ExtractHeader {
                 name: "token".to_owned(),
@@ -843,7 +835,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_extract_header_missing_optional() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ExtractHeader {
                 name: "token".to_owned(),
@@ -858,14 +850,14 @@ mod tests {
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
         let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
-        Python::attach(|py| {
+        with_py(|py| {
             assert!(result["token"].bind(py).is_none());
         });
     }
 
     #[tokio::test]
     async fn execute_extract_cookie_missing_required() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ExtractCookie {
                 name: "session".to_owned(),
@@ -885,7 +877,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_extract_cookie_missing_optional() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ExtractCookie {
                 name: "session".to_owned(),
@@ -899,15 +891,14 @@ mod tests {
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
         let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
-        Python::attach(|py| {
+        with_py(|py| {
             assert!(result["session"].bind(py).is_none());
         });
     }
 
     #[test]
     fn filter_handler_kwargs_missing_key() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let resolved = HashMap::new();
             let result = filter_handler_kwargs(py, &["missing".to_owned()], &resolved);
             assert!(result.is_err());
@@ -916,7 +907,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_extract_query_with_default() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ExtractQuery {
                 name: "page".to_owned(),
@@ -931,7 +922,7 @@ mod tests {
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
         let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
-        Python::attach(|py| {
+        with_py(|py| {
             let val: i64 = result["page"].extract(py).unwrap();
             assert_eq!(val, 1);
         });
@@ -939,15 +930,14 @@ mod tests {
 
     #[tokio::test]
     async fn execute_validate_body_step() {
-        Python::initialize();
         // Create a minimal Pydantic model in Python for testing
-        let has_pydantic = Python::attach(|py| py.import(c"pydantic").is_ok());
+        let has_pydantic = with_py(|py| py.import(c"pydantic").is_ok());
         if !has_pydantic {
             // Skip test if pydantic is not installed
             return;
         }
 
-        Python::attach(|py| {
+        with_py(|py| {
             py.run(
                 c"import pydantic\nclass TestModel(pydantic.BaseModel):\n    name: str\n",
                 None,
@@ -979,7 +969,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_validate_body_missing_body() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ValidateBody {
                 name: "body".to_owned(),
@@ -998,7 +988,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_call_python_sync() {
-        Python::initialize();
+        with_py(|_py| {});
         // Use a built-in Python function: len
         let plan = DependencyPlan {
             steps: vec![DependencyStep::CallPython {
@@ -1023,8 +1013,7 @@ mod tests {
 
     #[test]
     fn build_step_kwargs_missing_input() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let resolved = HashMap::new();
             let result = build_step_kwargs(py, &["missing".to_owned()], &resolved);
             assert!(result.is_err());
@@ -1033,8 +1022,7 @@ mod tests {
 
     #[test]
     fn build_step_kwargs_populated() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let mut resolved = HashMap::new();
             resolved.insert("x".to_owned(), py.None());
             let kwargs = build_step_kwargs(py, &["x".to_owned()], &resolved).unwrap();
@@ -1044,7 +1032,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_validate_body_bad_import() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::ValidateBody {
                 name: "body".to_owned(),
@@ -1068,14 +1056,13 @@ mod tests {
 
     #[tokio::test]
     async fn execute_validate_body_invalid_json() {
-        Python::initialize();
-        let has_pydantic = Python::attach(|py| py.import(c"pydantic").is_ok());
+        let has_pydantic = with_py(|py| py.import(c"pydantic").is_ok());
         if !has_pydantic {
             return;
         }
 
         // Define a model that requires a string field
-        Python::attach(|py| {
+        with_py(|py| {
             py.run(
                 c"import sys\nimport pydantic\nclass _TestModelVal(pydantic.BaseModel):\n    name: str\nsys.modules['_test_model_val'] = type(sys)('_test_model_val')\nsys.modules['_test_model_val']._TestModelVal = _TestModelVal\n",
                 None,
@@ -1112,9 +1099,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_call_python_sync_success() {
-        Python::initialize();
         // Define a simple sync function that returns a value
-        Python::attach(|py| {
+        with_py(|py| {
             py.run(
                 c"import sys\ndef _test_sync_fn(x=None): return 42\nsys.modules['_test_sync_mod'] = type(sys)('_test_sync_mod')\nsys.modules['_test_sync_mod']._test_sync_fn = _test_sync_fn\n",
                 None,
@@ -1139,7 +1125,7 @@ mod tests {
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
         let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
-        Python::attach(|py| {
+        with_py(|py| {
             let val: i64 = result["result"].extract(py).unwrap();
             assert_eq!(val, 42);
         });
@@ -1147,9 +1133,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_call_python_sync_with_inputs() {
-        Python::initialize();
         // Define a sync function that uses its inputs
-        Python::attach(|py| {
+        with_py(|py| {
             py.run(
                 c"import sys\ndef _test_add(a=0, b=0): return a + b\nsys.modules['_test_add_mod'] = type(sys)('_test_add_mod')\nsys.modules['_test_add_mod']._test_add = _test_add\n",
                 None,
@@ -1193,7 +1178,7 @@ mod tests {
         };
         let cache = LifecycleCache::empty();
         let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
-        Python::attach(|py| {
+        with_py(|py| {
             let val: i64 = result["sum"].extract(py).unwrap();
             assert_eq!(val, 10);
         });
@@ -1201,7 +1186,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_call_python_sync_bad_import() {
-        Python::initialize();
+        with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::CallPython {
                 dep_qualname: QualName::new("nonexistent.module.func").unwrap(),

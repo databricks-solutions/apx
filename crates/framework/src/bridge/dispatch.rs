@@ -552,6 +552,7 @@ fn extract_detail(value: &pyo3::Bound<'_, PyAny>, f: fn(String) -> AppError) -> 
 )]
 mod tests {
     use super::*;
+    use crate::with_py;
 
     /// Parse a raw query string into key-value pairs (mirrors extract_context logic).
     fn parse_query_string(query: &[u8]) -> Vec<(String, String)> {
@@ -663,10 +664,9 @@ mod tests {
 
     #[test]
     fn resolve_header_param_present() {
-        Python::initialize();
-        let param = make_header_param("x-token", None, "str", true);
-        let ctx = ctx_with_headers(&[("x-token", "abc")]);
-        Python::attach(|py| {
+        with_py(|py| {
+            let param = make_header_param("x-token", None, "str", true);
+            let ctx = ctx_with_headers(&[("x-token", "abc")]);
             let result = resolve_header_param(py, &param, &ctx);
             assert!(result.is_ok());
             let val: String = result.unwrap().extract().unwrap();
@@ -676,10 +676,9 @@ mod tests {
 
     #[test]
     fn resolve_header_param_alias() {
-        Python::initialize();
-        let param = make_header_param("token", Some("x-token"), "str", true);
-        let ctx = ctx_with_headers(&[("x-token", "xyz")]);
-        Python::attach(|py| {
+        with_py(|py| {
+            let param = make_header_param("token", Some("x-token"), "str", true);
+            let ctx = ctx_with_headers(&[("x-token", "xyz")]);
             let result = resolve_header_param(py, &param, &ctx);
             assert!(result.is_ok());
             let val: String = result.unwrap().extract().unwrap();
@@ -689,10 +688,9 @@ mod tests {
 
     #[test]
     fn resolve_header_param_int_conversion() {
-        Python::initialize();
-        let param = make_header_param("x-count", None, "int", true);
-        let ctx = ctx_with_headers(&[("x-count", "42")]);
-        Python::attach(|py| {
+        with_py(|py| {
+            let param = make_header_param("x-count", None, "int", true);
+            let ctx = ctx_with_headers(&[("x-count", "42")]);
             let result = resolve_header_param(py, &param, &ctx);
             assert!(result.is_ok());
             let val: i64 = result.unwrap().extract().unwrap();
@@ -702,10 +700,9 @@ mod tests {
 
     #[test]
     fn resolve_header_param_missing_required() {
-        Python::initialize();
-        let param = make_header_param("x-token", None, "str", true);
-        let ctx = ctx_with_headers(&[]);
-        Python::attach(|py| {
+        with_py(|py| {
+            let param = make_header_param("x-token", None, "str", true);
+            let ctx = ctx_with_headers(&[]);
             let result = resolve_header_param(py, &param, &ctx);
             assert!(result.is_err());
             let err = result.unwrap_err();
@@ -715,10 +712,9 @@ mod tests {
 
     #[test]
     fn resolve_header_param_missing_optional() {
-        Python::initialize();
-        let param = make_header_param("x-token", None, "str", false);
-        let ctx = ctx_with_headers(&[]);
-        Python::attach(|py| {
+        with_py(|py| {
+            let param = make_header_param("x-token", None, "str", false);
+            let ctx = ctx_with_headers(&[]);
             let result = resolve_header_param(py, &param, &ctx);
             assert!(result.is_ok());
             assert!(result.unwrap().is_none());
@@ -729,10 +725,9 @@ mod tests {
 
     #[test]
     fn resolve_cookie_param_present() {
-        Python::initialize();
-        let param = make_cookie_param("session", "str", true);
-        let ctx = ctx_with_headers(&[("cookie", "session=abc123; theme=dark")]);
-        Python::attach(|py| {
+        with_py(|py| {
+            let param = make_cookie_param("session", "str", true);
+            let ctx = ctx_with_headers(&[("cookie", "session=abc123; theme=dark")]);
             let result = resolve_cookie_param(py, &param, &ctx);
             assert!(result.is_ok());
             let val: String = result.unwrap().extract().unwrap();
@@ -742,10 +737,9 @@ mod tests {
 
     #[test]
     fn resolve_cookie_param_missing_required() {
-        Python::initialize();
-        let param = make_cookie_param("session", "str", true);
-        let ctx = ctx_with_headers(&[]);
-        Python::attach(|py| {
+        with_py(|py| {
+            let param = make_cookie_param("session", "str", true);
+            let ctx = ctx_with_headers(&[]);
             let result = resolve_cookie_param(py, &param, &ctx);
             assert!(result.is_err());
             assert!(matches!(result.unwrap_err(), AppError::Validation(_)));
@@ -754,10 +748,9 @@ mod tests {
 
     #[test]
     fn resolve_cookie_param_missing_optional() {
-        Python::initialize();
-        let param = make_cookie_param("session", "str", false);
-        let ctx = ctx_with_headers(&[]);
-        Python::attach(|py| {
+        with_py(|py| {
+            let param = make_cookie_param("session", "str", false);
+            let ctx = ctx_with_headers(&[]);
             let result = resolve_cookie_param(py, &param, &ctx);
             assert!(result.is_ok());
             assert!(result.unwrap().is_none());
@@ -766,10 +759,9 @@ mod tests {
 
     #[test]
     fn resolve_cookie_param_multiple_cookies() {
-        Python::initialize();
-        let param = make_cookie_param("b", "str", true);
-        let ctx = ctx_with_headers(&[("cookie", "a=1; b=2; c=3")]);
-        Python::attach(|py| {
+        with_py(|py| {
+            let param = make_cookie_param("b", "str", true);
+            let ctx = ctx_with_headers(&[("cookie", "a=1; b=2; c=3")]);
             let result = resolve_cookie_param(py, &param, &ctx);
             assert!(result.is_ok());
             let val: String = result.unwrap().extract().unwrap();
@@ -781,8 +773,7 @@ mod tests {
 
     #[test]
     fn convert_path_value_float() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let result = convert_path_value(py, "2.5", "float").unwrap();
             let val: f64 = result.extract().unwrap();
             assert!((val - 2.5).abs() < f64::EPSILON);
@@ -791,8 +782,7 @@ mod tests {
 
     #[test]
     fn convert_path_value_invalid_float() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let result = convert_path_value(py, "not_a_number", "float");
             assert!(result.is_err());
             assert!(matches!(result.unwrap_err(), AppError::BadRequest(_)));
@@ -801,8 +791,7 @@ mod tests {
 
     #[test]
     fn convert_path_value_unknown_type_returns_string() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let result = convert_path_value(py, "hello", "uuid").unwrap();
             let val: String = result.extract().unwrap();
             assert_eq!(val, "hello");
@@ -813,14 +802,13 @@ mod tests {
 
     #[test]
     fn resolve_raw_body_with_body() {
-        Python::initialize();
-        let ctx = RequestContext {
-            path_params: Vec::new(),
-            query_params: Vec::new(),
-            headers: http::HeaderMap::new(),
-            body: Some(Bytes::from("raw bytes")),
-        };
-        Python::attach(|py| {
+        with_py(|py| {
+            let ctx = RequestContext {
+                path_params: Vec::new(),
+                query_params: Vec::new(),
+                headers: http::HeaderMap::new(),
+                body: Some(Bytes::from("raw bytes")),
+            };
             let result = resolve_raw_body(py, &ctx).unwrap();
             let val: Vec<u8> = result.extract().unwrap();
             assert_eq!(val, b"raw bytes");
@@ -829,14 +817,13 @@ mod tests {
 
     #[test]
     fn resolve_raw_body_no_body() {
-        Python::initialize();
-        let ctx = RequestContext {
-            path_params: Vec::new(),
-            query_params: Vec::new(),
-            headers: http::HeaderMap::new(),
-            body: None,
-        };
-        Python::attach(|py| {
+        with_py(|py| {
+            let ctx = RequestContext {
+                path_params: Vec::new(),
+                query_params: Vec::new(),
+                headers: http::HeaderMap::new(),
+                body: None,
+            };
             let result = resolve_raw_body(py, &ctx).unwrap();
             let val: Vec<u8> = result.extract().unwrap();
             assert!(val.is_empty());
@@ -847,16 +834,15 @@ mod tests {
 
     #[test]
     fn resolve_raw_request_with_headers_and_body() {
-        Python::initialize();
-        let mut headers = http::HeaderMap::new();
-        headers.insert("x-token", "secret".parse().unwrap());
-        let ctx = RequestContext {
-            path_params: Vec::new(),
-            query_params: Vec::new(),
-            headers,
-            body: Some(Bytes::from("body data")),
-        };
-        Python::attach(|py| {
+        with_py(|py| {
+            let mut headers = http::HeaderMap::new();
+            headers.insert("x-token", "secret".parse().unwrap());
+            let ctx = RequestContext {
+                path_params: Vec::new(),
+                query_params: Vec::new(),
+                headers,
+                body: Some(Bytes::from("body data")),
+            };
             let result = resolve_raw_request(py, &ctx).unwrap();
             assert!(result.is_instance_of::<crate::pyapi::Request>());
         });
@@ -864,14 +850,13 @@ mod tests {
 
     #[test]
     fn resolve_raw_request_empty() {
-        Python::initialize();
-        let ctx = RequestContext {
-            path_params: Vec::new(),
-            query_params: Vec::new(),
-            headers: http::HeaderMap::new(),
-            body: None,
-        };
-        Python::attach(|py| {
+        with_py(|py| {
+            let ctx = RequestContext {
+                path_params: Vec::new(),
+                query_params: Vec::new(),
+                headers: http::HeaderMap::new(),
+                body: None,
+            };
             let result = resolve_raw_request(py, &ctx).unwrap();
             assert!(result.is_instance_of::<crate::pyapi::Request>());
         });
@@ -881,38 +866,37 @@ mod tests {
 
     #[test]
     fn python_err_to_app_error_not_found() {
-        Python::initialize();
-        let err =
-            Python::attach(|_py| pyo3::PyErr::new::<crate::pyapi::NotFound, _>("item not found"));
-        let app_err = python_err_to_app_error(err);
-        assert!(matches!(app_err, AppError::NotFound(_)));
+        with_py(|_py| {
+            let err = pyo3::PyErr::new::<crate::pyapi::NotFound, _>("item not found");
+            let app_err = python_err_to_app_error(err);
+            assert!(matches!(app_err, AppError::NotFound(_)));
+        });
     }
 
     #[test]
     fn python_err_to_app_error_bad_request() {
-        Python::initialize();
-        let err =
-            Python::attach(|_py| pyo3::PyErr::new::<crate::pyapi::BadRequest, _>("invalid input"));
-        let app_err = python_err_to_app_error(err);
-        assert!(matches!(app_err, AppError::BadRequest(_)));
+        with_py(|_py| {
+            let err = pyo3::PyErr::new::<crate::pyapi::BadRequest, _>("invalid input");
+            let app_err = python_err_to_app_error(err);
+            assert!(matches!(app_err, AppError::BadRequest(_)));
+        });
     }
 
     #[test]
     fn python_err_to_app_error_forbidden() {
-        Python::initialize();
-        let err =
-            Python::attach(|_py| pyo3::PyErr::new::<crate::pyapi::Forbidden, _>("access denied"));
-        let app_err = python_err_to_app_error(err);
-        assert!(matches!(app_err, AppError::Forbidden(_)));
+        with_py(|_py| {
+            let err = pyo3::PyErr::new::<crate::pyapi::Forbidden, _>("access denied");
+            let app_err = python_err_to_app_error(err);
+            assert!(matches!(app_err, AppError::Forbidden(_)));
+        });
     }
 
     #[test]
     fn python_err_to_app_error_generic() {
-        Python::initialize();
-        let err = Python::attach(|_py| {
-            pyo3::PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("something broke")
+        with_py(|_py| {
+            let err = pyo3::PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("something broke");
+            let app_err = python_err_to_app_error(err);
+            assert!(matches!(app_err, AppError::Internal(_)));
         });
-        let app_err = python_err_to_app_error(err);
-        assert!(matches!(app_err, AppError::Internal(_)));
     }
 }

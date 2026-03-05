@@ -412,10 +412,10 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::route::{HandlerKind, QualName, ResponseType, RouteManifest, RoutePath};
+    use crate::with_py;
 
     fn make_route_with_strategy(strategy: DispatchStrategy) -> BoundRoute {
-        pyo3::Python::initialize();
-        BoundRoute {
+        with_py(|py| BoundRoute {
             manifest: RouteManifest {
                 kind: HandlerKind::RequestResponse,
                 method: HttpMethod::Get,
@@ -433,13 +433,13 @@ mod tests {
                 deprecated: false,
                 operation_id: None,
             },
-            handler: pyo3::Python::attach(|py| py.None()),
+            handler: py.None(),
             params: Vec::new(),
             response_model: None,
             has_body_param: false,
             dependant: None,
             fastapi_app: None,
-        }
+        })
     }
 
     #[test]
@@ -551,36 +551,37 @@ mod tests {
     // ── SSE / WebSocket dispatch tests ──────────────────────────────────
 
     fn make_route_with_kind(kind: HandlerKind) -> BoundRoute {
-        pyo3::Python::initialize();
-        let dispatch = match kind {
-            HandlerKind::WebSocket | HandlerKind::SSE => DispatchStrategy::AsgiBridge,
-            HandlerKind::RequestResponse => DispatchStrategy::Direct,
-        };
-        BoundRoute {
-            manifest: RouteManifest {
-                kind,
-                method: HttpMethod::Get,
-                path: RoutePath::new("/test").unwrap(),
-                handler_qualname: QualName::new("test.handler").unwrap(),
+        with_py(|py| {
+            let dispatch = match kind {
+                HandlerKind::WebSocket | HandlerKind::SSE => DispatchStrategy::AsgiBridge,
+                HandlerKind::RequestResponse => DispatchStrategy::Direct,
+            };
+            BoundRoute {
+                manifest: RouteManifest {
+                    kind,
+                    method: HttpMethod::Get,
+                    path: RoutePath::new("/test").unwrap(),
+                    handler_qualname: QualName::new("test.handler").unwrap(),
+                    params: Vec::new(),
+                    response_type: ResponseType::RawResponse,
+                    tags: Vec::new(),
+                    dispatch_strategy: dispatch,
+                    dependency_plan: None,
+                    status_code: 200,
+                    summary: None,
+                    description: None,
+                    include_in_schema: true,
+                    deprecated: false,
+                    operation_id: None,
+                },
+                handler: py.None(),
                 params: Vec::new(),
-                response_type: ResponseType::RawResponse,
-                tags: Vec::new(),
-                dispatch_strategy: dispatch,
-                dependency_plan: None,
-                status_code: 200,
-                summary: None,
-                description: None,
-                include_in_schema: true,
-                deprecated: false,
-                operation_id: None,
-            },
-            handler: pyo3::Python::attach(|py| py.None()),
-            params: Vec::new(),
-            response_model: None,
-            has_body_param: false,
-            dependant: None,
-            fastapi_app: None,
-        }
+                response_model: None,
+                has_body_param: false,
+                dependant: None,
+                fastapi_app: None,
+            }
+        })
     }
 
     #[test]

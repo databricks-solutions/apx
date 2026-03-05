@@ -199,12 +199,11 @@ pub fn import_qualified_name(py: Python<'_>, qualname: &str) -> Result<Py<PyAny>
 )]
 mod tests {
     use super::*;
-    use pyo3::Python;
+    use crate::with_py;
 
     #[test]
     fn import_qualified_name_builtin() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let result = import_qualified_name(py, "builtins.len");
             assert!(result.is_ok());
             // Verify it's callable
@@ -214,8 +213,7 @@ mod tests {
 
     #[test]
     fn import_qualified_name_no_dot() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let result = import_qualified_name(py, "nodot");
             assert!(result.is_err());
             assert!(matches!(
@@ -227,8 +225,7 @@ mod tests {
 
     #[test]
     fn import_qualified_name_bad_module() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let result = import_qualified_name(py, "nonexistent_module_xyz.Thing");
             assert!(result.is_err());
             assert!(matches!(result.unwrap_err(), DiscoveryError::Python(_)));
@@ -237,8 +234,7 @@ mod tests {
 
     #[test]
     fn import_qualified_name_bad_attr() {
-        Python::initialize();
-        Python::attach(|py| {
+        with_py(|py| {
             let result = import_qualified_name(py, "builtins.nonexistent_attr_xyz");
             assert!(result.is_err());
             assert!(matches!(result.unwrap_err(), DiscoveryError::Python(_)));
