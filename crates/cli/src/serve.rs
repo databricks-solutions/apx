@@ -7,6 +7,16 @@ use apx_framework::route::AppModule;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Validate that the manifest file exists (clap value_parser).
+fn validate_manifest_path(s: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(s);
+    if path.exists() {
+        Ok(path)
+    } else {
+        Err(format!("manifest file not found: {}", path.display()))
+    }
+}
+
 /// CLI arguments for `apx serve`.
 #[derive(clap::Args, Debug)]
 pub struct ServeArgs {
@@ -29,6 +39,10 @@ pub struct ServeArgs {
     /// Python module path (e.g., "backend.app").
     #[arg(long, default_value = "backend.app")]
     app: String,
+
+    /// Path to pre-built manifest JSON. Skips live FastAPI discovery.
+    #[arg(long, value_parser = validate_manifest_path)]
+    manifest: Option<PathBuf>,
 }
 
 /// Run the serve command.
@@ -63,6 +77,7 @@ pub async fn run(args: ServeArgs) -> i32 {
                 app_module,
                 app_dir,
                 request_timeout: Duration::from_secs(args.timeout),
+                manifest_path: args.manifest,
             };
 
             if let Err(e) = apx_framework::runtime::supervisor::run_supervisor(config).await {

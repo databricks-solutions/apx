@@ -26,6 +26,8 @@ pub struct SupervisorConfig {
     pub app_dir: PathBuf,
     /// Per-request timeout passed to workers.
     pub request_timeout: Duration,
+    /// Path to pre-built manifest JSON (skips live FastAPI discovery).
+    pub manifest_path: Option<PathBuf>,
 }
 
 /// What went wrong with supervisor config validation.
@@ -212,6 +214,10 @@ async fn spawn_worker(
         .env("APX_WORKER_NONCE", nonce.as_str())
         .env("APX_WORKER_SOCK", sock_str);
 
+    if let Some(manifest) = &config.manifest_path {
+        cmd.arg("--manifest").arg(manifest);
+    }
+
     // Propagate OTEL env vars.
     for (key, value) in std::env::vars() {
         if key.starts_with("OTEL_") {
@@ -239,7 +245,7 @@ async fn spawn_worker(
         app_module: config.app_module.clone(),
         request_timeout_secs: config.request_timeout.as_secs(),
         nonce: nonce.clone(),
-        manifest_path: None,
+        manifest_path: config.manifest_path.clone(),
     };
 
     channel
@@ -449,6 +455,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
+            manifest_path: None,
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -462,6 +469,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
+            manifest_path: None,
         };
         let err = validate_config(&config).unwrap_err();
         assert!(matches!(
@@ -479,6 +487,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
+            manifest_path: None,
         };
         let err = validate_config(&config).unwrap_err();
         assert!(matches!(

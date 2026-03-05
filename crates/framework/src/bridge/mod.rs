@@ -8,13 +8,16 @@ pub mod context;
 pub mod dispatch;
 
 pub mod asgi_dispatch;
+pub mod plan_executor;
 
 use crate::route::{BoundRoute, DispatchStrategy, HttpMethod};
+use crate::runtime::lifecycle::LifecycleCache;
 use asgi_dispatch::AsgiBridgeDispatch;
 use axum::extract::ConnectInfo;
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use dispatch::{AppState, HandlerDispatch, RequestResponseDispatch};
+use plan_executor::PlanExecutorDispatch;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -81,7 +84,18 @@ fn collect_path_params(raw_params: &axum::extract::RawPathParams) -> Vec<(String
 }
 
 /// Select the dispatch impl based on the route's dispatch strategy.
-fn dispatch_for(route: &BoundRoute) -> Arc<dyn HandlerDispatch> {
+///
+/// Routes with a compiled dependency plan (that don't need ASGI) use
+/// [`PlanExecutorDispatch`]. Otherwise falls back to dispatch strategy.
+fn dispatch_for(
+    route: &BoundRoute,
+    lifecycle_cache: &Arc<LifecycleCache>,
+) -> Arc<dyn HandlerDispatch> {
+    if let Some(plan) = &route.manifest.dependency_plan
+        && !plan.needs_asgi
+    {
+        return Arc::new(PlanExecutorDispatch::new(Arc::clone(lifecycle_cache)));
+    }
     match route.manifest.dispatch_strategy {
         DispatchStrategy::Direct => Arc::new(RequestResponseDispatch),
         DispatchStrategy::AsgiBridge => Arc::new(AsgiBridgeDispatch),
@@ -111,9 +125,10 @@ fn register_routes(
     routes: Vec<BoundRoute>,
     app_state: &Arc<AppState>,
     server_addr: SocketAddr,
+    lifecycle_cache: &Arc<LifecycleCache>,
 ) -> Router {
     for route in routes {
-        let dispatch = dispatch_for(&route);
+        let dispatch = dispatch_for(&route, lifecycle_cache);
         let method = route.manifest.method;
         let path = route.manifest.path.as_str().to_owned();
         let state = HandlerState {
@@ -143,10 +158,11 @@ pub fn build_router(
     routes: Vec<BoundRoute>,
     app_state: Arc<AppState>,
     server_addr: SocketAddr,
+    lifecycle_cache: Arc<LifecycleCache>,
 ) -> Router {
     let user_paths: HashSet<&str> = routes.iter().map(|r| r.manifest.path.as_str()).collect();
     let router = register_health_probes(Router::new(), &user_paths);
-    register_routes(router, routes, &app_state, server_addr)
+    register_routes(router, routes, &app_state, server_addr, &lifecycle_cache)
 }
 
 /// Apply tower layer stack to the router.
@@ -248,15 +264,51 @@ mod tests {
     #[test]
     fn dispatch_for_direct() {
         let route = make_route_with_strategy(DispatchStrategy::Direct);
-        let d = dispatch_for(&route);
-        let _ = format!("{:?}", Arc::as_ptr(&d));
+        let cache = Arc::new(LifecycleCache::empty());
+        let d = dispatch_for(&route, &cache);
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("RequestResponseDispatch"));
     }
 
     #[test]
     fn dispatch_for_asgi_bridge() {
         let route = make_route_with_strategy(DispatchStrategy::AsgiBridge);
-        let d = dispatch_for(&route);
-        let _ = format!("{:?}", Arc::as_ptr(&d));
+        let cache = Arc::new(LifecycleCache::empty());
+        let d = dispatch_for(&route, &cache);
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("AsgiBridgeDispatch"));
+    }
+
+    #[test]
+    fn dispatch_for_plan_executor() {
+        use crate::route::DependencyPlan;
+        let mut route = make_route_with_strategy(DispatchStrategy::Direct);
+        route.manifest.dependency_plan = Some(DependencyPlan {
+            steps: Vec::new(),
+            handler_kwargs: Vec::new(),
+            needs_asgi: false,
+            generator_cleanup_indices: Vec::new(),
+        });
+        let cache = Arc::new(LifecycleCache::empty());
+        let d = dispatch_for(&route, &cache);
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("PlanExecutorDispatch"));
+    }
+
+    #[test]
+    fn dispatch_for_plan_needs_asgi_falls_back() {
+        use crate::route::DependencyPlan;
+        let mut route = make_route_with_strategy(DispatchStrategy::AsgiBridge);
+        route.manifest.dependency_plan = Some(DependencyPlan {
+            steps: Vec::new(),
+            handler_kwargs: Vec::new(),
+            needs_asgi: true,
+            generator_cleanup_indices: Vec::new(),
+        });
+        let cache = Arc::new(LifecycleCache::empty());
+        let d = dispatch_for(&route, &cache);
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("AsgiBridgeDispatch"));
     }
 
     #[tokio::test]

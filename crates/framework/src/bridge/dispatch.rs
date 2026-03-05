@@ -34,7 +34,7 @@ impl std::fmt::Debug for AppState {
 ///
 /// Implementations work entirely on transport-neutral types. The axum
 /// boundary lives in `bridge/mod.rs::python_handler` only.
-pub trait HandlerDispatch: Send + Sync {
+pub trait HandlerDispatch: Send + Sync + std::fmt::Debug {
     /// Process a request and return a transport-neutral response.
     fn handle(
         &self,
@@ -74,7 +74,7 @@ impl HandlerDispatch for RequestResponseDispatch {
 ///
 /// Path params come from `request.path_params`, query params are parsed
 /// from the raw query string via `form_urlencoded`.
-async fn extract_context(
+pub(super) async fn extract_context(
     request: &mut InboundRequest,
     route: &BoundRoute,
     app_state: &AppState,
@@ -183,7 +183,7 @@ fn resolve_path_param<'py>(
 }
 
 /// Convert a path parameter string to the target Python type.
-fn convert_path_value<'py>(
+pub(super) fn convert_path_value<'py>(
     py: Python<'py>,
     value: &str,
     type_name: &str,
@@ -270,7 +270,10 @@ fn resolve_body_param<'py>(
 }
 
 /// Extract structured errors from a Pydantic `ValidationError`.
-fn extract_pydantic_errors(py: Python<'_>, err: &pyo3::PyErr) -> Vec<ValidationErrorItem> {
+pub(super) fn extract_pydantic_errors(
+    py: Python<'_>,
+    err: &pyo3::PyErr,
+) -> Vec<ValidationErrorItem> {
     let err_value = err.value(py);
     let Ok(errors_list) = err_value.call_method0(c"errors") else {
         return Vec::new();
@@ -389,7 +392,7 @@ fn resolve_cookie_param<'py>(
 // ── Step 3: Serialize response ──────────────────────────────────────────
 
 /// Validate return type and serialize the Python result to an outbound response.
-fn serialize_result(
+pub(super) fn serialize_result(
     py: Python<'_>,
     result: &Py<PyAny>,
     route: &BoundRoute,

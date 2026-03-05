@@ -127,6 +127,41 @@ fn bind_response_model(
     }
 }
 
+/// Bind manifest routes to live Python handlers without importing FastAPI.
+///
+/// For each route, imports the handler by its dotted qualified name, resolves
+/// Body param types and response model classes. No FastAPI app needed.
+pub fn bind_routes_from_manifest(
+    py: Python<'_>,
+    manifest: &AppManifest,
+) -> Result<Vec<BoundRoute>, DiscoveryError> {
+    let mut bound = Vec::with_capacity(manifest.routes.len());
+
+    for rm in &manifest.routes {
+        let handler = import_qualified_name(py, rm.handler_qualname.as_str())?;
+        let params = bind_params(py, &rm.params)?;
+        let response_model = bind_response_model(py, &rm.response_type)?;
+        let has_body_param = rm.params.iter().any(|p| {
+            matches!(
+                p.source,
+                ParamSource::Body | ParamSource::RawBody | ParamSource::RawRequest
+            )
+        });
+
+        bound.push(BoundRoute {
+            manifest: rm.clone(),
+            handler,
+            params,
+            response_model,
+            has_body_param,
+            dependant: None,
+            fastapi_app: None,
+        });
+    }
+
+    Ok(bound)
+}
+
 /// Import a Python object by its dotted qualified name.
 ///
 /// Splits on the last `.` to get `(module_path, attr_name)`, imports the

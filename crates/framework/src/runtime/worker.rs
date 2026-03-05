@@ -9,6 +9,8 @@ use crate::bridge::{build_router, wrap_layers};
 use crate::discovery;
 use crate::ipc::channel::WorkerChannel;
 use crate::ipc::protocol::{BootstrapError, IpcMessage, Nonce, WorkerBootstrap};
+use crate::manifest::ManifestError;
+use crate::runtime::lifecycle::LifecycleCache;
 use crate::transport::{Listener, TransportConfig, TransportError};
 use axum::Router;
 use pyo3::Python;
@@ -35,6 +37,10 @@ pub enum WorkerError {
     /// IPC communication error.
     #[error("ipc: {0}")]
     Ipc(#[from] crate::ipc::protocol::IpcError),
+
+    /// Manifest loading failed.
+    #[error("manifest load: {0}")]
+    ManifestLoad(#[from] ManifestError),
 
     /// Serving requests failed.
     #[error("serve failed: {0}")]
@@ -97,10 +103,45 @@ pub async fn init_worker(
 
 /// Phase 2: Load the Python app and build the axum router.
 ///
+/// Branches on `manifest_path`: when present, loads the pre-built manifest
+/// and imports only handler functions (no FastAPI). Otherwise runs live
+/// FastAPI discovery.
+///
 /// # Errors
 ///
-/// Returns an error if discovery fails or the router can't be built.
+/// Returns an error if discovery/manifest loading fails or the router can't be built.
 pub fn load_app(
+    bootstrap: &WorkerBootstrap,
+    server_addr: std::net::SocketAddr,
+) -> Result<(Router, Arc<AppState>), WorkerError> {
+    match &bootstrap.manifest_path {
+        Some(path) => load_from_manifest(path, server_addr),
+        None => load_from_discovery(bootstrap, server_addr),
+    }
+}
+
+/// Load routes from a pre-built manifest (no FastAPI import).
+fn load_from_manifest(
+    path: &std::path::Path,
+    server_addr: std::net::SocketAddr,
+) -> Result<(Router, Arc<AppState>), WorkerError> {
+    let manifest = crate::manifest::load(path)?;
+    crate::manifest::check_version(&manifest)?;
+
+    let lifecycle_cache = Arc::new(LifecycleCache::empty());
+
+    let routes = Python::attach(|py| discovery::bind::bind_routes_from_manifest(py, &manifest))?;
+
+    let app_state = Arc::new(AppState {
+        max_body_limit: manifest.max_body_limit,
+    });
+
+    let router = build_router(routes, Arc::clone(&app_state), server_addr, lifecycle_cache);
+    Ok((router, app_state))
+}
+
+/// Load routes via live FastAPI discovery (dev mode).
+fn load_from_discovery(
     bootstrap: &WorkerBootstrap,
     server_addr: std::net::SocketAddr,
 ) -> Result<(Router, Arc<AppState>), WorkerError> {
@@ -111,7 +152,8 @@ pub fn load_app(
             max_body_limit: manifest.max_body_limit,
         });
 
-        let router = build_router(routes, Arc::clone(&app_state), server_addr);
+        let lifecycle_cache = Arc::new(LifecycleCache::empty());
+        let router = build_router(routes, Arc::clone(&app_state), server_addr, lifecycle_cache);
         Ok((router, app_state))
     })
 }
@@ -237,3 +279,57 @@ pub async fn connect_to_supervisor()
 
 /// Re-export shared shutdown signal for worker use.
 use crate::signal::shutdown_signal;
+
+// ── Tests ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_error_display_manifest_load() {
+        let err = WorkerError::ManifestLoad(ManifestError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "file not found",
+        )));
+        let msg = format!("{err}");
+        assert!(msg.contains("manifest load"));
+        assert!(msg.contains("file not found"));
+    }
+
+    #[test]
+    fn worker_error_display_discovery() {
+        let err =
+            WorkerError::Discovery(discovery::DiscoveryError::NoApp("backend.app".to_owned()));
+        let msg = format!("{err}");
+        assert!(msg.contains("discovery"));
+    }
+
+    #[test]
+    fn worker_error_display_python_init() {
+        let err = WorkerError::PythonInit("failed".to_owned());
+        let msg = format!("{err}");
+        assert!(msg.contains("python init"));
+    }
+
+    #[test]
+    fn worker_error_display_transport() {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let err = WorkerError::Transport(TransportError::Bind {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8000),
+            source: std::io::Error::other("in use"),
+        });
+        let msg = format!("{err}");
+        assert!(msg.contains("transport"));
+    }
+
+    #[test]
+    fn worker_error_manifest_load_version_mismatch() {
+        let err = WorkerError::ManifestLoad(ManifestError::VersionMismatch {
+            manifest: "0.1.0".to_owned(),
+            running: "0.2.0".to_owned(),
+        });
+        let msg = format!("{err}");
+        assert!(msg.contains("version mismatch"));
+    }
+}
