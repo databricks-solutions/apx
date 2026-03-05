@@ -188,7 +188,10 @@ impl std::fmt::Debug for InboundRequest {
 
 impl InboundRequest {
     /// Construct a new `InboundRequest`. Called by `transport/convert.rs`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "constructor mirrors HTTP request fields"
+    )]
     pub fn new(
         method: http::Method,
         path: String,
@@ -274,7 +277,8 @@ impl std::fmt::Debug for ResponseBody {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
     use super::*;

@@ -48,10 +48,13 @@ impl Listener for TcpListener {
         router: axum::Router,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> Result<(), TransportError> {
-        axum::serve(self.inner, router)
-            .with_graceful_shutdown(shutdown)
-            .await
-            .map_err(TransportError::Serve)
+        axum::serve(
+            self.inner,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown)
+        .await
+        .map_err(TransportError::Serve)
     }
 
     fn local_addr(&self) -> SocketAddr {
@@ -111,7 +114,8 @@ fn create_socket(config: &TransportConfig) -> Result<socket2::Socket, TransportE
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
     use super::*;

@@ -100,7 +100,10 @@ pub async fn init_worker(
 /// # Errors
 ///
 /// Returns an error if discovery fails or the router can't be built.
-pub fn load_app(bootstrap: &WorkerBootstrap) -> Result<(Router, Arc<AppState>), WorkerError> {
+pub fn load_app(
+    bootstrap: &WorkerBootstrap,
+    server_addr: std::net::SocketAddr,
+) -> Result<(Router, Arc<AppState>), WorkerError> {
     Python::attach(|py| {
         let (routes, manifest) = discovery::discover_and_bind(py, &bootstrap.app_module)?;
 
@@ -108,7 +111,7 @@ pub fn load_app(bootstrap: &WorkerBootstrap) -> Result<(Router, Arc<AppState>), 
             max_body_limit: manifest.max_body_limit,
         });
 
-        let router = build_router(routes, Arc::clone(&app_state));
+        let router = build_router(routes, Arc::clone(&app_state), server_addr);
         Ok((router, app_state))
     })
 }
@@ -173,7 +176,8 @@ pub async fn run_worker(
 ) -> Result<(), WorkerError> {
     let mut runtime = init_worker(&bootstrap, channel).await?;
 
-    let (router, _app_state) = load_app(&bootstrap)?;
+    let server_addr = runtime.listener.local_addr();
+    let (router, _app_state) = load_app(&bootstrap, server_addr)?;
 
     signal_readiness(&mut runtime.channel).await?;
 
@@ -231,31 +235,5 @@ pub async fn connect_to_supervisor()
     Ok(Some((channel, bootstrap)))
 }
 
-/// Wait for a SIGTERM or SIGINT signal (graceful shutdown).
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .unwrap_or_else(|e| tracing::error!("ctrl_c signal handler failed: {e}"));
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .unwrap_or_else(|e| {
-                tracing::error!("SIGTERM signal handler failed: {e}");
-                // Return a signal stream that never fires.
-                unreachable!("signal handler creation should succeed")
-            })
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {},
-        () = terminate => {},
-    }
-}
+/// Re-export shared shutdown signal for worker use.
+use crate::signal::shutdown_signal;

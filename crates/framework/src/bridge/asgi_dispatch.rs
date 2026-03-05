@@ -1,0 +1,310 @@
+//! ASGI bridge dispatch — runs handlers through scope/receive/send.
+//!
+//! This dispatch path is used for routes with `Depends()`, streaming
+//! responses, or `Request`/`Response` parameter injection. It constructs
+//! Rust-backed ASGI objects from [`InboundRequest`] and collects the
+//! response from the ASGI send channel.
+
+use crate::bridge::asgi::{AsgiEvent, AsgiReceive, AsgiSend, build_http_scope};
+use crate::bridge::dispatch::{AppState, HandlerDispatch};
+use crate::error::{AppError, BodyParseKind};
+use crate::route::BoundRoute;
+use crate::transport::types::{InboundRequest, OutboundResponse, ResponseBody};
+use bytes::Bytes;
+use http::StatusCode;
+use http::header::HeaderMap;
+use pyo3::prelude::*;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+/// Channel buffer size for ASGI response events.
+const ASGI_CHANNEL_SIZE: usize = 8;
+
+/// Dispatch via the ASGI bridge (scope/receive/send).
+pub struct AsgiBridgeDispatch;
+
+impl std::fmt::Debug for AsgiBridgeDispatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsgiBridgeDispatch").finish()
+    }
+}
+
+impl HandlerDispatch for AsgiBridgeDispatch {
+    fn handle(
+        &self,
+        route: Arc<BoundRoute>,
+        app_state: Arc<AppState>,
+        mut request: InboundRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<OutboundResponse, AppError>> + Send>> {
+        Box::pin(async move {
+            // 1. Take body + collect bytes
+            let body_stream = request.take_body();
+            let body_bytes = body_stream
+                .collect(app_state.max_body_limit.0)
+                .await
+                .map_err(|_| AppError::BodyParse(BodyParseKind::BodyTooLarge))?;
+
+            // 2. Build ASGI objects
+            let (send_tx, mut send_rx) = mpsc::channel::<AsgiEvent>(ASGI_CHANNEL_SIZE);
+
+            let future = Python::attach(|py| {
+                let scope = build_http_scope(py, &request)
+                    .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
+
+                let receive = if body_bytes.is_empty() {
+                    AsgiReceive::empty()
+                } else {
+                    AsgiReceive::http(body_bytes)
+                };
+                let send = AsgiSend::new(send_tx);
+
+                // 3. Call handler with ASGI triad (scope, receive, send)
+                let receive_obj = Py::new(py, receive)
+                    .map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
+                let send_obj =
+                    Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
+                let coro = route
+                    .handler
+                    .call(py, (scope, receive_obj, send_obj), None)
+                    .map_err(|e| AppError::Internal(format!("handler call: {e}")))?;
+
+                pyo3_async_runtimes::tokio::into_future(coro.into_bound(py))
+                    .map_err(|e| AppError::Internal(format!("into_future: {e}")))
+            })?;
+
+            // 4. Await handler (runs concurrently — sends events through channel)
+            let handler_task = tokio::spawn(async move {
+                future
+                    .await
+                    .map_err(|e| AppError::Internal(format!("asgi handler failed: {e}")))
+            });
+
+            // 5. Collect response events
+            let response = collect_asgi_response(&mut send_rx).await?;
+
+            // Wait for handler to finish (errors already captured through channel)
+            let _ = handler_task.await;
+
+            Ok(response)
+        })
+    }
+}
+
+/// Collect ASGI send events into an [`OutboundResponse`].
+///
+/// Expects `ResponseStart` followed by one or more `ResponseBody` chunks.
+pub async fn collect_asgi_response(
+    rx: &mut mpsc::Receiver<AsgiEvent>,
+) -> Result<OutboundResponse, AppError> {
+    // First event must be ResponseStart
+    let (status, raw_headers) = recv_response_start(rx).await?;
+
+    // Collect body chunks
+    let body = recv_response_body(rx).await?;
+
+    // Build header map from raw byte pairs
+    let headers = build_header_map(&raw_headers)?;
+
+    Ok(OutboundResponse {
+        status: StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        headers,
+        body: ResponseBody::Fixed(body),
+    })
+}
+
+/// Receive the `ResponseStart` event from the channel.
+async fn recv_response_start(
+    rx: &mut mpsc::Receiver<AsgiEvent>,
+) -> Result<(u16, Vec<(Vec<u8>, Vec<u8>)>), AppError> {
+    match rx.recv().await {
+        Some(AsgiEvent::ResponseStart { status, headers }) => Ok((status, headers)),
+        Some(AsgiEvent::ResponseBody { .. }) => Err(AppError::Internal(
+            "ASGI protocol error: received body before response start".to_owned(),
+        )),
+        None => Err(AppError::Internal(
+            "ASGI protocol error: channel closed before response start".to_owned(),
+        )),
+    }
+}
+
+/// Receive and concatenate `ResponseBody` chunks from the channel.
+async fn recv_response_body(rx: &mut mpsc::Receiver<AsgiEvent>) -> Result<Bytes, AppError> {
+    let mut buf = Vec::new();
+    loop {
+        match rx.recv().await {
+            Some(AsgiEvent::ResponseBody { body, more_body }) => {
+                buf.extend_from_slice(&body);
+                if !more_body {
+                    return Ok(Bytes::from(buf));
+                }
+            }
+            Some(AsgiEvent::ResponseStart { .. }) => {
+                return Err(AppError::Internal(
+                    "ASGI protocol error: duplicate response start".to_owned(),
+                ));
+            }
+            None => return Ok(Bytes::from(buf)),
+        }
+    }
+}
+
+/// Convert raw ASGI header byte pairs to an [`http::HeaderMap`].
+fn build_header_map(raw: &[(Vec<u8>, Vec<u8>)]) -> Result<HeaderMap, AppError> {
+    let mut headers = HeaderMap::with_capacity(raw.len());
+    for (name, value) in raw {
+        let name = http::HeaderName::from_bytes(name)
+            .map_err(|e| AppError::Internal(format!("invalid header name: {e}")))?;
+        let value = http::HeaderValue::from_bytes(value)
+            .map_err(|e| AppError::Internal(format!("invalid header value: {e}")))?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code uses unwrap/assert for clarity"
+)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn collect_asgi_response_simple() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(AsgiEvent::ResponseStart {
+            status: 200,
+            headers: vec![(b"content-type".to_vec(), b"text/plain".to_vec())],
+        })
+        .await
+        .unwrap();
+        tx.send(AsgiEvent::ResponseBody {
+            body: Bytes::from("hello"),
+            more_body: false,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let resp = collect_asgi_response(&mut rx).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.headers.get("content-type").unwrap(), "text/plain");
+        match &resp.body {
+            ResponseBody::Fixed(b) => assert_eq!(b.as_ref(), b"hello"),
+            ResponseBody::Stream(_) => panic!("expected Fixed body"),
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_asgi_response_chunked() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(AsgiEvent::ResponseStart {
+            status: 200,
+            headers: Vec::new(),
+        })
+        .await
+        .unwrap();
+        tx.send(AsgiEvent::ResponseBody {
+            body: Bytes::from("hel"),
+            more_body: true,
+        })
+        .await
+        .unwrap();
+        tx.send(AsgiEvent::ResponseBody {
+            body: Bytes::from("lo"),
+            more_body: false,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let resp = collect_asgi_response(&mut rx).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        match &resp.body {
+            ResponseBody::Fixed(b) => assert_eq!(b.as_ref(), b"hello"),
+            ResponseBody::Stream(_) => panic!("expected Fixed body"),
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_asgi_response_missing_start() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(AsgiEvent::ResponseBody {
+            body: Bytes::from("oops"),
+            more_body: false,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let result = collect_asgi_response(&mut rx).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, AppError::Internal(_)));
+    }
+
+    #[tokio::test]
+    async fn collect_asgi_response_empty_body() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(AsgiEvent::ResponseStart {
+            status: 204,
+            headers: Vec::new(),
+        })
+        .await
+        .unwrap();
+        tx.send(AsgiEvent::ResponseBody {
+            body: Bytes::new(),
+            more_body: false,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let resp = collect_asgi_response(&mut rx).await.unwrap();
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        match &resp.body {
+            ResponseBody::Fixed(b) => assert!(b.is_empty()),
+            ResponseBody::Stream(_) => panic!("expected Fixed body"),
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_asgi_response_channel_closed_before_start() {
+        let (tx, mut rx) = mpsc::channel::<AsgiEvent>(4);
+        drop(tx);
+
+        let result = collect_asgi_response(&mut rx).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn asgi_bridge_dispatch_debug() {
+        let d = AsgiBridgeDispatch;
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("AsgiBridgeDispatch"));
+    }
+
+    #[test]
+    fn build_header_map_valid() {
+        let raw = vec![
+            (b"content-type".to_vec(), b"application/json".to_vec()),
+            (b"x-custom".to_vec(), b"value".to_vec()),
+        ];
+        let headers = build_header_map(&raw).unwrap();
+        assert_eq!(headers.get("content-type").unwrap(), "application/json");
+        assert_eq!(headers.get("x-custom").unwrap(), "value");
+    }
+
+    #[test]
+    fn build_header_map_invalid_name() {
+        let raw = vec![(b"invalid header\x00".to_vec(), b"value".to_vec())];
+        assert!(build_header_map(&raw).is_err());
+    }
+}

@@ -3,14 +3,20 @@
 //! Wires bound routes into the axum router and delegates request handling
 //! to the appropriate [`dispatch::HandlerDispatch`] implementation.
 
+pub mod asgi;
 pub mod context;
 pub mod dispatch;
 
-use crate::route::{BoundRoute, HandlerKind, HttpMethod};
+pub mod asgi_dispatch;
+
+use crate::route::{BoundRoute, DispatchStrategy, HttpMethod};
+use asgi_dispatch::AsgiBridgeDispatch;
+use axum::extract::ConnectInfo;
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use dispatch::{AppState, HandlerDispatch, RequestResponseDispatch};
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,39 +35,56 @@ struct HandlerState {
     route: Arc<BoundRoute>,
     app_state: Arc<AppState>,
     dispatch: Arc<dyn HandlerDispatch>,
+    server_addr: SocketAddr,
 }
 
-/// The axum handler function. Delegates to the dispatch trait.
+/// The axum handler function — transport boundary.
 ///
-/// Path params are extracted via axum's `RawPathParams` (percent-decoded).
+/// Converts axum types to transport-neutral [`InboundRequest`] once here.
+/// Everything below is transport-agnostic.
 async fn python_handler(
     axum::extract::State(state): axum::extract::State<HandlerState>,
     raw_params: axum::extract::RawPathParams,
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, crate::error::AppError> {
-    let path_params: Vec<(String, String)> = raw_params
-        .iter()
-        .map(|(k, v)| (k.to_owned(), v.to_owned()))
-        .collect();
+    let path_params = collect_path_params(&raw_params);
 
-    state
+    // Transport boundary: axum → InboundRequest (once, here)
+    let inbound = crate::transport::convert::from_axum_request(
+        request,
+        path_params,
+        state.server_addr,
+        Some(client_addr),
+    );
+
+    // Everything below is transport-agnostic
+    let response = state
         .dispatch
         .handle(
             Arc::clone(&state.route),
             Arc::clone(&state.app_state),
-            path_params,
-            request,
+            inbound,
         )
-        .await
+        .await?;
+
+    // Convert back at the boundary
+    Ok(crate::transport::convert::to_axum_response(response))
 }
 
-/// Select the dispatch impl for a given handler kind.
-fn dispatch_for(kind: HandlerKind) -> Arc<dyn HandlerDispatch> {
-    match kind {
-        // TODO(phase-3): SSE and WebSocket dispatch implementations
-        HandlerKind::RequestResponse | HandlerKind::SSE | HandlerKind::WebSocket => {
-            Arc::new(RequestResponseDispatch)
-        }
+/// Collect path params from axum's `RawPathParams` extractor.
+fn collect_path_params(raw_params: &axum::extract::RawPathParams) -> Vec<(String, String)> {
+    raw_params
+        .iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect()
+}
+
+/// Select the dispatch impl based on the route's dispatch strategy.
+fn dispatch_for(route: &BoundRoute) -> Arc<dyn HandlerDispatch> {
+    match route.manifest.dispatch_strategy {
+        DispatchStrategy::Direct => Arc::new(RequestResponseDispatch),
+        DispatchStrategy::AsgiBridge => Arc::new(AsgiBridgeDispatch),
     }
 }
 
@@ -87,15 +110,17 @@ fn register_routes(
     mut router: Router,
     routes: Vec<BoundRoute>,
     app_state: &Arc<AppState>,
+    server_addr: SocketAddr,
 ) -> Router {
     for route in routes {
-        let dispatch = dispatch_for(route.manifest.kind);
+        let dispatch = dispatch_for(&route);
         let method = route.manifest.method;
         let path = route.manifest.path.as_str().to_owned();
         let state = HandlerState {
             route: Arc::new(route),
             app_state: Arc::clone(app_state),
             dispatch,
+            server_addr,
         };
 
         let method_router = match method {
@@ -114,10 +139,14 @@ fn register_routes(
 /// Build the axum Router from bound routes (without tower layer wrapping).
 ///
 /// Returns a bare `Router` — layer wrapping happens in [`wrap_layers`].
-pub fn build_router(routes: Vec<BoundRoute>, app_state: Arc<AppState>) -> Router {
+pub fn build_router(
+    routes: Vec<BoundRoute>,
+    app_state: Arc<AppState>,
+    server_addr: SocketAddr,
+) -> Router {
     let user_paths: HashSet<&str> = routes.iter().map(|r| r.manifest.path.as_str()).collect();
     let router = register_health_probes(Router::new(), &user_paths);
-    register_routes(router, routes, &app_state)
+    register_routes(router, routes, &app_state, server_addr)
 }
 
 /// Apply tower layer stack to the router.
@@ -177,29 +206,56 @@ async fn handle_infra_error(err: tower::BoxError) -> axum::response::Response {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
     use super::*;
     use axum::body::Body;
     use tower::ServiceExt;
 
+    use crate::route::{HandlerKind, QualName, ResponseType, RouteManifest, RoutePath};
+
+    fn make_route_with_strategy(strategy: DispatchStrategy) -> BoundRoute {
+        pyo3::Python::initialize();
+        BoundRoute {
+            manifest: RouteManifest {
+                kind: HandlerKind::RequestResponse,
+                method: HttpMethod::Get,
+                path: RoutePath::new("/test").unwrap(),
+                handler_qualname: QualName::new("test.handler").unwrap(),
+                params: Vec::new(),
+                response_type: ResponseType::RawResponse,
+                tags: Vec::new(),
+                dispatch_strategy: strategy,
+                dependency_plan: None,
+                status_code: 200,
+                summary: None,
+                description: None,
+                include_in_schema: true,
+                deprecated: false,
+                operation_id: None,
+            },
+            handler: pyo3::Python::attach(|py| py.None()),
+            params: Vec::new(),
+            response_model: None,
+            has_body_param: false,
+            dependant: None,
+            fastapi_app: None,
+        }
+    }
+
     #[test]
-    fn dispatch_for_request_response() {
-        let d = dispatch_for(HandlerKind::RequestResponse);
-        // Just verify it returns an Arc (coverage for the match arm)
+    fn dispatch_for_direct() {
+        let route = make_route_with_strategy(DispatchStrategy::Direct);
+        let d = dispatch_for(&route);
         let _ = format!("{:?}", Arc::as_ptr(&d));
     }
 
     #[test]
-    fn dispatch_for_sse() {
-        let d = dispatch_for(HandlerKind::SSE);
-        let _ = format!("{:?}", Arc::as_ptr(&d));
-    }
-
-    #[test]
-    fn dispatch_for_websocket() {
-        let d = dispatch_for(HandlerKind::WebSocket);
+    fn dispatch_for_asgi_bridge() {
+        let route = make_route_with_strategy(DispatchStrategy::AsgiBridge);
+        let d = dispatch_for(&route);
         let _ = format!("{:?}", Arc::as_ptr(&d));
     }
 

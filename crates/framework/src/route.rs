@@ -639,6 +639,19 @@ pub(crate) struct BoundRoute {
     /// Whether this route has a `Body` param. Pre-computed at bind time
     /// so the dispatch can skip body reading for GET-style routes.
     pub(crate) has_body_param: bool,
+    /// The FastAPI Dependant object (for ASGI bridge dispatch).
+    /// `None` for direct-dispatch routes.
+    #[expect(
+        dead_code,
+        reason = "populated at discovery, consumed by phase-5 manifest serve"
+    )]
+    pub(crate) dependant: Option<Py<PyAny>>,
+    /// Reference to the live FastAPI app (for dependency_overrides).
+    #[expect(
+        dead_code,
+        reason = "populated at discovery, consumed by phase-5 manifest serve"
+    )]
+    pub(crate) fastapi_app: Option<Py<PyAny>>,
 }
 
 impl fmt::Debug for BoundRoute {
@@ -658,7 +671,8 @@ impl fmt::Debug for BoundRoute {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
     use super::*;

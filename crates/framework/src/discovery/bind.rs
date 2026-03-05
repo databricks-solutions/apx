@@ -1,0 +1,150 @@
+//! Manifest → `BoundRoute` binding: import qualnames, resolve types.
+
+use crate::discovery::DiscoveryError;
+use crate::route::{AppManifest, BoundParam, BoundRoute, ParamManifest, ParamSource, ResponseType};
+use pyo3::types::{PyAnyMethods, PyString};
+use pyo3::{Bound, Py, PyAny, Python};
+use std::collections::{HashMap, HashSet};
+
+/// Bind manifest routes to live Python handler objects for runtime dispatch.
+///
+/// Builds a `(path, method)` → `endpoint` map from the live FastAPI app,
+/// then resolves each [`RouteManifest`] to a [`BoundRoute`].
+pub fn bind_routes(
+    py: Python<'_>,
+    manifest: &AppManifest,
+    app: &Bound<'_, PyAny>,
+) -> Result<Vec<BoundRoute>, DiscoveryError> {
+    let routes_obj = app
+        .getattr(c"routes")
+        .map_err(|e| DiscoveryError::Python(format!("get routes: {e}")))?;
+
+    let routes_list = routes_obj
+        .cast::<pyo3::types::PyList>()
+        .map_err(|e| DiscoveryError::Python(format!("routes is not a list: {e}")))?;
+
+    let api_route_cls = py
+        .import(c"fastapi.routing")
+        .and_then(|m| m.getattr(c"APIRoute"))
+        .map_err(|e| DiscoveryError::Python(format!("import APIRoute: {e}")))?;
+
+    // Build endpoint map: (path, METHOD) → handler callable.
+    let mut endpoint_map: HashMap<(String, String), Py<PyAny>> = HashMap::new();
+    for route in routes_list {
+        if !route.is_instance(&api_route_cls).unwrap_or(false) {
+            continue;
+        }
+        let path: String = route
+            .getattr(c"path")
+            .and_then(|v: Bound<'_, PyAny>| v.extract())
+            .map_err(|e| DiscoveryError::Python(format!("route.path: {e}")))?;
+        let methods: HashSet<String> = route
+            .getattr(c"methods")
+            .and_then(|v: Bound<'_, PyAny>| v.extract())
+            .unwrap_or_default();
+        let endpoint = route
+            .getattr(c"endpoint")
+            .map_err(|e| DiscoveryError::Python(format!("route.endpoint: {e}")))?
+            .unbind();
+        for m in methods {
+            endpoint_map.insert((path.clone(), m), endpoint.clone_ref(py));
+        }
+    }
+
+    let mut bound = Vec::with_capacity(manifest.routes.len());
+
+    for rm in &manifest.routes {
+        let method_str = super::http_method_str(rm.method);
+        let key = (rm.path.as_str().to_owned(), method_str.to_owned());
+        let handler = endpoint_map
+            .get(&key)
+            .ok_or_else(|| {
+                DiscoveryError::InvalidRoute(format!(
+                    "handler not found for {method_str} {}",
+                    rm.path
+                ))
+            })?
+            .clone_ref(py);
+
+        let params = bind_params(py, &rm.params)?;
+        let response_model = bind_response_model(py, &rm.response_type)?;
+        let has_body_param = rm.params.iter().any(|p| {
+            matches!(
+                p.source,
+                ParamSource::Body | ParamSource::RawBody | ParamSource::RawRequest
+            )
+        });
+
+        bound.push(BoundRoute {
+            manifest: rm.clone(),
+            handler,
+            params,
+            response_model,
+            has_body_param,
+            dependant: None,
+            fastapi_app: None,
+        });
+    }
+
+    Ok(bound)
+}
+
+/// Bind parameter manifests to their resolved Python types.
+fn bind_params(
+    py: Python<'_>,
+    params: &[ParamManifest],
+) -> Result<Vec<BoundParam>, DiscoveryError> {
+    let mut bound = Vec::with_capacity(params.len());
+
+    for param in params {
+        let python_type = match param.source {
+            ParamSource::Body => {
+                let cls = import_qualified_name(py, param.type_qualname.as_str())?;
+                Some(cls)
+            }
+            _ => None,
+        };
+        bound.push(BoundParam {
+            manifest: param.clone(),
+            python_type,
+        });
+    }
+
+    Ok(bound)
+}
+
+/// Resolve the response model class for type checking.
+fn bind_response_model(
+    py: Python<'_>,
+    response_type: &ResponseType,
+) -> Result<Option<Py<PyAny>>, DiscoveryError> {
+    match response_type {
+        ResponseType::Model { qualname, .. } => {
+            let cls = import_qualified_name(py, qualname.as_str())?;
+            Ok(Some(cls))
+        }
+        ResponseType::StreamingResponse | ResponseType::RawResponse => Ok(None),
+    }
+}
+
+/// Import a Python object by its dotted qualified name.
+///
+/// Splits on the last `.` to get `(module_path, attr_name)`, imports the
+/// module, and returns the attribute.
+pub fn import_qualified_name(py: Python<'_>, qualname: &str) -> Result<Py<PyAny>, DiscoveryError> {
+    let (module_path, class_name) = qualname.rsplit_once('.').ok_or_else(|| {
+        DiscoveryError::InvalidRoute(format!(
+            "qualified name '{qualname}' has no module component"
+        ))
+    })?;
+
+    let module = py
+        .import(PyString::new(py, module_path))
+        .map_err(|e| DiscoveryError::Python(format!("import '{module_path}': {e}")))?;
+
+    let cls = module.getattr(PyString::new(py, class_name)).map_err(|e| {
+        DiscoveryError::Python(format!("get '{class_name}' from '{module_path}': {e}"))
+    })?;
+
+    Ok(cls.unbind())
+}

@@ -98,6 +98,7 @@ pub fn find_in_error_chain<T: std::error::Error + 'static>(
 }
 
 /// Map axum/hyper body errors to [`BodyParseKind`] by error type, not string content.
+#[cfg(test)]
 pub(crate) fn map_body_error(err: axum::Error) -> AppError {
     if find_in_error_chain::<http_body_util::LengthLimitError>(&err).is_some() {
         return AppError::BodyParse(BodyParseKind::BodyTooLarge);
@@ -246,7 +247,8 @@ impl IntoResponse for AppError {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
     use super::*;

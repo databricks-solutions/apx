@@ -4,9 +4,9 @@
 //! [`HandlerDispatch`] impl, owning the full request lifecycle.
 
 use super::context::RequestContext;
-use crate::error::{AppError, ValidationErrorItem, map_body_error};
+use crate::error::{AppError, BodyParseKind, ValidationErrorItem};
 use crate::route::{BoundRoute, ParamSource, ResponseType};
-use axum::response::Response;
+use crate::transport::types::{InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
 use http::StatusCode;
 use pyo3::types::{PyAnyMethods, PyBytes, PyDict, PyDictMethods, PyString, PyTypeMethods};
@@ -32,16 +32,16 @@ impl std::fmt::Debug for AppState {
 
 /// Handles the full request lifecycle for a specific handler kind.
 ///
-/// v0: only [`RequestResponseDispatch`].
+/// Implementations work entirely on transport-neutral types. The axum
+/// boundary lives in `bridge/mod.rs::python_handler` only.
 pub trait HandlerDispatch: Send + Sync {
-    /// Process a request and return an HTTP response.
+    /// Process a request and return a transport-neutral response.
     fn handle(
         &self,
         route: Arc<BoundRoute>,
         app_state: Arc<AppState>,
-        path_params: Vec<(String, String)>,
-        request: axum::extract::Request,
-    ) -> Pin<Box<dyn Future<Output = Result<Response, AppError>> + Send>>;
+        request: InboundRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<OutboundResponse, AppError>> + Send>>;
 }
 
 /// Standard request → response dispatch via Python.
@@ -58,11 +58,10 @@ impl HandlerDispatch for RequestResponseDispatch {
         &self,
         route: Arc<BoundRoute>,
         app_state: Arc<AppState>,
-        path_params: Vec<(String, String)>,
-        request: axum::extract::Request,
-    ) -> Pin<Box<dyn Future<Output = Result<Response, AppError>> + Send>> {
+        mut request: InboundRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<OutboundResponse, AppError>> + Send>> {
         Box::pin(async move {
-            let ctx = extract_context(request, path_params, &route, &app_state).await?;
+            let ctx = extract_context(&mut request, &route, &app_state).await?;
             let result = invoke_handler(&route, &ctx).await?;
             Python::attach(|py| serialize_result(py, &result, &route))
         })
@@ -71,51 +70,36 @@ impl HandlerDispatch for RequestResponseDispatch {
 
 // ── Step 1: Extract HTTP parts ──────────────────────────────────────────
 
-/// Extract HTTP parts into [`RequestContext`].
+/// Extract HTTP parts into [`RequestContext`] from an [`InboundRequest`].
 ///
-/// Path params are pre-extracted by axum's `RawPathParams` extractor
-/// (percent-decoded). Query params are parsed via `form_urlencoded`.
+/// Path params come from `request.path_params`, query params are parsed
+/// from the raw query string via `form_urlencoded`.
 async fn extract_context(
-    request: axum::extract::Request,
-    path_params: Vec<(String, String)>,
+    request: &mut InboundRequest,
     route: &BoundRoute,
     app_state: &AppState,
 ) -> Result<RequestContext, AppError> {
-    let (parts, body) = request.into_parts();
-
-    let query_params = extract_query_params(&parts);
+    let query_params: Vec<(String, String)> = form_urlencoded::parse(&request.query_string)
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
 
     let body = if route.has_body_param {
-        let bytes = axum::body::to_bytes(body, app_state.max_body_limit.0)
+        let body_stream = request.take_body();
+        let bytes = body_stream
+            .collect(app_state.max_body_limit.0)
             .await
-            .map_err(map_body_error)?;
+            .map_err(|_| AppError::BodyParse(BodyParseKind::BodyTooLarge))?;
         Some(bytes)
     } else {
         None
     };
 
     Ok(RequestContext {
-        path_params,
+        path_params: request.path_params.clone(),
         query_params,
-        headers: parts.headers,
+        headers: request.headers.clone(),
         body,
     })
-}
-
-/// Parse query string into URL-decoded key-value pairs.
-///
-/// Uses `form_urlencoded` (same parser axum uses internally) for proper
-/// percent-decoding and `+`-as-space handling.
-fn extract_query_params(parts: &http::request::Parts) -> Vec<(String, String)> {
-    parts
-        .uri
-        .query()
-        .map(|q| {
-            form_urlencoded::parse(q.as_bytes())
-                .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 // ── Step 2: Invoke handler ──────────────────────────────────────────────
@@ -168,11 +152,8 @@ fn resolve_param_value<'py>(
     match param.source {
         ParamSource::Path => resolve_path_param(py, param, ctx),
         ParamSource::Query => resolve_query_param(py, param, ctx),
-        // TODO(phase-3): header/cookie extraction via InboundRequest
-        ParamSource::Header | ParamSource::Cookie => Err(AppError::Internal(format!(
-            "param source {:?} not yet implemented",
-            param.source
-        ))),
+        ParamSource::Header => resolve_header_param(py, param, ctx),
+        ParamSource::Cookie => resolve_cookie_param(py, param, ctx),
         ParamSource::Body => resolve_body_param(py, ctx, python_type),
         ParamSource::RawBody => resolve_raw_body(py, ctx),
         ParamSource::RawRequest => resolve_raw_request(py, ctx),
@@ -348,14 +329,71 @@ fn resolve_raw_request<'py>(
         .map_err(|e| AppError::Internal(format!("construct Request: {e}")))
 }
 
+/// Resolve a header parameter by looking up the wire name in the header map.
+fn resolve_header_param<'py>(
+    py: Python<'py>,
+    param: &crate::route::ParamManifest,
+    ctx: &RequestContext,
+) -> Result<pyo3::Bound<'py, PyAny>, AppError> {
+    let wire_name = param.alias.as_deref().unwrap_or(&param.name);
+    match ctx.headers.get(wire_name) {
+        Some(value) => {
+            let value_str = value.to_str().map_err(|_| {
+                AppError::BadRequest(format!(
+                    "header '{wire_name}' contains non-ASCII characters"
+                ))
+            })?;
+            convert_path_value(py, value_str, param.type_qualname.as_str())
+        }
+        None if !param.required => Ok(py.None().into_bound(py)),
+        None => Err(AppError::Validation(vec![ValidationErrorItem {
+            loc: vec!["header".into(), wire_name.into()],
+            msg: format!("missing required header: {wire_name}"),
+            r#type: "missing".into(),
+        }])),
+    }
+}
+
+/// Resolve a cookie parameter by parsing the `Cookie` header.
+fn resolve_cookie_param<'py>(
+    py: Python<'py>,
+    param: &crate::route::ParamManifest,
+    ctx: &RequestContext,
+) -> Result<pyo3::Bound<'py, PyAny>, AppError> {
+    let cookie_header = ctx
+        .headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    for pair in cookie_header.split(';') {
+        let pair = pair.trim();
+        if let Some((name, value)) = pair.split_once('=')
+            && name.trim() == param.name
+        {
+            return convert_path_value(py, value.trim(), param.type_qualname.as_str());
+        }
+    }
+
+    if param.required {
+        Err(AppError::Validation(vec![ValidationErrorItem {
+            loc: vec!["cookie".into(), param.name.clone()],
+            msg: format!("missing required cookie: {}", param.name),
+            r#type: "missing".into(),
+        }]))
+    } else {
+        Ok(py.None().into_bound(py))
+    }
+}
+
 // ── Step 3: Serialize response ──────────────────────────────────────────
 
-/// Validate return type and serialize the Python result to an HTTP response.
+/// Validate return type and serialize the Python result to an outbound response.
 fn serialize_result(
     py: Python<'_>,
     result: &Py<PyAny>,
     route: &BoundRoute,
-) -> Result<Response, AppError> {
+) -> Result<OutboundResponse, AppError> {
     let result_ref = result.bind(py);
     validate_return_type(py, result_ref, route)?;
     serialize_response(py, result_ref, route)
@@ -383,12 +421,12 @@ fn validate_return_type(
     )))
 }
 
-/// Serialize the Python result to an HTTP response.
+/// Serialize the Python result to an outbound response.
 fn serialize_response(
     py: Python<'_>,
     result: &pyo3::Bound<'_, PyAny>,
     route: &BoundRoute,
-) -> Result<Response, AppError> {
+) -> Result<OutboundResponse, AppError> {
     match &route.manifest.response_type {
         ResponseType::Model { .. } => serialize_model_response(py, result),
         // TODO(phase-7): streaming serialization via AsgiSend
@@ -403,7 +441,7 @@ fn serialize_response(
 fn serialize_model_response(
     py: Python<'_>,
     result: &pyo3::Bound<'_, PyAny>,
-) -> Result<Response, AppError> {
+) -> Result<OutboundResponse, AppError> {
     let by_alias = PyDict::new(py);
     let _ = by_alias.set_item(c"by_alias", true);
 
@@ -412,18 +450,26 @@ fn serialize_model_response(
         .and_then(|s| s.extract())
         .map_err(|e| AppError::Internal(format!("model_dump_json: {e}")))?;
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(json_bytes))
-        .map_err(|e| AppError::Internal(format!("build response: {e}")))
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        "application/json"
+            .parse()
+            .map_err(|e| AppError::Internal(format!("header value: {e}")))?,
+    );
+
+    Ok(OutboundResponse {
+        status: StatusCode::OK,
+        headers,
+        body: ResponseBody::Fixed(Bytes::from(json_bytes)),
+    })
 }
 
 /// Serialize a raw `Response` object.
 fn serialize_raw_response(
     py: Python<'_>,
     result: &pyo3::Bound<'_, PyAny>,
-) -> Result<Response, AppError> {
+) -> Result<OutboundResponse, AppError> {
     let status: u16 = result
         .getattr(c"status")
         .and_then(|s| s.extract())
@@ -447,11 +493,19 @@ fn serialize_raw_response(
 
     let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-    Response::builder()
-        .status(status_code)
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .body(axum::body::Body::from(json_body))
-        .map_err(|e| AppError::Internal(format!("build response: {e}")))
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        "application/json"
+            .parse()
+            .map_err(|e| AppError::Internal(format!("header value: {e}")))?,
+    );
+
+    Ok(OutboundResponse {
+        status: status_code,
+        headers,
+        body: ResponseBody::Fixed(Bytes::from(json_body)),
+    })
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -490,61 +544,54 @@ fn extract_detail(value: &pyo3::Bound<'_, PyAny>, f: fn(String) -> AppError) -> 
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
     use super::*;
 
-    fn make_parts(uri: &str) -> http::request::Parts {
-        http::Request::builder()
-            .uri(uri)
-            .body(())
-            .unwrap()
-            .into_parts()
-            .0
+    /// Parse a raw query string into key-value pairs (mirrors extract_context logic).
+    fn parse_query_string(query: &[u8]) -> Vec<(String, String)> {
+        form_urlencoded::parse(query)
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect()
     }
 
     #[test]
-    fn extract_query_params_empty() {
-        let parts = make_parts("/items");
-        let params = extract_query_params(&parts);
+    fn parse_query_string_empty() {
+        let params = parse_query_string(b"");
         assert!(params.is_empty());
     }
 
     #[test]
-    fn extract_query_params_single() {
-        let parts = make_parts("/items?page=1");
-        let params = extract_query_params(&parts);
+    fn parse_query_string_single() {
+        let params = parse_query_string(b"page=1");
         assert_eq!(params, vec![("page".to_owned(), "1".to_owned())]);
     }
 
     #[test]
-    fn extract_query_params_multiple() {
-        let parts = make_parts("/items?page=1&sort=name");
-        let params = extract_query_params(&parts);
+    fn parse_query_string_multiple() {
+        let params = parse_query_string(b"page=1&sort=name");
         assert_eq!(params.len(), 2);
         assert_eq!(params[0], ("page".to_owned(), "1".to_owned()));
         assert_eq!(params[1], ("sort".to_owned(), "name".to_owned()));
     }
 
     #[test]
-    fn extract_query_params_percent_encoded() {
-        let parts = make_parts("/search?q=hello%20world");
-        let params = extract_query_params(&parts);
+    fn parse_query_string_percent_encoded() {
+        let params = parse_query_string(b"q=hello%20world");
         assert_eq!(params, vec![("q".to_owned(), "hello world".to_owned())]);
     }
 
     #[test]
-    fn extract_query_params_plus_as_space() {
-        let parts = make_parts("/search?q=hello+world");
-        let params = extract_query_params(&parts);
+    fn parse_query_string_plus_as_space() {
+        let params = parse_query_string(b"q=hello+world");
         assert_eq!(params, vec![("q".to_owned(), "hello world".to_owned())]);
     }
 
     #[test]
-    fn extract_query_params_duplicate_keys() {
-        let parts = make_parts("/items?tag=a&tag=b");
-        let params = extract_query_params(&parts);
+    fn parse_query_string_duplicate_keys() {
+        let params = parse_query_string(b"tag=a&tag=b");
         assert_eq!(params.len(), 2);
         assert_eq!(params[0].0, "tag");
         assert_eq!(params[1].0, "tag");
@@ -558,5 +605,172 @@ mod tests {
         let dbg = format!("{state:?}");
         assert!(dbg.contains("AppState"));
         assert!(dbg.contains("max_body_limit"));
+    }
+
+    // ── Header extraction ───────────────────────────────────────────────
+
+    fn make_header_param(
+        name: &str,
+        alias: Option<&str>,
+        type_name: &str,
+        required: bool,
+    ) -> crate::route::ParamManifest {
+        crate::route::ParamManifest {
+            name: name.to_owned(),
+            source: ParamSource::Header,
+            type_qualname: crate::route::QualName::new(type_name).unwrap(),
+            required,
+            alias: alias.map(str::to_owned),
+            json_schema: None,
+            default_json: None,
+        }
+    }
+
+    fn make_cookie_param(
+        name: &str,
+        type_name: &str,
+        required: bool,
+    ) -> crate::route::ParamManifest {
+        crate::route::ParamManifest {
+            name: name.to_owned(),
+            source: ParamSource::Cookie,
+            type_qualname: crate::route::QualName::new(type_name).unwrap(),
+            required,
+            alias: None,
+            json_schema: None,
+            default_json: None,
+        }
+    }
+
+    fn ctx_with_headers(pairs: &[(&str, &str)]) -> RequestContext {
+        let mut headers = http::HeaderMap::new();
+        for (k, v) in pairs {
+            headers.insert(
+                http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                http::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        RequestContext {
+            path_params: Vec::new(),
+            query_params: Vec::new(),
+            headers,
+            body: None,
+        }
+    }
+
+    #[test]
+    fn resolve_header_param_present() {
+        Python::initialize();
+        let param = make_header_param("x-token", None, "str", true);
+        let ctx = ctx_with_headers(&[("x-token", "abc")]);
+        Python::attach(|py| {
+            let result = resolve_header_param(py, &param, &ctx);
+            assert!(result.is_ok());
+            let val: String = result.unwrap().extract().unwrap();
+            assert_eq!(val, "abc");
+        });
+    }
+
+    #[test]
+    fn resolve_header_param_alias() {
+        Python::initialize();
+        let param = make_header_param("token", Some("x-token"), "str", true);
+        let ctx = ctx_with_headers(&[("x-token", "xyz")]);
+        Python::attach(|py| {
+            let result = resolve_header_param(py, &param, &ctx);
+            assert!(result.is_ok());
+            let val: String = result.unwrap().extract().unwrap();
+            assert_eq!(val, "xyz");
+        });
+    }
+
+    #[test]
+    fn resolve_header_param_int_conversion() {
+        Python::initialize();
+        let param = make_header_param("x-count", None, "int", true);
+        let ctx = ctx_with_headers(&[("x-count", "42")]);
+        Python::attach(|py| {
+            let result = resolve_header_param(py, &param, &ctx);
+            assert!(result.is_ok());
+            let val: i64 = result.unwrap().extract().unwrap();
+            assert_eq!(val, 42);
+        });
+    }
+
+    #[test]
+    fn resolve_header_param_missing_required() {
+        Python::initialize();
+        let param = make_header_param("x-token", None, "str", true);
+        let ctx = ctx_with_headers(&[]);
+        Python::attach(|py| {
+            let result = resolve_header_param(py, &param, &ctx);
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert!(matches!(err, AppError::Validation(_)));
+        });
+    }
+
+    #[test]
+    fn resolve_header_param_missing_optional() {
+        Python::initialize();
+        let param = make_header_param("x-token", None, "str", false);
+        let ctx = ctx_with_headers(&[]);
+        Python::attach(|py| {
+            let result = resolve_header_param(py, &param, &ctx);
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_none());
+        });
+    }
+
+    // ── Cookie extraction ───────────────────────────────────────────────
+
+    #[test]
+    fn resolve_cookie_param_present() {
+        Python::initialize();
+        let param = make_cookie_param("session", "str", true);
+        let ctx = ctx_with_headers(&[("cookie", "session=abc123; theme=dark")]);
+        Python::attach(|py| {
+            let result = resolve_cookie_param(py, &param, &ctx);
+            assert!(result.is_ok());
+            let val: String = result.unwrap().extract().unwrap();
+            assert_eq!(val, "abc123");
+        });
+    }
+
+    #[test]
+    fn resolve_cookie_param_missing_required() {
+        Python::initialize();
+        let param = make_cookie_param("session", "str", true);
+        let ctx = ctx_with_headers(&[]);
+        Python::attach(|py| {
+            let result = resolve_cookie_param(py, &param, &ctx);
+            assert!(result.is_err());
+            assert!(matches!(result.unwrap_err(), AppError::Validation(_)));
+        });
+    }
+
+    #[test]
+    fn resolve_cookie_param_missing_optional() {
+        Python::initialize();
+        let param = make_cookie_param("session", "str", false);
+        let ctx = ctx_with_headers(&[]);
+        Python::attach(|py| {
+            let result = resolve_cookie_param(py, &param, &ctx);
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn resolve_cookie_param_multiple_cookies() {
+        Python::initialize();
+        let param = make_cookie_param("b", "str", true);
+        let ctx = ctx_with_headers(&[("cookie", "a=1; b=2; c=3")]);
+        Python::attach(|py| {
+            let result = resolve_cookie_param(py, &param, &ctx);
+            assert!(result.is_ok());
+            let val: String = result.unwrap().extract().unwrap();
+            assert_eq!(val, "2");
+        });
     }
 }
