@@ -166,6 +166,11 @@ pub fn bind_routes_from_manifest(
 ///
 /// Splits on the last `.` to get `(module_path, attr_name)`, imports the
 /// module, and returns the attribute.
+///
+/// # Errors
+///
+/// Returns `InvalidRoute` if `qualname` has no dot, or `Python` if the
+/// module cannot be imported or the attribute is missing.
 pub fn import_qualified_name(py: Python<'_>, qualname: &str) -> Result<Py<PyAny>, DiscoveryError> {
     let (module_path, class_name) = qualname.rsplit_once('.').ok_or_else(|| {
         DiscoveryError::InvalidRoute(format!(
@@ -182,4 +187,61 @@ pub fn import_qualified_name(py: Python<'_>, qualname: &str) -> Result<Py<PyAny>
     })?;
 
     Ok(cls.unbind())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test code uses unwrap/assert for clarity"
+)]
+mod tests {
+    use super::*;
+    use pyo3::Python;
+
+    #[test]
+    fn import_qualified_name_builtin() {
+        Python::initialize();
+        Python::attach(|py| {
+            let result = import_qualified_name(py, "builtins.len");
+            assert!(result.is_ok());
+            // Verify it's callable
+            assert!(result.unwrap().bind(py).is_callable());
+        });
+    }
+
+    #[test]
+    fn import_qualified_name_no_dot() {
+        Python::initialize();
+        Python::attach(|py| {
+            let result = import_qualified_name(py, "nodot");
+            assert!(result.is_err());
+            assert!(matches!(
+                result.unwrap_err(),
+                DiscoveryError::InvalidRoute(_)
+            ));
+        });
+    }
+
+    #[test]
+    fn import_qualified_name_bad_module() {
+        Python::initialize();
+        Python::attach(|py| {
+            let result = import_qualified_name(py, "nonexistent_module_xyz.Thing");
+            assert!(result.is_err());
+            assert!(matches!(result.unwrap_err(), DiscoveryError::Python(_)));
+        });
+    }
+
+    #[test]
+    fn import_qualified_name_bad_attr() {
+        Python::initialize();
+        Python::attach(|py| {
+            let result = import_qualified_name(py, "builtins.nonexistent_attr_xyz");
+            assert!(result.is_err());
+            assert!(matches!(result.unwrap_err(), DiscoveryError::Python(_)));
+        });
+    }
 }

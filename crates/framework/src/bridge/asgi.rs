@@ -1125,4 +1125,118 @@ mod tests {
             assert!(scope.get_item("method").unwrap().is_none());
         });
     }
+
+    // ── build_ws_receive_event tests ─────────────────────────────────────
+
+    #[test]
+    fn build_ws_receive_event_connect() {
+        init_python();
+        Python::attach(|py| {
+            let result = build_ws_receive_event(py, Some(WsIncomingEvent::Connect)).unwrap();
+            let dict = result.bind(py);
+            let event_type: String = dict.get_item("type").unwrap().extract().unwrap();
+            assert_eq!(event_type, "websocket.connect");
+        });
+    }
+
+    #[test]
+    fn build_ws_receive_event_receive_text() {
+        init_python();
+        Python::attach(|py| {
+            let event = WsIncomingEvent::Receive {
+                text: Some("hello".to_owned()),
+                bytes: None,
+            };
+            let result = build_ws_receive_event(py, Some(event)).unwrap();
+            let dict = result.bind(py);
+            let event_type: String = dict.get_item("type").unwrap().extract().unwrap();
+            assert_eq!(event_type, "websocket.receive");
+            let text: String = dict.get_item("text").unwrap().extract().unwrap();
+            assert_eq!(text, "hello");
+        });
+    }
+
+    #[test]
+    fn build_ws_receive_event_receive_bytes() {
+        init_python();
+        Python::attach(|py| {
+            let event = WsIncomingEvent::Receive {
+                text: None,
+                bytes: Some(vec![0x01, 0x02, 0x03]),
+            };
+            let result = build_ws_receive_event(py, Some(event)).unwrap();
+            let dict = result.bind(py);
+            let event_type: String = dict.get_item("type").unwrap().extract().unwrap();
+            assert_eq!(event_type, "websocket.receive");
+            let bytes: Vec<u8> = dict.get_item("bytes").unwrap().extract().unwrap();
+            assert_eq!(bytes, vec![0x01, 0x02, 0x03]);
+        });
+    }
+
+    #[test]
+    fn build_ws_receive_event_disconnect_with_code() {
+        init_python();
+        Python::attach(|py| {
+            let event = WsIncomingEvent::Disconnect { code: 1001 };
+            let result = build_ws_receive_event(py, Some(event)).unwrap();
+            let dict = result.bind(py);
+            let event_type: String = dict.get_item("type").unwrap().extract().unwrap();
+            assert_eq!(event_type, "websocket.disconnect");
+            let code: u16 = dict.get_item("code").unwrap().extract().unwrap();
+            assert_eq!(code, 1001);
+        });
+    }
+
+    #[test]
+    fn build_ws_receive_event_channel_closed() {
+        init_python();
+        Python::attach(|py| {
+            let result = build_ws_receive_event(py, None).unwrap();
+            let dict = result.bind(py);
+            let event_type: String = dict.get_item("type").unwrap().extract().unwrap();
+            assert_eq!(event_type, "websocket.disconnect");
+            let code: u16 = dict.get_item("code").unwrap().extract().unwrap();
+            assert_eq!(code, 1000);
+        });
+    }
+
+    // ── parse edge case tests ────────────────────────────────────────────
+
+    #[test]
+    fn parse_response_body_missing_body_key() {
+        init_python();
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("type", "http.response.body").unwrap();
+            // No "body" key, no "more_body" key — defaults to empty body, more_body=false
+            let event = parse_asgi_send_event(&dict).unwrap();
+            match event {
+                AsgiEvent::ResponseBody { body, more_body } => {
+                    assert!(body.is_empty());
+                    assert!(!more_body);
+                }
+                other => panic!("expected ResponseBody, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn parse_ws_accept_no_subprotocol() {
+        init_python();
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("type", "websocket.accept").unwrap();
+            let event = parse_asgi_send_event(&dict).unwrap();
+            match event {
+                AsgiEvent::WsAccept {
+                    subprotocol,
+                    headers,
+                } => {
+                    assert!(subprotocol.is_none());
+                    assert!(headers.is_empty());
+                }
+                other => panic!("expected WsAccept, got {other:?}"),
+            }
+        });
+    }
 }

@@ -776,4 +776,143 @@ mod tests {
             assert_eq!(val, "2");
         });
     }
+
+    // ── convert_path_value ─────────────────────────────────────────────
+
+    #[test]
+    fn convert_path_value_float() {
+        Python::initialize();
+        Python::attach(|py| {
+            let result = convert_path_value(py, "2.5", "float").unwrap();
+            let val: f64 = result.extract().unwrap();
+            assert!((val - 2.5).abs() < f64::EPSILON);
+        });
+    }
+
+    #[test]
+    fn convert_path_value_invalid_float() {
+        Python::initialize();
+        Python::attach(|py| {
+            let result = convert_path_value(py, "not_a_number", "float");
+            assert!(result.is_err());
+            assert!(matches!(result.unwrap_err(), AppError::BadRequest(_)));
+        });
+    }
+
+    #[test]
+    fn convert_path_value_unknown_type_returns_string() {
+        Python::initialize();
+        Python::attach(|py| {
+            let result = convert_path_value(py, "hello", "uuid").unwrap();
+            let val: String = result.extract().unwrap();
+            assert_eq!(val, "hello");
+        });
+    }
+
+    // ── resolve_raw_body ───────────────────────────────────────────────
+
+    #[test]
+    fn resolve_raw_body_with_body() {
+        Python::initialize();
+        let ctx = RequestContext {
+            path_params: Vec::new(),
+            query_params: Vec::new(),
+            headers: http::HeaderMap::new(),
+            body: Some(Bytes::from("raw bytes")),
+        };
+        Python::attach(|py| {
+            let result = resolve_raw_body(py, &ctx).unwrap();
+            let val: Vec<u8> = result.extract().unwrap();
+            assert_eq!(val, b"raw bytes");
+        });
+    }
+
+    #[test]
+    fn resolve_raw_body_no_body() {
+        Python::initialize();
+        let ctx = RequestContext {
+            path_params: Vec::new(),
+            query_params: Vec::new(),
+            headers: http::HeaderMap::new(),
+            body: None,
+        };
+        Python::attach(|py| {
+            let result = resolve_raw_body(py, &ctx).unwrap();
+            let val: Vec<u8> = result.extract().unwrap();
+            assert!(val.is_empty());
+        });
+    }
+
+    // ── resolve_raw_request ────────────────────────────────────────────
+
+    #[test]
+    fn resolve_raw_request_with_headers_and_body() {
+        Python::initialize();
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-token", "secret".parse().unwrap());
+        let ctx = RequestContext {
+            path_params: Vec::new(),
+            query_params: Vec::new(),
+            headers,
+            body: Some(Bytes::from("body data")),
+        };
+        Python::attach(|py| {
+            let result = resolve_raw_request(py, &ctx).unwrap();
+            assert!(result.is_instance_of::<crate::pyapi::Request>());
+        });
+    }
+
+    #[test]
+    fn resolve_raw_request_empty() {
+        Python::initialize();
+        let ctx = RequestContext {
+            path_params: Vec::new(),
+            query_params: Vec::new(),
+            headers: http::HeaderMap::new(),
+            body: None,
+        };
+        Python::attach(|py| {
+            let result = resolve_raw_request(py, &ctx).unwrap();
+            assert!(result.is_instance_of::<crate::pyapi::Request>());
+        });
+    }
+
+    // ── python_err_to_app_error ────────────────────────────────────────
+
+    #[test]
+    fn python_err_to_app_error_not_found() {
+        Python::initialize();
+        let err =
+            Python::attach(|_py| pyo3::PyErr::new::<crate::pyapi::NotFound, _>("item not found"));
+        let app_err = python_err_to_app_error(err);
+        assert!(matches!(app_err, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn python_err_to_app_error_bad_request() {
+        Python::initialize();
+        let err =
+            Python::attach(|_py| pyo3::PyErr::new::<crate::pyapi::BadRequest, _>("invalid input"));
+        let app_err = python_err_to_app_error(err);
+        assert!(matches!(app_err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn python_err_to_app_error_forbidden() {
+        Python::initialize();
+        let err =
+            Python::attach(|_py| pyo3::PyErr::new::<crate::pyapi::Forbidden, _>("access denied"));
+        let app_err = python_err_to_app_error(err);
+        assert!(matches!(app_err, AppError::Forbidden(_)));
+    }
+
+    #[test]
+    fn python_err_to_app_error_generic() {
+        Python::initialize();
+        let err = Python::attach(|_py| {
+            pyo3::PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("something broke")
+        });
+        let app_err = python_err_to_app_error(err);
+        assert!(matches!(app_err, AppError::Internal(_)));
+    }
 }

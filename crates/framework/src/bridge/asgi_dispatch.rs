@@ -373,4 +373,94 @@ mod tests {
         let headers = build_header_map(&raw).unwrap();
         assert_eq!(headers.get("x-test").unwrap(), "value");
     }
+
+    // ── recv_response_body error branches ────────────────────────────────
+
+    #[tokio::test]
+    async fn recv_response_body_duplicate_start() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(AsgiEvent::ResponseStart {
+            status: 200,
+            headers: Vec::new(),
+        })
+        .await
+        .unwrap();
+        // Send another start where a body chunk is expected
+        tx.send(AsgiEvent::ResponseStart {
+            status: 200,
+            headers: Vec::new(),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let _ = recv_response_start(&mut rx).await.unwrap();
+        let result = recv_response_body(&mut rx).await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), AppError::Internal(msg) if msg.contains("duplicate"))
+        );
+    }
+
+    #[tokio::test]
+    async fn recv_response_body_unexpected_event() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(AsgiEvent::ResponseStart {
+            status: 200,
+            headers: Vec::new(),
+        })
+        .await
+        .unwrap();
+        // Send a WS event during body collection
+        tx.send(AsgiEvent::WsClose { code: 1000 }).await.unwrap();
+        drop(tx);
+
+        let _ = recv_response_start(&mut rx).await.unwrap();
+        let result = recv_response_body(&mut rx).await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), AppError::Internal(msg) if msg.contains("unexpected"))
+        );
+    }
+
+    #[tokio::test]
+    async fn recv_response_body_channel_close_partial() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(AsgiEvent::ResponseStart {
+            status: 200,
+            headers: Vec::new(),
+        })
+        .await
+        .unwrap();
+        tx.send(AsgiEvent::ResponseBody {
+            body: Bytes::from("partial"),
+            more_body: true,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let _ = recv_response_start(&mut rx).await.unwrap();
+        // Channel closes mid-stream — returns whatever was collected
+        let result = recv_response_body(&mut rx).await.unwrap();
+        assert_eq!(result.as_ref(), b"partial");
+    }
+
+    #[tokio::test]
+    async fn recv_response_start_unexpected_ws_event() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(AsgiEvent::WsSend {
+            text: Some("hello".to_owned()),
+            bytes: None,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let result = recv_response_start(&mut rx).await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), AppError::Internal(msg) if msg.contains("unexpected"))
+        );
+    }
 }
