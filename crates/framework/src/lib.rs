@@ -12,6 +12,7 @@
 //! - **Bridge** calls Python async handlers from axum via PyO3 + `pyo3-async-runtimes`
 
 pub mod error;
+pub mod manifest;
 pub mod pyapi;
 pub mod route;
 pub mod runtime;
