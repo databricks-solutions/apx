@@ -44,47 +44,6 @@ pub fn discover_and_bind(
 
 // ── Shared helpers ──────────────────────────────────────────────────────
 
-/// Parse a param source string to [`ParamSource`].
-#[allow(
-    dead_code,
-    reason = "tested utility — will be used by manifest loading path"
-)]
-pub fn parse_param_source(source: &str) -> Result<crate::route::ParamSource, DiscoveryError> {
-    use crate::route::ParamSource;
-    match source {
-        "path" => Ok(ParamSource::Path),
-        "query" => Ok(ParamSource::Query),
-        "header" => Ok(ParamSource::Header),
-        "cookie" => Ok(ParamSource::Cookie),
-        "body" => Ok(ParamSource::Body),
-        "raw_body" => Ok(ParamSource::RawBody),
-        other => Err(DiscoveryError::InvalidRoute(format!(
-            "unknown param source: {other}"
-        ))),
-    }
-}
-
-/// Parse a response type string from Python.
-#[allow(
-    dead_code,
-    reason = "tested utility — will be used by manifest loading path"
-)]
-pub fn parse_response_type(s: &str) -> Result<crate::route::ResponseType, DiscoveryError> {
-    use crate::route::{QualName, ResponseType};
-    if let Some(qualname_str) = s.strip_prefix("model:") {
-        let qualname = QualName::new(qualname_str).map_err(|e| {
-            DiscoveryError::InvalidRoute(format!("response model '{qualname_str}': {e}"))
-        })?;
-        Ok(ResponseType::Model {
-            qualname,
-            json_schema: None,
-            status_code: 200,
-        })
-    } else {
-        Ok(ResponseType::RawResponse)
-    }
-}
-
 /// Parse an HTTP method string (e.g. `"GET"`) to [`HttpMethod`].
 pub fn parse_http_method(s: &str) -> Result<crate::route::HttpMethod, DiscoveryError> {
     use crate::route::HttpMethod;
@@ -122,87 +81,6 @@ pub fn http_method_str(m: crate::route::HttpMethod) -> &'static str {
 )]
 mod tests {
     use super::*;
-    use crate::route::{ParamSource, ResponseType};
-
-    // ── parse_param_source ───────────────────────────────────────────────
-
-    #[test]
-    fn parse_param_source_path() {
-        assert_eq!(parse_param_source("path").unwrap(), ParamSource::Path);
-    }
-
-    #[test]
-    fn parse_param_source_query() {
-        assert_eq!(parse_param_source("query").unwrap(), ParamSource::Query);
-    }
-
-    #[test]
-    fn parse_param_source_header() {
-        assert_eq!(parse_param_source("header").unwrap(), ParamSource::Header);
-    }
-
-    #[test]
-    fn parse_param_source_cookie() {
-        assert_eq!(parse_param_source("cookie").unwrap(), ParamSource::Cookie);
-    }
-
-    #[test]
-    fn parse_param_source_body() {
-        assert_eq!(parse_param_source("body").unwrap(), ParamSource::Body);
-    }
-
-    #[test]
-    fn parse_param_source_raw_body() {
-        assert_eq!(
-            parse_param_source("raw_body").unwrap(),
-            ParamSource::RawBody
-        );
-    }
-
-    #[test]
-    fn parse_param_source_unknown() {
-        let err = parse_param_source("unknown").unwrap_err();
-        assert!(matches!(err, DiscoveryError::InvalidRoute(_)));
-        let msg = format!("{err}");
-        assert!(msg.contains("unknown"));
-    }
-
-    // ── parse_response_type ──────────────────────────────────────────────
-
-    #[test]
-    fn parse_response_type_model_valid() {
-        let rt = parse_response_type("model:backend.models.Item").unwrap();
-        match rt {
-            ResponseType::Model {
-                qualname,
-                json_schema,
-                status_code,
-            } => {
-                assert_eq!(qualname.as_str(), "backend.models.Item");
-                assert!(json_schema.is_none());
-                assert_eq!(status_code, 200);
-            }
-            _ => panic!("expected Model"),
-        }
-    }
-
-    #[test]
-    fn parse_response_type_model_invalid_qualname() {
-        let err = parse_response_type("model:").unwrap_err();
-        assert!(matches!(err, DiscoveryError::InvalidRoute(_)));
-    }
-
-    #[test]
-    fn parse_response_type_raw_fallback() {
-        let rt = parse_response_type("raw_response").unwrap();
-        assert!(matches!(rt, ResponseType::RawResponse));
-    }
-
-    #[test]
-    fn parse_response_type_anything_else_is_raw() {
-        let rt = parse_response_type("something_else").unwrap();
-        assert!(matches!(rt, ResponseType::RawResponse));
-    }
 
     // ── parse_http_method ────────────────────────────────────────────────
 
