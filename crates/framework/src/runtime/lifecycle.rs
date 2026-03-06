@@ -33,9 +33,54 @@ pub enum LifecycleError {
 
 /// Kind of generator stored for shutdown cleanup.
 #[derive(Debug, Clone, Copy)]
-enum GenKind {
+pub(crate) enum GenKind {
     Sync,
     Async,
+}
+
+/// A Python generator yielded during lifecycle dep initialization.
+///
+/// Advancing past the yield triggers the dependency's cleanup code.
+pub(crate) struct Generator {
+    inner: Py<PyAny>,
+    kind: GenKind,
+}
+
+impl Generator {
+    pub(crate) fn new(inner: Py<PyAny>, kind: GenKind) -> Self {
+        Self { inner, kind }
+    }
+
+    /// Advance the generator to trigger cleanup.
+    ///
+    /// `StopIteration` / `StopAsyncIteration` is the expected outcome.
+    pub(crate) fn advance(&self, py: Python<'_>) -> Result<(), pyo3::PyErr> {
+        match self.kind {
+            GenKind::Sync => match self.inner.call_method0(py, c"__next__") {
+                Ok(_) => Ok(()),
+                Err(e) if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) => Ok(()),
+                Err(e) => Err(e),
+            },
+            GenKind::Async => {
+                let coro = self.inner.call_method0(py, c"__anext__")?;
+                match run_coroutine(py, &coro) {
+                    Ok(_) => Ok(()),
+                    Err(e) if e.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py) => {
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for Generator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Generator")
+            .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Python callable classification for lifecycle dependency init.
@@ -48,7 +93,7 @@ enum CallableKind {
 }
 
 /// Result of initializing one lifecycle dep: resolved value + optional generator for cleanup.
-type InitResult = Result<(Py<PyAny>, Option<(Py<PyAny>, GenKind)>), LifecycleError>;
+type InitResult = Result<(Py<PyAny>, Option<Generator>), LifecycleError>;
 
 /// Cache of lifecycle-scoped dependency values, shared across all routes.
 ///
@@ -59,7 +104,7 @@ pub struct LifecycleCache {
     /// Resolved values keyed by qualname. `pub(crate)` for test access.
     pub(crate) values: HashMap<String, Py<PyAny>>,
     /// Generators needing cleanup at shutdown, in initialization order.
-    exit_stacks: Vec<(String, Py<PyAny>, GenKind)>,
+    exit_stacks: Vec<(String, Generator)>,
 }
 
 impl LifecycleCache {
@@ -102,8 +147,8 @@ impl LifecycleCache {
             let qualname = dep.qualname.as_str();
             let (value, cleanup) = init_dep(py, &inspect, qualname)?;
             values.insert(qualname.to_owned(), value);
-            if let Some((generator, kind)) = cleanup {
-                exit_stacks.push((qualname.to_owned(), generator, kind));
+            if let Some(generator) = cleanup {
+                exit_stacks.push((qualname.to_owned(), generator));
             }
         }
 
@@ -127,8 +172,10 @@ impl LifecycleCache {
     /// Advances each generator past its yield point to trigger cleanup.
     /// Errors are logged but not propagated (best-effort cleanup).
     pub fn shutdown(&self, py: Python<'_>) {
-        for (qualname, generator, kind) in self.exit_stacks.iter().rev() {
-            cleanup_generator(py, qualname, generator, *kind);
+        for (qualname, generator) in self.exit_stacks.iter().rev() {
+            if let Err(e) = generator.advance(py) {
+                tracing::warn!(dep = qualname, error = %e, "lifecycle dep cleanup failed");
+            }
         }
     }
 }
@@ -200,7 +247,7 @@ fn init_async_gen(py: Python<'_>, qualname: &str, func: &Py<PyAny>) -> InitResul
         qualname: qualname.to_owned(),
         message: format!("await __anext__: {e}"),
     })?;
-    Ok((value, Some((generator, GenKind::Async))))
+    Ok((value, Some(Generator::new(generator, GenKind::Async))))
 }
 
 /// Initialize a sync generator dep: call → `__next__()` → store gen.
@@ -212,7 +259,7 @@ fn init_sync_gen(py: Python<'_>, qualname: &str, func: &Py<PyAny>) -> InitResult
             qualname: qualname.to_owned(),
             message: format!("__next__: {e}"),
         })?;
-    Ok((value, Some((generator, GenKind::Sync))))
+    Ok((value, Some(Generator::new(generator, GenKind::Sync))))
 }
 
 /// Initialize an async callable dep: call → await coroutine.
@@ -249,38 +296,6 @@ fn run_coroutine(py: Python<'_>, coro: &Py<PyAny>) -> Result<Py<PyAny>, pyo3::Py
     let loop_obj = asyncio.call_method0(c"get_event_loop")?;
     let result = loop_obj.call_method1(c"run_until_complete", (coro.bind(py),))?;
     Ok(result.unbind())
-}
-
-// ── Shutdown helpers ────────────────────────────────────────────────────
-
-/// Advance a generator past its yield to trigger cleanup code.
-fn cleanup_generator(py: Python<'_>, qualname: &str, generator: &Py<PyAny>, kind: GenKind) {
-    let result = match kind {
-        GenKind::Sync => cleanup_sync_gen(py, generator),
-        GenKind::Async => cleanup_async_gen(py, generator),
-    };
-    if let Err(e) = result {
-        tracing::warn!(dep = qualname, error = %e, "lifecycle dep cleanup failed");
-    }
-}
-
-/// Advance a sync generator; `StopIteration` is the expected outcome.
-fn cleanup_sync_gen(py: Python<'_>, generator: &Py<PyAny>) -> Result<(), pyo3::PyErr> {
-    match generator.call_method0(py, c"__next__") {
-        Ok(_) => Ok(()),
-        Err(e) if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-/// Advance an async generator; `StopAsyncIteration` is the expected outcome.
-fn cleanup_async_gen(py: Python<'_>, generator: &Py<PyAny>) -> Result<(), pyo3::PyErr> {
-    let anext_coro = generator.call_method0(py, c"__anext__")?;
-    match run_coroutine(py, &anext_coro) {
-        Ok(_) => Ok(()),
-        Err(e) if e.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py) => Ok(()),
-        Err(e) => Err(e),
-    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

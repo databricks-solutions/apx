@@ -7,6 +7,7 @@
 use crate::bridge::dispatch::AppState;
 use crate::bridge::{build_router, wrap_layers};
 use crate::discovery;
+use crate::event_loop::EventLoop;
 use crate::ipc::channel::WorkerChannel;
 use crate::ipc::protocol::{BootstrapError, IpcMessage, Nonce, WorkerBootstrap};
 use crate::manifest::ManifestError;
@@ -14,7 +15,6 @@ use crate::runtime::lifecycle::{LifecycleCache, LifecycleError};
 use crate::transport::{Listener, TransportConfig, TransportError};
 use axum::Router;
 use pyo3::Python;
-use pyo3::types::PyAnyMethods;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,6 +57,8 @@ pub struct WorkerRuntime {
     pub listener: crate::transport::TcpListener,
     /// IPC channel to supervisor — stays open for the worker's lifetime.
     pub channel: WorkerChannel,
+    /// Persistent asyncio event loop on a dedicated thread.
+    pub py_event_loop: EventLoop,
 }
 
 impl std::fmt::Debug for WorkerRuntime {
@@ -88,21 +90,16 @@ pub async fn init_worker(
     // IMPORTANT: must only be called once per process, only in worker processes.
     Python::initialize();
 
-    // Set up asyncio event loop.
-    Python::attach(|py| {
-        let asyncio = py
-            .import(c"asyncio")
-            .map_err(|e| WorkerError::PythonInit(format!("import asyncio: {e}")))?;
-        let event_loop = asyncio
-            .call_method0(c"new_event_loop")
-            .map_err(|e| WorkerError::PythonInit(format!("new_event_loop: {e}")))?;
-        asyncio
-            .call_method1(c"set_event_loop", (&event_loop,))
-            .map_err(|e| WorkerError::PythonInit(format!("set_event_loop: {e}")))?;
-        Ok::<_, WorkerError>(())
-    })?;
+    // Start a persistent asyncio event loop on a dedicated thread.
+    // Handler coroutines are submitted via call_soon_threadsafe.
+    let py_event_loop =
+        EventLoop::start().map_err(|e| WorkerError::PythonInit(format!("event loop: {e}")))?;
 
-    Ok(WorkerRuntime { listener, channel })
+    Ok(WorkerRuntime {
+        listener,
+        channel,
+        py_event_loop,
+    })
 }
 
 /// Phase 2: Load the Python app and build the axum router.
@@ -117,10 +114,12 @@ pub async fn init_worker(
 pub fn load_app(
     bootstrap: &WorkerBootstrap,
     server_addr: std::net::SocketAddr,
+    py_event_loop: &EventLoop,
 ) -> Result<(Router, Arc<AppState>, Arc<LifecycleCache>), WorkerError> {
+    let loop_handle = py_event_loop.handle();
     match &bootstrap.manifest_path {
-        Some(path) => load_from_manifest(path, server_addr),
-        None => load_from_discovery(bootstrap, server_addr),
+        Some(path) => load_from_manifest(path, server_addr, loop_handle),
+        None => load_from_discovery(bootstrap, server_addr, loop_handle),
     }
 }
 
@@ -128,6 +127,7 @@ pub fn load_app(
 fn load_from_manifest(
     path: &std::path::Path,
     server_addr: std::net::SocketAddr,
+    loop_handle: crate::event_loop::EventLoopHandle,
 ) -> Result<(Router, Arc<AppState>, Arc<LifecycleCache>), WorkerError> {
     let manifest = crate::manifest::load(path)?;
     crate::manifest::check_version(&manifest)?;
@@ -141,6 +141,7 @@ fn load_from_manifest(
 
     let app_state = Arc::new(AppState {
         max_body_limit: manifest.max_body_limit,
+        loop_handle,
     });
 
     let router = build_router(
@@ -156,12 +157,14 @@ fn load_from_manifest(
 fn load_from_discovery(
     bootstrap: &WorkerBootstrap,
     server_addr: std::net::SocketAddr,
+    loop_handle: crate::event_loop::EventLoopHandle,
 ) -> Result<(Router, Arc<AppState>, Arc<LifecycleCache>), WorkerError> {
     Python::attach(|py| {
         let (routes, manifest) = discovery::discover_and_bind(py, &bootstrap.app_module)?;
 
         let app_state = Arc::new(AppState {
             max_body_limit: manifest.max_body_limit,
+            loop_handle: loop_handle.clone(),
         });
 
         // Live discovery doesn't extract lifecycle deps yet — use empty cache.
@@ -208,23 +211,6 @@ async fn signal_readiness(channel: &mut WorkerChannel) -> Result<(), WorkerError
         .map_err(WorkerError::from)
 }
 
-/// Close the asyncio event loop gracefully.
-fn shutdown_event_loop() {
-    Python::attach(|py| {
-        let _ = close_event_loop(py);
-    });
-}
-
-/// Drain async generators and close the event loop.
-fn close_event_loop(py: Python<'_>) -> pyo3::PyResult<()> {
-    let asyncio = py.import(c"asyncio")?;
-    let loop_obj = asyncio.call_method0(c"get_event_loop")?;
-    let shutdown_coro = loop_obj.call_method0(c"shutdown_asyncgens")?;
-    let _ = loop_obj.call_method1(c"run_until_complete", (shutdown_coro,));
-    loop_obj.call_method0(c"close")?;
-    Ok(())
-}
-
 /// Convenience: connect → init → load → signal readiness → serve → shutdown.
 ///
 /// # Errors
@@ -237,7 +223,8 @@ pub async fn run_worker(
     let mut runtime = init_worker(&bootstrap, channel).await?;
 
     let server_addr = runtime.listener.local_addr();
-    let (router, _app_state, lifecycle_cache) = load_app(&bootstrap, server_addr)?;
+    let (router, _app_state, lifecycle_cache) =
+        load_app(&bootstrap, server_addr, &runtime.py_event_loop)?;
 
     signal_readiness(&mut runtime.channel).await?;
 
@@ -250,7 +237,8 @@ pub async fn run_worker(
     let result = serve(runtime.listener, router, timeout).await;
 
     Python::attach(|py| lifecycle_cache.shutdown(py));
-    shutdown_event_loop();
+    // EventLoop::stop() is called by Drop, but we call explicitly for clarity.
+    runtime.py_event_loop.stop();
 
     result
 }

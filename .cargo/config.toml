@@ -1,0 +1,6 @@
+[env]
+# Use the uv-managed venv interpreter for PyO3 build configuration.
+# This ensures `cargo test` links against the same Python that has
+# fastapi/pydantic installed.  `relative = true` resolves the path
+# against the workspace root (parent of .cargo/).
+PYO3_PYTHON = { value = ".venv/bin/python", relative = true }

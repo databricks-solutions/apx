@@ -1,7 +1,10 @@
 //! Manifest → `BoundRoute` binding: import qualnames, resolve types.
 
 use crate::discovery::DiscoveryError;
-use crate::route::{AppManifest, BoundParam, BoundRoute, ParamManifest, ParamSource, ResponseType};
+use crate::route::{
+    AppManifest, BoundDependencyPlan, BoundParam, BoundRoute, DependencyPlan, DependencyStep,
+    Handler, Model, ParamManifest, ParamSource, ResponseType,
+};
 use pyo3::types::{PyAnyMethods, PyString};
 use pyo3::{Bound, Py, PyAny, Python};
 use std::collections::{HashMap, HashSet};
@@ -56,7 +59,7 @@ pub fn bind_routes(
     for rm in &manifest.routes {
         let method_str = rm.method.as_str();
         let key = (rm.path.as_str().to_owned(), method_str.to_owned());
-        let handler = endpoint_map
+        let handler_obj = endpoint_map
             .get(&key)
             .ok_or_else(|| {
                 DiscoveryError::InvalidRoute(format!(
@@ -65,6 +68,7 @@ pub fn bind_routes(
                 ))
             })?
             .clone_ref(py);
+        let handler = Handler::new(py, handler_obj);
 
         let params = bind_params(py, &rm.params)?;
         let response_model = bind_response_model(py, &rm.response_type)?;
@@ -72,6 +76,12 @@ pub fn bind_routes(
             .params
             .iter()
             .any(|p| matches!(p.source, ParamSource::Body | ParamSource::RawBody));
+
+        let bound_plan = rm
+            .dependency_plan
+            .as_ref()
+            .map(|plan| bind_dependency_plan(py, plan))
+            .transpose()?;
 
         bound.push(BoundRoute {
             manifest: rm.clone(),
@@ -81,10 +91,37 @@ pub fn bind_routes(
             has_body_param,
             dependant: None,
             fastapi_app: None,
+            bound_plan,
         });
     }
 
     Ok(bound)
+}
+
+/// Pre-resolve `CallPython` step qualnames to live Python callables.
+///
+/// Returns `None` if the route has no dependency plan. For each plan step,
+/// the callable slot is `Some` only for `CallPython` variants.
+fn bind_dependency_plan(
+    py: Python<'_>,
+    plan: &DependencyPlan,
+) -> Result<BoundDependencyPlan, DiscoveryError> {
+    let callables = plan
+        .steps
+        .iter()
+        .map(|step| match step {
+            DependencyStep::CallPython { dep_qualname, .. } => {
+                let func = import_qualified_name(py, dep_qualname.as_str())?;
+                Ok(Some(func))
+            }
+            _ => Ok(None),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(BoundDependencyPlan {
+        plan: plan.clone(),
+        callables,
+    })
 }
 
 /// Bind parameter manifests to their resolved Python types.
@@ -98,7 +135,7 @@ fn bind_params(
         let python_type = match param.source {
             ParamSource::Body => {
                 let cls = import_qualified_name(py, param.type_qualname.as_str())?;
-                Some(cls)
+                Some(Model::new(cls))
             }
             _ => None,
         };
@@ -115,11 +152,11 @@ fn bind_params(
 fn bind_response_model(
     py: Python<'_>,
     response_type: &ResponseType,
-) -> Result<Option<Py<PyAny>>, DiscoveryError> {
+) -> Result<Option<Model>, DiscoveryError> {
     match response_type {
         ResponseType::Model { qualname, .. } => {
             let cls = import_qualified_name(py, qualname.as_str())?;
-            Ok(Some(cls))
+            Ok(Some(Model::new(cls)))
         }
         ResponseType::StreamingResponse | ResponseType::RawResponse => Ok(None),
     }
@@ -136,13 +173,20 @@ pub fn bind_routes_from_manifest(
     let mut bound = Vec::with_capacity(manifest.routes.len());
 
     for rm in &manifest.routes {
-        let handler = import_qualified_name(py, rm.handler_qualname.as_str())?;
+        let handler_obj = import_qualified_name(py, rm.handler_qualname.as_str())?;
+        let handler = Handler::new(py, handler_obj);
         let params = bind_params(py, &rm.params)?;
         let response_model = bind_response_model(py, &rm.response_type)?;
         let has_body_param = rm
             .params
             .iter()
             .any(|p| matches!(p.source, ParamSource::Body | ParamSource::RawBody));
+
+        let bound_plan = rm
+            .dependency_plan
+            .as_ref()
+            .map(|plan| bind_dependency_plan(py, plan))
+            .transpose()?;
 
         bound.push(BoundRoute {
             manifest: rm.clone(),
@@ -152,6 +196,7 @@ pub fn bind_routes_from_manifest(
             has_body_param,
             dependant: None,
             fastapi_app: None,
+            bound_plan,
         });
     }
 
@@ -186,11 +231,8 @@ pub fn import_qualified_name(py: Python<'_>, qualname: &str) -> Result<Py<PyAny>
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
     reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {

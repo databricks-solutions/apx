@@ -5,21 +5,85 @@
 
 use super::context::RequestContext;
 use super::dispatch::{
-    AppState, HandlerDispatch, convert_path_value, extract_context, extract_pydantic_errors,
-    serialize_result,
+    AppState, HandlerDispatch, extract_context, extract_pydantic_errors, serialize_result,
 };
 use crate::discovery::bind::import_qualified_name;
-use crate::error::{AppError, ValidationErrorItem};
-use crate::route::{BoundRoute, DependencyPlan, DependencyStep};
+use crate::error::AppError;
+use crate::event_loop::EventLoopHandle;
+use crate::route::{BoundDependencyPlan, BoundRoute, DependencyStep};
 use crate::runtime::lifecycle::LifecycleCache;
 use crate::transport::types::{InboundRequest, OutboundResponse};
-use pyo3::conversion::IntoPyObject;
-use pyo3::types::{PyAnyMethods, PyDictMethods, PyString};
+use pyo3::types::{PyAnyMethods, PyDict, PyDictMethods};
 use pyo3::{Py, PyAny, Python};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+
+/// Resolved dependency values, keyed by target kwarg name.
+///
+/// Populated during plan execution, consumed to build the handler's kwargs dict.
+#[derive(Debug)]
+struct ResolvedKwargs(HashMap<String, Py<PyAny>>);
+
+impl ResolvedKwargs {
+    fn with_capacity(n: usize) -> Self {
+        Self(HashMap::with_capacity(n))
+    }
+
+    /// Insert a resolved value.
+    ///
+    /// Debug-asserts that the key hasn't been written before (plan steps are
+    /// topologically sorted — double-writes indicate a plan compilation bug).
+    fn insert(&mut self, key: String, value: Py<PyAny>) {
+        debug_assert!(
+            !self.0.contains_key(&key),
+            "plan executor: duplicate resolved key '{key}'"
+        );
+        self.0.insert(key, value);
+    }
+
+    fn get(&self, key: &str) -> Option<&Py<PyAny>> {
+        self.0.get(key)
+    }
+
+    /// Build a PyDict containing only the specified kwargs.
+    fn to_py_dict<'py>(
+        &self,
+        py: Python<'py>,
+        names: &[String],
+    ) -> Result<pyo3::Bound<'py, PyDict>, AppError> {
+        let dict = PyDict::new(py);
+        for name in names {
+            let value = self.get(name).ok_or_else(|| {
+                AppError::Internal(format!("kwarg '{name}' not resolved by plan"))
+            })?;
+            dict.set_item(name, value.bind(py))
+                .map_err(|e| AppError::Internal(format!("set kwarg '{name}': {e}")))?;
+        }
+        Ok(dict)
+    }
+
+    /// Check if empty.
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Check if a key exists.
+    #[cfg(test)]
+    fn contains_key(&self, key: &str) -> bool {
+        self.0.contains_key(key)
+    }
+}
+
+impl std::ops::Index<&str> for ResolvedKwargs {
+    type Output = Py<PyAny>;
+
+    fn index(&self, key: &str) -> &Self::Output {
+        &self.0[key]
+    }
+}
 
 /// Dispatch via compiled dependency plan execution.
 ///
@@ -48,14 +112,13 @@ impl HandlerDispatch for PlanExecutorDispatch {
         Box::pin(async move {
             let ctx = extract_context(&mut request, &route, &app_state).await?;
 
-            let plan = route
-                .manifest
-                .dependency_plan
-                .as_ref()
-                .ok_or_else(|| AppError::Internal("route has no dependency plan".to_owned()))?;
+            let bound_plan = route.bound_plan.as_ref().ok_or_else(|| {
+                AppError::Internal("route has no bound dependency plan".to_owned())
+            })?;
 
-            let kwargs = execute_plan(plan, &ctx, &cache).await?;
-            let result = invoke_with_kwargs(&route, &kwargs).await?;
+            let kwargs = execute_plan(bound_plan, &ctx, &cache, &app_state.loop_handle).await?;
+            let result =
+                invoke_with_kwargs(&route, bound_plan, &kwargs, &app_state.loop_handle).await?;
             Python::attach(|py| serialize_result(py, &result, &route))
         })
     }
@@ -63,33 +126,38 @@ impl HandlerDispatch for PlanExecutorDispatch {
 
 /// Execute all steps in a dependency plan, producing resolved values.
 async fn execute_plan(
-    plan: &DependencyPlan,
+    bound_plan: &BoundDependencyPlan,
     ctx: &RequestContext,
     cache: &LifecycleCache,
-) -> Result<HashMap<String, Py<PyAny>>, AppError> {
-    let mut resolved: HashMap<String, Py<PyAny>> = HashMap::with_capacity(plan.steps.len());
+    loop_handle: &EventLoopHandle,
+) -> Result<ResolvedKwargs, AppError> {
+    let mut resolved = ResolvedKwargs::with_capacity(bound_plan.plan.steps.len());
 
-    for step in &plan.steps {
-        execute_step(step, ctx, cache, &mut resolved).await?;
+    for (index, step) in bound_plan.plan.steps.iter().enumerate() {
+        let callable = bound_plan.callable_for(index);
+        let (key, value) = resolve_step(step, callable, ctx, cache, &resolved, loop_handle).await?;
+        resolved.insert(key.to_owned(), value);
     }
 
     Ok(resolved)
 }
 
-/// Execute a single dependency step, inserting the result into `resolved`.
-async fn execute_step(
-    step: &DependencyStep,
+/// Resolve a single dependency step, returning the target kwarg name and value.
+async fn resolve_step<'a>(
+    step: &'a DependencyStep,
+    callable: Option<&Py<PyAny>>,
     ctx: &RequestContext,
     cache: &LifecycleCache,
-    resolved: &mut HashMap<String, Py<PyAny>>,
-) -> Result<(), AppError> {
+    resolved: &ResolvedKwargs,
+    loop_handle: &EventLoopHandle,
+) -> Result<(&'a str, Py<PyAny>), AppError> {
     match step {
         DependencyStep::ExtractPath {
             name,
             type_qualname,
         } => {
             let value = extract_path_step(ctx, name, type_qualname.as_str())?;
-            resolved.insert(name.clone(), value);
+            Ok((name.as_str(), value))
         }
         DependencyStep::ExtractQuery {
             name,
@@ -104,7 +172,7 @@ async fn execute_step(
                 *required,
                 default_json.as_ref(),
             )?;
-            resolved.insert(name.clone(), value);
+            Ok((name.as_str(), value))
         }
         DependencyStep::ExtractHeader {
             name,
@@ -113,7 +181,7 @@ async fn execute_step(
             required,
         } => {
             let value = extract_header_step(ctx, name, alias, type_qualname.as_str(), *required)?;
-            resolved.insert(name.clone(), value);
+            Ok((name.as_str(), value))
         }
         DependencyStep::ExtractCookie {
             name,
@@ -121,40 +189,38 @@ async fn execute_step(
             required,
         } => {
             let value = extract_cookie_step(ctx, name, type_qualname.as_str(), *required)?;
-            resolved.insert(name.clone(), value);
+            Ok((name.as_str(), value))
         }
         DependencyStep::ValidateBody {
             name,
             model_qualname,
         } => {
             let value = validate_body_step(ctx, model_qualname.as_str())?;
-            resolved.insert(name.clone(), value);
+            Ok((name.as_str(), value))
         }
         DependencyStep::ResolveLifecycle {
             dep_qualname,
             target_kwarg,
         } => {
             let value = resolve_lifecycle_step(cache, dep_qualname.as_str())?;
-            resolved.insert(target_kwarg.clone(), value);
+            Ok((target_kwarg.as_str(), value))
         }
         DependencyStep::CallPython {
-            dep_qualname,
             target_kwarg,
             inputs,
             is_async,
             ..
         } => {
-            let value =
-                call_python_step(dep_qualname.as_str(), inputs, *is_async, resolved).await?;
-            resolved.insert(target_kwarg.clone(), value);
+            let func = callable.ok_or_else(|| {
+                AppError::Internal("missing pre-resolved callable for CallPython step".to_owned())
+            })?;
+            let value = call_python_step(func, inputs, *is_async, resolved, loop_handle).await?;
+            Ok((target_kwarg.as_str(), value))
         }
-        DependencyStep::ResolveNative { .. } => {
-            return Err(AppError::Internal(
-                "native dependency resolution not yet supported".to_owned(),
-            ));
-        }
+        DependencyStep::ResolveNative { .. } => Err(AppError::Internal(
+            "native dependency resolution not yet supported".to_owned(),
+        )),
     }
-    Ok(())
 }
 
 // ── Step implementations ────────────────────────────────────────────────
@@ -165,17 +231,9 @@ fn extract_path_step(
     name: &str,
     type_name: &str,
 ) -> Result<Py<PyAny>, AppError> {
-    let raw = ctx
-        .path_params
-        .iter()
-        .find(|(k, _)| k == name)
-        .map(|(_, v)| v.as_str());
-
-    Python::attach(|py| match raw {
-        Some(v) => convert_path_value(py, v, type_name).map(|b| b.unbind()),
-        None => Err(AppError::BadRequest(format!(
-            "missing path parameter: {name}"
-        ))),
+    Python::attach(|py| {
+        super::extract::extract_path_value(py, &ctx.path_params, name, type_name, true)
+            .map(|b| b.unbind())
     })
 }
 
@@ -187,54 +245,17 @@ fn extract_query_step(
     required: bool,
     default_json: Option<&serde_json::Value>,
 ) -> Result<Py<PyAny>, AppError> {
-    let raw = ctx
-        .query_params
-        .iter()
-        .rev()
-        .find(|(k, _)| k == name)
-        .map(|(_, v)| v.as_str());
-
-    Python::attach(|py| match raw {
-        Some(v) => convert_path_value(py, v, type_name).map(|b| b.unbind()),
-        None if !required => resolve_default(py, default_json),
-        None => Err(AppError::Validation(vec![ValidationErrorItem {
-            loc: vec!["query".to_owned(), name.to_owned()],
-            msg: "Field required".to_owned(),
-            r#type: "missing".to_owned(),
-        }])),
+    Python::attach(|py| {
+        super::extract::extract_query_value(
+            py,
+            &ctx.query_params,
+            name,
+            type_name,
+            required,
+            default_json,
+        )
+        .map(|b| b.unbind())
     })
-}
-
-/// Resolve a default value from JSON, falling back to `None`.
-fn resolve_default(
-    py: Python<'_>,
-    default_json: Option<&serde_json::Value>,
-) -> Result<Py<PyAny>, AppError> {
-    match default_json {
-        Some(serde_json::Value::String(s)) => Ok(PyString::new(py, s).into_any().unbind()),
-        Some(serde_json::Value::Number(n)) => {
-            if let Some(i) = n.as_i64() {
-                Ok(i.into_pyobject(py)
-                    .map_err(|e| AppError::Internal(format!("int conversion: {e}")))?
-                    .into_any()
-                    .unbind())
-            } else if let Some(f) = n.as_f64() {
-                Ok(f.into_pyobject(py)
-                    .map_err(|e| AppError::Internal(format!("float conversion: {e}")))?
-                    .into_any()
-                    .unbind())
-            } else {
-                Ok(py.None())
-            }
-        }
-        Some(serde_json::Value::Bool(b)) => {
-            let py_bool = b
-                .into_pyobject(py)
-                .map_err(|e| AppError::Internal(format!("bool conversion: {e}")))?;
-            Ok(py_bool.to_owned().into_any().unbind())
-        }
-        _ => Ok(py.None()),
-    }
 }
 
 /// Extract a header value from the request context.
@@ -245,16 +266,9 @@ fn extract_header_step(
     type_name: &str,
     required: bool,
 ) -> Result<Py<PyAny>, AppError> {
-    let value = ctx.headers.get(alias).and_then(|v| v.to_str().ok());
-
-    Python::attach(|py| match value {
-        Some(v) => convert_path_value(py, v, type_name).map(|b| b.unbind()),
-        None if !required => Ok(py.None()),
-        None => Err(AppError::Validation(vec![ValidationErrorItem {
-            loc: vec!["header".to_owned(), alias.to_owned()],
-            msg: format!("missing required header: {alias}"),
-            r#type: "missing".to_owned(),
-        }])),
+    Python::attach(|py| {
+        super::extract::extract_header_value(py, &ctx.headers, alias, type_name, required)
+            .map(|b| b.unbind())
     })
 }
 
@@ -265,27 +279,9 @@ fn extract_cookie_step(
     type_name: &str,
     required: bool,
 ) -> Result<Py<PyAny>, AppError> {
-    let cookie_header = ctx
-        .headers
-        .get("cookie")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let value = cookie_header.split(';').find_map(|pair| {
-        let pair = pair.trim();
-        pair.split_once('=')
-            .filter(|(k, _)| k.trim() == name)
-            .map(|(_, v)| v.trim())
-    });
-
-    Python::attach(|py| match value {
-        Some(v) => convert_path_value(py, v, type_name).map(|b| b.unbind()),
-        None if !required => Ok(py.None()),
-        None => Err(AppError::Validation(vec![ValidationErrorItem {
-            loc: vec!["cookie".to_owned(), name.to_owned()],
-            msg: format!("missing required cookie: {name}"),
-            r#type: "missing".to_owned(),
-        }])),
+    Python::attach(|py| {
+        super::extract::extract_cookie_value(py, &ctx.headers, name, type_name, required)
+            .map(|b| b.unbind())
     })
 }
 
@@ -329,78 +325,49 @@ fn resolve_lifecycle_step(cache: &LifecycleCache, qualname: &str) -> Result<Py<P
 
 /// Call a Python dependency function with kwargs from resolved inputs.
 async fn call_python_step(
-    dep_qualname: &str,
+    func: &Py<PyAny>,
     inputs: &[String],
     is_async: bool,
-    resolved: &HashMap<String, Py<PyAny>>,
+    resolved: &ResolvedKwargs,
+    loop_handle: &EventLoopHandle,
 ) -> Result<Py<PyAny>, AppError> {
     if is_async {
-        call_python_async(dep_qualname, inputs, resolved).await
+        call_python_async(func, inputs, resolved, loop_handle).await
     } else {
-        call_python_sync(dep_qualname, inputs, resolved)
+        call_python_sync(func, inputs, resolved)
     }
 }
 
 /// Call a sync Python dependency.
 fn call_python_sync(
-    dep_qualname: &str,
+    func: &Py<PyAny>,
     inputs: &[String],
-    resolved: &HashMap<String, Py<PyAny>>,
+    resolved: &ResolvedKwargs,
 ) -> Result<Py<PyAny>, AppError> {
     Python::attach(|py| {
-        let func = import_qualified_name(py, dep_qualname)
-            .map_err(|e| AppError::Internal(format!("import dep '{dep_qualname}': {e}")))?;
-
-        let kwargs = build_step_kwargs(py, inputs, resolved)?;
-
+        let kwargs = resolved.to_py_dict(py, inputs)?;
         func.call(py, (), Some(&kwargs))
-            .map_err(|e| AppError::Internal(format!("dep '{dep_qualname}' failed: {e}")))
+            .map_err(|e| AppError::Internal(format!("dependency call failed: {e}")))
     })
 }
 
-/// Call an async Python dependency.
+/// Call an async Python dependency via the persistent event loop.
 async fn call_python_async(
-    dep_qualname: &str,
+    func: &Py<PyAny>,
     inputs: &[String],
-    resolved: &HashMap<String, Py<PyAny>>,
+    resolved: &ResolvedKwargs,
+    loop_handle: &EventLoopHandle,
 ) -> Result<Py<PyAny>, AppError> {
-    let future = Python::attach(|py| {
-        let func = import_qualified_name(py, dep_qualname)
-            .map_err(|e| AppError::Internal(format!("import dep '{dep_qualname}': {e}")))?;
-
-        let kwargs = build_step_kwargs(py, inputs, resolved)?;
-
-        let coro = func
-            .call(py, (), Some(&kwargs))
-            .map_err(|e| AppError::Internal(format!("dep '{dep_qualname}' failed: {e}")))?;
-
-        pyo3_async_runtimes::tokio::into_future(coro.into_bound(py))
-            .map_err(|e| AppError::Internal(format!("into_future: {e}")))
+    let coro = Python::attach(|py| {
+        let kwargs = resolved.to_py_dict(py, inputs)?;
+        func.call(py, (), Some(&kwargs))
+            .map_err(|e| AppError::Internal(format!("dependency call failed: {e}")))
     })?;
 
-    future
+    loop_handle
+        .drive_coroutine(coro)
         .await
-        .map_err(|e| AppError::Internal(format!("async dep '{dep_qualname}' failed: {e}")))
-}
-
-/// Build a kwargs dict for a dependency step from previously resolved values.
-fn build_step_kwargs<'py>(
-    py: Python<'py>,
-    inputs: &[String],
-    resolved: &HashMap<String, Py<PyAny>>,
-) -> Result<pyo3::Bound<'py, pyo3::types::PyDict>, AppError> {
-    let kwargs = pyo3::types::PyDict::new(py);
-    for input_name in inputs {
-        let value = resolved.get(input_name).ok_or_else(|| {
-            AppError::Internal(format!(
-                "unresolved input '{input_name}' for dependency step"
-            ))
-        })?;
-        kwargs
-            .set_item(input_name, value.bind(py))
-            .map_err(|e| AppError::Internal(format!("set kwarg: {e}")))?;
-    }
-    Ok(kwargs)
+        .map_err(|e| AppError::Internal(format!("async dependency failed: {e}")))
 }
 
 // ── Handler invocation ──────────────────────────────────────────────────
@@ -408,47 +375,39 @@ fn build_step_kwargs<'py>(
 /// Call the handler with plan-produced kwargs, filtering to declared names.
 async fn invoke_with_kwargs(
     route: &BoundRoute,
-    resolved: &HashMap<String, Py<PyAny>>,
+    bound_plan: &BoundDependencyPlan,
+    resolved: &ResolvedKwargs,
+    loop_handle: &EventLoopHandle,
 ) -> Result<Py<PyAny>, AppError> {
-    let plan = route
-        .manifest
-        .dependency_plan
-        .as_ref()
-        .ok_or_else(|| AppError::Internal("missing dependency plan".to_owned()))?;
-
-    let future = Python::attach(|py| {
-        let kwargs = filter_handler_kwargs(py, &plan.handler_kwargs, resolved)?;
-
-        let coro = route
-            .handler
-            .call(py, (), Some(&kwargs))
-            .map_err(|e| AppError::Internal(format!("handler call failed: {e}")))?;
-
-        pyo3_async_runtimes::tokio::into_future(coro.into_bound(py))
-            .map_err(|e| AppError::Internal(format!("into_future: {e}")))
-    })?;
-
-    future
-        .await
-        .map_err(|e| AppError::Internal(format!("handler failed: {e}")))
-}
-
-/// Filter resolved values to only the kwargs declared in the plan.
-fn filter_handler_kwargs<'py>(
-    py: Python<'py>,
-    handler_kwargs: &[String],
-    resolved: &HashMap<String, Py<PyAny>>,
-) -> Result<pyo3::Bound<'py, pyo3::types::PyDict>, AppError> {
-    let kwargs = pyo3::types::PyDict::new(py);
-    for name in handler_kwargs {
-        let value = resolved.get(name).ok_or_else(|| {
-            AppError::Internal(format!("handler kwarg '{name}' not resolved by plan"))
+    if route.manifest.is_async_handler {
+        let coro = Python::attach(|py| {
+            let kwargs = resolved.to_py_dict(py, &bound_plan.plan.handler_kwargs)?;
+            route
+                .handler
+                .call(py, &kwargs)
+                .map(|b| b.unbind())
+                .map_err(|e| AppError::Internal(format!("handler call failed: {e}")))
         })?;
-        kwargs
-            .set_item(name, value.bind(py))
-            .map_err(|e| AppError::Internal(format!("set kwarg: {e}")))?;
+        loop_handle
+            .drive_coroutine(coro)
+            .await
+            .map_err(|e| AppError::Internal(format!("handler failed: {e}")))
+    } else {
+        let (handler, kwargs) = Python::attach(|py| {
+            let kwargs = resolved.to_py_dict(py, &bound_plan.plan.handler_kwargs)?;
+            Ok::<_, AppError>((route.handler.clone_ref(py), kwargs.unbind()))
+        })?;
+        tokio::task::spawn_blocking(move || {
+            Python::attach(|py| {
+                handler
+                    .call(py, kwargs.bind(py))
+                    .map(|b| b.unbind())
+                    .map_err(|e| AppError::Internal(format!("handler failed: {e}")))
+            })
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("spawn_blocking: {e}")))?
     }
-    Ok(kwargs)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -462,6 +421,15 @@ mod tests {
     use crate::with_py;
     use http::HeaderMap;
 
+    fn test_handle() -> EventLoopHandle {
+        // Start a real event loop. The EventLoop is leaked (stopped on process exit)
+        // because these tests exercise sync-only plan steps. The handle keeps it alive.
+        let event_loop = crate::event_loop::EventLoop::start().unwrap();
+        let handle = event_loop.handle();
+        std::mem::forget(event_loop);
+        handle
+    }
+
     fn empty_ctx() -> RequestContext {
         RequestContext {
             path_params: Vec::new(),
@@ -469,6 +437,26 @@ mod tests {
             headers: HeaderMap::new(),
             body: None,
         }
+    }
+
+    /// Wrap a `DependencyPlan` into a `BoundDependencyPlan`.
+    ///
+    /// Resolves `CallPython` step qualnames to live Python callables (mirrors
+    /// `bind_dependency_plan` in `discovery/bind.rs`). Non-`CallPython` steps
+    /// get `None`.
+    fn bind_plan(plan: DependencyPlan) -> BoundDependencyPlan {
+        let callables = with_py(|py| {
+            plan.steps
+                .iter()
+                .map(|step| match step {
+                    DependencyStep::CallPython { dep_qualname, .. } => {
+                        import_qualified_name(py, dep_qualname.as_str()).ok()
+                    }
+                    _ => None,
+                })
+                .collect()
+        });
+        BoundDependencyPlan { plan, callables }
     }
 
     #[tokio::test]
@@ -481,7 +469,10 @@ mod tests {
         };
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle())
+            .await
+            .unwrap();
         assert!(result.is_empty());
     }
 
@@ -504,7 +495,10 @@ mod tests {
             body: None,
         };
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle())
+            .await
+            .unwrap();
         with_py(|py| {
             assert!(result.contains_key("item_id"));
             let val: i64 = result["item_id"].extract(py).unwrap();
@@ -533,7 +527,10 @@ mod tests {
             body: None,
         };
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle())
+            .await
+            .unwrap();
         with_py(|py| {
             let val: i64 = result["page"].extract(py).unwrap();
             assert_eq!(val, 3);
@@ -556,7 +553,10 @@ mod tests {
         };
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle())
+            .await
+            .unwrap();
         with_py(|py| {
             assert!(result["page"].bind(py).is_none());
         });
@@ -585,7 +585,10 @@ mod tests {
             body: None,
         };
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle())
+            .await
+            .unwrap();
         with_py(|py| {
             let val: String = result["token"].extract(py).unwrap();
             assert_eq!(val, "secret");
@@ -614,7 +617,10 @@ mod tests {
             body: None,
         };
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle())
+            .await
+            .unwrap();
         with_py(|py| {
             let val: String = result["session"].extract(py).unwrap();
             assert_eq!(val, "abc123");
@@ -639,7 +645,10 @@ mod tests {
             generator_cleanup_indices: Vec::new(),
         };
         let ctx = empty_ctx();
-        let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle())
+            .await
+            .unwrap();
         assert!(result.contains_key("engine"));
     }
 
@@ -656,22 +665,24 @@ mod tests {
         };
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await;
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle()).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, AppError::Internal(_)));
     }
 
-    #[tokio::test]
-    async fn execute_filter_handler_kwargs() {
+    #[test]
+    fn resolved_kwargs_to_py_dict() {
         with_py(|py| {
-            let mut resolved = HashMap::new();
+            let mut resolved = ResolvedKwargs::with_capacity(3);
             resolved.insert("a".to_owned(), py.None());
             resolved.insert("b".to_owned(), py.None());
             resolved.insert("c".to_owned(), py.None());
 
-            let kwargs = filter_handler_kwargs(py, &["a".to_owned(), "c".to_owned()], &resolved);
-            let dict = kwargs.unwrap();
+            let dict = resolved
+                .to_py_dict(py, &["a".to_owned(), "c".to_owned()])
+                .unwrap();
             assert_eq!(dict.len(), 2);
             assert!(dict.contains("a").unwrap());
             assert!(dict.contains("c").unwrap());
@@ -701,7 +712,8 @@ mod tests {
         };
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await;
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle()).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::BadRequest(_)));
     }
@@ -720,7 +732,8 @@ mod tests {
         };
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await;
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle()).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::Internal(_)));
     }
@@ -728,7 +741,7 @@ mod tests {
     #[test]
     fn resolve_default_none() {
         with_py(|py| {
-            let result = resolve_default(py, None).unwrap();
+            let result = crate::bridge::extract::resolve_default(py, None).unwrap();
             assert!(result.bind(py).is_none());
         });
     }
@@ -737,7 +750,7 @@ mod tests {
     fn resolve_default_string() {
         with_py(|py| {
             let default = serde_json::Value::String("hello".to_owned());
-            let result = resolve_default(py, Some(&default)).unwrap();
+            let result = crate::bridge::extract::resolve_default(py, Some(&default)).unwrap();
             let val: String = result.extract(py).unwrap();
             assert_eq!(val, "hello");
         });
@@ -747,7 +760,7 @@ mod tests {
     fn resolve_default_int() {
         with_py(|py| {
             let default = serde_json::json!(42);
-            let result = resolve_default(py, Some(&default)).unwrap();
+            let result = crate::bridge::extract::resolve_default(py, Some(&default)).unwrap();
             let val: i64 = result.extract(py).unwrap();
             assert_eq!(val, 42);
         });
@@ -757,7 +770,7 @@ mod tests {
     fn resolve_default_bool() {
         with_py(|py| {
             let default = serde_json::Value::Bool(true);
-            let result = resolve_default(py, Some(&default)).unwrap();
+            let result = crate::bridge::extract::resolve_default(py, Some(&default)).unwrap();
             let val: bool = result.extract(py).unwrap();
             assert!(val);
         });
@@ -767,7 +780,7 @@ mod tests {
     fn resolve_default_float() {
         with_py(|py| {
             let default = serde_json::json!(1.5);
-            let result = resolve_default(py, Some(&default)).unwrap();
+            let result = crate::bridge::extract::resolve_default(py, Some(&default)).unwrap();
             let val: f64 = result.extract(py).unwrap();
             assert!((val - 1.5).abs() < f64::EPSILON);
         });
@@ -777,17 +790,29 @@ mod tests {
     fn resolve_default_null() {
         with_py(|py| {
             let default = serde_json::Value::Null;
-            let result = resolve_default(py, Some(&default)).unwrap();
+            let result = crate::bridge::extract::resolve_default(py, Some(&default)).unwrap();
             assert!(result.bind(py).is_none());
         });
     }
 
     #[test]
-    fn resolve_default_array_falls_back_to_none() {
+    fn resolve_default_array_roundtrips() {
         with_py(|py| {
             let default = serde_json::json!([1, 2, 3]);
-            let result = resolve_default(py, Some(&default)).unwrap();
-            assert!(result.bind(py).is_none());
+            let result = crate::bridge::extract::resolve_default(py, Some(&default)).unwrap();
+            let val: Vec<i64> = result.extract(py).unwrap();
+            assert_eq!(val, vec![1, 2, 3]);
+        });
+    }
+
+    #[test]
+    fn resolve_default_object_roundtrips() {
+        with_py(|py| {
+            let default = serde_json::json!({"key": "val"});
+            let result = crate::bridge::extract::resolve_default(py, Some(&default)).unwrap();
+            let dict = result.bind(py).cast::<PyDict>().unwrap();
+            let val: String = dict.get_item("key").unwrap().unwrap().extract().unwrap();
+            assert_eq!(val, "val");
         });
     }
 
@@ -807,7 +832,8 @@ mod tests {
         };
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await;
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle()).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::Validation(_)));
     }
@@ -828,7 +854,8 @@ mod tests {
         };
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await;
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle()).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::Validation(_)));
     }
@@ -849,7 +876,10 @@ mod tests {
         };
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle())
+            .await
+            .unwrap();
         with_py(|py| {
             assert!(result["token"].bind(py).is_none());
         });
@@ -870,7 +900,8 @@ mod tests {
         };
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await;
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle()).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::Validation(_)));
     }
@@ -890,17 +921,20 @@ mod tests {
         };
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle())
+            .await
+            .unwrap();
         with_py(|py| {
             assert!(result["session"].bind(py).is_none());
         });
     }
 
     #[test]
-    fn filter_handler_kwargs_missing_key() {
+    fn resolved_kwargs_to_py_dict_missing_key() {
         with_py(|py| {
-            let resolved = HashMap::new();
-            let result = filter_handler_kwargs(py, &["missing".to_owned()], &resolved);
+            let resolved = ResolvedKwargs::with_capacity(0);
+            let result = resolved.to_py_dict(py, &["missing".to_owned()]);
             assert!(result.is_err());
         });
     }
@@ -921,7 +955,10 @@ mod tests {
         };
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle())
+            .await
+            .unwrap();
         with_py(|py| {
             let val: i64 = result["page"].extract(py).unwrap();
             assert_eq!(val, 1);
@@ -963,7 +1000,8 @@ mod tests {
         };
         let cache = LifecycleCache::empty();
         // BaseModel accepts empty dict
-        let result = execute_plan(&plan, &ctx, &cache).await;
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle()).await;
         assert!(result.is_ok());
     }
 
@@ -981,7 +1019,8 @@ mod tests {
         };
         let ctx = empty_ctx(); // no body
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await;
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle()).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::Internal(_)));
     }
@@ -1006,26 +1045,27 @@ mod tests {
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
         // builtins.len() with no args will fail, but that exercises the call path
-        let result = execute_plan(&plan, &ctx, &cache).await;
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle()).await;
         // len() with no positional args and no kwargs fails — that's expected
         assert!(result.is_err());
     }
 
     #[test]
-    fn build_step_kwargs_missing_input() {
+    fn resolved_kwargs_missing_input() {
         with_py(|py| {
-            let resolved = HashMap::new();
-            let result = build_step_kwargs(py, &["missing".to_owned()], &resolved);
+            let resolved = ResolvedKwargs::with_capacity(0);
+            let result = resolved.to_py_dict(py, &["missing".to_owned()]);
             assert!(result.is_err());
         });
     }
 
     #[test]
-    fn build_step_kwargs_populated() {
+    fn resolved_kwargs_populated() {
         with_py(|py| {
-            let mut resolved = HashMap::new();
+            let mut resolved = ResolvedKwargs::with_capacity(1);
             resolved.insert("x".to_owned(), py.None());
-            let kwargs = build_step_kwargs(py, &["x".to_owned()], &resolved).unwrap();
+            let kwargs = resolved.to_py_dict(py, &["x".to_owned()]).unwrap();
             assert_eq!(kwargs.len(), 1);
         });
     }
@@ -1049,7 +1089,8 @@ mod tests {
             body: Some(bytes::Bytes::from("{}")),
         };
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await;
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle()).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::Internal(_)));
     }
@@ -1088,7 +1129,8 @@ mod tests {
             body: Some(bytes::Bytes::from("{}")),
         };
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await;
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle()).await;
         assert!(result.is_err());
         // Pydantic returns structured validation errors
         assert!(matches!(
@@ -1124,7 +1166,10 @@ mod tests {
         };
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle())
+            .await
+            .unwrap();
         with_py(|py| {
             let val: i64 = result["result"].extract(py).unwrap();
             assert_eq!(val, 42);
@@ -1177,7 +1222,10 @@ mod tests {
             body: None,
         };
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await.unwrap();
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle())
+            .await
+            .unwrap();
         with_py(|py| {
             let val: i64 = result["sum"].extract(py).unwrap();
             assert_eq!(val, 10);
@@ -1185,7 +1233,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_call_python_sync_bad_import() {
+    async fn execute_call_python_unresolved_callable() {
+        // With pre-resolution, a bad qualname produces None at bind time.
+        // The executor surfaces this as an Internal error.
         with_py(|_py| {});
         let plan = DependencyPlan {
             steps: vec![DependencyStep::CallPython {
@@ -1202,7 +1252,8 @@ mod tests {
         };
         let ctx = empty_ctx();
         let cache = LifecycleCache::empty();
-        let result = execute_plan(&plan, &ctx, &cache).await;
+        let bound = bind_plan(plan);
+        let result = execute_plan(&bound, &ctx, &cache, &test_handle()).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::Internal(_)));
     }

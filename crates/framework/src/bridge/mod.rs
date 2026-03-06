@@ -6,11 +6,13 @@
 pub mod asgi;
 pub mod context;
 pub mod dispatch;
+mod extract;
 
 pub mod asgi_dispatch;
 pub mod plan_executor;
 pub mod streaming;
 
+use crate::event_loop::EventLoopHandle;
 use crate::route::{BoundRoute, DispatchStrategy, HandlerKind, HttpMethod};
 use crate::runtime::lifecycle::LifecycleCache;
 use asgi_dispatch::AsgiBridgeDispatch;
@@ -20,7 +22,6 @@ use axum::{Json, Router};
 use dispatch::{AppState, HandlerDispatch, RequestResponseDispatch};
 use plan_executor::PlanExecutorDispatch;
 use std::collections::HashSet;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,6 +54,12 @@ async fn python_handler(
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, crate::error::AppError> {
+    tracing::debug!(
+        method = %request.method(),
+        path = %request.uri().path(),
+        dispatch = ?state.dispatch,
+        "python_handler entry"
+    );
     let path_params = collect_path_params(&raw_params);
 
     // Transport boundary: axum → InboundRequest (once, here)
@@ -111,6 +118,7 @@ fn dispatch_for(
 struct WsHandlerState {
     route: Arc<BoundRoute>,
     server_addr: SocketAddr,
+    loop_handle: EventLoopHandle,
 }
 
 /// axum handler for WebSocket upgrade.
@@ -155,46 +163,37 @@ async fn handle_ws_connection(
     let receive = asgi::AsgiWsReceive::new(incoming_rx);
     let send = asgi::AsgiSend::new(outgoing_tx);
 
-    let result = launch_ws_handler(&state, &inbound, receive, send);
-    match result {
-        Ok(future) => {
-            if let Err(e) = future.await {
-                tracing::error!(error = %e, "websocket handler error");
-            }
-        }
+    // Build ASGI objects and get handler coroutine (brief GIL hold).
+    let coro = pyo3::Python::attach(
+        |py| -> Result<pyo3::Py<pyo3::PyAny>, crate::error::AppError> {
+            let scope = asgi::build_ws_scope(py, &inbound)
+                .map_err(|e| crate::error::AppError::Internal(format!("build ws scope: {e}")))?;
+            let receive_obj = pyo3::Py::new(py, receive)
+                .map_err(|e| crate::error::AppError::Internal(format!("wrap ws receive: {e}")))?;
+            let send_obj = pyo3::Py::new(py, send)
+                .map_err(|e| crate::error::AppError::Internal(format!("wrap ws send: {e}")))?;
+            state
+                .route
+                .handler
+                .inner()
+                .call(py, (scope, receive_obj, send_obj), None)
+                .map_err(|e| crate::error::AppError::Internal(format!("ws handler call: {e}")))
+        },
+    );
+
+    // Drive the WS handler coroutine on the persistent event loop.
+    // This runs concurrently with the frame-forwarding tasks above.
+    // BackgroundTasks and contextvars work correctly.
+    match coro {
+        Ok(coro) => match state.loop_handle.drive_coroutine(coro).await {
+            Ok(_) => {}
+            Err(e) => tracing::error!(error = %e, "websocket handler error"),
+        },
         Err(e) => tracing::error!(error = %e, "websocket handler setup error"),
     }
 
     recv_task.abort();
     send_task.abort();
-}
-
-/// Build ASGI scope and start the Python WebSocket handler coroutine.
-///
-/// Acquires the GIL briefly to construct scope/receive/send and call the
-/// handler. Returns a Rust future that can be awaited with the GIL released.
-fn launch_ws_handler(
-    state: &WsHandlerState,
-    inbound: &crate::transport::types::InboundRequest,
-    receive: asgi::AsgiWsReceive,
-    send: asgi::AsgiSend,
-) -> Result<impl Future<Output = Result<pyo3::Py<pyo3::PyAny>, pyo3::PyErr>>, crate::error::AppError>
-{
-    pyo3::Python::attach(|py| {
-        let scope = asgi::build_ws_scope(py, inbound)
-            .map_err(|e| crate::error::AppError::Internal(format!("build ws scope: {e}")))?;
-        let receive_obj = pyo3::Py::new(py, receive)
-            .map_err(|e| crate::error::AppError::Internal(format!("wrap ws receive: {e}")))?;
-        let send_obj = pyo3::Py::new(py, send)
-            .map_err(|e| crate::error::AppError::Internal(format!("wrap ws send: {e}")))?;
-        let coro = state
-            .route
-            .handler
-            .call(py, (scope, receive_obj, send_obj), None)
-            .map_err(|e| crate::error::AppError::Internal(format!("ws handler call: {e}")))?;
-        pyo3_async_runtimes::tokio::into_future(coro.into_bound(py))
-            .map_err(|e| crate::error::AppError::Internal(format!("ws into_future: {e}")))
-    })
 }
 
 /// Forward incoming WebSocket frames from axum to the Python receive channel.
@@ -316,6 +315,7 @@ fn register_routes(
             let ws_state = WsHandlerState {
                 route: Arc::new(route),
                 server_addr,
+                loop_handle: app_state.loop_handle.clone(),
             };
             router = router.route(&path, get(ws_handler).with_state(ws_state));
             continue;
@@ -410,11 +410,8 @@ async fn handle_infra_error(err: tower::BoxError) -> axum::response::Response {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
     reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
@@ -422,7 +419,7 @@ mod tests {
     use axum::body::Body;
     use tower::ServiceExt;
 
-    use crate::route::{HandlerKind, QualName, ResponseType, RouteManifest, RoutePath};
+    use crate::route::{Handler, HandlerKind, QualName, ResponseType, RouteManifest, RoutePath};
     use crate::with_py;
 
     fn make_route_with_strategy(strategy: DispatchStrategy) -> BoundRoute {
@@ -443,13 +440,15 @@ mod tests {
                 include_in_schema: true,
                 deprecated: false,
                 operation_id: None,
+                is_async_handler: true,
             },
-            handler: py.None(),
+            handler: Handler::stub(py.None()),
             params: Vec::new(),
             response_model: None,
             has_body_param: false,
             dependant: None,
             fastapi_app: None,
+            bound_plan: None,
         })
     }
 
@@ -584,13 +583,15 @@ mod tests {
                     include_in_schema: true,
                     deprecated: false,
                     operation_id: None,
+                    is_async_handler: true,
                 },
-                handler: py.None(),
+                handler: Handler::stub(py.None()),
                 params: Vec::new(),
                 response_model: None,
                 has_body_param: false,
                 dependant: None,
                 fastapi_app: None,
+                bound_plan: None,
             }
         })
     }
@@ -618,8 +619,10 @@ mod tests {
         // Verify a WebSocket route is registered (doesn't crash)
         // and goes through the WS path (different state type)
         let ws_route = make_route_with_kind(HandlerKind::WebSocket);
+        let mut event_loop = crate::event_loop::EventLoop::start().unwrap();
         let app_state = Arc::new(AppState {
             max_body_limit: crate::route::BodyLimit::DEFAULT,
+            loop_handle: event_loop.handle(),
         });
         let server_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
         let cache = Arc::new(LifecycleCache::empty());
@@ -632,5 +635,6 @@ mod tests {
             server_addr,
             &cache,
         );
+        event_loop.stop();
     }
 }

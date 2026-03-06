@@ -491,9 +491,8 @@ fn set_scope_path_params(
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
     reason = "test code uses unwrap/assert for clarity"

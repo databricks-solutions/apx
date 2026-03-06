@@ -6,7 +6,7 @@ use crate::route::{
     QualName, ResponseType, RouteManifest, RoutePath,
 };
 use pyo3::types::{PyAnyMethods, PyString};
-use pyo3::{Bound, Python};
+use pyo3::{Bound, FromPyObject, Python};
 use std::collections::HashSet;
 
 /// Import the user module, find the FastAPI app, and extract an [`AppManifest`].
@@ -89,60 +89,44 @@ struct RouteMetadata {
     operation_id: Option<String>,
 }
 
+/// Raw attributes extracted from a Python `APIRoute` via `FromPyObject`.
+#[derive(FromPyObject)]
+struct RouteAttrs {
+    #[pyo3(attribute)]
+    path: String,
+    #[pyo3(attribute, default)]
+    methods: Option<HashSet<String>>,
+    #[pyo3(attribute, default)]
+    status_code: Option<u16>,
+    #[pyo3(attribute, default)]
+    tags: Option<Vec<String>>,
+    #[pyo3(attribute, default)]
+    summary: Option<String>,
+    #[pyo3(attribute, default)]
+    description: Option<String>,
+    #[pyo3(attribute, default)]
+    deprecated: Option<bool>,
+    #[pyo3(attribute, default)]
+    include_in_schema: Option<bool>,
+    #[pyo3(attribute, default)]
+    operation_id: Option<String>,
+}
+
 /// Read scalar metadata fields from a Python `APIRoute`.
 fn extract_route_metadata(route: &Bound<'_, pyo3::PyAny>) -> Result<RouteMetadata, DiscoveryError> {
-    let path: String = extract_attr(route, "path")?;
-
-    let methods: HashSet<String> = route
-        .getattr(c"methods")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .unwrap_or_default();
-
-    let status_code: u16 = route
-        .getattr(c"status_code")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .unwrap_or(200);
-
-    let tags: Vec<String> = route
-        .getattr(c"tags")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .unwrap_or_default();
-
-    let summary: Option<String> = route
-        .getattr(c"summary")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .ok();
-
-    let description: Option<String> = route
-        .getattr(c"description")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .ok();
-
-    let deprecated: bool = route
-        .getattr(c"deprecated")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .unwrap_or(false);
-
-    let include_in_schema: bool = route
-        .getattr(c"include_in_schema")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .unwrap_or(true);
-
-    let operation_id: Option<String> = route
-        .getattr(c"operation_id")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .ok();
-
+    let raw: RouteAttrs = route
+        .extract()
+        .map_err(|e| DiscoveryError::Python(format!("route metadata: {e}")))?;
     Ok(RouteMetadata {
-        path,
-        methods,
-        status_code,
-        tags,
-        summary,
-        description,
-        deprecated,
-        include_in_schema,
-        operation_id,
+        path: raw.path,
+        methods: raw.methods.unwrap_or_default(),
+        status_code: raw.status_code.unwrap_or(200),
+        tags: raw.tags.unwrap_or_default(),
+        summary: raw.summary,
+        description: raw.description,
+        deprecated: raw.deprecated.unwrap_or(false),
+        include_in_schema: raw.include_in_schema.unwrap_or(true),
+        operation_id: raw.operation_id,
     })
 }
 
@@ -230,6 +214,15 @@ fn extract_routes(
         let (kind, dispatch_strategy, response_type) =
             classify_route(py, &endpoint, &dependant, &response_model)?;
 
+        let is_async_handler = {
+            let inspect = py
+                .import(c"inspect")
+                .map_err(|e| DiscoveryError::Python(format!("import inspect: {e}")))?;
+            inspect
+                .call_method1(c"iscoroutinefunction", (&endpoint,))
+                .is_ok_and(|r| r.is_truthy().unwrap_or(false))
+        };
+
         let route_path = RoutePath::new(&meta.path)
             .map_err(|e| DiscoveryError::InvalidRoute(format!("path '{}': {e}", meta.path)))?;
 
@@ -252,6 +245,7 @@ fn extract_routes(
                 include_in_schema: meta.include_in_schema,
                 deprecated: meta.deprecated,
                 operation_id: meta.operation_id.clone(),
+                is_async_handler,
             });
         }
     }
@@ -298,6 +292,7 @@ fn extract_ws_route(
         include_in_schema: false,
         deprecated: false,
         operation_id: None,
+        is_async_handler: true,
     }))
 }
 
@@ -342,46 +337,47 @@ fn extract_params_from_dependant(
     Ok(params)
 }
 
+/// Raw attributes extracted from a Python field info object.
+#[derive(FromPyObject)]
+struct FieldAttrs<'py> {
+    #[pyo3(attribute)]
+    name: String,
+    #[pyo3(attribute, default)]
+    alias: Option<String>,
+    #[pyo3(attribute, default)]
+    required: Option<bool>,
+    #[pyo3(attribute("type_"))]
+    type_obj: Bound<'py, pyo3::PyAny>,
+}
+
 /// Convert a FastAPI `FieldInfo` / `ModelField` → [`ParamManifest`].
 fn field_to_param_manifest(
     py: Python<'_>,
     field: &Bound<'_, pyo3::PyAny>,
     source: ParamSource,
 ) -> Result<ParamManifest, DiscoveryError> {
-    let name: String = field
-        .getattr(c"name")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .map_err(|e| DiscoveryError::Python(format!("field.name: {e}")))?;
+    let attrs: FieldAttrs<'_> = field
+        .extract()
+        .map_err(|e| DiscoveryError::Python(format!("field attrs: {e}")))?;
 
-    let alias: Option<String> = field
-        .getattr(c"alias")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .ok();
-
-    let required: bool = field
-        .getattr(c"required")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .unwrap_or(true);
-
-    let type_ = field
-        .getattr(c"type_")
-        .map_err(|e| DiscoveryError::Python(format!("field.type_: {e}")))?;
-
-    let type_qualname_str = python_type_qualname(py, &type_)?;
+    let type_qualname_str = python_type_qualname(py, &attrs.type_obj)?;
     let type_qualname = QualName::new(&type_qualname_str).map_err(|e| {
-        DiscoveryError::InvalidRoute(format!("param '{name}' type '{type_qualname_str}': {e}"))
+        DiscoveryError::InvalidRoute(format!(
+            "param '{}' type '{type_qualname_str}': {e}",
+            attrs.name
+        ))
     })?;
 
     let default_json = extract_default_json(py, field)?;
 
     // Only store alias if it differs from the name.
-    let alias = alias.filter(|a| a != &name);
+    let alias = attrs.alias.filter(|a| a != &attrs.name);
 
     Ok(ParamManifest {
-        name,
+        name: attrs.name,
         source,
         type_qualname,
-        required,
+        required: attrs.required.unwrap_or(true),
         json_schema: None,
         alias,
         default_json,

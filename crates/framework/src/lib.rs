@@ -20,6 +20,7 @@ pub mod transport;
 
 pub(crate) mod bridge;
 pub(crate) mod discovery;
+pub(crate) mod event_loop;
 pub(crate) mod ipc;
 pub(crate) mod signal;
 
@@ -28,3 +29,6 @@ pub(crate) fn with_py<R>(f: impl FnOnce(pyo3::Python<'_>) -> R) -> R {
     pyo3::Python::initialize();
     pyo3::Python::attach(f)
 }
+
+#[cfg(test)]
+mod integration_tests;

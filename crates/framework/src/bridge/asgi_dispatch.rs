@@ -39,6 +39,12 @@ impl HandlerDispatch for AsgiBridgeDispatch {
         mut request: InboundRequest,
     ) -> Pin<Box<dyn Future<Output = Result<OutboundResponse, AppError>> + Send>> {
         Box::pin(async move {
+            tracing::debug!(
+                path = %request.path,
+                handler = %route.manifest.handler_qualname,
+                "asgi_dispatch: handle entry"
+            );
+
             // 1. Take body + collect bytes
             let body_stream = request.take_body();
             let body_bytes = body_stream
@@ -46,10 +52,10 @@ impl HandlerDispatch for AsgiBridgeDispatch {
                 .await
                 .map_err(|_| AppError::BodyParse(BodyParseKind::BodyTooLarge))?;
 
-            // 2. Build ASGI objects
+            // 2. Build ASGI objects and get handler coroutine (brief GIL hold)
             let (send_tx, mut send_rx) = mpsc::channel::<AsgiEvent>(ASGI_CHANNEL_SIZE);
 
-            let future = Python::attach(|py| {
+            let coro = Python::attach(|py| -> Result<Py<PyAny>, AppError> {
                 let scope = build_http_scope(py, &request)
                     .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
 
@@ -60,28 +66,26 @@ impl HandlerDispatch for AsgiBridgeDispatch {
                 };
                 let send = AsgiSend::new(send_tx);
 
-                // 3. Call handler with ASGI triad (scope, receive, send)
                 let receive_obj = Py::new(py, receive)
                     .map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
                 let send_obj =
                     Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
-                let coro = route
-                    .handler
-                    .call(py, (scope, receive_obj, send_obj), None)
-                    .map_err(|e| AppError::Internal(format!("handler call: {e}")))?;
 
-                pyo3_async_runtimes::tokio::into_future(coro.into_bound(py))
-                    .map_err(|e| AppError::Internal(format!("into_future: {e}")))
+                route
+                    .handler
+                    .inner()
+                    .call(py, (scope, receive_obj, send_obj), None)
+                    .map_err(|e| AppError::Internal(format!("handler call: {e}")))
             })?;
 
-            // 4. Await handler (runs concurrently — sends events through channel)
-            let handler_task = tokio::spawn(async move {
-                future
-                    .await
-                    .map_err(|e| AppError::Internal(format!("asgi handler failed: {e}")))
-            });
+            // 3. Drive handler coroutine on the persistent event loop.
+            //    This runs concurrently with Tokio response collection below.
+            //    BackgroundTasks, contextvars, and get_running_loop() all work
+            //    correctly because the coroutine runs on a real asyncio loop.
+            let loop_handle = app_state.loop_handle.clone();
+            let handler_task = tokio::spawn(async move { loop_handle.drive_coroutine(coro).await });
 
-            // 5. Branch: streaming vs buffered response collection
+            // 4. Branch: streaming vs buffered response collection
             let is_streaming = matches!(route.manifest.kind, HandlerKind::SSE)
                 || matches!(
                     route.manifest.response_type,

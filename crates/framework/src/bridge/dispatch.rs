@@ -5,27 +5,31 @@
 
 use super::context::RequestContext;
 use crate::error::{AppError, BodyParseKind, ValidationErrorItem};
-use crate::route::{BoundRoute, ParamSource, ResponseType};
+use crate::event_loop::EventLoopHandle;
+use crate::route::{BoundRoute, Model, ParamSource, ResponseType};
 use crate::transport::types::{InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
 use http::StatusCode;
-use pyo3::types::{PyAnyMethods, PyBytes, PyDict, PyDictMethods, PyString, PyTypeMethods};
+use pyo3::types::{PyAnyMethods, PyBytes, PyDict, PyDictMethods, PyTypeMethods};
 use pyo3::{Py, PyAny, Python};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 /// Lifecycle-scoped state shared across all routes in a single worker.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct AppState {
     /// Max request body size in bytes.
     pub max_body_limit: crate::route::BodyLimit,
+    /// Handle to the persistent asyncio event loop.
+    pub loop_handle: EventLoopHandle,
 }
 
 impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppState")
             .field("max_body_limit", &self.max_body_limit)
+            .field("loop_handle", &self.loop_handle)
             .finish_non_exhaustive()
     }
 }
@@ -62,7 +66,7 @@ impl HandlerDispatch for RequestResponseDispatch {
     ) -> Pin<Box<dyn Future<Output = Result<OutboundResponse, AppError>> + Send>> {
         Box::pin(async move {
             let ctx = extract_context(&mut request, &route, &app_state).await?;
-            let result = invoke_handler(&route, &ctx).await?;
+            let result = invoke_handler(&route, &ctx, &app_state.loop_handle).await?;
             Python::attach(|py| serialize_result(py, &result, &route))
         })
     }
@@ -104,24 +108,68 @@ pub(super) async fn extract_context(
 
 // ── Step 2: Invoke handler ──────────────────────────────────────────────
 
-/// Call the Python handler and await the result.
+/// Call the Python handler, branching on async vs sync.
 ///
-/// Phase 1 (GIL held): build kwargs, call handler, get coroutine, convert
-/// to Rust future via `into_future`.
-/// Phase 2 (GIL released): await the future.
-async fn invoke_handler(route: &BoundRoute, ctx: &RequestContext) -> Result<Py<PyAny>, AppError> {
-    let future = Python::attach(|py| {
+/// Async handlers: build kwargs, get coroutine, drive on the persistent event loop.
+/// Sync handlers: build kwargs, run the call in `spawn_blocking`.
+async fn invoke_handler(
+    route: &BoundRoute,
+    ctx: &RequestContext,
+    loop_handle: &EventLoopHandle,
+) -> Result<Py<PyAny>, AppError> {
+    tracing::debug!(
+        handler = %route.manifest.handler_qualname,
+        params = route.params.len(),
+        is_async = route.manifest.is_async_handler,
+        "invoke_handler: calling handler"
+    );
+
+    let result = if route.manifest.is_async_handler {
+        invoke_handler_async(route, ctx, loop_handle).await?
+    } else {
+        invoke_handler_sync(route, ctx).await?
+    };
+
+    tracing::debug!("invoke_handler: handler completed successfully");
+    Ok(result)
+}
+
+/// Async path: build kwargs, obtain the coroutine, drive it on the event loop.
+async fn invoke_handler_async(
+    route: &BoundRoute,
+    ctx: &RequestContext,
+    loop_handle: &EventLoopHandle,
+) -> Result<Py<PyAny>, AppError> {
+    let coro = Python::attach(|py| {
         let kwargs = build_kwargs(py, route, ctx)?;
-        let coro = route
+        route
             .handler
-            .call(py, (), Some(&kwargs))
-            .map_err(|e| AppError::Internal(format!("handler call failed: {e}")))?;
-
-        pyo3_async_runtimes::tokio::into_future(coro.into_bound(py))
-            .map_err(|e| AppError::Internal(format!("into_future: {e}")))
+            .call(py, &kwargs)
+            .map(|b| b.unbind())
+            .map_err(|e| AppError::Internal(format!("handler call failed: {e}")))
     })?;
+    loop_handle.drive_coroutine(coro).await
+}
 
-    future.await.map_err(python_err_to_app_error)
+/// Sync path: build kwargs, run the handler on the blocking threadpool.
+async fn invoke_handler_sync(
+    route: &BoundRoute,
+    ctx: &RequestContext,
+) -> Result<Py<PyAny>, AppError> {
+    let (handler, kwargs) = Python::attach(|py| {
+        let kwargs = build_kwargs(py, route, ctx)?;
+        Ok::<_, AppError>((route.handler.clone_ref(py), kwargs.unbind()))
+    })?;
+    tokio::task::spawn_blocking(move || {
+        Python::attach(|py| {
+            handler
+                .call(py, kwargs.bind(py))
+                .map(|b| b.unbind())
+                .map_err(|e| AppError::Internal(format!("handler call failed: {e}")))
+        })
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn_blocking: {e}")))?
 }
 
 /// Build Python kwargs dict from route params and request context.
@@ -147,97 +195,43 @@ fn resolve_param_value<'py>(
     py: Python<'py>,
     param: &crate::route::ParamManifest,
     ctx: &RequestContext,
-    python_type: Option<&Py<PyAny>>,
+    python_type: Option<&Model>,
 ) -> Result<pyo3::Bound<'py, PyAny>, AppError> {
     match param.source {
-        ParamSource::Path => resolve_path_param(py, param, ctx),
-        ParamSource::Query => resolve_query_param(py, param, ctx),
-        ParamSource::Header => resolve_header_param(py, param, ctx),
-        ParamSource::Cookie => resolve_cookie_param(py, param, ctx),
+        ParamSource::Path => super::extract::extract_path_value(
+            py,
+            &ctx.path_params,
+            &param.name,
+            param.type_qualname.as_str(),
+            param.required,
+        ),
+        ParamSource::Query => super::extract::extract_query_value(
+            py,
+            &ctx.query_params,
+            &param.name,
+            param.type_qualname.as_str(),
+            param.required,
+            param.default_json.as_ref(),
+        ),
+        ParamSource::Header => {
+            let wire_name = param.alias.as_deref().unwrap_or(&param.name);
+            super::extract::extract_header_value(
+                py,
+                &ctx.headers,
+                wire_name,
+                param.type_qualname.as_str(),
+                param.required,
+            )
+        }
+        ParamSource::Cookie => super::extract::extract_cookie_value(
+            py,
+            &ctx.headers,
+            &param.name,
+            param.type_qualname.as_str(),
+            param.required,
+        ),
         ParamSource::Body => resolve_body_param(py, ctx, python_type),
         ParamSource::RawBody => resolve_raw_body(py, ctx),
-    }
-}
-
-/// Resolve a path parameter.
-fn resolve_path_param<'py>(
-    py: Python<'py>,
-    param: &crate::route::ParamManifest,
-    ctx: &RequestContext,
-) -> Result<pyo3::Bound<'py, PyAny>, AppError> {
-    let value = ctx
-        .path_params
-        .iter()
-        .find(|(k, _)| k == &param.name)
-        .map(|(_, v)| v.as_str());
-
-    match value {
-        Some(v) => convert_path_value(py, v, param.type_qualname.as_str()),
-        None if !param.required => Ok(py.None().into_bound(py)),
-        None => Err(AppError::BadRequest(format!(
-            "missing path parameter: {}",
-            param.name
-        ))),
-    }
-}
-
-/// Convert a path parameter string to the target Python type.
-pub(super) fn convert_path_value<'py>(
-    py: Python<'py>,
-    value: &str,
-    type_name: &str,
-) -> Result<pyo3::Bound<'py, PyAny>, AppError> {
-    let py_str = PyString::new(py, value);
-
-    match type_name {
-        "int" => {
-            let builtins = py
-                .import(c"builtins")
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            builtins
-                .getattr(c"int")
-                .and_then(|f| f.call1((py_str,)))
-                .map_err(|_| {
-                    AppError::BadRequest(format!("path param is not a valid integer: {value}"))
-                })
-        }
-        "float" => {
-            let builtins = py
-                .import(c"builtins")
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            builtins
-                .getattr(c"float")
-                .and_then(|f| f.call1((py_str,)))
-                .map_err(|_| {
-                    AppError::BadRequest(format!("path param is not a valid float: {value}"))
-                })
-        }
-        _ => Ok(py_str.into_any()),
-    }
-}
-
-/// Resolve a query parameter.
-fn resolve_query_param<'py>(
-    py: Python<'py>,
-    param: &crate::route::ParamManifest,
-    ctx: &RequestContext,
-) -> Result<pyo3::Bound<'py, PyAny>, AppError> {
-    // Take last value for scalar types (standard browser behavior for duplicate keys).
-    let value = ctx
-        .query_params
-        .iter()
-        .rev()
-        .find(|(k, _)| k == &param.name)
-        .map(|(_, v)| v.as_str());
-
-    match value {
-        Some(v) => convert_path_value(py, v, param.type_qualname.as_str()),
-        None if !param.required => Ok(py.None().into_bound(py)),
-        None => Err(AppError::Validation(vec![ValidationErrorItem {
-            loc: vec!["query".to_owned(), param.name.clone()],
-            msg: "Field required".to_owned(),
-            r#type: "missing".to_owned(),
-        }])),
     }
 }
 
@@ -245,27 +239,24 @@ fn resolve_query_param<'py>(
 fn resolve_body_param<'py>(
     py: Python<'py>,
     ctx: &RequestContext,
-    python_type: Option<&Py<PyAny>>,
+    python_type: Option<&Model>,
 ) -> Result<pyo3::Bound<'py, PyAny>, AppError> {
     let body = ctx
         .body
         .as_ref()
         .ok_or_else(|| AppError::Internal("body not read for Body param".to_owned()))?;
 
-    let model_cls = python_type
+    let model = python_type
         .ok_or_else(|| AppError::Internal("missing python_type for Body param".to_owned()))?;
 
-    model_cls
-        .bind(py)
-        .call_method1(c"model_validate_json", (body.as_ref(),))
-        .map_err(|e| {
-            let errors = extract_pydantic_errors(py, &e);
-            if errors.is_empty() {
-                AppError::BadRequest(format!("body validation failed: {e}"))
-            } else {
-                AppError::Validation(errors)
-            }
-        })
+    model.validate_json(py, body.as_ref()).map_err(|e| {
+        let errors = extract_pydantic_errors(py, &e);
+        if errors.is_empty() {
+            AppError::BadRequest(format!("body validation failed: {e}"))
+        } else {
+            AppError::Validation(errors)
+        }
+    })
 }
 
 /// Extract structured errors from a Pydantic `ValidationError`.
@@ -305,63 +296,6 @@ fn resolve_raw_body<'py>(
     Ok(PyBytes::new(py, body).into_any())
 }
 
-/// Resolve a header parameter by looking up the wire name in the header map.
-fn resolve_header_param<'py>(
-    py: Python<'py>,
-    param: &crate::route::ParamManifest,
-    ctx: &RequestContext,
-) -> Result<pyo3::Bound<'py, PyAny>, AppError> {
-    let wire_name = param.alias.as_deref().unwrap_or(&param.name);
-    match ctx.headers.get(wire_name) {
-        Some(value) => {
-            let value_str = value.to_str().map_err(|_| {
-                AppError::BadRequest(format!(
-                    "header '{wire_name}' contains non-ASCII characters"
-                ))
-            })?;
-            convert_path_value(py, value_str, param.type_qualname.as_str())
-        }
-        None if !param.required => Ok(py.None().into_bound(py)),
-        None => Err(AppError::Validation(vec![ValidationErrorItem {
-            loc: vec!["header".into(), wire_name.into()],
-            msg: format!("missing required header: {wire_name}"),
-            r#type: "missing".into(),
-        }])),
-    }
-}
-
-/// Resolve a cookie parameter by parsing the `Cookie` header.
-fn resolve_cookie_param<'py>(
-    py: Python<'py>,
-    param: &crate::route::ParamManifest,
-    ctx: &RequestContext,
-) -> Result<pyo3::Bound<'py, PyAny>, AppError> {
-    let cookie_header = ctx
-        .headers
-        .get("cookie")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    for pair in cookie_header.split(';') {
-        let pair = pair.trim();
-        if let Some((name, value)) = pair.split_once('=')
-            && name.trim() == param.name
-        {
-            return convert_path_value(py, value.trim(), param.type_qualname.as_str());
-        }
-    }
-
-    if param.required {
-        Err(AppError::Validation(vec![ValidationErrorItem {
-            loc: vec!["cookie".into(), param.name.clone()],
-            msg: format!("missing required cookie: {}", param.name),
-            r#type: "missing".into(),
-        }]))
-    } else {
-        Ok(py.None().into_bound(py))
-    }
-}
-
 // ── Step 3: Serialize response ──────────────────────────────────────────
 
 /// Validate return type and serialize the Python result to an outbound response.
@@ -384,7 +318,7 @@ fn validate_return_type(
     let Some(model) = route.response_model.as_ref() else {
         return Ok(());
     };
-    if result.is_instance(model.bind(py)).unwrap_or(false) {
+    if model.is_instance(py, result) {
         return Ok(());
     }
     let actual = result
@@ -496,40 +430,9 @@ fn try_json_dumps(py: Python<'_>, result: &pyo3::Bound<'_, PyAny>) -> Option<Vec
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/// Convert a Python exception to an [`AppError`].
-///
-/// Uses `is_instance_of` against the Rust-defined `create_exception!` types —
-/// no runtime Python import needed.
-fn python_err_to_app_error(err: pyo3::PyErr) -> AppError {
-    Python::attach(|py| {
-        if err.is_instance_of::<crate::pyapi::NotFound>(py) {
-            return extract_detail(err.value(py), AppError::NotFound);
-        }
-        if err.is_instance_of::<crate::pyapi::BadRequest>(py) {
-            return extract_detail(err.value(py), AppError::BadRequest);
-        }
-        if err.is_instance_of::<crate::pyapi::Forbidden>(py) {
-            return extract_detail(err.value(py), AppError::Forbidden);
-        }
-
-        AppError::Internal(format!("{err}"))
-    })
-}
-
-/// Extract the detail message from a framework exception.
-///
-/// Framework exceptions set `args[0]` as the detail message (standard
-/// Python Exception pattern). Falls back to `str(value)`.
-fn extract_detail(value: &pyo3::Bound<'_, PyAny>, f: fn(String) -> AppError) -> AppError {
-    let detail = value.str().map(|s| s.to_string()).unwrap_or_default();
-    f(detail)
-}
-
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
     clippy::indexing_slicing,
     reason = "test code uses unwrap/assert for clarity"
 )]
@@ -586,50 +489,22 @@ mod tests {
 
     #[test]
     fn app_state_debug() {
+        let mut event_loop = crate::event_loop::EventLoop::start().unwrap();
         let state = AppState {
             max_body_limit: crate::route::BodyLimit::DEFAULT,
+            loop_handle: event_loop.handle(),
         };
         let dbg = format!("{state:?}");
         assert!(dbg.contains("AppState"));
         assert!(dbg.contains("max_body_limit"));
+        event_loop.stop();
     }
 
     // ── Header extraction ───────────────────────────────────────────────
 
-    fn make_header_param(
-        name: &str,
-        alias: Option<&str>,
-        type_name: &str,
-        required: bool,
-    ) -> crate::route::ParamManifest {
-        crate::route::ParamManifest {
-            name: name.to_owned(),
-            source: ParamSource::Header,
-            type_qualname: crate::route::QualName::new(type_name).unwrap(),
-            required,
-            alias: alias.map(str::to_owned),
-            json_schema: None,
-            default_json: None,
-        }
-    }
+    use crate::bridge::extract;
 
-    fn make_cookie_param(
-        name: &str,
-        type_name: &str,
-        required: bool,
-    ) -> crate::route::ParamManifest {
-        crate::route::ParamManifest {
-            name: name.to_owned(),
-            source: ParamSource::Cookie,
-            type_qualname: crate::route::QualName::new(type_name).unwrap(),
-            required,
-            alias: None,
-            json_schema: None,
-            default_json: None,
-        }
-    }
-
-    fn ctx_with_headers(pairs: &[(&str, &str)]) -> RequestContext {
+    fn make_headers(pairs: &[(&str, &str)]) -> http::HeaderMap {
         let mut headers = http::HeaderMap::new();
         for (k, v) in pairs {
             headers.insert(
@@ -637,20 +512,14 @@ mod tests {
                 http::HeaderValue::from_str(v).unwrap(),
             );
         }
-        RequestContext {
-            path_params: Vec::new(),
-            query_params: Vec::new(),
-            headers,
-            body: None,
-        }
+        headers
     }
 
     #[test]
-    fn resolve_header_param_present() {
+    fn extract_header_present() {
         with_py(|py| {
-            let param = make_header_param("x-token", None, "str", true);
-            let ctx = ctx_with_headers(&[("x-token", "abc")]);
-            let result = resolve_header_param(py, &param, &ctx);
+            let headers = make_headers(&[("x-token", "abc")]);
+            let result = extract::extract_header_value(py, &headers, "x-token", "str", true);
             assert!(result.is_ok());
             let val: String = result.unwrap().extract().unwrap();
             assert_eq!(val, "abc");
@@ -658,11 +527,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_header_param_alias() {
+    fn extract_header_alias() {
         with_py(|py| {
-            let param = make_header_param("token", Some("x-token"), "str", true);
-            let ctx = ctx_with_headers(&[("x-token", "xyz")]);
-            let result = resolve_header_param(py, &param, &ctx);
+            let headers = make_headers(&[("x-token", "xyz")]);
+            let result = extract::extract_header_value(py, &headers, "x-token", "str", true);
             assert!(result.is_ok());
             let val: String = result.unwrap().extract().unwrap();
             assert_eq!(val, "xyz");
@@ -670,11 +538,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_header_param_int_conversion() {
+    fn extract_header_int_conversion() {
         with_py(|py| {
-            let param = make_header_param("x-count", None, "int", true);
-            let ctx = ctx_with_headers(&[("x-count", "42")]);
-            let result = resolve_header_param(py, &param, &ctx);
+            let headers = make_headers(&[("x-count", "42")]);
+            let result = extract::extract_header_value(py, &headers, "x-count", "int", true);
             assert!(result.is_ok());
             let val: i64 = result.unwrap().extract().unwrap();
             assert_eq!(val, 42);
@@ -682,11 +549,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_header_param_missing_required() {
+    fn extract_header_missing_required() {
         with_py(|py| {
-            let param = make_header_param("x-token", None, "str", true);
-            let ctx = ctx_with_headers(&[]);
-            let result = resolve_header_param(py, &param, &ctx);
+            let headers = make_headers(&[]);
+            let result = extract::extract_header_value(py, &headers, "x-token", "str", true);
             assert!(result.is_err());
             let err = result.unwrap_err();
             assert!(matches!(err, AppError::Validation(_)));
@@ -694,11 +560,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_header_param_missing_optional() {
+    fn extract_header_missing_optional() {
         with_py(|py| {
-            let param = make_header_param("x-token", None, "str", false);
-            let ctx = ctx_with_headers(&[]);
-            let result = resolve_header_param(py, &param, &ctx);
+            let headers = make_headers(&[]);
+            let result = extract::extract_header_value(py, &headers, "x-token", "str", false);
             assert!(result.is_ok());
             assert!(result.unwrap().is_none());
         });
@@ -707,11 +572,10 @@ mod tests {
     // ── Cookie extraction ───────────────────────────────────────────────
 
     #[test]
-    fn resolve_cookie_param_present() {
+    fn extract_cookie_present() {
         with_py(|py| {
-            let param = make_cookie_param("session", "str", true);
-            let ctx = ctx_with_headers(&[("cookie", "session=abc123; theme=dark")]);
-            let result = resolve_cookie_param(py, &param, &ctx);
+            let headers = make_headers(&[("cookie", "session=abc123; theme=dark")]);
+            let result = extract::extract_cookie_value(py, &headers, "session", "str", true);
             assert!(result.is_ok());
             let val: String = result.unwrap().extract().unwrap();
             assert_eq!(val, "abc123");
@@ -719,63 +583,60 @@ mod tests {
     }
 
     #[test]
-    fn resolve_cookie_param_missing_required() {
+    fn extract_cookie_missing_required() {
         with_py(|py| {
-            let param = make_cookie_param("session", "str", true);
-            let ctx = ctx_with_headers(&[]);
-            let result = resolve_cookie_param(py, &param, &ctx);
+            let headers = make_headers(&[]);
+            let result = extract::extract_cookie_value(py, &headers, "session", "str", true);
             assert!(result.is_err());
             assert!(matches!(result.unwrap_err(), AppError::Validation(_)));
         });
     }
 
     #[test]
-    fn resolve_cookie_param_missing_optional() {
+    fn extract_cookie_missing_optional() {
         with_py(|py| {
-            let param = make_cookie_param("session", "str", false);
-            let ctx = ctx_with_headers(&[]);
-            let result = resolve_cookie_param(py, &param, &ctx);
+            let headers = make_headers(&[]);
+            let result = extract::extract_cookie_value(py, &headers, "session", "str", false);
             assert!(result.is_ok());
             assert!(result.unwrap().is_none());
         });
     }
 
     #[test]
-    fn resolve_cookie_param_multiple_cookies() {
+    fn extract_cookie_multiple_cookies() {
         with_py(|py| {
-            let param = make_cookie_param("b", "str", true);
-            let ctx = ctx_with_headers(&[("cookie", "a=1; b=2; c=3")]);
-            let result = resolve_cookie_param(py, &param, &ctx);
+            let headers = make_headers(&[("cookie", "a=1; b=2; c=3")]);
+            let result = extract::extract_cookie_value(py, &headers, "b", "str", true);
             assert!(result.is_ok());
             let val: String = result.unwrap().extract().unwrap();
             assert_eq!(val, "2");
         });
     }
 
-    // ── convert_path_value ─────────────────────────────────────────────
+    // ── convert_scalar ───────────────────────────────────────────────────
 
     #[test]
-    fn convert_path_value_float() {
+    fn convert_scalar_float() {
         with_py(|py| {
-            let result = convert_path_value(py, "2.5", "float").unwrap();
+            let result = extract::convert_scalar(py, "2.5", "float").unwrap();
             let val: f64 = result.extract().unwrap();
             assert!((val - 2.5).abs() < f64::EPSILON);
         });
     }
 
     #[test]
-    fn convert_path_value_invalid_float() {
+    fn convert_scalar_invalid_float() {
         with_py(|py| {
-            let result = convert_path_value(py, "not_a_number", "float");
+            let result = extract::convert_scalar(py, "not_a_number", "float");
             assert!(result.is_err());
             assert!(matches!(result.unwrap_err(), AppError::BadRequest(_)));
         });
     }
 
     #[test]
-    fn convert_path_value_unknown_type_returns_string() {
+    fn convert_scalar_unknown_type_returns_string() {
         with_py(|py| {
-            let result = convert_path_value(py, "hello", "uuid").unwrap();
+            let result = extract::convert_scalar(py, "hello", "uuid").unwrap();
             let val: String = result.extract().unwrap();
             assert_eq!(val, "hello");
         });
@@ -810,44 +671,6 @@ mod tests {
             let result = resolve_raw_body(py, &ctx).unwrap();
             let val: Vec<u8> = result.extract().unwrap();
             assert!(val.is_empty());
-        });
-    }
-
-    // ── python_err_to_app_error ────────────────────────────────────────
-
-    #[test]
-    fn python_err_to_app_error_not_found() {
-        with_py(|_py| {
-            let err = pyo3::PyErr::new::<crate::pyapi::NotFound, _>("item not found");
-            let app_err = python_err_to_app_error(err);
-            assert!(matches!(app_err, AppError::NotFound(_)));
-        });
-    }
-
-    #[test]
-    fn python_err_to_app_error_bad_request() {
-        with_py(|_py| {
-            let err = pyo3::PyErr::new::<crate::pyapi::BadRequest, _>("invalid input");
-            let app_err = python_err_to_app_error(err);
-            assert!(matches!(app_err, AppError::BadRequest(_)));
-        });
-    }
-
-    #[test]
-    fn python_err_to_app_error_forbidden() {
-        with_py(|_py| {
-            let err = pyo3::PyErr::new::<crate::pyapi::Forbidden, _>("access denied");
-            let app_err = python_err_to_app_error(err);
-            assert!(matches!(app_err, AppError::Forbidden(_)));
-        });
-    }
-
-    #[test]
-    fn python_err_to_app_error_generic() {
-        with_py(|_py| {
-            let err = pyo3::PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("something broke");
-            let app_err = python_err_to_app_error(err);
-            assert!(matches!(app_err, AppError::Internal(_)));
         });
     }
 }

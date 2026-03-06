@@ -130,6 +130,7 @@ mod tests {
                 include_in_schema: true,
                 deprecated: false,
                 operation_id: None,
+                is_async_handler: true,
             }],
             dependency_graph: Vec::new(),
             lifecycle_deps: Vec::new(),
@@ -158,6 +159,7 @@ mod tests {
             include_in_schema: true,
             deprecated: false,
             operation_id: None,
+            is_async_handler: true,
         };
         let manifest = AppManifest {
             meta: None,
