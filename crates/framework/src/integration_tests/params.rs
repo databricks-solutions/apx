@@ -432,3 +432,88 @@ async def get_item(item_id: int = Path(ge=1)):
 
     server.stop().await;
 }
+
+/// Unicode characters in path params — percent-decoded by axum.
+#[tokio::test]
+async fn unicode_path_params() {
+    let app = r#"
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/users/{username}")
+async def get_user(username: str):
+    return {"username": username}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_unicode_path").await;
+
+    // ASCII with accented char (percent-encoded café)
+    let (status, body) = server.get("/users/caf%C3%A9").await;
+    assert_eq!(status, 200, "unicode path param café: {body}");
+    assert_eq!(body["username"], "café");
+
+    // CJK characters (percent-encoded 日本語)
+    let (status, body) = server.get("/users/%E6%97%A5%E6%9C%AC%E8%AA%9E").await;
+    assert_eq!(status, 200, "unicode path param 日本語: {body}");
+    assert_eq!(body["username"], "日本語");
+
+    server.stop().await;
+}
+
+/// `Query()` with `List[str]` — repeated query params `?tags=a&tags=b`.
+#[tokio::test]
+async fn list_query_params() {
+    let app = r#"
+from fastapi import FastAPI, Query
+from typing import List
+app = FastAPI()
+
+@app.get("/items")
+async def list_items(tags: List[str] = Query(default=[])):
+    return {"tags": tags}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_list_query").await;
+
+    // Multiple values
+    let (status, body) = server.get("/items?tags=a&tags=b").await;
+    assert_eq!(status, 200, "list query params: {body}");
+    assert_eq!(body["tags"], serde_json::json!(["a", "b"]));
+
+    // Single value
+    let (status, body) = server.get("/items?tags=only").await;
+    assert_eq!(status, 200, "single list query: {body}");
+    assert_eq!(body["tags"], serde_json::json!(["only"]));
+
+    // Empty default
+    let (status, body) = server.get("/items").await;
+    assert_eq!(status, 200, "empty default list: {body}");
+    assert_eq!(body["tags"], serde_json::json!([]));
+
+    server.stop().await;
+}
+
+/// `Query(alias="item-query")` — hyphenated alias for query param.
+#[tokio::test]
+async fn aliased_query_param() {
+    let app = r#"
+from fastapi import FastAPI, Query
+app = FastAPI()
+
+@app.get("/search")
+async def search(q: str = Query(alias="item-query")):
+    return {"q": q}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_alias_query").await;
+
+    let (status, body) = server.get("/search?item-query=foo").await;
+    assert_eq!(status, 200, "aliased query param: {body}");
+    assert_eq!(body["q"], "foo");
+
+    // Using the Python name instead of alias → 422
+    let (status, _body) = server.get("/search?q=foo").await;
+    assert_eq!(status, 422, "non-aliased name should be 422");
+
+    server.stop().await;
+}

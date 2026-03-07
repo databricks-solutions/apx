@@ -355,3 +355,53 @@ async def upload(file: UploadFile = File()):
 
     server.stop().await;
 }
+
+/// Sending `text/plain` content-type to an endpoint expecting JSON body → 422.
+#[tokio::test]
+async fn wrong_content_type_for_json() {
+    let app = r#"
+from fastapi import FastAPI
+from pydantic import BaseModel
+app = FastAPI()
+
+class Item(BaseModel):
+    name: str
+
+@app.post("/items")
+async def create_item(item: Item):
+    return {"name": item.name}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_wrong_ct").await;
+
+    let (status, _body) = server
+        .post_raw("/items", r#"{"name": "x"}"#, "text/plain")
+        .await;
+    assert_eq!(
+        status, 422,
+        "text/plain content-type for JSON endpoint should be 422"
+    );
+
+    server.stop().await;
+}
+
+/// POST `{}` to a handler with no body params → 200 (body is ignored).
+#[tokio::test]
+async fn empty_json_to_no_body_handler() {
+    let app = r#"
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.post("/empty-ok")
+async def empty_ok():
+    return {"ok": True}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_empty_json").await;
+
+    let (status, body) = server.post_json("/empty-ok", serde_json::json!({})).await;
+    assert_eq!(status, 200, "empty JSON to no-body handler: {body}");
+    assert_eq!(body["ok"], true);
+
+    server.stop().await;
+}

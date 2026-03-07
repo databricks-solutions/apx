@@ -320,3 +320,107 @@ async def false_val():
 
     server.stop().await;
 }
+
+/// `Response(status_code=204)` — no body returned.
+#[tokio::test]
+async fn response_204_no_content() {
+    let app = r#"
+from fastapi import FastAPI
+from starlette.responses import Response
+app = FastAPI()
+
+@app.delete("/items/{item_id}", status_code=204)
+async def delete_item(item_id: int):
+    return Response(status_code=204)
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_204").await;
+
+    let (status, body) = server.delete("/items/1").await;
+    assert_eq!(status, 204, "DELETE should return 204");
+    assert!(body.is_null(), "204 body should be null/empty, got: {body}");
+
+    server.stop().await;
+}
+
+/// `JSONResponse` with custom headers — verify headers pass through the ASGI bridge.
+#[tokio::test]
+async fn json_response_custom_headers() {
+    let app = r#"
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+app = FastAPI()
+
+@app.get("/custom-headers")
+async def custom_headers():
+    return JSONResponse(
+        content={"data": "value"},
+        headers={"x-custom": "hello", "x-request-id": "req-42"},
+    )
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_json_headers").await;
+
+    let (status, headers, body) = server.get_raw("/custom-headers").await;
+    assert_eq!(status, 200, "custom headers: status {status}");
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    assert_eq!(json["data"], "value");
+    assert_eq!(
+        headers.get("x-custom").map(|v| v.to_str().unwrap_or("")),
+        Some("hello"),
+        "x-custom header missing: {headers:?}"
+    );
+    assert_eq!(
+        headers
+            .get("x-request-id")
+            .map(|v| v.to_str().unwrap_or("")),
+        Some("req-42"),
+        "x-request-id header missing: {headers:?}"
+    );
+
+    server.stop().await;
+}
+
+/// Nested list response — `[[1,2],[3,4]]` serialized correctly.
+#[tokio::test]
+async fn nested_list_response() {
+    let app = r#"
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/nested")
+async def nested():
+    return [[1, 2], [3, 4]]
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_nested_list").await;
+
+    let (status, body) = server.get("/nested").await;
+    assert_eq!(status, 200, "nested list: {body}");
+    assert_eq!(body, serde_json::json!([[1, 2], [3, 4]]));
+
+    server.stop().await;
+}
+
+/// Dict with int keys — JSON stringifies keys to `{"1":"a","2":"b"}`.
+#[tokio::test]
+async fn int_key_dict_response() {
+    let app = r#"
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/int-keys")
+async def int_keys():
+    return {1: "a", 2: "b"}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_int_keys").await;
+
+    let (status, body) = server.get("/int-keys").await;
+    assert_eq!(status, 200, "int key dict: {body}");
+    // JSON stringifies integer keys
+    assert_eq!(body["1"], "a", "int key 1: {body}");
+    assert_eq!(body["2"], "b", "int key 2: {body}");
+
+    server.stop().await;
+}

@@ -270,3 +270,67 @@ async def with_custom_header(response: Response):
 
     server.stop().await;
 }
+
+/// `HTTPException` with custom `headers` kwarg — headers pass through to response.
+#[tokio::test]
+async fn http_exception_custom_headers() {
+    let app = r#"
+from fastapi import FastAPI, HTTPException
+app = FastAPI()
+
+@app.get("/forbidden")
+async def forbidden():
+    raise HTTPException(
+        status_code=403,
+        detail="access denied",
+        headers={"x-error": "denied", "x-reason": "no-auth"},
+    )
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_exc_headers").await;
+
+    let (status, headers, body) = server.get_raw("/forbidden").await;
+    assert_eq!(status, 403, "HTTPException with headers: status {status}");
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    assert_eq!(json["detail"], "access denied");
+    assert_eq!(
+        headers.get("x-error").map(|v| v.to_str().unwrap_or("")),
+        Some("denied"),
+        "x-error header missing: {headers:?}"
+    );
+    assert_eq!(
+        headers.get("x-reason").map(|v| v.to_str().unwrap_or("")),
+        Some("no-auth"),
+        "x-reason header missing: {headers:?}"
+    );
+
+    server.stop().await;
+}
+
+/// `Depends()` function that raises `RuntimeError` → 500, no detail leak.
+#[tokio::test]
+async fn dependency_raises_returns_500() {
+    let app = r#"
+from fastapi import FastAPI, Depends
+app = FastAPI()
+
+def broken_dep():
+    raise RuntimeError("secret internal error in dependency")
+
+@app.get("/with-broken-dep")
+async def with_broken_dep(dep=Depends(broken_dep)):
+    return {"dep": dep}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_dep_raises").await;
+
+    let (status, body) = server.get("/with-broken-dep").await;
+    assert_eq!(status, 500, "broken dependency should return 500: {body}");
+    let detail = body["detail"].as_str().unwrap_or("");
+    assert!(
+        !detail.contains("secret internal error"),
+        "dependency error detail should not leak: {body}"
+    );
+
+    server.stop().await;
+}

@@ -7,6 +7,7 @@
 //! - [`responses`] — status codes, response types, streaming, SSE
 //! - [`dependencies`] — `Depends()`, generators, background tasks, overrides
 //! - [`middleware`] — error handling, middleware, lifespan, request/response injection
+//! - [`routing`] — 404/405, health probes, trailing slash, multiple routers
 
 #![expect(
     clippy::unwrap_used,
@@ -22,6 +23,7 @@ mod handlers;
 mod middleware;
 mod params;
 mod responses;
+mod routing;
 
 use crate::bridge::asgi::lifespan::{LifespanGuard, run_lifespan_startup};
 use crate::bridge::dispatch::AppState;
