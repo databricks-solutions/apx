@@ -566,6 +566,216 @@ const fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
+// ── ASGI Lifespan Protocol ───────────────────────────────────────────────
+
+// Gated behind cfg(test) — only the integration test harness uses lifespan.
+// Remove the gate when production `apx serve` runs lifespan startup.
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test-only lifespan helpers use unwrap for infallible PyDict operations"
+)]
+pub mod lifespan {
+    use super::*;
+    use crate::error::AppError;
+    use crate::event_loop::EventLoopHandle;
+    use tokio::sync::oneshot;
+
+    /// Startup-complete signal sender.
+    type StartupTx = Arc<std::sync::Mutex<Option<oneshot::Sender<Result<(), String>>>>>;
+
+    /// RAII guard for a running ASGI lifespan. Sends `lifespan.shutdown` on drop.
+    pub struct LifespanGuard {
+        /// Send `lifespan.shutdown` when ready to stop.
+        shutdown_tx: Option<mpsc::Sender<Py<PyAny>>>,
+        /// Join handle for the background lifespan task (the ASGI app coroutine).
+        _task: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl Drop for LifespanGuard {
+        fn drop(&mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                // Build shutdown event and send it (best-effort on drop).
+                // Use try_send (non-blocking) since drop may run inside a tokio runtime.
+                Python::attach(|py| {
+                    let event = build_lifespan_event(py, "lifespan.shutdown");
+                    let _ = tx.try_send(event);
+                });
+            }
+        }
+    }
+
+    /// ASGI `receive` callable for the lifespan protocol.
+    ///
+    /// Yields events from a channel: first `lifespan.startup`, then
+    /// `lifespan.shutdown` (sent by [`LifespanGuard`] on drop).
+    #[pyclass(module = "apx._core")]
+    struct AsgiLifespanReceive {
+        rx: Arc<Mutex<mpsc::Receiver<Py<PyAny>>>>,
+    }
+
+    #[pymethods]
+    impl AsgiLifespanReceive {
+        fn __call__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+            let rx = Arc::clone(&self.rx);
+            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                let mut guard = rx.lock().await;
+                match guard.recv().await {
+                    Some(event) => Ok(event),
+                    None => {
+                        // Channel closed — block forever to prevent the ASGI app
+                        // from returning prematurely.
+                        std::future::pending::<PyResult<Py<PyAny>>>().await
+                    }
+                }
+            })
+        }
+    }
+
+    /// ASGI `send` callable for the lifespan protocol.
+    ///
+    /// Captures `lifespan.startup.complete` and `lifespan.shutdown.complete`.
+    #[pyclass(module = "apx._core")]
+    struct AsgiLifespanSend {
+        startup_complete_tx: StartupTx,
+    }
+
+    #[pymethods]
+    impl AsgiLifespanSend {
+        fn __call__<'py>(
+            &self,
+            py: Python<'py>,
+            event: Bound<'py, PyDict>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let event_type: String = event
+                .get_item("type")?
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("type"))?
+                .extract()?;
+
+            match event_type.as_str() {
+                "lifespan.startup.complete" => {
+                    let maybe_tx = self.startup_complete_tx.lock().unwrap().take();
+                    if let Some(tx) = maybe_tx {
+                        let _ = tx.send(Ok(()));
+                    }
+                }
+                "lifespan.startup.failed" => {
+                    let message: String = event
+                        .get_item("message")?
+                        .map(|v| v.extract())
+                        .transpose()?
+                        .unwrap_or_default();
+                    let maybe_tx = self.startup_complete_tx.lock().unwrap().take();
+                    if let Some(tx) = maybe_tx {
+                        let _ = tx.send(Err(message));
+                    }
+                }
+                "lifespan.shutdown.complete" | "lifespan.shutdown.failed" => {
+                    // Nothing to do — the ASGI app will return on its own.
+                }
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "unexpected lifespan event: {other}"
+                    )));
+                }
+            }
+
+            // Return an awaitable None.
+            pyo3_async_runtimes::tokio::future_into_py(py, async {
+                Python::attach(|py| Ok(py.None()))
+            })
+        }
+    }
+
+    /// Build a lifespan event dict: `{"type": <event_type>}`.
+    fn build_lifespan_event(py: Python<'_>, event_type: &str) -> Py<PyAny> {
+        let dict = PyDict::new(py);
+        dict.set_item("type", event_type).unwrap();
+        dict.into_any().unbind()
+    }
+
+    /// Build the ASGI lifespan scope dict.
+    fn build_lifespan_scope(py: Python<'_>) -> Py<PyDict> {
+        let dict = PyDict::new(py);
+        dict.set_item("type", "lifespan").unwrap();
+        let asgi = PyDict::new(py);
+        asgi.set_item("version", ASGI_VERSION).unwrap();
+        asgi.set_item("spec_version", ASGI_SPEC_VERSION).unwrap();
+        dict.set_item("asgi", asgi).unwrap();
+        dict.unbind()
+    }
+
+    /// Run the ASGI lifespan startup protocol against the app.
+    ///
+    /// Returns a [`LifespanGuard`] whose drop sends `lifespan.shutdown`.
+    /// The ASGI app coroutine runs in the background on the event loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if startup fails or the event loop can't drive the coroutine.
+    pub async fn run_lifespan_startup(
+        app: &Py<PyAny>,
+        loop_handle: &EventLoopHandle,
+    ) -> Result<LifespanGuard, AppError> {
+        // Channel for receive events (startup, then shutdown on drop).
+        let (receive_tx, receive_rx) = mpsc::channel::<Py<PyAny>>(2);
+
+        // Oneshot for startup-complete signal.
+        let (startup_tx, startup_rx) = oneshot::channel::<Result<(), String>>();
+
+        // Build ASGI objects and call app(scope, receive, send).
+        let coro = Python::attach(|py| -> Result<Py<PyAny>, AppError> {
+            let scope = build_lifespan_scope(py);
+
+            let receive = AsgiLifespanReceive {
+                rx: Arc::new(Mutex::new(receive_rx)),
+            };
+            let send = AsgiLifespanSend {
+                startup_complete_tx: Arc::new(std::sync::Mutex::new(Some(startup_tx))),
+            };
+
+            let receive_obj = Py::new(py, receive)
+                .map_err(|e| AppError::Internal(format!("wrap lifespan receive: {e}")))?;
+            let send_obj = Py::new(py, send)
+                .map_err(|e| AppError::Internal(format!("wrap lifespan send: {e}")))?;
+
+            app.call(py, (scope, receive_obj, send_obj), None)
+                .map_err(|e| AppError::Internal(format!("lifespan call: {e}")))
+        })?;
+
+        // Send the startup event through the receive channel.
+        let startup_event = Python::attach(|py| build_lifespan_event(py, "lifespan.startup"));
+        receive_tx.send(startup_event).await.map_err(|_| {
+            AppError::Internal("lifespan receive channel closed before startup".to_owned())
+        })?;
+
+        // Spawn the ASGI app coroutine on the event loop (don't await — it runs
+        // until shutdown).
+        let lh = loop_handle.clone();
+        let task = tokio::spawn(async move {
+            if let Err(e) = lh.drive_coroutine(coro).await {
+                tracing::warn!(error = %e, "lifespan coroutine error");
+            }
+        });
+
+        // Wait for the app to signal startup complete.
+        let result = startup_rx.await.map_err(|_| {
+            AppError::Internal("lifespan startup: app never sent startup.complete".to_owned())
+        })?;
+
+        if let Err(message) = result {
+            return Err(AppError::Internal(format!(
+                "lifespan startup failed: {message}"
+            )));
+        }
+
+        Ok(LifespanGuard {
+            shutdown_tx: Some(receive_tx),
+            _task: Some(task),
+        })
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -170,11 +170,7 @@ async def mw_test():
 }
 
 /// `FastAPI(lifespan=...)` context manager sets state accessible via `request.app.state`.
-///
-/// GAP: The ASGI bridge does not trigger lifespan startup events, so `app.state`
-/// set during lifespan is not available. Handlers get 500 (AttributeError).
 #[tokio::test]
-#[should_panic(expected = "lifespan state")]
 async fn lifespan_state() {
     let app = r#"
 from contextlib import asynccontextmanager

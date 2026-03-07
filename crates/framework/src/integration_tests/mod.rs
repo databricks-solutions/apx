@@ -23,6 +23,7 @@ mod middleware;
 mod params;
 mod responses;
 
+use crate::bridge::asgi::lifespan::{LifespanGuard, run_lifespan_startup};
 use crate::bridge::dispatch::AppState;
 use crate::bridge::{build_router, wrap_layers};
 use crate::discovery;
@@ -71,6 +72,7 @@ pub struct TestServer {
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     server_handle: Option<tokio::task::JoinHandle<()>>,
     event_loop: EventLoop,
+    _lifespan_guard: Option<LifespanGuard>,
     _tmp_dir: tempfile::TempDir,
 }
 
@@ -88,7 +90,6 @@ impl TestServer {
         std::fs::write(&app_file, python_app).unwrap();
 
         let event_loop = EventLoop::start().unwrap();
-        let loop_handle = event_loop.handle();
 
         let tmp_path = tmp_dir.path().to_path_buf();
         let module = module_name.to_owned();
@@ -114,6 +115,26 @@ impl TestServer {
         });
 
         assert!(!routes.is_empty(), "no routes discovered in {module_name}");
+
+        let loop_handle = event_loop.handle();
+
+        // Run ASGI lifespan startup if any route has a FastAPI app reference.
+        let lifespan_guard = if routes.iter().any(|r| r.fastapi_app.is_some()) {
+            let app_ref = routes
+                .iter()
+                .find_map(|r| r.fastapi_app.as_ref())
+                .unwrap()
+                .inner();
+            match run_lifespan_startup(app_ref, &loop_handle).await {
+                Ok(guard) => Some(guard),
+                Err(e) => {
+                    tracing::debug!(error = %e, "lifespan startup skipped (no lifespan handler)");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let app_state = Arc::new(AppState {
             max_body_limit: BodyLimit::DEFAULT,
@@ -143,6 +164,7 @@ impl TestServer {
             shutdown_tx: Some(shutdown_tx),
             server_handle: Some(server_handle),
             event_loop,
+            _lifespan_guard: lifespan_guard,
             _tmp_dir: tmp_dir,
         }
     }

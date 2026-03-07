@@ -108,14 +108,13 @@ async def get_float(value: float):
     server.stop().await;
 }
 
-/// `:path` catch-all route param is not supported by the axum/matchit router.
+/// `:path` catch-all route param — translated to axum `{*param}` syntax.
 #[tokio::test]
-#[should_panic(expected = "path param catch-all unsupported")]
 #[expect(
     clippy::literal_string_with_formatting_args,
     reason = "Python f-string in raw string literal"
 )]
-async fn path_param_catch_all_unsupported() {
+async fn path_param_catch_all() {
     let app = "
 from fastapi import FastAPI
 app = FastAPI()
@@ -128,14 +127,8 @@ async def get_file(file_path: str):
     let mut server = TestServer::start(app, "_apx_test_path_catchall").await;
 
     let (status, body) = server.get("/files/home/user/doc.txt").await;
-    assert_eq!(
-        status, 200,
-        "path param catch-all unsupported: got {status}: {body}"
-    );
-    assert_eq!(
-        body["path"], "home/user/doc.txt",
-        "path param catch-all unsupported"
-    );
+    assert_eq!(status, 200, "path param catch-all: got {status}: {body}");
+    assert_eq!(body["path"], "home/user/doc.txt", "path param catch-all");
 
     server.stop().await;
 }

@@ -292,7 +292,7 @@ fn register_routes(
     server_addr: SocketAddr,
 ) -> Router {
     for route in routes {
-        let path = route.manifest.path.as_str().to_owned();
+        let path = route.manifest.path.as_axum_str().into_owned();
 
         if route.manifest.kind == HandlerKind::WebSocket {
             let ws_state = WsHandlerState {

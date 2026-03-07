@@ -9,6 +9,7 @@
 use pyo3::types::{PyAny, PyAnyMethods};
 use pyo3::{Py, Python};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fmt;
 
 // ── Domain newtypes ─────────────────────────────────────────────────────
@@ -137,7 +138,8 @@ impl fmt::Display for AppModule {
 
 /// Validated route path template: `"/items/{item_id}"`.
 ///
-/// Must start with `'/'`.
+/// Must start with `'/'`. FastAPI catch-all convertors (`{param:path}`)
+/// are automatically translated to axum/matchit wildcards (`{*param}`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RoutePath(String);
 
@@ -147,6 +149,51 @@ pub enum RoutePathError {
     /// Path did not start with `/`.
     #[error("route path must start with '/', got: {0}")]
     MissingLeadingSlash(String),
+}
+
+/// A single path segment classification.
+enum Segment<'a> {
+    /// Verbatim text (e.g. `items`).
+    Literal(&'a str),
+    /// Named parameter (e.g. `{item_id}` — kept as-is, axum understands it).
+    Param(&'a str),
+    /// Catch-all parameter (e.g. `{file_path:path}` → `{*file_path}`).
+    CatchAll(&'a str),
+}
+
+/// Classify a single `/`-delimited path segment.
+fn classify_segment(segment: &str) -> Segment<'_> {
+    let Some(inner) = segment.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
+        return Segment::Literal(segment);
+    };
+    match inner.strip_suffix(":path") {
+        Some(name) => Segment::CatchAll(name),
+        None => Segment::Param(segment),
+    }
+}
+
+/// Render a classified segment back to axum/matchit syntax.
+fn render_segment(segment: Segment<'_>) -> Cow<'_, str> {
+    match segment {
+        Segment::Literal(s) | Segment::Param(s) => Cow::Borrowed(s),
+        Segment::CatchAll(name) => Cow::Owned(format!("{{*{name}}}")),
+    }
+}
+
+/// Convert FastAPI path syntax to axum/matchit syntax.
+///
+/// Translates `{param:path}` catch-all convertors to `{*param}` wildcards.
+/// Other segments pass through unchanged.
+fn to_axum_syntax(path: &str) -> Cow<'_, str> {
+    if !path.contains(":path}") {
+        return Cow::Borrowed(path);
+    }
+    let converted: String = path
+        .split('/')
+        .map(|seg| render_segment(classify_segment(seg)))
+        .collect::<Vec<_>>()
+        .join("/");
+    Cow::Owned(converted)
 }
 
 impl RoutePath {
@@ -163,9 +210,17 @@ impl RoutePath {
         Ok(Self(path))
     }
 
-    /// Return the inner string.
+    /// Return the inner string (FastAPI syntax).
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Return the path in axum/matchit syntax.
+    ///
+    /// Translates FastAPI `{param:path}` catch-all convertors to `{*param}`.
+    /// Returns a borrowed reference if no conversion is needed.
+    pub fn as_axum_str(&self) -> Cow<'_, str> {
+        to_axum_syntax(&self.0)
     }
 }
 
@@ -784,6 +839,32 @@ mod tests {
             RoutePath::new("items"),
             Err(RoutePathError::MissingLeadingSlash(_))
         ));
+    }
+
+    #[test]
+    fn route_path_axum_converts_catch_all() {
+        let rp = RoutePath::new("/files/{file_path:path}").unwrap();
+        assert_eq!(rp.as_str(), "/files/{file_path:path}");
+        assert_eq!(rp.as_axum_str().as_ref(), "/files/{*file_path}");
+    }
+
+    #[test]
+    fn route_path_axum_preserves_normal_params() {
+        let rp = RoutePath::new("/items/{item_id}").unwrap();
+        assert_eq!(rp.as_axum_str().as_ref(), "/items/{item_id}");
+    }
+
+    #[test]
+    #[expect(
+        clippy::literal_string_with_formatting_args,
+        reason = "route path template, not a format string"
+    )]
+    fn route_path_axum_mixed_params_and_catch_all() {
+        let rp = RoutePath::new("/repos/{owner}/{repo}/files/{file_path:path}").unwrap();
+        assert_eq!(
+            rp.as_axum_str().as_ref(),
+            "/repos/{owner}/{repo}/files/{*file_path}"
+        );
     }
 
     #[test]
