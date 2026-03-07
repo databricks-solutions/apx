@@ -122,7 +122,7 @@ mod tests {
                 params: Vec::new(),
                 response_type: ResponseType::RawResponse,
                 tags: Vec::new(),
-                dispatch_strategy: DispatchStrategy::Direct,
+
                 dependency_plan: None,
                 status_code: 200,
                 summary: None,
@@ -151,7 +151,6 @@ mod tests {
             params: Vec::new(),
             response_type: ResponseType::RawResponse,
             tags: Vec::new(),
-            dispatch_strategy: DispatchStrategy::Direct,
             dependency_plan: None,
             status_code: 200,
             summary: None,

@@ -1,10 +1,7 @@
 //! Manifest → `BoundRoute` binding: import qualnames, resolve types.
 
 use crate::discovery::DiscoveryError;
-use crate::route::{
-    AppManifest, BoundDependencyPlan, BoundParam, BoundRoute, DependencyPlan, DependencyStep,
-    Handler, Model, ParamManifest, ParamSource, ResponseType,
-};
+use crate::route::{App, AppManifest, BoundRoute, Handler, HandlerKind};
 use pyo3::types::{PyAnyMethods, PyString};
 use pyo3::{Bound, Py, PyAny, Python};
 use std::collections::{HashMap, HashSet};
@@ -31,32 +28,66 @@ pub fn bind_routes(
         .and_then(|m| m.getattr(c"APIRoute"))
         .map_err(|e| DiscoveryError::Python(format!("import APIRoute: {e}")))?;
 
+    let ws_route_cls = py
+        .import(c"fastapi.routing")
+        .and_then(|m| m.getattr(c"APIWebSocketRoute"))
+        .ok();
+
     // Build endpoint map: (path, METHOD) → handler callable.
     let mut endpoint_map: HashMap<(String, String), Py<PyAny>> = HashMap::new();
+    // Build WS endpoint map: path → route object (the route itself is an ASGI app).
+    let mut ws_endpoint_map: HashMap<String, Py<PyAny>> = HashMap::new();
     for route in routes_list {
-        if !route.is_instance(&api_route_cls).unwrap_or(false) {
-            continue;
-        }
-        let path: String = route
-            .getattr(c"path")
-            .and_then(|v: Bound<'_, PyAny>| v.extract())
-            .map_err(|e| DiscoveryError::Python(format!("route.path: {e}")))?;
-        let methods: HashSet<String> = route
-            .getattr(c"methods")
-            .and_then(|v: Bound<'_, PyAny>| v.extract())
-            .unwrap_or_default();
-        let endpoint = route
-            .getattr(c"endpoint")
-            .map_err(|e| DiscoveryError::Python(format!("route.endpoint: {e}")))?
-            .unbind();
-        for m in methods {
-            endpoint_map.insert((path.clone(), m), endpoint.clone_ref(py));
+        if route.is_instance(&api_route_cls).unwrap_or(false) {
+            let path: String = route
+                .getattr(c"path")
+                .and_then(|v: Bound<'_, PyAny>| v.extract())
+                .map_err(|e| DiscoveryError::Python(format!("route.path: {e}")))?;
+            let methods: HashSet<String> = route
+                .getattr(c"methods")
+                .and_then(|v: Bound<'_, PyAny>| v.extract())
+                .unwrap_or_default();
+            let endpoint = route
+                .getattr(c"endpoint")
+                .map_err(|e| DiscoveryError::Python(format!("route.endpoint: {e}")))?
+                .unbind();
+            for m in methods {
+                endpoint_map.insert((path.clone(), m), endpoint.clone_ref(py));
+            }
+        } else if let Some(ref ws_cls) = ws_route_cls
+            && route.is_instance(ws_cls).unwrap_or(false)
+        {
+            let path: String = route
+                .getattr(c"path")
+                .and_then(|v: Bound<'_, PyAny>| v.extract())
+                .map_err(|e| DiscoveryError::Python(format!("ws route.path: {e}")))?;
+            ws_endpoint_map.insert(path, route.clone().unbind());
         }
     }
 
+    let app_ref = App::new(app.clone().unbind());
     let mut bound = Vec::with_capacity(manifest.routes.len());
 
     for rm in &manifest.routes {
+        if rm.kind == HandlerKind::WebSocket {
+            // WS routes: look up the route object from ws_endpoint_map.
+            // The APIWebSocketRoute itself is an ASGI app that accepts (scope, receive, send).
+            let handler_obj = ws_endpoint_map
+                .get(rm.path.as_str())
+                .ok_or_else(|| {
+                    DiscoveryError::InvalidRoute(format!("ws handler not found for {}", rm.path))
+                })?
+                .clone_ref(py);
+            let handler = Handler::new(py, handler_obj);
+
+            bound.push(BoundRoute {
+                manifest: rm.clone(),
+                handler,
+                fastapi_app: Some(app_ref.clone_ref(py)),
+            });
+            continue;
+        }
+
         let method_str = rm.method.as_str();
         let key = (rm.path.as_str().to_owned(), method_str.to_owned());
         let handler_obj = endpoint_map
@@ -70,102 +101,20 @@ pub fn bind_routes(
             .clone_ref(py);
         let handler = Handler::new(py, handler_obj);
 
-        let params = bind_params(py, &rm.params)?;
-        let response_model = bind_response_model(py, &rm.response_type)?;
-        let has_body_param = rm
-            .params
-            .iter()
-            .any(|p| matches!(p.source, ParamSource::Body | ParamSource::RawBody));
-
-        let bound_plan = rm
-            .dependency_plan
-            .as_ref()
-            .map(|plan| bind_dependency_plan(py, plan))
-            .transpose()?;
-
         bound.push(BoundRoute {
             manifest: rm.clone(),
             handler,
-            params,
-            response_model,
-            has_body_param,
-            dependant: None,
-            fastapi_app: None,
-            bound_plan,
+            fastapi_app: Some(app_ref.clone_ref(py)),
         });
     }
 
     Ok(bound)
-}
-
-/// Pre-resolve `CallPython` step qualnames to live Python callables.
-///
-/// Returns `None` if the route has no dependency plan. For each plan step,
-/// the callable slot is `Some` only for `CallPython` variants.
-fn bind_dependency_plan(
-    py: Python<'_>,
-    plan: &DependencyPlan,
-) -> Result<BoundDependencyPlan, DiscoveryError> {
-    let callables = plan
-        .steps
-        .iter()
-        .map(|step| match step {
-            DependencyStep::CallPython { dep_qualname, .. } => {
-                let func = import_qualified_name(py, dep_qualname.as_str())?;
-                Ok(Some(func))
-            }
-            _ => Ok(None),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(BoundDependencyPlan {
-        plan: plan.clone(),
-        callables,
-    })
-}
-
-/// Bind parameter manifests to their resolved Python types.
-fn bind_params(
-    py: Python<'_>,
-    params: &[ParamManifest],
-) -> Result<Vec<BoundParam>, DiscoveryError> {
-    let mut bound = Vec::with_capacity(params.len());
-
-    for param in params {
-        let python_type = match param.source {
-            ParamSource::Body => {
-                let cls = import_qualified_name(py, param.type_qualname.as_str())?;
-                Some(Model::new(cls))
-            }
-            _ => None,
-        };
-        bound.push(BoundParam {
-            manifest: param.clone(),
-            python_type,
-        });
-    }
-
-    Ok(bound)
-}
-
-/// Resolve the response model class for type checking.
-fn bind_response_model(
-    py: Python<'_>,
-    response_type: &ResponseType,
-) -> Result<Option<Model>, DiscoveryError> {
-    match response_type {
-        ResponseType::Model { qualname, .. } => {
-            let cls = import_qualified_name(py, qualname.as_str())?;
-            Ok(Some(Model::new(cls)))
-        }
-        ResponseType::StreamingResponse | ResponseType::RawResponse => Ok(None),
-    }
 }
 
 /// Bind manifest routes to live Python handlers without importing FastAPI.
 ///
-/// For each route, imports the handler by its dotted qualified name, resolves
-/// Body param types and response model classes. No FastAPI app needed.
+/// For each route, imports the handler by its dotted qualified name.
+/// No FastAPI app needed — used for manifest-based serving.
 pub fn bind_routes_from_manifest(
     py: Python<'_>,
     manifest: &AppManifest,
@@ -175,28 +124,11 @@ pub fn bind_routes_from_manifest(
     for rm in &manifest.routes {
         let handler_obj = import_qualified_name(py, rm.handler_qualname.as_str())?;
         let handler = Handler::new(py, handler_obj);
-        let params = bind_params(py, &rm.params)?;
-        let response_model = bind_response_model(py, &rm.response_type)?;
-        let has_body_param = rm
-            .params
-            .iter()
-            .any(|p| matches!(p.source, ParamSource::Body | ParamSource::RawBody));
-
-        let bound_plan = rm
-            .dependency_plan
-            .as_ref()
-            .map(|plan| bind_dependency_plan(py, plan))
-            .transpose()?;
 
         bound.push(BoundRoute {
             manifest: rm.clone(),
             handler,
-            params,
-            response_model,
-            has_body_param,
-            dependant: None,
             fastapi_app: None,
-            bound_plan,
         });
     }
 

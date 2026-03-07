@@ -6,8 +6,8 @@
 //! Bound types carry live Python objects and are constructed at runtime during
 //! route discovery.
 
-use pyo3::types::{PyAny, PyAnyMethods, PyDict};
-use pyo3::{Py, PyResult, Python};
+use pyo3::types::{PyAny, PyAnyMethods};
+use pyo3::{Py, Python};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -345,20 +345,6 @@ impl fmt::Display for ResponseType {
     }
 }
 
-/// How the bridge dispatches this route at request time.
-///
-/// Determined at build time (or discovery time in dev mode).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DispatchStrategy {
-    /// No ASGI objects. Rust extracts params, calls handler directly.
-    /// Used when: no `Depends()`, no streaming, no `Request`/`Response` injection.
-    Direct,
-    /// Construct Rust-backed ASGI scope/receive/send, then either:
-    /// - call `solve_dependencies()` (dev mode)
-    /// - execute compiled `DependencyPlan` (manifest mode)
-    AsgiBridge,
-}
-
 // ── Dependency types ─────────────────────────────────────────────────────
 
 /// A single step in the compiled dependency execution plan.
@@ -467,35 +453,6 @@ pub struct DependencyPlan {
     pub generator_cleanup_indices: Vec<usize>,
 }
 
-/// A dependency plan with pre-resolved Python callables.
-///
-/// At bind time, `CallPython` step qualnames are imported once via
-/// [`import_qualified_name`](crate::discovery::bind::import_qualified_name)
-/// so the request hot path never touches the import machinery.
-pub(crate) struct BoundDependencyPlan {
-    /// The manifest plan (for metadata: inputs, is_async, handler_kwargs, etc.).
-    pub(crate) plan: DependencyPlan,
-    /// Pre-resolved callables, indexed by step position.
-    /// `None` for non-`CallPython` steps.
-    pub(crate) callables: Vec<Option<Py<PyAny>>>,
-}
-
-impl BoundDependencyPlan {
-    /// Return the pre-resolved callable for a given step index.
-    pub(crate) fn callable_for(&self, index: usize) -> Option<&Py<PyAny>> {
-        self.callables.get(index).and_then(|opt| opt.as_ref())
-    }
-}
-
-impl fmt::Debug for BoundDependencyPlan {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BoundDependencyPlan")
-            .field("plan", &self.plan)
-            .field("callable_count", &self.callables.iter().flatten().count())
-            .finish()
-    }
-}
-
 /// Scope at which a dependency is instantiated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DepScope {
@@ -600,8 +557,6 @@ pub struct RouteManifest {
     pub response_type: ResponseType,
     /// Route tags (for grouping in OpenAPI docs).
     pub tags: Vec<String>,
-    /// How this route is dispatched at request time.
-    pub dispatch_strategy: DispatchStrategy,
     /// Pre-compiled dependency execution plan (manifest mode only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependency_plan: Option<DependencyPlan>,
@@ -680,21 +635,7 @@ impl Handler {
         Self(obj)
     }
 
-    /// Call the handler with keyword arguments, returning the raw result.
-    pub(crate) fn call<'py>(
-        &self,
-        py: Python<'py>,
-        kwargs: &pyo3::Bound<'py, PyDict>,
-    ) -> PyResult<pyo3::Bound<'py, PyAny>> {
-        self.0.bind(py).call((), Some(kwargs))
-    }
-
-    /// Clone the reference (requires GIL).
-    pub(crate) fn clone_ref(&self, py: Python<'_>) -> Self {
-        Self(self.0.clone_ref(py))
-    }
-
-    /// Borrow the inner reference (escape hatch for ASGI bridge).
+    /// Borrow the inner reference (for ASGI bridge dispatch).
     pub(crate) fn inner(&self) -> &Py<PyAny> {
         &self.0
     }
@@ -706,87 +647,20 @@ impl fmt::Debug for Handler {
     }
 }
 
-/// A Python model class that can validate and serialize structured data.
-///
-/// Used as `BoundRoute.response_model` (response serialization) and
-/// `BoundParam.python_type` (body parameter validation).
-pub(crate) struct Model(Py<PyAny>);
-
-impl Model {
-    pub(crate) fn new(obj: Py<PyAny>) -> Self {
-        Self(obj)
-    }
-
-    /// Validate raw JSON bytes into a model instance.
-    pub(crate) fn validate_json<'py>(
-        &self,
-        py: Python<'py>,
-        data: &[u8],
-    ) -> PyResult<pyo3::Bound<'py, PyAny>> {
-        self.0
-            .bind(py)
-            .call_method1(c"model_validate_json", (data,))
-    }
-
-    /// Check whether a Python object is an instance of this model.
-    pub(crate) fn is_instance(&self, py: Python<'_>, obj: &pyo3::Bound<'_, PyAny>) -> bool {
-        obj.is_instance(self.0.bind(py)).unwrap_or(false)
-    }
-}
-
-impl fmt::Debug for Model {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Model").field(&"<class>").finish()
-    }
-}
-
-/// Dependency injection metadata for a route.
-///
-/// Populated at discovery, consumed by the ASGI bridge dispatch path.
-pub(crate) struct Dependant(Py<PyAny>);
-
-impl Dependant {
-    #[expect(
-        dead_code,
-        reason = "populated at discovery, consumed by phase-5 manifest serve"
-    )]
-    pub(crate) fn new(obj: Py<PyAny>) -> Self {
-        Self(obj)
-    }
-
-    /// Borrow the inner reference.
-    #[expect(
-        dead_code,
-        reason = "populated at discovery, consumed by phase-5 manifest serve"
-    )]
-    pub(crate) fn inner(&self) -> &Py<PyAny> {
-        &self.0
-    }
-}
-
-impl fmt::Debug for Dependant {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Dependant").field(&"<object>").finish()
-    }
-}
-
 /// The live ASGI application instance (for dependency_overrides, middleware).
 pub(crate) struct App(Py<PyAny>);
 
 impl App {
-    #[expect(
-        dead_code,
-        reason = "populated at discovery, consumed by phase-5 manifest serve"
-    )]
     pub(crate) fn new(obj: Py<PyAny>) -> Self {
         Self(obj)
     }
 
+    /// Clone the reference (requires GIL).
+    pub(crate) fn clone_ref(&self, py: Python<'_>) -> Self {
+        Self(self.0.clone_ref(py))
+    }
+
     /// Borrow the inner reference.
-    #[expect(
-        dead_code,
-        reason = "populated at discovery, consumed by phase-5 manifest serve"
-    )]
     pub(crate) fn inner(&self) -> &Py<PyAny> {
         &self.0
     }
@@ -795,25 +669,6 @@ impl App {
 impl fmt::Debug for App {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("App").field(&"<app>").finish()
-    }
-}
-
-/// A single parameter bound to its runtime Python type.
-///
-/// Combines manifest metadata with the resolved type — no parallel arrays.
-pub(crate) struct BoundParam {
-    /// Serializable parameter metadata.
-    pub(crate) manifest: ParamManifest,
-    /// Resolved Python type (for conversion). `None` for builtins.
-    pub(crate) python_type: Option<Model>,
-}
-
-impl fmt::Debug for BoundParam {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BoundParam")
-            .field("manifest", &self.manifest)
-            .field("python_type", &self.python_type.is_some())
-            .finish()
     }
 }
 
@@ -826,39 +681,16 @@ impl fmt::Debug for BoundParam {
 pub(crate) struct BoundRoute {
     /// Serializable route metadata.
     pub(crate) manifest: RouteManifest,
-    /// Python handler callable.
+    /// Python handler callable (for WS) or the ASGI app callable (for HTTP via FastAPI).
     pub(crate) handler: Handler,
-    /// Resolved parameters.
-    pub(crate) params: Vec<BoundParam>,
-    /// Resolved response model class (`None` for `RawResponse`).
-    pub(crate) response_model: Option<Model>,
-    /// Whether this route has a `Body` param. Pre-computed at bind time
-    /// so the dispatch can skip body reading for GET-style routes.
-    pub(crate) has_body_param: bool,
-    /// The FastAPI Dependant object (for ASGI bridge dispatch).
-    /// `None` for direct-dispatch routes.
-    #[expect(
-        dead_code,
-        reason = "populated at discovery, consumed by phase-5 manifest serve"
-    )]
-    pub(crate) dependant: Option<Dependant>,
-    /// Reference to the live FastAPI app (for dependency_overrides).
-    #[expect(
-        dead_code,
-        reason = "populated at discovery, consumed by phase-5 manifest serve"
-    )]
+    /// Reference to the live FastAPI app (for ASGI bridge dispatch).
     pub(crate) fastapi_app: Option<App>,
-    /// Pre-resolved dependency plan with live Python callables.
-    /// `None` when the route has no dependency plan or uses direct dispatch.
-    pub(crate) bound_plan: Option<BoundDependencyPlan>,
 }
 
 impl fmt::Debug for BoundRoute {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BoundRoute")
             .field("manifest", &self.manifest)
-            .field("params", &self.params)
-            .field("has_body_param", &self.has_body_param)
             .finish_non_exhaustive()
     }
 }
@@ -992,15 +824,6 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_strategy_serde() {
-        let json = serde_json::to_string(&DispatchStrategy::Direct).unwrap_or_default();
-        assert!(json.contains("Direct"));
-        let back: DispatchStrategy =
-            serde_json::from_str(&json).unwrap_or(DispatchStrategy::AsgiBridge);
-        assert_eq!(back, DispatchStrategy::Direct);
-    }
-
-    #[test]
     fn handler_kind_serde() {
         for kind in [
             HandlerKind::RequestResponse,
@@ -1091,7 +914,6 @@ mod tests {
                 params: Vec::new(),
                 response_type: ResponseType::RawResponse,
                 tags: Vec::new(),
-                dispatch_strategy: DispatchStrategy::Direct,
                 dependency_plan: None,
                 status_code: 200,
                 summary: None,

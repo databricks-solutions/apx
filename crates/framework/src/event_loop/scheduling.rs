@@ -99,26 +99,13 @@ impl TaskCallback {
     }
 }
 
-/// Classify a Python exception into a structured `AppError`.
+/// Convert a Python exception to `AppError::Internal`.
 ///
-/// Checks against framework exception types before falling back to Internal.
-fn classify_python_error(py: Python<'_>, err: &PyErr) -> AppError {
-    if err.is_instance_of::<crate::pyapi::NotFound>(py) {
-        return AppError::NotFound(error_detail(py, err));
-    }
-    if err.is_instance_of::<crate::pyapi::BadRequest>(py) {
-        return AppError::BadRequest(error_detail(py, err));
-    }
-    if err.is_instance_of::<crate::pyapi::Forbidden>(py) {
-        return AppError::Forbidden(error_detail(py, err));
-    }
+/// User-facing HTTP errors (404, 400, etc.) are handled by FastAPI's
+/// exception middleware via the ASGI bridge. Only infrastructure errors
+/// reach this point.
+fn classify_python_error(_py: Python<'_>, err: &PyErr) -> AppError {
     AppError::Internal(err.to_string())
-}
-
-fn error_detail(py: Python<'_>, err: &PyErr) -> String {
-    err.value(py)
-        .str()
-        .map_or_else(|_| String::new(), |s| s.to_string())
 }
 
 #[cfg(test)]
@@ -157,48 +144,12 @@ mod tests {
     }
 
     #[test]
-    fn classify_not_found() {
-        with_py(|py| {
-            let err = PyErr::new::<crate::pyapi::NotFound, _>("gone");
-            let app_err = classify_python_error(py, &err);
-            assert!(
-                matches!(app_err, AppError::NotFound(ref s) if s == "gone"),
-                "expected NotFound, got {app_err:?}"
-            );
-        });
-    }
-
-    #[test]
-    fn classify_bad_request() {
-        with_py(|py| {
-            let err = PyErr::new::<crate::pyapi::BadRequest, _>("invalid");
-            let app_err = classify_python_error(py, &err);
-            assert!(
-                matches!(app_err, AppError::BadRequest(ref s) if s == "invalid"),
-                "expected BadRequest, got {app_err:?}"
-            );
-        });
-    }
-
-    #[test]
-    fn classify_forbidden() {
-        with_py(|py| {
-            let err = PyErr::new::<crate::pyapi::Forbidden, _>("denied");
-            let app_err = classify_python_error(py, &err);
-            assert!(
-                matches!(app_err, AppError::Forbidden(ref s) if s == "denied"),
-                "expected Forbidden, got {app_err:?}"
-            );
-        });
-    }
-
-    #[test]
-    fn classify_generic_exception() {
+    fn classify_python_error_returns_internal() {
         with_py(|py| {
             let err = PyErr::new::<pyo3::exceptions::PyValueError, _>("oops");
             let app_err = classify_python_error(py, &err);
             assert!(
-                matches!(app_err, AppError::Internal(_)),
+                matches!(app_err, AppError::Internal(ref s) if s.contains("oops")),
                 "expected Internal, got {app_err:?}"
             );
         });

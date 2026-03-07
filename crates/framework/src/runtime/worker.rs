@@ -144,12 +144,7 @@ fn load_from_manifest(
         loop_handle,
     });
 
-    let router = build_router(
-        routes,
-        Arc::clone(&app_state),
-        server_addr,
-        Arc::clone(&lifecycle_cache),
-    );
+    let router = build_router(routes, Arc::clone(&app_state), server_addr);
     Ok((router, app_state, lifecycle_cache))
 }
 
@@ -169,12 +164,7 @@ fn load_from_discovery(
 
         // Live discovery doesn't extract lifecycle deps yet — use empty cache.
         let lifecycle_cache = Arc::new(LifecycleCache::empty());
-        let router = build_router(
-            routes,
-            Arc::clone(&app_state),
-            server_addr,
-            Arc::clone(&lifecycle_cache),
-        );
+        let router = build_router(routes, Arc::clone(&app_state), server_addr);
         Ok((router, app_state, lifecycle_cache))
     })
 }

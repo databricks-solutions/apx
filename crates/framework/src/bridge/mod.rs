@@ -4,23 +4,18 @@
 //! to the appropriate [`dispatch::HandlerDispatch`] implementation.
 
 pub mod asgi;
-pub mod context;
 pub mod dispatch;
-mod extract;
 
 pub mod asgi_dispatch;
-pub mod plan_executor;
 pub mod streaming;
 
 use crate::event_loop::EventLoopHandle;
-use crate::route::{BoundRoute, DispatchStrategy, HandlerKind, HttpMethod};
-use crate::runtime::lifecycle::LifecycleCache;
+use crate::route::{BoundRoute, HandlerKind, HttpMethod};
 use asgi_dispatch::AsgiBridgeDispatch;
 use axum::extract::ConnectInfo;
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
-use dispatch::{AppState, HandlerDispatch, RequestResponseDispatch};
-use plan_executor::PlanExecutorDispatch;
+use dispatch::{AppState, HandlerDispatch};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -92,23 +87,12 @@ fn collect_path_params(raw_params: &axum::extract::RawPathParams) -> Vec<(String
         .collect()
 }
 
-/// Select the dispatch impl based on the route's dispatch strategy.
+/// Create the dispatch impl for a route.
 ///
-/// Routes with a compiled dependency plan (that don't need ASGI) use
-/// [`PlanExecutorDispatch`]. Otherwise falls back to dispatch strategy.
-fn dispatch_for(
-    route: &BoundRoute,
-    lifecycle_cache: &Arc<LifecycleCache>,
-) -> Arc<dyn HandlerDispatch> {
-    if let Some(plan) = &route.manifest.dependency_plan
-        && !plan.needs_asgi
-    {
-        return Arc::new(PlanExecutorDispatch::new(Arc::clone(lifecycle_cache)));
-    }
-    match route.manifest.dispatch_strategy {
-        DispatchStrategy::Direct => Arc::new(RequestResponseDispatch),
-        DispatchStrategy::AsgiBridge => Arc::new(AsgiBridgeDispatch),
-    }
+/// All routes use the ASGI bridge — FastAPI handles dependency injection,
+/// response serialization, and error formatting natively.
+fn dispatch_for(_route: &BoundRoute) -> Arc<dyn HandlerDispatch> {
+    Arc::new(AsgiBridgeDispatch)
 }
 
 // ── WebSocket handler ────────────────────────────────────────────────────
@@ -306,7 +290,6 @@ fn register_routes(
     routes: Vec<BoundRoute>,
     app_state: &Arc<AppState>,
     server_addr: SocketAddr,
-    lifecycle_cache: &Arc<LifecycleCache>,
 ) -> Router {
     for route in routes {
         let path = route.manifest.path.as_str().to_owned();
@@ -321,7 +304,7 @@ fn register_routes(
             continue;
         }
 
-        let dispatch = dispatch_for(&route, lifecycle_cache);
+        let dispatch = dispatch_for(&route);
         let method = route.manifest.method;
         let state = HandlerState {
             route: Arc::new(route),
@@ -350,11 +333,10 @@ pub fn build_router(
     routes: Vec<BoundRoute>,
     app_state: Arc<AppState>,
     server_addr: SocketAddr,
-    lifecycle_cache: Arc<LifecycleCache>,
 ) -> Router {
     let user_paths: HashSet<&str> = routes.iter().map(|r| r.manifest.path.as_str()).collect();
     let router = register_health_probes(Router::new(), &user_paths);
-    register_routes(router, routes, &app_state, server_addr, &lifecycle_cache)
+    register_routes(router, routes, &app_state, server_addr)
 }
 
 /// Apply tower layer stack to the router.
@@ -422,17 +404,16 @@ mod tests {
     use crate::route::{Handler, HandlerKind, QualName, ResponseType, RouteManifest, RoutePath};
     use crate::with_py;
 
-    fn make_route_with_strategy(strategy: DispatchStrategy) -> BoundRoute {
+    fn make_route(kind: HandlerKind) -> BoundRoute {
         with_py(|py| BoundRoute {
             manifest: RouteManifest {
-                kind: HandlerKind::RequestResponse,
+                kind,
                 method: HttpMethod::Get,
                 path: RoutePath::new("/test").unwrap(),
                 handler_qualname: QualName::new("test.handler").unwrap(),
                 params: Vec::new(),
                 response_type: ResponseType::RawResponse,
                 tags: Vec::new(),
-                dispatch_strategy: strategy,
                 dependency_plan: None,
                 status_code: 200,
                 summary: None,
@@ -443,61 +424,14 @@ mod tests {
                 is_async_handler: true,
             },
             handler: Handler::stub(py.None()),
-            params: Vec::new(),
-            response_model: None,
-            has_body_param: false,
-            dependant: None,
             fastapi_app: None,
-            bound_plan: None,
         })
     }
 
     #[test]
-    fn dispatch_for_direct() {
-        let route = make_route_with_strategy(DispatchStrategy::Direct);
-        let cache = Arc::new(LifecycleCache::empty());
-        let d = dispatch_for(&route, &cache);
-        let dbg = format!("{d:?}");
-        assert!(dbg.contains("RequestResponseDispatch"));
-    }
-
-    #[test]
     fn dispatch_for_asgi_bridge() {
-        let route = make_route_with_strategy(DispatchStrategy::AsgiBridge);
-        let cache = Arc::new(LifecycleCache::empty());
-        let d = dispatch_for(&route, &cache);
-        let dbg = format!("{d:?}");
-        assert!(dbg.contains("AsgiBridgeDispatch"));
-    }
-
-    #[test]
-    fn dispatch_for_plan_executor() {
-        use crate::route::DependencyPlan;
-        let mut route = make_route_with_strategy(DispatchStrategy::Direct);
-        route.manifest.dependency_plan = Some(DependencyPlan {
-            steps: Vec::new(),
-            handler_kwargs: Vec::new(),
-            needs_asgi: false,
-            generator_cleanup_indices: Vec::new(),
-        });
-        let cache = Arc::new(LifecycleCache::empty());
-        let d = dispatch_for(&route, &cache);
-        let dbg = format!("{d:?}");
-        assert!(dbg.contains("PlanExecutorDispatch"));
-    }
-
-    #[test]
-    fn dispatch_for_plan_needs_asgi_falls_back() {
-        use crate::route::DependencyPlan;
-        let mut route = make_route_with_strategy(DispatchStrategy::AsgiBridge);
-        route.manifest.dependency_plan = Some(DependencyPlan {
-            steps: Vec::new(),
-            handler_kwargs: Vec::new(),
-            needs_asgi: true,
-            generator_cleanup_indices: Vec::new(),
-        });
-        let cache = Arc::new(LifecycleCache::empty());
-        let d = dispatch_for(&route, &cache);
+        let route = make_route(HandlerKind::RequestResponse);
+        let d = dispatch_for(&route);
         let dbg = format!("{d:?}");
         assert!(dbg.contains("AsgiBridgeDispatch"));
     }
@@ -541,7 +475,6 @@ mod tests {
         user_paths.insert("/healthz");
         let router = register_health_probes(Router::new(), &user_paths);
 
-        // /healthz should NOT be registered (user already has it)
         let req = http::Request::builder()
             .uri("/healthz")
             .body(Body::empty())
@@ -549,7 +482,6 @@ mod tests {
         let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
 
-        // /readyz should still be registered
         let req = http::Request::builder()
             .uri("/readyz")
             .body(Body::empty())
@@ -558,83 +490,17 @@ mod tests {
         assert_eq!(resp.status(), http::StatusCode::OK);
     }
 
-    // ── SSE / WebSocket dispatch tests ──────────────────────────────────
-
-    fn make_route_with_kind(kind: HandlerKind) -> BoundRoute {
-        with_py(|py| {
-            let dispatch = match kind {
-                HandlerKind::WebSocket | HandlerKind::SSE => DispatchStrategy::AsgiBridge,
-                HandlerKind::RequestResponse => DispatchStrategy::Direct,
-            };
-            BoundRoute {
-                manifest: RouteManifest {
-                    kind,
-                    method: HttpMethod::Get,
-                    path: RoutePath::new("/test").unwrap(),
-                    handler_qualname: QualName::new("test.handler").unwrap(),
-                    params: Vec::new(),
-                    response_type: ResponseType::RawResponse,
-                    tags: Vec::new(),
-                    dispatch_strategy: dispatch,
-                    dependency_plan: None,
-                    status_code: 200,
-                    summary: None,
-                    description: None,
-                    include_in_schema: true,
-                    deprecated: false,
-                    operation_id: None,
-                    is_async_handler: true,
-                },
-                handler: Handler::stub(py.None()),
-                params: Vec::new(),
-                response_model: None,
-                has_body_param: false,
-                dependant: None,
-                fastapi_app: None,
-                bound_plan: None,
-            }
-        })
-    }
-
-    #[test]
-    fn dispatch_for_sse_uses_asgi_bridge() {
-        let route = make_route_with_kind(HandlerKind::SSE);
-        let cache = Arc::new(LifecycleCache::empty());
-        let d = dispatch_for(&route, &cache);
-        let dbg = format!("{d:?}");
-        assert!(dbg.contains("AsgiBridgeDispatch"));
-    }
-
-    #[test]
-    fn dispatch_for_websocket_uses_asgi_bridge() {
-        let route = make_route_with_kind(HandlerKind::WebSocket);
-        let cache = Arc::new(LifecycleCache::empty());
-        let d = dispatch_for(&route, &cache);
-        let dbg = format!("{d:?}");
-        assert!(dbg.contains("AsgiBridgeDispatch"));
-    }
-
     #[test]
     fn register_ws_route_uses_get() {
-        // Verify a WebSocket route is registered (doesn't crash)
-        // and goes through the WS path (different state type)
-        let ws_route = make_route_with_kind(HandlerKind::WebSocket);
+        let ws_route = make_route(HandlerKind::WebSocket);
         let mut event_loop = crate::event_loop::EventLoop::start().unwrap();
         let app_state = Arc::new(AppState {
             max_body_limit: crate::route::BodyLimit::DEFAULT,
             loop_handle: event_loop.handle(),
         });
         let server_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
-        let cache = Arc::new(LifecycleCache::empty());
 
-        // Should not panic — verifies WS routes are registered correctly
-        let _router = register_routes(
-            Router::new(),
-            vec![ws_route],
-            &app_state,
-            server_addr,
-            &cache,
-        );
+        let _router = register_routes(Router::new(), vec![ws_route], &app_state, server_addr);
         event_loop.stop();
     }
 }

@@ -1,5 +1,4 @@
-"""Thin re-export of framework errors for ``from apx.errors import ...``."""
+"""Framework error utilities.
 
-from apx._core import BadRequest, Forbidden, NotFound
-
-__all__ = ["NotFound", "BadRequest", "Forbidden"]
+Users should raise ``fastapi.HTTPException`` directly for HTTP error responses.
+"""

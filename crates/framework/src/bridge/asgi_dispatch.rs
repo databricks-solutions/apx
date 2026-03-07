@@ -56,8 +56,14 @@ impl HandlerDispatch for AsgiBridgeDispatch {
             let (send_tx, mut send_rx) = mpsc::channel::<AsgiEvent>(ASGI_CHANNEL_SIZE);
 
             let coro = Python::attach(|py| -> Result<Py<PyAny>, AppError> {
-                let scope = build_http_scope(py, &request)
-                    .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
+                let asgi_callable = route
+                    .fastapi_app
+                    .as_ref()
+                    .map_or_else(|| route.handler.inner(), |a| a.inner());
+
+                let scope =
+                    build_http_scope(py, &request, route.fastapi_app.as_ref().map(|a| a.inner()))
+                        .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
 
                 let receive = if body_bytes.is_empty() {
                     AsgiReceive::empty()
@@ -71,9 +77,7 @@ impl HandlerDispatch for AsgiBridgeDispatch {
                 let send_obj =
                     Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
 
-                route
-                    .handler
-                    .inner()
+                asgi_callable
                     .call(py, (scope, receive_obj, send_obj), None)
                     .map_err(|e| AppError::Internal(format!("handler call: {e}")))
             })?;

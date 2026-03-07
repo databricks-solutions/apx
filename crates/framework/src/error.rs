@@ -114,18 +114,6 @@ pub enum AppError {
     #[error("validation error")]
     Validation(Vec<ValidationErrorItem>),
 
-    /// User raised `NotFound` (404).
-    #[error("not found: {0}")]
-    NotFound(String),
-
-    /// User raised `BadRequest` (400).
-    #[error("bad request: {0}")]
-    BadRequest(String),
-
-    /// User raised `Forbidden` (403).
-    #[error("forbidden: {0}")]
-    Forbidden(String),
-
     /// Python exception in handler (500) — detail is logged, NOT sent to client.
     #[error("internal error")]
     Internal(String),
@@ -144,9 +132,7 @@ impl AppError {
     fn status_code(&self) -> StatusCode {
         match self {
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::BadRequest(_) | Self::BodyParse(_) => StatusCode::BAD_REQUEST,
-            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::BodyParse(_) => StatusCode::BAD_REQUEST,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Timeout => StatusCode::REQUEST_TIMEOUT,
         }
@@ -156,9 +142,7 @@ impl AppError {
     fn title(&self) -> &'static str {
         match self {
             Self::Validation(_) => "Validation Error",
-            Self::NotFound(_) => "Not Found",
-            Self::BadRequest(_) | Self::BodyParse(_) => "Bad Request",
-            Self::Forbidden(_) => "Forbidden",
+            Self::BodyParse(_) => "Bad Request",
             Self::Internal(_) => "Internal Server Error",
             Self::Timeout => "Request Timeout",
         }
@@ -167,7 +151,6 @@ impl AppError {
     /// Convert to client-safe detail message.
     fn client_detail(&self) -> Option<String> {
         match self {
-            Self::NotFound(msg) | Self::BadRequest(msg) | Self::Forbidden(msg) => Some(msg.clone()),
             Self::BodyParse(kind) => Some(kind.detail().to_owned()),
             Self::Timeout => Some("The request exceeded the allowed processing time".to_owned()),
             Self::Internal(_) => Some("An unexpected error occurred".to_owned()),
@@ -279,18 +262,6 @@ mod tests {
         assert_eq!(
             AppError::Validation(vec![]).status_code(),
             StatusCode::UNPROCESSABLE_ENTITY
-        );
-        assert_eq!(
-            AppError::NotFound("x".to_owned()).status_code(),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            AppError::BadRequest("x".to_owned()).status_code(),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            AppError::Forbidden("x".to_owned()).status_code(),
-            StatusCode::FORBIDDEN
         );
         assert_eq!(
             AppError::Internal("x".to_owned()).status_code(),
@@ -411,41 +382,6 @@ mod tests {
     }
 
     // ── IntoResponse ─────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn into_response_not_found() {
-        use axum::response::IntoResponse;
-        let resp = AppError::NotFound("item 42".to_owned()).into_response();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        assert_eq!(
-            resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
-            PROBLEM_JSON_CONTENT_TYPE,
-        );
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["status"], 404);
-        assert_eq!(json["title"], "Not Found");
-    }
-
-    #[tokio::test]
-    async fn into_response_bad_request() {
-        use axum::response::IntoResponse;
-        let resp = AppError::BadRequest("invalid input".to_owned()).into_response();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["status"], 400);
-    }
-
-    #[tokio::test]
-    async fn into_response_forbidden() {
-        use axum::response::IntoResponse;
-        let resp = AppError::Forbidden("no access".to_owned()).into_response();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["status"], 403);
-    }
 
     #[tokio::test]
     async fn into_response_internal() {

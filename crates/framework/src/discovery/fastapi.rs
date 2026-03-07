@@ -2,8 +2,8 @@
 
 use crate::discovery::DiscoveryError;
 use crate::route::{
-    AppManifest, AppModule, BodyLimit, DispatchStrategy, HandlerKind, ParamManifest, ParamSource,
-    QualName, ResponseType, RouteManifest, RoutePath,
+    AppManifest, AppModule, BodyLimit, HandlerKind, ParamManifest, ParamSource, QualName,
+    ResponseType, RouteManifest, RoutePath,
 };
 use pyo3::types::{PyAnyMethods, PyString};
 use pyo3::{Bound, FromPyObject, Python};
@@ -130,27 +130,16 @@ fn extract_route_metadata(route: &Bound<'_, pyo3::PyAny>) -> Result<RouteMetadat
     })
 }
 
-/// Determine handler kind, dispatch strategy, and response type for a route.
+/// Determine handler kind and response type for a route.
 fn classify_route(
     py: Python<'_>,
     endpoint: &Bound<'_, pyo3::PyAny>,
-    dependant: &Bound<'_, pyo3::PyAny>,
+    _dependant: &Bound<'_, pyo3::PyAny>,
     response_model: &Bound<'_, pyo3::PyAny>,
-) -> Result<(HandlerKind, DispatchStrategy, ResponseType), DiscoveryError> {
+) -> Result<(HandlerKind, ResponseType), DiscoveryError> {
     let response_type = classify_response_type(py, response_model)?;
     let kind = classify_handler_kind(py, endpoint)?;
-    let has_dependencies = has_python_dependencies(dependant)?;
-
-    let dispatch_strategy = if has_dependencies
-        || kind != HandlerKind::RequestResponse
-        || has_request_param(dependant)?
-    {
-        DispatchStrategy::AsgiBridge
-    } else {
-        DispatchStrategy::Direct
-    };
-
-    Ok((kind, dispatch_strategy, response_type))
+    Ok((kind, response_type))
 }
 
 /// Walk `app.routes`, filter `APIRoute`, extract [`RouteManifest`] for each.
@@ -211,8 +200,7 @@ fn extract_routes(
             .map_err(|e| DiscoveryError::Python(format!("route.response_model: {e}")))?;
 
         let params = extract_params_from_dependant(py, &dependant)?;
-        let (kind, dispatch_strategy, response_type) =
-            classify_route(py, &endpoint, &dependant, &response_model)?;
+        let (kind, response_type) = classify_route(py, &endpoint, &dependant, &response_model)?;
 
         let is_async_handler = {
             let inspect = py
@@ -237,7 +225,6 @@ fn extract_routes(
                 params: params.clone(),
                 response_type: response_type.clone(),
                 tags: meta.tags.clone(),
-                dispatch_strategy,
                 dependency_plan: None,
                 status_code: meta.status_code,
                 summary: meta.summary.clone(),
@@ -284,7 +271,6 @@ fn extract_ws_route(
         params: Vec::new(),
         response_type: ResponseType::RawResponse,
         tags: Vec::new(),
-        dispatch_strategy: DispatchStrategy::AsgiBridge,
         dependency_plan: None,
         status_code: 101,
         summary: name,
@@ -528,32 +514,4 @@ fn classify_handler_kind(
     }
 
     Ok(HandlerKind::RequestResponse)
-}
-
-/// Check whether the route has Python dependencies (`Depends()`).
-fn has_python_dependencies(dependant: &Bound<'_, pyo3::PyAny>) -> Result<bool, DiscoveryError> {
-    let deps = dependant
-        .getattr(c"dependencies")
-        .map_err(|e| DiscoveryError::Python(format!("dependant.dependencies: {e}")))?;
-    let len: usize = deps
-        .len()
-        .map_err(|e| DiscoveryError::Python(format!("dependencies.len(): {e}")))?;
-    Ok(len > 0)
-}
-
-/// Check whether the route has a `Request`/`Response`/`BackgroundTasks` param.
-fn has_request_param(dependant: &Bound<'_, pyo3::PyAny>) -> Result<bool, DiscoveryError> {
-    let rp: Option<String> = dependant
-        .getattr(c"request_param_name")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .ok();
-    let resp: Option<String> = dependant
-        .getattr(c"response_param_name")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .ok();
-    let bg: Option<String> = dependant
-        .getattr(c"background_tasks_param_name")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .ok();
-    Ok(rp.is_some() || resp.is_some() || bg.is_some())
 }

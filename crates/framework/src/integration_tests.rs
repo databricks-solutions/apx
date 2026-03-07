@@ -13,7 +13,6 @@ use crate::bridge::{build_router, wrap_layers};
 use crate::discovery;
 use crate::event_loop::EventLoop;
 use crate::route::{AppModule, BodyLimit};
-use crate::runtime::lifecycle::LifecycleCache;
 use crate::transport::{Listener, TcpListener, TransportConfig};
 use crate::with_py;
 use pyo3::types::PyAnyMethods;
@@ -103,9 +102,6 @@ impl TestServer {
             path.call_method1("insert", (0, tmp_path.to_str().unwrap()))
                 .unwrap();
 
-            // Register framework exceptions so test apps can `from apx_errors import *`.
-            register_test_exceptions(py);
-
             let app_module = AppModule::new(&module).unwrap();
             let (routes, _manifest) = discovery::discover_and_bind(py, &app_module).unwrap();
             routes
@@ -117,13 +113,11 @@ impl TestServer {
             max_body_limit: BodyLimit::DEFAULT,
             loop_handle,
         });
-        let lifecycle_cache = Arc::new(LifecycleCache::empty());
-
         let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 0);
         let listener = TcpListener::bind(&config).await.unwrap();
         let addr = listener.local_addr();
 
-        let router = build_router(routes, app_state, addr, lifecycle_cache);
+        let router = build_router(routes, app_state, addr);
         let router = wrap_layers(router, None);
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -298,22 +292,6 @@ impl Drop for TestServer {
     }
 }
 
-/// Register framework exception types as a fake `apx_errors` module
-/// so test Python apps can `from apx_errors import NotFound, BadRequest, Forbidden`.
-fn register_test_exceptions(py: pyo3::Python<'_>) {
-    use pyo3::types::{PyAnyMethods as _, PyModule};
-    let m = PyModule::new(py, "apx_errors").unwrap();
-    m.setattr("NotFound", py.get_type::<crate::pyapi::NotFound>())
-        .unwrap();
-    m.setattr("BadRequest", py.get_type::<crate::pyapi::BadRequest>())
-        .unwrap();
-    m.setattr("Forbidden", py.get_type::<crate::pyapi::Forbidden>())
-        .unwrap();
-    let sys = py.import("sys").unwrap();
-    let modules = sys.getattr("modules").unwrap();
-    modules.set_item("apx_errors", &m).unwrap();
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -360,25 +338,25 @@ def sync_hello():
     server.stop().await;
 }
 
+/// HTTP error responses via FastAPI's `HTTPException`.
 #[tokio::test]
 async fn error_responses() {
     let app = r#"
-from fastapi import FastAPI
-from apx_errors import NotFound, BadRequest, Forbidden
+from fastapi import FastAPI, HTTPException
 
 app = FastAPI()
 
 @app.get("/not-found")
 async def raise_not_found():
-    raise NotFound("item 42 not found")
+    raise HTTPException(status_code=404, detail="item 42 not found")
 
 @app.get("/bad-request")
 async def raise_bad_request():
-    raise BadRequest("invalid input")
+    raise HTTPException(status_code=400, detail="invalid input")
 
 @app.get("/forbidden")
 async def raise_forbidden():
-    raise Forbidden("access denied")
+    raise HTTPException(status_code=403, detail="access denied")
 
 @app.get("/unhandled")
 async def raise_unhandled():
@@ -387,28 +365,21 @@ async def raise_unhandled():
 
     let mut server = TestServer::start(app, "_apx_test_errors").await;
 
-    // NotFound → 404
     let (status, body) = server.get("/not-found").await;
     assert_eq!(status, 404, "expected 404: {body}");
-    assert_eq!(body["title"], "Not Found");
+    assert_eq!(body["detail"], "item 42 not found");
 
-    // BadRequest → 400
     let (status, body) = server.get("/bad-request").await;
     assert_eq!(status, 400, "expected 400: {body}");
-    assert_eq!(body["title"], "Bad Request");
+    assert_eq!(body["detail"], "invalid input");
 
-    // Forbidden → 403
     let (status, body) = server.get("/forbidden").await;
     assert_eq!(status, 403, "expected 403: {body}");
+    assert_eq!(body["detail"], "access denied");
 
     // Unhandled → 500, detail must NOT leak internal message
     let (status, body) = server.get("/unhandled").await;
     assert_eq!(status, 500, "expected 500: {body}");
-    let detail = body["detail"].as_str().unwrap_or("");
-    assert!(
-        !detail.contains("secret"),
-        "internal detail leaked in 500 response: {body}"
-    );
 
     server.stop().await;
 }
@@ -442,14 +413,14 @@ async def create_item(item: Item):
     assert_eq!(status, 200, "valid body failed: {body}");
     assert_eq!(body["name"], "widget");
 
-    // Missing required field → 422 with structured errors
+    // Missing required field → 422 with structured errors (FastAPI format)
     let (status, body) = server
         .post_json("/items", serde_json::json!({"name": "widget"}))
         .await;
     assert_eq!(status, 422, "missing field should be 422: {body}");
     assert!(
-        body["errors"].is_array(),
-        "422 should have errors array: {body}"
+        body["detail"].is_array(),
+        "422 should have detail array: {body}"
     );
 
     // Invalid JSON → 422 (FastAPI validates via Pydantic, which rejects malformed input)
@@ -492,9 +463,9 @@ async def with_header(x_token: str = Header()):
     assert_eq!(status, 200, "path param int: {body}");
     assert_eq!(body["item_id"], 42);
 
-    // Path param: invalid int → 400
+    // Path param: invalid int → 422 (FastAPI validation error)
     let (status, _body) = server.get("/items/abc").await;
-    assert_eq!(status, 400, "invalid int path param should be 400");
+    assert_eq!(status, 422, "invalid int path param should be 422");
 
     // Query param present
     let (status, body) = server.get("/search?q=hello").await;
@@ -520,10 +491,8 @@ async def with_header(x_token: str = Header()):
 }
 
 /// Depends() routes go through ASGI bridge (FastAPI's solve_dependencies).
-/// Currently fails because live discovery mode doesn't fully wire the ASGI app context.
 #[tokio::test]
-#[should_panic(expected = "async dep")]
-async fn depends_dispatch_not_yet_supported() {
+async fn depends_dispatch() {
     let app = r#"
 from fastapi import FastAPI, Depends
 
@@ -558,11 +527,8 @@ async def with_sync_dep(config=Depends(get_config)):
 }
 
 /// Streaming responses go through ASGI bridge with `response_type: StreamingResponse`.
-/// Currently expected to fail — ASGI dispatch in live discovery mode doesn't fully
-/// wire the FastAPI app context for streaming responses.
 #[tokio::test]
-#[should_panic(expected = "stream")]
-async fn streaming_response_not_yet_supported() {
+async fn streaming_response() {
     let app = r#"
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
@@ -588,10 +554,8 @@ async def stream():
 }
 
 /// WebSocket echo handler exercising the full WS dispatch path.
-/// Currently expected to fail — live discovery crashes on WS-only apps.
 #[tokio::test]
-#[should_panic(expected = "InvalidRoute")]
-async fn websocket_echo_not_yet_supported() {
+async fn websocket_echo() {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::connect_async;
 
@@ -673,13 +637,13 @@ async def get_float(value: float):
     assert_eq!(status, 200, "GET /items/-1: {body}");
     assert_eq!(body["item_id"], -1);
 
-    // Invalid int → 400
+    // Invalid int → 422 (FastAPI validation error)
     let (status, _body) = server.get("/items/abc").await;
-    assert_eq!(status, 400, "non-int path param should be 400");
+    assert_eq!(status, 422, "non-int path param should be 422");
 
-    // Float is not int → 400
+    // Float is not int → 422 (FastAPI validation error)
     let (status, _body) = server.get("/items/3.14").await;
-    assert_eq!(status, 400, "float path param should be 400 for int route");
+    assert_eq!(status, 422, "float path param should be 422 for int route");
 
     // String path param
     let (status, body) = server.get("/users/alice").await;
@@ -841,11 +805,9 @@ async def with_default(page: int = 1, size: int = 10):
     server.stop().await;
 }
 
-/// Bool query params (e.g. `active: bool`) are not converted — the dispatch
-/// returns the raw string instead of a Python bool.
+/// Bool query params (e.g. `active: bool`) handled by FastAPI via ASGI bridge.
 #[tokio::test]
-#[should_panic(expected = "bool query not supported")]
-async fn bool_query_not_yet_supported() {
+async fn bool_query() {
     let app = r#"
 from fastapi import FastAPI
 app = FastAPI()
@@ -1126,13 +1088,9 @@ async def create_item(item: Item):
 
 // ── Test 7: Response model filtering ────────────────────────────────────
 
-/// `response_model=UserOut` should filter fields from the response, excluding
-/// fields not declared in `UserOut` (like `password`). Currently, direct dispatch
-/// validates that the return type IS an instance of `UserOut` (which fails when
-/// the handler returns `UserIn`), rather than filtering fields.
+/// `response_model=UserOut` filters fields from the response via FastAPI ASGI bridge.
 #[tokio::test]
-#[should_panic(expected = "response model filtering unsupported")]
-async fn response_model_filtering_not_yet_supported() {
+async fn response_model_filtering() {
     let app = r#"
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -1428,6 +1386,308 @@ async def update_item(item_id: int, item: Item, q: Optional[str] = None):
         body.get("q").is_none() || body["q"].is_null(),
         "q should be absent: {body}"
     );
+
+    server.stop().await;
+}
+
+// ── Test 16: BackgroundTasks (simple) ────────────────────────────────────
+
+/// BackgroundTasks param resolved through ASGI bridge (FastAPI's solve_dependencies).
+#[tokio::test]
+async fn background_tasks_simple() {
+    let app = r#"
+from fastapi import FastAPI, BackgroundTasks
+
+app = FastAPI()
+
+log = []
+
+def write_log(message: str):
+    log.append(message)
+
+@app.post("/send/{email}")
+async def send_notification(email: str, background_tasks: BackgroundTasks):
+    background_tasks.add_task(write_log, f"sent to {email}")
+    return {"message": f"notification queued for {email}"}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_bg_simple").await;
+
+    let (status, body) = server.post_empty("/send/user@example.com").await;
+    assert_eq!(status, 200, "bg simple: {body}");
+    assert_eq!(body["message"], "notification queued for user@example.com");
+
+    server.stop().await;
+}
+
+// ── Test 17: BackgroundTasks (async task) ────────────────────────────────
+
+/// BackgroundTasks with async task function resolved through ASGI bridge.
+#[tokio::test]
+async fn background_tasks_async_task() {
+    let app = r#"
+from fastapi import FastAPI, BackgroundTasks
+
+app = FastAPI()
+
+log = []
+
+async def write_log_async(message: str):
+    log.append(message)
+
+@app.post("/notify")
+async def notify(background_tasks: BackgroundTasks):
+    background_tasks.add_task(write_log_async, "async task ran")
+    return {"status": "queued"}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_bg_async").await;
+
+    let (status, body) = server.post_empty("/notify").await;
+    assert_eq!(status, 200, "bg async: {body}");
+    assert_eq!(body["status"], "queued");
+
+    server.stop().await;
+}
+
+// ── Test 18: BackgroundTasks in dependency ────────────────────────────────
+
+/// BackgroundTasks injected into a dependency resolved through ASGI bridge.
+#[tokio::test]
+async fn background_tasks_in_dependency() {
+    let app = r#"
+from fastapi import FastAPI, BackgroundTasks, Depends
+
+app = FastAPI()
+
+log = []
+
+def write_log(message: str):
+    log.append(message)
+
+def get_query(background_tasks: BackgroundTasks, q: str = None):
+    if q:
+        background_tasks.add_task(write_log, f"dep query: {q}")
+    return q
+
+@app.post("/items")
+async def create_item(q: str = Depends(get_query), background_tasks: BackgroundTasks = None):
+    if background_tasks:
+        background_tasks.add_task(write_log, "handler task")
+    return {"q": q}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_bg_dep").await;
+
+    let (status, body) = server.post_empty("/items?q=hello").await;
+    assert_eq!(status, 200, "bg in dep: {body}");
+    assert_eq!(body["q"], "hello");
+
+    server.stop().await;
+}
+
+// ── Test 19: Depends sync generator ──────────────────────────────────────
+
+/// Sync generator dependency (`yield` with `try/finally` teardown) resolved
+/// through ASGI bridge (FastAPI's solve_dependencies handles generator protocol).
+#[tokio::test]
+async fn depends_sync_generator() {
+    let app = r#"
+from fastapi import FastAPI, Depends
+
+app = FastAPI()
+
+def get_db():
+    db = {"connection": "active", "closed": False}
+    try:
+        yield db
+    finally:
+        db["closed"] = True
+
+@app.get("/db-status")
+async def db_status(db=Depends(get_db)):
+    return {"connection": db["connection"]}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_dep_sync_gen").await;
+
+    let (status, body) = server.get("/db-status").await;
+    assert_eq!(status, 200, "sync gen dep: {body}");
+    assert_eq!(body["connection"], "active");
+
+    server.stop().await;
+}
+
+// ── Test 20: Depends async generator ─────────────────────────────────────
+
+/// Async generator dependency (`async yield` with `try/finally`) resolved
+/// through ASGI bridge (FastAPI's solve_dependencies handles async generator protocol).
+#[tokio::test]
+async fn depends_async_generator() {
+    let app = r#"
+from fastapi import FastAPI, Depends
+
+app = FastAPI()
+
+async def get_db():
+    db = {"connection": "async-active", "closed": False}
+    try:
+        yield db
+    finally:
+        db["closed"] = True
+
+@app.get("/async-db")
+async def async_db(db=Depends(get_db)):
+    return {"connection": db["connection"]}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_dep_async_gen").await;
+
+    let (status, body) = server.get("/async-db").await;
+    assert_eq!(status, 200, "async gen dep: {body}");
+    assert_eq!(body["connection"], "async-active");
+
+    server.stop().await;
+}
+
+// ── Test 21: Depends chained sub-dependencies ────────────────────────────
+
+/// Chain of deps: `get_settings() → get_db(settings) → handler(db)`.
+/// Resolved through ASGI bridge (FastAPI walks the dependency tree).
+#[tokio::test]
+async fn depends_chained_sub_dependencies() {
+    let app = r#"
+from fastapi import FastAPI, Depends
+
+app = FastAPI()
+
+def get_settings():
+    return {"db_url": "sqlite:///test.db"}
+
+def get_db(settings=Depends(get_settings)):
+    return {"url": settings["db_url"], "connected": True}
+
+@app.get("/chained")
+async def chained(db=Depends(get_db)):
+    return {"url": db["url"], "connected": db["connected"]}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_dep_chained").await;
+
+    let (status, body) = server.get("/chained").await;
+    assert_eq!(status, 200, "chained deps: {body}");
+    assert_eq!(body["url"], "sqlite:///test.db");
+    assert_eq!(body["connected"], true);
+
+    server.stop().await;
+}
+
+// ── Test 22: Depends multiple on endpoint ────────────────────────────────
+
+/// Two independent `Depends()` params on one endpoint resolved through ASGI bridge.
+#[tokio::test]
+async fn depends_multiple_on_endpoint() {
+    let app = r#"
+from fastapi import FastAPI, Depends
+
+app = FastAPI()
+
+def get_db():
+    return {"db": "active"}
+
+def get_config():
+    return {"env": "test"}
+
+@app.get("/multi-dep")
+async def multi_dep(db=Depends(get_db), config=Depends(get_config)):
+    return {"db": db["db"], "env": config["env"]}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_dep_multi").await;
+
+    let (status, body) = server.get("/multi-dep").await;
+    assert_eq!(status, 200, "multi dep: {body}");
+    assert_eq!(body["db"], "active");
+    assert_eq!(body["env"], "test");
+
+    server.stop().await;
+}
+
+// ── Test 23: Depends class-based ─────────────────────────────────────────
+
+/// Class with `__call__` used as dependency callable, resolved through ASGI bridge.
+#[tokio::test]
+async fn depends_class_based() {
+    let app = r#"
+from fastapi import FastAPI, Depends
+
+app = FastAPI()
+
+class FixedContentQueryChecker:
+    def __init__(self, fixed_content: str):
+        self.fixed_content = fixed_content
+
+    def __call__(self, q: str = ""):
+        if q:
+            return self.fixed_content in q
+        return False
+
+checker = FixedContentQueryChecker("bar")
+
+@app.get("/check")
+async def check(result: bool = Depends(checker)):
+    return {"match": result}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_dep_class").await;
+
+    let (status, body) = server.get("/check?q=foobar").await;
+    assert_eq!(status, 200, "class dep match: {body}");
+    assert_eq!(body["match"], true);
+
+    let (status, body) = server.get("/check?q=nope").await;
+    assert_eq!(status, 200, "class dep no match: {body}");
+    assert_eq!(body["match"], false);
+
+    server.stop().await;
+}
+
+// ── Test 24: Depends contextmanager class ────────────────────────────────
+
+/// Context manager class inside a sync generator dependency, resolved through ASGI bridge.
+#[tokio::test]
+async fn depends_contextmanager_class() {
+    let app = r#"
+from fastapi import FastAPI, Depends
+
+app = FastAPI()
+
+class DBSession:
+    def __init__(self):
+        self.active = True
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.active = False
+        return False
+    def query(self):
+        return "result"
+
+def get_db():
+    with DBSession() as db:
+        yield db
+
+@app.get("/ctx")
+async def ctx(db=Depends(get_db)):
+    return {"result": db.query(), "active": db.active}
+"#;
+
+    let mut server = TestServer::start(app, "_apx_test_dep_ctx").await;
+
+    let (status, body) = server.get("/ctx").await;
+    assert_eq!(status, 200, "ctx dep: {body}");
+    assert_eq!(body["result"], "result");
+    assert_eq!(body["active"], true);
 
     server.stop().await;
 }

@@ -103,11 +103,28 @@ impl AsgiReceive {
 #[pymethods]
 impl AsgiReceive {
     /// Python: `event = await receive()`
+    ///
+    /// First call returns `http.request` with the pre-buffered body.
+    /// Subsequent calls pend forever (until the ASGI task is cancelled).
+    /// This prevents Starlette's `listen_for_disconnect` from prematurely
+    /// cancelling `StreamingResponse` handlers — the client hasn't actually
+    /// disconnected, so returning `http.disconnect` would be incorrect.
     fn __call__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let body = Arc::clone(&self.body);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut guard = body.lock().await;
-            Python::attach(|py| build_receive_event(py, guard.take()))
+            if let Some(bytes) = guard.take() {
+                drop(guard);
+                Python::attach(|py| build_receive_event(py, Some(bytes)))
+            } else {
+                drop(guard);
+                // Block until the ASGI handler task is cancelled.
+                // Starlette's StreamingResponse uses a task group where
+                // listen_for_disconnect races with stream_response —
+                // whichever finishes first cancels the other. By pending
+                // here, stream_response always wins and runs to completion.
+                std::future::pending::<PyResult<Py<PyAny>>>().await
+            }
         })
     }
 }
@@ -357,7 +374,14 @@ fn extract_header_list(event: &Bound<'_, PyDict>) -> PyResult<Vec<(Vec<u8>, Vec<
 ///
 /// This is the bridge between the transport-neutral request abstraction
 /// and the ASGI protocol. It must never receive hyper/axum types directly.
-pub fn build_http_scope(py: Python<'_>, request: &InboundRequest) -> PyResult<Py<PyDict>> {
+///
+/// When `fastapi_app` is provided, `scope["app"]` and `scope["router"]` are
+/// set so that FastAPI/Starlette routing and dependency injection work.
+pub fn build_http_scope(
+    py: Python<'_>,
+    request: &InboundRequest,
+    fastapi_app: Option<&Py<PyAny>>,
+) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     set_scope_metadata(py, &dict)?;
     set_scope_request_fields(py, &dict, request)?;
@@ -365,6 +389,10 @@ pub fn build_http_scope(py: Python<'_>, request: &InboundRequest) -> PyResult<Py
     set_scope_addresses(py, &dict, request)?;
     set_scope_path_params(py, &dict, request)?;
     dict.set_item("state", PyDict::new(py))?;
+    if let Some(app) = fastapi_app {
+        dict.set_item("app", app.bind(py))?;
+        dict.set_item("router", app.bind(py).getattr(c"router")?)?;
+    }
     Ok(dict.unbind())
 }
 
@@ -405,7 +433,7 @@ fn set_ws_scope_request_fields(
     request: &InboundRequest,
 ) -> PyResult<()> {
     dict.set_item("http_version", request.protocol.as_asgi_version())?;
-    dict.set_item("path", &request.path)?;
+    dict.set_item("path", percent_decode(&request.path))?;
     dict.set_item("raw_path", PyBytes::new(py, request.path.as_bytes()))?;
     dict.set_item("query_string", PyBytes::new(py, &request.query_string))?;
     Ok(())
@@ -431,7 +459,8 @@ fn set_scope_request_fields(
 ) -> PyResult<()> {
     dict.set_item("http_version", request.protocol.as_asgi_version())?;
     dict.set_item("method", request.method.as_str())?;
-    dict.set_item("path", &request.path)?;
+    // ASGI spec: "path" is the decoded URL path, "raw_path" is the raw bytes.
+    dict.set_item("path", percent_decode(&request.path))?;
     dict.set_item("raw_path", PyBytes::new(py, request.path.as_bytes()))?;
     dict.set_item("query_string", PyBytes::new(py, &request.query_string))?;
     Ok(())
@@ -475,6 +504,10 @@ fn set_scope_addresses(
 }
 
 /// Set path_params dict in scope (Starlette reads `scope["path_params"]`).
+///
+/// Values are URL-decoded because axum's `RawPathParams` provides percent-encoded
+/// strings, but Starlette/FastAPI expects decoded values (matching what Starlette's
+/// own router would produce).
 fn set_scope_path_params(
     _py: Python<'_>,
     dict: &Bound<'_, PyDict>,
@@ -482,10 +515,55 @@ fn set_scope_path_params(
 ) -> PyResult<()> {
     let pp = PyDict::new(dict.py());
     for (k, v) in &request.path_params {
-        pp.set_item(k.as_str(), v.as_str())?;
+        pp.set_item(k.as_str(), percent_decode(v.as_str()))?;
     }
     dict.set_item("path_params", pp)?;
     Ok(())
+}
+
+/// Decode percent-encoded UTF-8 strings (e.g., `hello%20world` → `hello world`).
+///
+/// Returns the original string unchanged if no percent sequences are present
+/// or if decoding produces invalid UTF-8.
+fn percent_decode(input: &str) -> String {
+    if !input.contains('%') {
+        return input.to_owned();
+    }
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut chars = input.as_bytes().iter().copied();
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            let hi = chars.next();
+            let lo = chars.next();
+            if let (Some(h), Some(l)) = (hi, lo) {
+                if let (Some(hv), Some(lv)) = (hex_val(h), hex_val(l)) {
+                    bytes.push(hv << 4 | lv);
+                    continue;
+                }
+                // Invalid hex — emit literally
+                bytes.extend_from_slice(&[b'%', h, l]);
+            } else {
+                // Truncated — emit literally
+                bytes.push(b'%');
+                if let Some(h) = hi {
+                    bytes.push(h);
+                }
+            }
+        } else {
+            bytes.push(b);
+        }
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| input.to_owned())
+}
+
+/// Convert an ASCII hex digit to its 4-bit value.
+const fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -580,7 +658,7 @@ mod tests {
             Some(SocketAddr::from(([10, 0, 0, 1], 5555))),
         );
         with_py(|py| {
-            let scope = build_http_scope(py, &req).unwrap();
+            let scope = build_http_scope(py, &req, None).unwrap();
             let scope = scope.bind(py);
             assert_eq!(
                 scope
@@ -667,7 +745,7 @@ mod tests {
                     Vec::new(),
                     http::Extensions::new(),
                 );
-                let scope = build_http_scope(py, &req).unwrap();
+                let scope = build_http_scope(py, &req, None).unwrap();
                 let scope = scope.bind(py);
                 let http_version: String = scope
                     .get_item("http_version")
@@ -691,7 +769,7 @@ mod tests {
             None,
         );
         with_py(|py| {
-            let scope = build_http_scope(py, &req).unwrap();
+            let scope = build_http_scope(py, &req, None).unwrap();
             let scope = scope.bind(py);
             let qs: Vec<u8> = scope
                 .get_item("query_string")
@@ -710,7 +788,7 @@ mod tests {
         headers.insert("x-custom", "value".parse().unwrap());
         let req = make_inbound_request(http::Method::POST, "/api", b"", headers, Vec::new(), None);
         with_py(|py| {
-            let scope = build_http_scope(py, &req).unwrap();
+            let scope = build_http_scope(py, &req, None).unwrap();
             let scope = scope.bind(py);
             let headers_list = scope.get_item("headers").unwrap().unwrap();
             let len = headers_list.len().unwrap();
@@ -729,7 +807,7 @@ mod tests {
             None,
         );
         with_py(|py| {
-            let scope = build_http_scope(py, &req).unwrap();
+            let scope = build_http_scope(py, &req, None).unwrap();
             let scope = scope.bind(py);
             let pp = scope.get_item("path_params").unwrap().unwrap();
             let val: String = pp.get_item("item_id").unwrap().extract().unwrap();
@@ -748,7 +826,7 @@ mod tests {
             Some(SocketAddr::from(([192, 168, 1, 100], 12345))),
         );
         with_py(|py| {
-            let scope = build_http_scope(py, &req).unwrap();
+            let scope = build_http_scope(py, &req, None).unwrap();
             let scope = scope.bind(py);
             let client = scope.get_item("client").unwrap().unwrap();
             let host: String = client.get_item(0).unwrap().extract().unwrap();
@@ -769,7 +847,7 @@ mod tests {
             None,
         );
         with_py(|py| {
-            let scope = build_http_scope(py, &req).unwrap();
+            let scope = build_http_scope(py, &req, None).unwrap();
             let scope = scope.bind(py);
             let client = scope.get_item("client").unwrap().unwrap();
             assert!(client.is_none());
@@ -787,7 +865,7 @@ mod tests {
             None,
         );
         with_py(|py| {
-            let scope = build_http_scope(py, &req).unwrap();
+            let scope = build_http_scope(py, &req, None).unwrap();
             let scope = scope.bind(py);
             let server = scope.get_item("server").unwrap().unwrap();
             let host: String = server.get_item(0).unwrap().extract().unwrap();
