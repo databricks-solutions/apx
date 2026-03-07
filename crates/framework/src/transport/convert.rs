@@ -86,7 +86,7 @@ pub fn to_axum_response(response: OutboundResponse) -> axum::response::Response 
 
     // SAFETY: builder cannot fail — status is a valid StatusCode and headers
     // come from a validated HeaderMap. Both are pre-constructed http types.
-    #[allow(
+    #[expect(
         clippy::expect_used,
         reason = "proven invariant: pre-validated http types"
     )]
@@ -96,11 +96,8 @@ pub fn to_axum_response(response: OutboundResponse) -> axum::response::Response 
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
     reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {

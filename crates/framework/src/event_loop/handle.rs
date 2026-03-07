@@ -92,9 +92,8 @@ impl std::fmt::Debug for EventLoopHandle {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {

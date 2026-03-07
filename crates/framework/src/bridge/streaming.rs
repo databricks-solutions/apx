@@ -108,11 +108,9 @@ pub async fn stream_asgi_response<T: Send + 'static>(
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing,
     reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {

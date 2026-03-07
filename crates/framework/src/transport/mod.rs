@@ -65,9 +65,6 @@ pub enum TransportError {
     Serve(std::io::Error),
 }
 
-/// Default TCP listen backlog.
-const DEFAULT_BACKLOG: u32 = 1024;
-
 /// Configuration for transport binding.
 #[derive(Debug, Clone, Copy)]
 pub struct TransportConfig {
@@ -77,8 +74,6 @@ pub struct TransportConfig {
     pub port: u16,
     /// Which transport to use.
     pub transport_kind: TransportKind,
-    /// TCP listen backlog.
-    pub backlog: u32,
 }
 
 impl TransportConfig {
@@ -88,7 +83,6 @@ impl TransportConfig {
             host,
             port,
             transport_kind: TransportKind::Tcp,
-            backlog: DEFAULT_BACKLOG,
         }
     }
 }
@@ -123,11 +117,8 @@ pub trait Listener: Send + Sync + 'static {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
     reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
@@ -139,7 +130,6 @@ mod tests {
         let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 8080);
         assert_eq!(config.host, IpAddr::from([127, 0, 0, 1]));
         assert_eq!(config.port, 8080);
-        assert_eq!(config.backlog, DEFAULT_BACKLOG);
         assert!(matches!(config.transport_kind, TransportKind::Tcp));
     }
 

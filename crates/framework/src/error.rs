@@ -37,7 +37,7 @@ pub struct ProblemDetail {
 /// Structured Pydantic validation error — safe to include in response.
 ///
 /// Mirrors Pydantic's `ValidationError.errors()` output.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ValidationErrorItem {
     /// Location path: `["body", "name"]`.
     pub loc: Vec<String>,
@@ -217,10 +217,8 @@ impl IntoResponse for AppError {
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
     clippy::indexing_slicing,
     reason = "test code uses unwrap/assert for clarity"
 )]

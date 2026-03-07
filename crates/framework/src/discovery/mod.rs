@@ -60,11 +60,8 @@ pub fn parse_http_method(s: &str) -> Result<crate::route::HttpMethod, DiscoveryE
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
     reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {

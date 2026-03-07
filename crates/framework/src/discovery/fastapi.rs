@@ -370,32 +370,40 @@ fn field_to_param_manifest(
     })
 }
 
+/// Extract `__module__.__qualname__` from a Python object.
+///
+/// Builtins return just the qualname (e.g. `"int"`). All others return
+/// `"module.qualname"` (e.g. `"backend.app.Item"`). Returns `None` if
+/// either attribute is missing.
+fn extract_module_qualname(obj: &Bound<'_, pyo3::PyAny>) -> Option<String> {
+    let module: String = obj
+        .getattr(c"__module__")
+        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
+        .ok()?;
+    let qualname: String = obj
+        .getattr(c"__qualname__")
+        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
+        .ok()?;
+    if module == "builtins" || module.is_empty() {
+        Some(qualname)
+    } else {
+        Some(format!("{module}.{qualname}"))
+    }
+}
+
 /// Get the qualified name of a Python type.
 fn python_type_qualname(
     _py: Python<'_>,
     type_obj: &Bound<'_, pyo3::PyAny>,
 ) -> Result<String, DiscoveryError> {
-    // Try __module__.__qualname__ for classes.
-    if let (Ok(module), Ok(qualname)) = (
-        type_obj
-            .getattr(c"__module__")
-            .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract::<String>()),
-        type_obj
-            .getattr(c"__qualname__")
-            .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract::<String>()),
-    ) {
-        if module == "builtins" || module.is_empty() {
-            return Ok(qualname);
-        }
-        return Ok(format!("{module}.{qualname}"));
+    if let Some(name) = extract_module_qualname(type_obj) {
+        return Ok(name);
     }
-
-    // Fallback: str(type_).
-    let s = type_obj
+    // Fallback: str(type_) for special forms like typing.Optional[int].
+    type_obj
         .str()
         .and_then(|v| v.extract::<String>())
-        .map_err(|e| DiscoveryError::Python(format!("type qualname: {e}")))?;
-    Ok(s)
+        .map_err(|e| DiscoveryError::Python(format!("type qualname: {e}")))
 }
 
 /// Extract default value as JSON if the field has a default.
@@ -434,22 +442,9 @@ fn extract_default_json(
 
 /// Get the handler's qualified name.
 fn get_handler_qualname(endpoint: &Bound<'_, pyo3::PyAny>) -> Result<QualName, DiscoveryError> {
-    let module: String = endpoint
-        .getattr(c"__module__")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .map_err(|e| DiscoveryError::Python(format!("endpoint.__module__: {e}")))?;
-
-    let qualname: String = endpoint
-        .getattr(c"__qualname__")
-        .and_then(|v: Bound<'_, pyo3::PyAny>| v.extract())
-        .map_err(|e| DiscoveryError::Python(format!("endpoint.__qualname__: {e}")))?;
-
-    let full = if module == "builtins" || module.is_empty() {
-        qualname
-    } else {
-        format!("{module}.{qualname}")
-    };
-
+    let full = extract_module_qualname(endpoint).ok_or_else(|| {
+        DiscoveryError::Python("endpoint missing __module__ or __qualname__".to_owned())
+    })?;
     QualName::new(&full)
         .map_err(|e| DiscoveryError::InvalidRoute(format!("handler qualname '{full}': {e}")))
 }

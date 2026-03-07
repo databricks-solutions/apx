@@ -3,6 +3,7 @@
 //! The supervisor NEVER imports or calls PyO3. Python is initialized only
 //! in worker processes. See the architectural boundary note in the plan.
 
+use crate::bridge::CorsConfig;
 use crate::ipc::channel::{self, WorkerChannel};
 use crate::ipc::protocol::{IpcMessage, Nonce, WorkerBootstrap};
 use crate::route::AppModule;
@@ -28,6 +29,8 @@ pub struct SupervisorConfig {
     pub request_timeout: Duration,
     /// Path to pre-built manifest JSON (skips live FastAPI discovery).
     pub manifest_path: Option<PathBuf>,
+    /// CORS policy for workers.
+    pub cors: CorsConfig,
 }
 
 /// What went wrong with supervisor config validation.
@@ -246,6 +249,7 @@ async fn spawn_worker(
         request_timeout_secs: config.request_timeout.as_secs(),
         nonce: nonce.clone(),
         manifest_path: config.manifest_path.clone(),
+        cors: config.cors,
     };
 
     channel
@@ -346,15 +350,16 @@ async fn monitor_workers(
 async fn wait_for_any_exit(
     workers: &mut [WorkerHandle],
 ) -> (usize, Option<std::process::ExitStatus>) {
-    loop {
-        for (i, worker) in workers.iter_mut().enumerate() {
-            match worker.child.try_wait() {
-                Ok(Some(status)) => return (i, Some(status)),
-                Ok(None) => {}
-                Err(_) => return (i, None),
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    let futs: Vec<_> = workers
+        .iter_mut()
+        .enumerate()
+        .map(|(i, w)| Box::pin(async move { (i, w.child.wait().await) }))
+        .collect();
+
+    let ((index, result), _, _) = futures_util::future::select_all(futs).await;
+    match result {
+        Ok(status) => (index, Some(status)),
+        Err(_) => (index, None),
     }
 }
 
@@ -371,23 +376,17 @@ async fn shutdown_workers(workers: &mut [WorkerHandle]) {
         }
     }
 
-    // Phase 2: Wait for graceful exit.
-    let deadline = tokio::time::sleep(GRACEFUL_SHUTDOWN_TIMEOUT);
-    tokio::pin!(deadline);
-
-    loop {
-        let all_exited = workers
-            .iter_mut()
-            .all(|w| w.child.try_wait().map(|s| s.is_some()).unwrap_or(true));
-
-        if all_exited {
-            return;
+    // Phase 2: Wait for graceful exit (or timeout).
+    let wait_all = async {
+        for worker in workers.iter_mut() {
+            let _ = worker.child.wait().await;
         }
-
-        tokio::select! {
-            () = &mut deadline => break,
-            () = tokio::time::sleep(Duration::from_millis(100)) => {}
-        }
+    };
+    if tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, wait_all)
+        .await
+        .is_ok()
+    {
+        return;
     }
 
     // Phase 3: SIGKILL remaining.
@@ -419,11 +418,8 @@ use crate::signal::shutdown_signal;
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
     reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
@@ -456,6 +452,7 @@ mod tests {
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
             manifest_path: None,
+            cors: CorsConfig::default(),
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -470,6 +467,7 @@ mod tests {
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
             manifest_path: None,
+            cors: CorsConfig::default(),
         };
         let err = validate_config(&config).unwrap_err();
         assert!(matches!(
@@ -488,6 +486,7 @@ mod tests {
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
             manifest_path: None,
+            cors: CorsConfig::default(),
         };
         let err = validate_config(&config).unwrap_err();
         assert!(matches!(

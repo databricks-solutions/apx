@@ -3,6 +3,7 @@
 //! All messages are serialized as msgpack and framed with a 4-byte big-endian
 //! length prefix. Python never touches these — they are Rust-internal.
 
+use crate::bridge::CorsConfig;
 use crate::route::AppModule;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -119,6 +120,9 @@ pub struct WorkerBootstrap {
     /// Python discovery. When `None` (dev mode), the worker runs discovery directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_path: Option<PathBuf>,
+    /// CORS policy for this worker's HTTP server.
+    #[serde(default)]
+    pub cors: CorsConfig,
 }
 
 // ── Bootstrap errors ────────────────────────────────────────────────────
@@ -155,11 +159,8 @@ pub enum BootstrapError {
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
     reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
@@ -205,6 +206,7 @@ mod tests {
             request_timeout_secs: 30,
             nonce: Nonce::generate(),
             manifest_path: None,
+            cors: CorsConfig::default(),
         };
         let msg = IpcMessage::Bootstrap(bootstrap);
         let encoded = rmp_serde::to_vec(&msg)
@@ -298,6 +300,7 @@ mod tests {
             request_timeout_secs: 30,
             nonce: Nonce::from_string("abc123".to_owned()),
             manifest_path: Some(PathBuf::from("/app/manifest.json")),
+            cors: CorsConfig::default(),
         };
         let encoded = rmp_serde::to_vec(&bootstrap).unwrap();
         let decoded: WorkerBootstrap = rmp_serde::from_slice(&encoded).unwrap();

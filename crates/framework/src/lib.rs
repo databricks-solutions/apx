@@ -19,6 +19,9 @@ pub mod runtime;
 pub mod transport;
 
 pub(crate) mod bridge;
+
+// Re-export bridge types needed by external callers.
+pub use bridge::CorsConfig;
 pub(crate) mod discovery;
 pub(crate) mod event_loop;
 pub(crate) mod ipc;

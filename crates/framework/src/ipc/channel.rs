@@ -120,11 +120,8 @@ compile_error!("Windows IPC (Named Pipes) is not yet implemented. See extensions
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
     reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
@@ -154,6 +151,7 @@ mod tests {
             request_timeout_secs: 30,
             nonce,
             manifest_path: None,
+            cors: crate::bridge::CorsConfig::default(),
         };
 
         let supervisor_handle = tokio::spawn(async move {
