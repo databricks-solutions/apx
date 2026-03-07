@@ -26,6 +26,7 @@ pub(crate) mod signal;
 
 #[cfg(test)]
 pub(crate) fn with_py<R>(f: impl FnOnce(pyo3::Python<'_>) -> R) -> R {
+    integration_tests::ensure_python_env();
     pyo3::Python::initialize();
     pyo3::Python::attach(f)
 }

@@ -36,33 +36,79 @@ use crate::with_py;
 use pyo3::types::PyAnyMethods;
 use std::net::IpAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Once, OnceLock};
 
-// ── Test server harness ─────────────────────────────────────────────────
+// ── Python environment setup ────────────────────────────────────────────
 
-/// Ensure `PYTHONHOME` is set so the embedded interpreter can find its stdlib.
+static PYTHON_ENV_INIT: Once = Once::new();
+static PYTHON_VERSION: OnceLock<String> = OnceLock::new();
+
+/// Ensure `PYTHONHOME` and `VIRTUAL_ENV` are set so the embedded interpreter
+/// can find its stdlib. Safe to call from any test — runs exactly once.
+///
+/// **Testing harness only** — this module is `#[cfg(test)]` and must not be
+/// used in production code paths.
 #[expect(unsafe_code, reason = "env::set_var required for Python interpreter")]
-fn ensure_python_home() {
-    if std::env::var("PYTHONHOME").is_ok() {
+pub fn ensure_python_env() {
+    PYTHON_ENV_INIT.call_once(|| {
+        if std::env::var("PYTHONHOME").is_ok() {
+            // CI or manual override — still parse version for site-packages.
+            parse_python_version();
+            return;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
+        let venv = workspace_root.join(".venv");
+        let cfg_path = venv.join("pyvenv.cfg");
+        let cfg = std::fs::read_to_string(&cfg_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", cfg_path.display()));
+
+        let mut found_home = false;
+        for line in cfg.lines() {
+            if let Some(home_bin) = line.strip_prefix("home = ") {
+                let base = Path::new(home_bin.trim()).parent().unwrap();
+                unsafe {
+                    std::env::set_var("PYTHONHOME", base);
+                    std::env::set_var("VIRTUAL_ENV", &venv);
+                }
+                found_home = true;
+            } else if let Some(ver) = line.strip_prefix("version_info = ") {
+                // e.g. "3.11.10" → "3.11"
+                let parts: Vec<&str> = ver.trim().splitn(3, '.').collect();
+                if parts.len() >= 2 {
+                    let _ = PYTHON_VERSION.set(format!("{}.{}", parts[0], parts[1]));
+                }
+            }
+        }
+        assert!(found_home, "pyvenv.cfg missing `home` key");
+    });
+}
+
+/// Parse only the Python version from pyvenv.cfg (for the PYTHONHOME-already-set case).
+fn parse_python_version() {
+    if PYTHON_VERSION.get().is_some() {
         return;
     }
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = Path::new(manifest_dir).parent().unwrap().parent().unwrap();
-    let venv = workspace_root.join(".venv");
-    let cfg_path = venv.join("pyvenv.cfg");
-    let cfg = std::fs::read_to_string(&cfg_path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", cfg_path.display()));
-    for line in cfg.lines() {
-        if let Some(home_bin) = line.strip_prefix("home = ") {
-            let base = Path::new(home_bin.trim()).parent().unwrap();
-            unsafe {
-                std::env::set_var("PYTHONHOME", base);
-                std::env::set_var("VIRTUAL_ENV", &venv);
+    let cfg_path = workspace_root.join(".venv/pyvenv.cfg");
+    if let Ok(cfg) = std::fs::read_to_string(&cfg_path) {
+        for line in cfg.lines() {
+            if let Some(ver) = line.strip_prefix("version_info = ") {
+                let parts: Vec<&str> = ver.trim().splitn(3, '.').collect();
+                if parts.len() >= 2 {
+                    let _ = PYTHON_VERSION.set(format!("{}.{}", parts[0], parts[1]));
+                }
+                return;
             }
-            return;
         }
     }
-    panic!("pyvenv.cfg missing `home` key");
+}
+
+/// Returns the cached `"X.Y"` Python version string (e.g. `"3.11"`).
+/// Falls back to `"3.11"` if pyvenv.cfg couldn't be parsed.
+pub fn python_version() -> &'static str {
+    PYTHON_VERSION.get().map_or("3.11", String::as_str)
 }
 
 /// Self-contained test server: writes Python app to tempdir, discovers routes,
@@ -84,7 +130,7 @@ impl TestServer {
     /// The module name is derived from the test to avoid import collisions
     /// when multiple tests run in the same process.
     pub async fn start(python_app: &str, module_name: &str) -> Self {
-        ensure_python_home();
+        ensure_python_env();
         with_py(|_| {});
 
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -105,7 +151,10 @@ impl TestServer {
                 .unwrap()
                 .parent()
                 .unwrap()
-                .join(".venv/lib/python3.11/site-packages");
+                .join(format!(
+                    ".venv/lib/python{}/site-packages",
+                    python_version()
+                ));
             path.call_method1("insert", (0, site_packages.to_str().unwrap()))
                 .unwrap();
             path.call_method1("insert", (0, tmp_path.to_str().unwrap()))
