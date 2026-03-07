@@ -126,7 +126,7 @@ socket2 = "0.6.2"
 
 # Framework: admission control + HTTP middleware
 tower = { version = "0.5", features = ["timeout", "limit"] }
-tower-http = { version = "0.6", features = ["trace", "cors", "normalize-path", "request-id"] }
+tower-http = { version = "0.6", features = ["trace", "normalize-path", "request-id"] }
 
 # Framework: IPC serialization (msgpack)
 rmp-serde = "1"

@@ -5,7 +5,7 @@
 //! `SO_REUSEPORT`.
 
 use crate::bridge::dispatch::AppState;
-use crate::bridge::{CorsConfig, build_router, wrap_layers};
+use crate::bridge::{build_router, wrap_layers};
 use crate::discovery;
 use crate::event_loop::EventLoop;
 use crate::ipc::channel::WorkerChannel;
@@ -171,7 +171,7 @@ fn load_from_discovery(
 
 /// Phase 3: Serve requests until shutdown.
 ///
-/// Applies tower layers (CORS, trace, timeout, concurrency limit) and
+/// Applies tower layers (trace, timeout, concurrency limit) and
 /// serves with graceful shutdown via the `Listener` trait.
 ///
 /// # Errors
@@ -181,9 +181,8 @@ pub async fn serve(
     listener: crate::transport::TcpListener,
     router: Router,
     request_timeout: Option<Duration>,
-    cors: CorsConfig,
 ) -> Result<(), WorkerError> {
-    let router = wrap_layers(router, request_timeout, cors);
+    let router = wrap_layers(router, request_timeout);
     listener
         .serve(router, shutdown_signal())
         .await
@@ -225,7 +224,7 @@ pub async fn run_worker(
         None
     };
 
-    let result = serve(runtime.listener, router, timeout, bootstrap.cors).await;
+    let result = serve(runtime.listener, router, timeout).await;
 
     Python::attach(|py| lifecycle_cache.shutdown(py));
     // EventLoop::stop() is called by Drop, but we call explicitly for clarity.

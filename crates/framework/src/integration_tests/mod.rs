@@ -27,7 +27,7 @@ mod routing;
 
 use crate::bridge::asgi::lifespan::{LifespanGuard, run_lifespan_startup};
 use crate::bridge::dispatch::AppState;
-use crate::bridge::{CorsConfig, build_router, wrap_layers};
+use crate::bridge::{build_router, wrap_layers};
 use crate::discovery;
 use crate::event_loop::EventLoop;
 use crate::route::{AppModule, BodyLimit};
@@ -147,7 +147,7 @@ impl TestServer {
         let addr = listener.local_addr();
 
         let router = build_router(routes, app_state, addr);
-        let router = wrap_layers(router, None, CorsConfig::default());
+        let router = wrap_layers(router, None);
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let server_handle = tokio::spawn(async move {

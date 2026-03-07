@@ -21,16 +21,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// CORS policy for the HTTP server.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum CorsConfig {
-    /// Allow all origins, methods, and headers (dev mode).
-    #[default]
-    Permissive,
-    /// No CORS headers (behind reverse proxy that handles CORS).
-    Disabled,
-}
-
 /// Default request timeout. Prevents slow clients from holding workers indefinitely.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -358,7 +348,7 @@ pub fn build_router(
 /// Note: `NormalizePath` is not applied here because it produces an opaque
 /// type incompatible with `axum::serve`. Trailing slash normalization can
 /// be added via a custom axum middleware in the future.
-pub fn wrap_layers(router: Router, request_timeout: Option<Duration>, cors: CorsConfig) -> Router {
+pub fn wrap_layers(router: Router, request_timeout: Option<Duration>) -> Router {
     use axum::error_handling::HandleErrorLayer;
     use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
     use tower_http::trace::TraceLayer;
@@ -367,7 +357,7 @@ pub fn wrap_layers(router: Router, request_timeout: Option<Duration>, cors: Cors
 
     // Fallible layers (timeout, concurrency) must be wrapped in HandleErrorLayer
     // to convert their errors to responses before axum sees them.
-    let router = router
+    router
         .layer(
             tower::ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(handle_infra_error))
@@ -380,12 +370,7 @@ pub fn wrap_layers(router: Router, request_timeout: Option<Duration>, cors: Cors
         // Infallible layers applied directly.
         .layer(TraceLayer::new_for_http())
         .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid));
-
-    match cors {
-        CorsConfig::Permissive => router.layer(tower_http::cors::CorsLayer::permissive()),
-        CorsConfig::Disabled => router,
-    }
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
 }
 
 /// Convert tower infrastructure errors (timeout, concurrency limit) to responses.

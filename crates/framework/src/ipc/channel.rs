@@ -151,7 +151,6 @@ mod tests {
             request_timeout_secs: 30,
             nonce,
             manifest_path: None,
-            cors: crate::bridge::CorsConfig::default(),
         };
 
         let supervisor_handle = tokio::spawn(async move {

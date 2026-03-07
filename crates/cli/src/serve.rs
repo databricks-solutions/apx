@@ -78,7 +78,6 @@ pub async fn run(args: ServeArgs) -> i32 {
                 app_dir,
                 request_timeout: Duration::from_secs(args.timeout),
                 manifest_path: args.manifest,
-                cors: apx_framework::CorsConfig::default(),
             };
 
             if let Err(e) = apx_framework::runtime::supervisor::run_supervisor(config).await {

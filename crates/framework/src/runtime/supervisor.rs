@@ -3,7 +3,6 @@
 //! The supervisor NEVER imports or calls PyO3. Python is initialized only
 //! in worker processes. See the architectural boundary note in the plan.
 
-use crate::bridge::CorsConfig;
 use crate::ipc::channel::{self, WorkerChannel};
 use crate::ipc::protocol::{IpcMessage, Nonce, WorkerBootstrap};
 use crate::route::AppModule;
@@ -29,8 +28,6 @@ pub struct SupervisorConfig {
     pub request_timeout: Duration,
     /// Path to pre-built manifest JSON (skips live FastAPI discovery).
     pub manifest_path: Option<PathBuf>,
-    /// CORS policy for workers.
-    pub cors: CorsConfig,
 }
 
 /// What went wrong with supervisor config validation.
@@ -249,7 +246,6 @@ async fn spawn_worker(
         request_timeout_secs: config.request_timeout.as_secs(),
         nonce: nonce.clone(),
         manifest_path: config.manifest_path.clone(),
-        cors: config.cors,
     };
 
     channel
@@ -452,7 +448,6 @@ mod tests {
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
             manifest_path: None,
-            cors: CorsConfig::default(),
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -467,7 +462,6 @@ mod tests {
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
             manifest_path: None,
-            cors: CorsConfig::default(),
         };
         let err = validate_config(&config).unwrap_err();
         assert!(matches!(
@@ -486,7 +480,6 @@ mod tests {
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
             manifest_path: None,
-            cors: CorsConfig::default(),
         };
         let err = validate_config(&config).unwrap_err();
         assert!(matches!(
