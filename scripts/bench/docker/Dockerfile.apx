@@ -11,9 +11,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --default-toolchain stable
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# uv + maturin
+# uv + maturin + sccache
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-RUN uv pip install --system maturin
+RUN uv pip install --system maturin \
+    && curl -sSL https://github.com/mozilla/sccache/releases/download/v0.9.1/sccache-v0.9.1-x86_64-unknown-linux-musl.tar.gz \
+       | tar xz -C /usr/local/bin --strip-components=1 sccache-v0.9.1-x86_64-unknown-linux-musl/sccache
+ENV RUSTC_WRAPPER=sccache
 
 # ── Copy source (order matters for Docker cache) ────────────────
 WORKDIR /build
@@ -26,8 +29,11 @@ COPY crates/ ./crates/
 COPY src/ ./src/
 COPY pyproject.toml ./
 
-# ── Build wheel ─────────────────────────────────────────────────
-RUN maturin build --release --out /build/dist/
+# ── Build wheel (with sccache + cargo registry cache) ──────────
+RUN --mount=type=cache,target=/root/.cache/sccache \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    maturin build --release --out /build/dist/
 
 # ── Build manifest ──────────────────────────────────────────────
 RUN uv pip install --system /build/dist/apx-*.whl fastapi
