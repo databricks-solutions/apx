@@ -186,7 +186,7 @@ def print_summary(results: dict[str, dict[str, ScenarioResult]]) -> None:
         ax = apx[name]
         if uv.requests_per_sec > 0:
             throughput_ratios.append(ax.requests_per_sec / uv.requests_per_sec)
-        if ax.latency_p99_ms > 0:
+        if uv.latency_p99_ms > 0 and ax.latency_p99_ms > 0:
             latency_ratios.append(uv.latency_p99_ms / ax.latency_p99_ms)
 
     if throughput_ratios:

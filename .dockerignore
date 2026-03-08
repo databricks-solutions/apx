@@ -1,0 +1,15 @@
+target/
+.git/
+node_modules/
+.venv/
+docs/
+experiments/
+.pages/
+.reports/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.uv-cache/
+.claude/
+*.lock
+!Cargo.lock

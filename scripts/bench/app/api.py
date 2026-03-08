@@ -68,6 +68,4 @@ def update_item(item_id: int, body: ItemUpdate) -> Item:
 
 @router.delete("/items/{item_id}", status_code=204)
 def delete_item(item_id: int) -> None:
-    if item_id not in ITEMS:
-        raise HTTPException(status_code=404, detail="Item not found")
-    del ITEMS[item_id]
+    ITEMS.pop(item_id, None)
