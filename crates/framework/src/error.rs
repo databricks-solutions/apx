@@ -157,21 +157,6 @@ impl AppError {
             Self::Validation(_) => Some("Request validation failed".to_owned()),
         }
     }
-
-    /// Extract validation error items (empty vec for non-validation errors).
-    fn validation_errors(&self) -> Vec<ValidationErrorItem> {
-        match self {
-            Self::Validation(items) => items
-                .iter()
-                .map(|i| ValidationErrorItem {
-                    loc: i.loc.clone(),
-                    msg: i.msg.clone(),
-                    r#type: i.r#type.clone(),
-                })
-                .collect(),
-            _ => Vec::new(),
-        }
-    }
 }
 
 /// Content-Type header value for RFC 9457 problem detail responses.
@@ -179,19 +164,27 @@ const PROBLEM_JSON_CONTENT_TYPE: &str = "application/problem+json";
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        // Log internal errors server-side — never expose to client.
-        if let Self::Internal(ref detail) = self {
-            tracing::error!(error = %detail, "handler returned internal error");
-        }
-
         let status = self.status_code();
+        let title = self.title();
+        let detail = self.client_detail();
+
+        // Destructure to take ownership — avoids cloning validation items.
+        let errors = match self {
+            Self::Internal(ref msg) => {
+                tracing::error!(error = %msg, "handler returned internal error");
+                Vec::new()
+            }
+            Self::Validation(items) => items,
+            _ => Vec::new(),
+        };
+
         let problem = ProblemDetail {
             r#type: ProblemTypeUri::blank(),
-            title: self.title().to_owned(),
+            title: title.to_owned(),
             status: status.as_u16(),
-            detail: self.client_detail(),
+            detail,
             instance: None,
-            errors: self.validation_errors(),
+            errors,
         };
 
         let body = serde_json::to_vec(&problem).unwrap_or_else(|_| {

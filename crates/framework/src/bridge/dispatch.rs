@@ -3,6 +3,7 @@
 //! The sole concrete implementation is [`super::asgi_dispatch::AsgiBridgeDispatch`] —
 //! all routes are dispatched through the FastAPI ASGI app.
 
+use crate::bridge::asgi::ScopeInterns;
 use crate::error::AppError;
 use crate::event_loop::EventLoopHandle;
 use crate::route::BoundRoute;
@@ -18,6 +19,8 @@ pub struct AppState {
     pub max_body_limit: crate::route::BodyLimit,
     /// Handle to the persistent asyncio event loop.
     pub loop_handle: EventLoopHandle,
+    /// Pre-interned Python strings for ASGI scope construction.
+    pub scope_interns: Arc<ScopeInterns>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -56,9 +59,11 @@ mod tests {
     #[test]
     fn app_state_debug() {
         let mut event_loop = crate::event_loop::EventLoop::start().unwrap();
+        let scope_interns = pyo3::Python::attach(ScopeInterns::new);
         let state = AppState {
             max_body_limit: crate::route::BodyLimit::DEFAULT,
             loop_handle: event_loop.handle(),
+            scope_interns: Arc::new(scope_interns),
         };
         let dbg = format!("{state:?}");
         assert!(dbg.contains("AppState"));

@@ -14,7 +14,15 @@ use tokio_stream::StreamExt;
 /// Convert an axum `Body` into a transport-neutral [`BodyStream`].
 ///
 /// Lives here (not on `BodyStream`) to keep axum types out of `transport/types.rs`.
+/// Returns `BodyStream::Empty` for zero-length bodies (GET/HEAD/DELETE) to avoid
+/// a `Box::pin` heap allocation on the common bodyless request path.
 fn body_stream_from_axum(body: axum::body::Body) -> BodyStream {
+    use axum::body::HttpBody as _;
+
+    if body.size_hint().upper() == Some(0) {
+        return BodyStream::Empty;
+    }
+
     let stream = http_body_util::BodyStream::new(body).filter_map(|result| match result {
         Ok(frame) => frame.into_data().ok().map(Ok),
         Err(e) => Some(Err(std::io::Error::other(e))),

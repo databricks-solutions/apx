@@ -9,7 +9,7 @@
 use crate::transport::types::InboundRequest;
 use bytes::Bytes;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyDictMethods, PyList, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyDictMethods, PyList, PyString, PyTuple};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -21,6 +21,99 @@ const ASGI_SPEC_VERSION: &str = "2.3";
 
 /// Default HTTP scheme (TLS detection is a future extension).
 const DEFAULT_SCHEME: &str = "http";
+
+/// Default WebSocket scheme.
+const WS_SCHEME: &str = "ws";
+
+// ── ScopeInterns ─────────────────────────────────────────────────────────
+
+/// Pre-interned Python strings for ASGI scope construction.
+///
+/// Created once at worker startup, shared across all requests via `AppState`.
+/// Eliminates ~25 transient `PyString` allocations per request.
+impl std::fmt::Debug for ScopeInterns {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScopeInterns").finish_non_exhaustive()
+    }
+}
+
+pub struct ScopeInterns {
+    /// Fixed keys used in every ASGI scope dict.
+    pub(crate) keys: ScopeKeys,
+    /// Fixed values (type strings, version strings, empty root_path).
+    pub(crate) vals: ScopeValues,
+}
+
+/// Fixed dict keys used in ASGI scope construction.
+pub struct ScopeKeys {
+    pub(crate) r#type: Py<PyString>,
+    pub(crate) asgi: Py<PyString>,
+    pub(crate) http_version: Py<PyString>,
+    pub(crate) method: Py<PyString>,
+    pub(crate) path: Py<PyString>,
+    pub(crate) raw_path: Py<PyString>,
+    pub(crate) query_string: Py<PyString>,
+    pub(crate) headers: Py<PyString>,
+    pub(crate) server: Py<PyString>,
+    pub(crate) client: Py<PyString>,
+    pub(crate) scheme: Py<PyString>,
+    pub(crate) root_path: Py<PyString>,
+    pub(crate) state: Py<PyString>,
+    pub(crate) path_params: Py<PyString>,
+    pub(crate) app: Py<PyString>,
+    pub(crate) router: Py<PyString>,
+    pub(crate) version: Py<PyString>,
+    pub(crate) spec_version: Py<PyString>,
+}
+
+/// Fixed dict values used in ASGI scope construction.
+pub struct ScopeValues {
+    pub(crate) type_http: Py<PyString>,
+    pub(crate) type_websocket: Py<PyString>,
+    pub(crate) asgi_version: Py<PyString>,
+    pub(crate) spec_version: Py<PyString>,
+    pub(crate) scheme_http: Py<PyString>,
+    pub(crate) scheme_ws: Py<PyString>,
+    pub(crate) root_path_empty: Py<PyString>,
+}
+
+impl ScopeInterns {
+    /// Create all interned strings. Call once at worker startup with GIL held.
+    pub(crate) fn new(py: Python<'_>) -> Self {
+        let s = |v: &str| PyString::new(py, v).unbind();
+        Self {
+            keys: ScopeKeys {
+                r#type: s("type"),
+                asgi: s("asgi"),
+                http_version: s("http_version"),
+                method: s("method"),
+                path: s("path"),
+                raw_path: s("raw_path"),
+                query_string: s("query_string"),
+                headers: s("headers"),
+                server: s("server"),
+                client: s("client"),
+                scheme: s("scheme"),
+                root_path: s("root_path"),
+                state: s("state"),
+                path_params: s("path_params"),
+                app: s("app"),
+                router: s("router"),
+                version: s("version"),
+                spec_version: s("spec_version"),
+            },
+            vals: ScopeValues {
+                type_http: s("http"),
+                type_websocket: s("websocket"),
+                asgi_version: s(ASGI_VERSION),
+                spec_version: s(ASGI_SPEC_VERSION),
+                scheme_http: s(DEFAULT_SCHEME),
+                scheme_ws: s(WS_SCHEME),
+                root_path_empty: s(""),
+            },
+        }
+    }
+}
 
 // ── AsgiEvent ────────────────────────────────────────────────────────────
 
@@ -308,20 +401,24 @@ fn parse_response_start(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
 
 /// Parse `http.response.body` — extract body bytes and more_body flag.
 fn parse_response_body(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
-    let body: Vec<u8> = event
-        .get_item("body")?
-        .map(|b| b.extract())
-        .transpose()?
-        .unwrap_or_default();
+    let body = extract_body_bytes(event)?;
     let more_body: bool = event
         .get_item("more_body")?
         .map(|b| b.extract())
         .transpose()?
         .unwrap_or(false);
-    Ok(AsgiEvent::ResponseBody {
-        body: Bytes::from(body),
-        more_body,
-    })
+    Ok(AsgiEvent::ResponseBody { body, more_body })
+}
+
+/// Extract body bytes from an ASGI event dict, preferring zero-copy via `PyBytes`.
+fn extract_body_bytes(event: &Bound<'_, PyDict>) -> PyResult<Bytes> {
+    let Some(obj) = event.get_item("body")? else {
+        return Ok(Bytes::new());
+    };
+    match obj.cast::<PyBytes>() {
+        Ok(py_bytes) => Ok(Bytes::copy_from_slice(py_bytes.as_bytes())),
+        Err(_) => Ok(Bytes::from(obj.extract::<Vec<u8>>()?)),
+    }
 }
 
 /// Parse `websocket.accept` — extract optional subprotocol and headers.
@@ -354,6 +451,9 @@ fn parse_ws_close(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
 }
 
 /// Parse ASGI headers list: `[(b"name", b"value"), ...]`.
+///
+/// Uses `PyBytes::as_bytes()` to borrow directly from Python objects,
+/// avoiding pyo3's generic extraction overhead per header pair.
 fn extract_header_list(event: &Bound<'_, PyDict>) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
     let Some(list) = event.get_item("headers")? else {
         return Ok(Vec::new());
@@ -361,11 +461,19 @@ fn extract_header_list(event: &Bound<'_, PyDict>) -> PyResult<Vec<(Vec<u8>, Vec<
     list.try_iter()?
         .map(|item| {
             let tuple = item?;
-            let name: Vec<u8> = tuple.get_item(0)?.extract()?;
-            let value: Vec<u8> = tuple.get_item(1)?.extract()?;
+            let name = extract_bytes_field(&tuple.get_item(0)?)?;
+            let value = extract_bytes_field(&tuple.get_item(1)?)?;
             Ok((name, value))
         })
         .collect()
+}
+
+/// Extract a `Vec<u8>` from a Python object, preferring direct `PyBytes` borrow.
+fn extract_bytes_field(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    match obj.cast::<PyBytes>() {
+        Ok(py_bytes) => Ok(py_bytes.as_bytes().to_vec()),
+        Err(_) => obj.extract::<Vec<u8>>(),
+    }
 }
 
 // ── build_http_scope ─────────────────────────────────────────────────────
@@ -381,17 +489,21 @@ pub fn build_http_scope(
     py: Python<'_>,
     request: &InboundRequest,
     fastapi_app: Option<&Py<PyAny>>,
+    interns: &ScopeInterns,
 ) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
-    set_scope_metadata(py, &dict)?;
-    set_scope_request_fields(py, &dict, request)?;
-    set_scope_headers(py, &dict, request)?;
-    set_scope_addresses(py, &dict, request)?;
-    set_scope_path_params(py, &dict, request)?;
-    dict.set_item("state", PyDict::new(py))?;
+    set_scope_metadata(py, &dict, interns)?;
+    set_scope_request_fields(py, &dict, request, interns)?;
+    set_scope_headers(py, &dict, request, interns)?;
+    set_scope_addresses(py, &dict, request, interns)?;
+    set_scope_path_params(py, &dict, request, interns)?;
+    dict.set_item(interns.keys.state.bind(py), PyDict::new(py))?;
     if let Some(app) = fastapi_app {
-        dict.set_item("app", app.bind(py))?;
-        dict.set_item("router", app.bind(py).getattr(c"router")?)?;
+        dict.set_item(interns.keys.app.bind(py), app.bind(py))?;
+        dict.set_item(
+            interns.keys.router.bind(py),
+            app.bind(py).getattr(c"router")?,
+        )?;
     }
     Ok(dict.unbind())
 }
@@ -400,29 +512,49 @@ pub fn build_http_scope(
 ///
 /// Similar to [`build_http_scope`] but sets `type: "websocket"` and `scheme: "ws"`.
 /// No body-related fields.
-pub fn build_ws_scope(py: Python<'_>, request: &InboundRequest) -> PyResult<Py<PyDict>> {
+pub fn build_ws_scope(
+    py: Python<'_>,
+    request: &InboundRequest,
+    interns: &ScopeInterns,
+) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
-    set_ws_scope_metadata(py, &dict)?;
-    set_ws_scope_request_fields(py, &dict, request)?;
-    set_scope_headers(py, &dict, request)?;
-    set_scope_addresses(py, &dict, request)?;
-    set_scope_path_params(py, &dict, request)?;
-    dict.set_item("state", PyDict::new(py))?;
+    set_ws_scope_metadata(py, &dict, interns)?;
+    set_ws_scope_request_fields(py, &dict, request, interns)?;
+    set_scope_headers(py, &dict, request, interns)?;
+    set_scope_addresses(py, &dict, request, interns)?;
+    set_scope_path_params(py, &dict, request, interns)?;
+    dict.set_item(interns.keys.state.bind(py), PyDict::new(py))?;
     Ok(dict.unbind())
 }
 
-/// Default WebSocket scheme.
-const WS_SCHEME: &str = "ws";
-
 /// Set ASGI WebSocket scope metadata fields.
-fn set_ws_scope_metadata(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<()> {
-    dict.set_item("type", "websocket")?;
+fn set_ws_scope_metadata(
+    py: Python<'_>,
+    dict: &Bound<'_, PyDict>,
+    interns: &ScopeInterns,
+) -> PyResult<()> {
+    dict.set_item(
+        interns.keys.r#type.bind(py),
+        interns.vals.type_websocket.bind(py),
+    )?;
     let asgi = PyDict::new(py);
-    asgi.set_item("version", ASGI_VERSION)?;
-    asgi.set_item("spec_version", ASGI_SPEC_VERSION)?;
-    dict.set_item("asgi", asgi)?;
-    dict.set_item("scheme", WS_SCHEME)?;
-    dict.set_item("root_path", "")?;
+    asgi.set_item(
+        interns.keys.version.bind(py),
+        interns.vals.asgi_version.bind(py),
+    )?;
+    asgi.set_item(
+        interns.keys.spec_version.bind(py),
+        interns.vals.spec_version.bind(py),
+    )?;
+    dict.set_item(interns.keys.asgi.bind(py), asgi)?;
+    dict.set_item(
+        interns.keys.scheme.bind(py),
+        interns.vals.scheme_ws.bind(py),
+    )?;
+    dict.set_item(
+        interns.keys.root_path.bind(py),
+        interns.vals.root_path_empty.bind(py),
+    )?;
     Ok(())
 }
 
@@ -431,23 +563,52 @@ fn set_ws_scope_request_fields(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
     request: &InboundRequest,
+    interns: &ScopeInterns,
 ) -> PyResult<()> {
-    dict.set_item("http_version", request.protocol.as_asgi_version())?;
-    dict.set_item("path", percent_decode(&request.path))?;
-    dict.set_item("raw_path", PyBytes::new(py, request.path.as_bytes()))?;
-    dict.set_item("query_string", PyBytes::new(py, &request.query_string))?;
+    dict.set_item(
+        interns.keys.http_version.bind(py),
+        request.protocol.as_asgi_version(),
+    )?;
+    dict.set_item(interns.keys.path.bind(py), percent_decode(&request.path))?;
+    dict.set_item(
+        interns.keys.raw_path.bind(py),
+        PyBytes::new(py, request.path.as_bytes()),
+    )?;
+    dict.set_item(
+        interns.keys.query_string.bind(py),
+        PyBytes::new(py, &request.query_string),
+    )?;
     Ok(())
 }
 
 /// Set ASGI scope metadata fields: type, asgi, http_version, scheme, root_path.
-fn set_scope_metadata(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<()> {
-    dict.set_item("type", "http")?;
+fn set_scope_metadata(
+    py: Python<'_>,
+    dict: &Bound<'_, PyDict>,
+    interns: &ScopeInterns,
+) -> PyResult<()> {
+    dict.set_item(
+        interns.keys.r#type.bind(py),
+        interns.vals.type_http.bind(py),
+    )?;
     let asgi = PyDict::new(py);
-    asgi.set_item("version", ASGI_VERSION)?;
-    asgi.set_item("spec_version", ASGI_SPEC_VERSION)?;
-    dict.set_item("asgi", asgi)?;
-    dict.set_item("scheme", DEFAULT_SCHEME)?;
-    dict.set_item("root_path", "")?;
+    asgi.set_item(
+        interns.keys.version.bind(py),
+        interns.vals.asgi_version.bind(py),
+    )?;
+    asgi.set_item(
+        interns.keys.spec_version.bind(py),
+        interns.vals.spec_version.bind(py),
+    )?;
+    dict.set_item(interns.keys.asgi.bind(py), asgi)?;
+    dict.set_item(
+        interns.keys.scheme.bind(py),
+        interns.vals.scheme_http.bind(py),
+    )?;
+    dict.set_item(
+        interns.keys.root_path.bind(py),
+        interns.vals.root_path_empty.bind(py),
+    )?;
     Ok(())
 }
 
@@ -456,13 +617,23 @@ fn set_scope_request_fields(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
     request: &InboundRequest,
+    interns: &ScopeInterns,
 ) -> PyResult<()> {
-    dict.set_item("http_version", request.protocol.as_asgi_version())?;
-    dict.set_item("method", request.method.as_str())?;
+    dict.set_item(
+        interns.keys.http_version.bind(py),
+        request.protocol.as_asgi_version(),
+    )?;
+    dict.set_item(interns.keys.method.bind(py), request.method.as_str())?;
     // ASGI spec: "path" is the decoded URL path, "raw_path" is the raw bytes.
-    dict.set_item("path", percent_decode(&request.path))?;
-    dict.set_item("raw_path", PyBytes::new(py, request.path.as_bytes()))?;
-    dict.set_item("query_string", PyBytes::new(py, &request.query_string))?;
+    dict.set_item(interns.keys.path.bind(py), percent_decode(&request.path))?;
+    dict.set_item(
+        interns.keys.raw_path.bind(py),
+        PyBytes::new(py, request.path.as_bytes()),
+    )?;
+    dict.set_item(
+        interns.keys.query_string.bind(py),
+        PyBytes::new(py, &request.query_string),
+    )?;
     Ok(())
 }
 
@@ -471,6 +642,7 @@ fn set_scope_headers(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
     request: &InboundRequest,
+    interns: &ScopeInterns,
 ) -> PyResult<()> {
     let headers_list = PyList::empty(py);
     for (name, value) in &request.headers {
@@ -479,7 +651,7 @@ fn set_scope_headers(
         let pair = PyTuple::new(py, [n.into_any(), v.into_any()])?;
         headers_list.append(pair)?;
     }
-    dict.set_item("headers", headers_list)?;
+    dict.set_item(interns.keys.headers.bind(py), headers_list)?;
     Ok(())
 }
 
@@ -488,17 +660,23 @@ fn set_scope_addresses(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
     request: &InboundRequest,
+    interns: &ScopeInterns,
 ) -> PyResult<()> {
     dict.set_item(
-        "server",
+        interns.keys.server.bind(py),
         (
             request.server_addr.ip().to_string(),
             request.server_addr.port(),
         ),
     )?;
     match request.client_addr {
-        Some(addr) => dict.set_item("client", (addr.ip().to_string(), addr.port()))?,
-        None => dict.set_item("client", py.None())?,
+        Some(addr) => {
+            dict.set_item(
+                interns.keys.client.bind(py),
+                (addr.ip().to_string(), addr.port()),
+            )?;
+        }
+        None => dict.set_item(interns.keys.client.bind(py), py.None())?,
     }
     Ok(())
 }
@@ -509,15 +687,16 @@ fn set_scope_addresses(
 /// strings, but Starlette/FastAPI expects decoded values (matching what Starlette's
 /// own router would produce).
 fn set_scope_path_params(
-    _py: Python<'_>,
+    py: Python<'_>,
     dict: &Bound<'_, PyDict>,
     request: &InboundRequest,
+    interns: &ScopeInterns,
 ) -> PyResult<()> {
-    let pp = PyDict::new(dict.py());
+    let pp = PyDict::new(py);
     for (k, v) in &request.path_params {
         pp.set_item(k.as_str(), percent_decode(v.as_str()))?;
     }
-    dict.set_item("path_params", pp)?;
+    dict.set_item(interns.keys.path_params.bind(py), pp)?;
     Ok(())
 }
 
@@ -868,7 +1047,8 @@ mod tests {
             Some(SocketAddr::from(([10, 0, 0, 1], 5555))),
         );
         with_py(|py| {
-            let scope = build_http_scope(py, &req, None).unwrap();
+            let interns = ScopeInterns::new(py);
+            let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             assert_eq!(
                 scope
@@ -955,7 +1135,8 @@ mod tests {
                     Vec::new(),
                     http::Extensions::new(),
                 );
-                let scope = build_http_scope(py, &req, None).unwrap();
+                let interns = ScopeInterns::new(py);
+                let scope = build_http_scope(py, &req, None, &interns).unwrap();
                 let scope = scope.bind(py);
                 let http_version: String = scope
                     .get_item("http_version")
@@ -979,7 +1160,8 @@ mod tests {
             None,
         );
         with_py(|py| {
-            let scope = build_http_scope(py, &req, None).unwrap();
+            let interns = ScopeInterns::new(py);
+            let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let qs: Vec<u8> = scope
                 .get_item("query_string")
@@ -998,7 +1180,8 @@ mod tests {
         headers.insert("x-custom", "value".parse().unwrap());
         let req = make_inbound_request(http::Method::POST, "/api", b"", headers, Vec::new(), None);
         with_py(|py| {
-            let scope = build_http_scope(py, &req, None).unwrap();
+            let interns = ScopeInterns::new(py);
+            let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let headers_list = scope.get_item("headers").unwrap().unwrap();
             let len = headers_list.len().unwrap();
@@ -1017,7 +1200,8 @@ mod tests {
             None,
         );
         with_py(|py| {
-            let scope = build_http_scope(py, &req, None).unwrap();
+            let interns = ScopeInterns::new(py);
+            let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let pp = scope.get_item("path_params").unwrap().unwrap();
             let val: String = pp.get_item("item_id").unwrap().extract().unwrap();
@@ -1036,7 +1220,8 @@ mod tests {
             Some(SocketAddr::from(([192, 168, 1, 100], 12345))),
         );
         with_py(|py| {
-            let scope = build_http_scope(py, &req, None).unwrap();
+            let interns = ScopeInterns::new(py);
+            let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let client = scope.get_item("client").unwrap().unwrap();
             let host: String = client.get_item(0).unwrap().extract().unwrap();
@@ -1057,7 +1242,8 @@ mod tests {
             None,
         );
         with_py(|py| {
-            let scope = build_http_scope(py, &req, None).unwrap();
+            let interns = ScopeInterns::new(py);
+            let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let client = scope.get_item("client").unwrap().unwrap();
             assert!(client.is_none());
@@ -1075,7 +1261,8 @@ mod tests {
             None,
         );
         with_py(|py| {
-            let scope = build_http_scope(py, &req, None).unwrap();
+            let interns = ScopeInterns::new(py);
+            let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let server = scope.get_item("server").unwrap().unwrap();
             let host: String = server.get_item(0).unwrap().extract().unwrap();
@@ -1354,7 +1541,8 @@ mod tests {
             Some(SocketAddr::from(([10, 0, 0, 1], 5555))),
         );
         with_py(|py| {
-            let scope = build_ws_scope(py, &req).unwrap();
+            let interns = ScopeInterns::new(py);
+            let scope = build_ws_scope(py, &req, &interns).unwrap();
             let scope = scope.bind(py);
 
             let scope_type: String = scope.get_item("type").unwrap().unwrap().extract().unwrap();

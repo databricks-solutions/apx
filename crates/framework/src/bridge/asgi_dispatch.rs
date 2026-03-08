@@ -56,14 +56,19 @@ impl HandlerDispatch for AsgiBridgeDispatch {
             let (send_tx, mut send_rx) = mpsc::channel::<AsgiEvent>(ASGI_CHANNEL_SIZE);
 
             let coro = Python::attach(|py| -> Result<Py<PyAny>, AppError> {
+                let _span = tracing::trace_span!("build_scope").entered();
                 let asgi_callable = route
                     .fastapi_app
                     .as_ref()
                     .map_or_else(|| route.handler.inner(), |a| a.inner());
 
-                let scope =
-                    build_http_scope(py, &request, route.fastapi_app.as_ref().map(|a| a.inner()))
-                        .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
+                let scope = build_http_scope(
+                    py,
+                    &request,
+                    route.fastapi_app.as_ref().map(|a| a.inner()),
+                    &app_state.scope_interns,
+                )
+                .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
 
                 let receive = if body_bytes.is_empty() {
                     AsgiReceive::empty()
@@ -99,7 +104,9 @@ impl HandlerDispatch for AsgiBridgeDispatch {
             if is_streaming {
                 super::streaming::stream_asgi_response(send_rx, handler_task).await
             } else {
+                let t0 = std::time::Instant::now();
                 let response = collect_asgi_response(&mut send_rx).await?;
+                tracing::trace!(elapsed_us = t0.elapsed().as_micros(), "response_collect");
                 let _ = handler_task.await;
                 Ok(response)
             }
@@ -148,27 +155,43 @@ pub(super) async fn recv_response_start(
 }
 
 /// Receive and concatenate `ResponseBody` chunks from the channel.
+///
+/// Fast path: single-chunk response (common for JSON APIs) avoids
+/// intermediate `Vec` allocation — the `Bytes` from the channel is
+/// returned directly.
 async fn recv_response_body(rx: &mut mpsc::Receiver<AsgiEvent>) -> Result<Bytes, AppError> {
-    let mut buf = Vec::new();
+    let (first_chunk, more) = recv_body_chunk(rx).await?;
+    if !more {
+        return Ok(first_chunk); // single chunk — zero-copy return
+    }
+    accumulate_remaining_chunks(rx, first_chunk).await
+}
+
+/// Receive one body chunk from the channel.
+async fn recv_body_chunk(rx: &mut mpsc::Receiver<AsgiEvent>) -> Result<(Bytes, bool), AppError> {
+    match rx.recv().await {
+        Some(AsgiEvent::ResponseBody { body, more_body }) => Ok((body, more_body)),
+        Some(AsgiEvent::ResponseStart { .. }) => Err(AppError::Internal(
+            "ASGI protocol error: duplicate response start".to_owned(),
+        )),
+        Some(_) => Err(AppError::Internal(
+            "ASGI protocol error: unexpected event during body collection".to_owned(),
+        )),
+        None => Ok((Bytes::new(), false)),
+    }
+}
+
+/// Slow path: accumulate remaining chunks after the first.
+async fn accumulate_remaining_chunks(
+    rx: &mut mpsc::Receiver<AsgiEvent>,
+    first: Bytes,
+) -> Result<Bytes, AppError> {
+    let mut buf = Vec::from(first.as_ref());
     loop {
-        match rx.recv().await {
-            Some(AsgiEvent::ResponseBody { body, more_body }) => {
-                buf.extend_from_slice(&body);
-                if !more_body {
-                    return Ok(Bytes::from(buf));
-                }
-            }
-            Some(AsgiEvent::ResponseStart { .. }) => {
-                return Err(AppError::Internal(
-                    "ASGI protocol error: duplicate response start".to_owned(),
-                ));
-            }
-            Some(_) => {
-                return Err(AppError::Internal(
-                    "ASGI protocol error: unexpected event during body collection".to_owned(),
-                ));
-            }
-            None => return Ok(Bytes::from(buf)),
+        let (chunk, more) = recv_body_chunk(rx).await?;
+        buf.extend_from_slice(&chunk);
+        if !more {
+            return Ok(Bytes::from(buf));
         }
     }
 }

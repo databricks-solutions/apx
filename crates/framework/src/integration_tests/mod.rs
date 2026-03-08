@@ -202,9 +202,11 @@ impl TestServer {
             None
         };
 
+        let scope_interns = with_py(crate::bridge::asgi::ScopeInterns::new);
         let app_state = Arc::new(AppState {
             max_body_limit: BodyLimit::DEFAULT,
             loop_handle,
+            scope_interns: Arc::new(scope_interns),
         });
         let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 0);
         let listener = TcpListener::bind(&config).await.unwrap();
@@ -322,9 +324,11 @@ impl TestServer {
             None
         };
 
+        let scope_interns = with_py(crate::bridge::asgi::ScopeInterns::new);
         let app_state = Arc::new(AppState {
             max_body_limit: loaded_manifest.max_body_limit,
             loop_handle,
+            scope_interns: Arc::new(scope_interns),
         });
         let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 0);
         let listener = TcpListener::bind(&config).await.unwrap();

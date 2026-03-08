@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// [`drive_coroutine`](Self::drive_coroutine) schedules the coroutine on
 /// the event loop thread via `call_soon_threadsafe` and returns a Tokio
 /// future that resolves when the coroutine completes.
+///
 pub struct EventLoopHandle {
     event_loop: Py<PyAny>,
     running: Arc<AtomicBool>,
@@ -53,28 +54,32 @@ impl EventLoopHandle {
         }
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let handle = self.clone();
 
-        tokio::task::spawn_blocking(move || {
-            Python::attach(|py| -> Result<(), AppError> {
-                let callback = Py::new(py, TaskCallback::new(tx))
-                    .map_err(|e| AppError::Internal(format!("TaskCallback: {e}")))?;
-                let scheduler = Py::new(py, CoroutineScheduler::new(coro, callback.into_any()))
-                    .map_err(|e| AppError::Internal(format!("CoroutineScheduler: {e}")))?;
+        // Single brief GIL acquisition — consistent with asgi_dispatch.rs:58.
+        // call_soon_threadsafe is O(1) and thread-safe by design; the GIL hold
+        // covers only 2 object allocations + enqueue (<5µs).
+        Python::attach(|py| -> Result<(), AppError> {
+            let _span = tracing::trace_span!("drive_coroutine_schedule").entered();
+            let callback = Py::new(py, TaskCallback::new(tx))
+                .map_err(|e| AppError::Internal(format!("TaskCallback: {e}")))?;
+            let scheduler = Py::new(py, CoroutineScheduler::new(coro, callback.into_any()))
+                .map_err(|e| AppError::Internal(format!("CoroutineScheduler: {e}")))?;
 
-                handle
-                    .event_loop
-                    .call_method1(py, "call_soon_threadsafe", (scheduler,))
-                    .map_err(|e| AppError::Internal(format!("call_soon_threadsafe: {e}")))?;
-                Ok(())
-            })
-        })
-        .await
-        .map_err(|e| AppError::Internal(format!("spawn_blocking: {e}")))??;
+            self.event_loop
+                .call_method1(py, "call_soon_threadsafe", (scheduler,))
+                .map_err(|e| AppError::Internal(format!("call_soon_threadsafe: {e}")))?;
+            Ok(())
+        })?;
 
-        rx.await.map_err(|_| {
+        let t0 = std::time::Instant::now();
+        let result = rx.await.map_err(|_| {
             AppError::Internal("event loop closed before coroutine completed".to_owned())
-        })?
+        })?;
+        tracing::trace!(
+            elapsed_us = t0.elapsed().as_micros(),
+            "drive_coroutine_await"
+        );
+        result
     }
 
     /// Get a reference to the event loop Python object (for tests/diagnostics).

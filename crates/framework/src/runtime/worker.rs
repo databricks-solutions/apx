@@ -120,16 +120,18 @@ pub fn load_app(
     let meta = crate::manifest::validate_for_serving(&manifest)?;
     let app_module = meta.app_module.clone();
 
-    let (lifecycle_cache, routes) = Python::attach(|py| {
+    let (lifecycle_cache, routes, scope_interns) = Python::attach(|py| {
         let cache = LifecycleCache::initialize(py, &manifest.lifecycle_deps)?;
         let routes = discovery::bind::bind_routes_from_manifest(py, &manifest, &app_module)?;
-        Ok::<_, WorkerError>((cache, routes))
+        let interns = crate::bridge::asgi::ScopeInterns::new(py);
+        Ok::<_, WorkerError>((cache, routes, interns))
     })?;
     let lifecycle_cache = Arc::new(lifecycle_cache);
 
     let app_state = Arc::new(AppState {
         max_body_limit: manifest.max_body_limit,
         loop_handle,
+        scope_interns: Arc::new(scope_interns),
     });
 
     let router = build_router(routes, Arc::clone(&app_state), server_addr);

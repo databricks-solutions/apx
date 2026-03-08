@@ -103,6 +103,7 @@ struct WsHandlerState {
     route: Arc<BoundRoute>,
     server_addr: SocketAddr,
     loop_handle: EventLoopHandle,
+    scope_interns: Arc<asgi::ScopeInterns>,
 }
 
 /// axum handler for WebSocket upgrade.
@@ -150,7 +151,7 @@ async fn handle_ws_connection(
     // Build ASGI objects and get handler coroutine (brief GIL hold).
     let coro = pyo3::Python::attach(
         |py| -> Result<pyo3::Py<pyo3::PyAny>, crate::error::AppError> {
-            let scope = asgi::build_ws_scope(py, &inbound)
+            let scope = asgi::build_ws_scope(py, &inbound, &state.scope_interns)
                 .map_err(|e| crate::error::AppError::Internal(format!("build ws scope: {e}")))?;
             let receive_obj = pyo3::Py::new(py, receive)
                 .map_err(|e| crate::error::AppError::Internal(format!("wrap ws receive: {e}")))?;
@@ -299,6 +300,7 @@ fn register_routes(
                 route: Arc::new(route),
                 server_addr,
                 loop_handle: app_state.loop_handle.clone(),
+                scope_interns: Arc::clone(&app_state.scope_interns),
             };
             router = router.route(&path, get(ws_handler).with_state(ws_state));
             continue;
@@ -492,9 +494,11 @@ mod tests {
     fn register_ws_route_uses_get() {
         let ws_route = make_route(HandlerKind::WebSocket);
         let mut event_loop = crate::event_loop::EventLoop::start().unwrap();
+        let scope_interns = pyo3::Python::attach(asgi::ScopeInterns::new);
         let app_state = Arc::new(AppState {
             max_body_limit: crate::route::BodyLimit::DEFAULT,
             loop_handle: event_loop.handle(),
+            scope_interns: Arc::new(scope_interns),
         });
         let server_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
 
