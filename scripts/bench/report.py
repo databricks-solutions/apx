@@ -49,15 +49,19 @@ def parse_oha_json(path: Path, name: str) -> ScenarioResult | None:
     summary = data.get("summary", {})
     percentiles = data.get("latencyPercentiles", {})
 
+    def _f(d: dict, key: str, default: float = 0.0) -> float:
+        v = d.get(key)
+        return float(v) if v is not None else default
+
     return ScenarioResult(
         name=name,
-        requests_per_sec=summary.get("requestsPerSec", 0.0),
-        latency_p50_ms=percentiles.get("p50", 0.0) * 1000,
-        latency_p90_ms=percentiles.get("p90", 0.0) * 1000,
-        latency_p99_ms=percentiles.get("p99", 0.0) * 1000,
-        success_rate=summary.get("successRate", 0.0),
-        total_requests=summary.get("total", 0),
-        transfer_per_sec_kb=summary.get("sizePerSec", 0.0) / 1024,
+        requests_per_sec=_f(summary, "requestsPerSec"),
+        latency_p50_ms=_f(percentiles, "p50") * 1000,
+        latency_p90_ms=_f(percentiles, "p90") * 1000,
+        latency_p99_ms=_f(percentiles, "p99") * 1000,
+        success_rate=_f(summary, "successRate"),
+        total_requests=int(_f(summary, "total")),
+        transfer_per_sec_kb=_f(summary, "sizePerSec") / 1024,
     )
 
 
