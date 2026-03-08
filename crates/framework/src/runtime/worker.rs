@@ -102,39 +102,27 @@ pub async fn init_worker(
     })
 }
 
-/// Phase 2: Load the Python app and build the axum router.
+/// Phase 2: Load the Python app from the manifest and build the axum router.
 ///
-/// Branches on `manifest_path`: when present, loads the pre-built manifest
-/// and imports only handler functions (no FastAPI). Otherwise runs live
-/// FastAPI discovery.
+/// Loads the pre-built manifest, validates it, imports the FastAPI app
+/// via the `app_module` stored in manifest meta, and binds routes.
 ///
 /// # Errors
 ///
-/// Returns an error if discovery/manifest loading fails or the router can't be built.
+/// Returns an error if manifest loading/validation fails or the router can't be built.
 pub fn load_app(
     bootstrap: &WorkerBootstrap,
     server_addr: std::net::SocketAddr,
     py_event_loop: &EventLoop,
 ) -> Result<(Router, Arc<AppState>, Arc<LifecycleCache>), WorkerError> {
     let loop_handle = py_event_loop.handle();
-    match &bootstrap.manifest_path {
-        Some(path) => load_from_manifest(path, server_addr, loop_handle),
-        None => load_from_discovery(bootstrap, server_addr, loop_handle),
-    }
-}
-
-/// Load routes from a pre-built manifest (no FastAPI import).
-fn load_from_manifest(
-    path: &std::path::Path,
-    server_addr: std::net::SocketAddr,
-    loop_handle: crate::event_loop::EventLoopHandle,
-) -> Result<(Router, Arc<AppState>, Arc<LifecycleCache>), WorkerError> {
-    let manifest = crate::manifest::load(path)?;
-    crate::manifest::check_version(&manifest)?;
+    let manifest = crate::manifest::load(&bootstrap.manifest_path)?;
+    let meta = crate::manifest::validate_for_serving(&manifest)?;
+    let app_module = meta.app_module.clone();
 
     let (lifecycle_cache, routes) = Python::attach(|py| {
         let cache = LifecycleCache::initialize(py, &manifest.lifecycle_deps)?;
-        let routes = discovery::bind::bind_routes_from_manifest(py, &manifest)?;
+        let routes = discovery::bind::bind_routes_from_manifest(py, &manifest, &app_module)?;
         Ok::<_, WorkerError>((cache, routes))
     })?;
     let lifecycle_cache = Arc::new(lifecycle_cache);
@@ -146,27 +134,6 @@ fn load_from_manifest(
 
     let router = build_router(routes, Arc::clone(&app_state), server_addr);
     Ok((router, app_state, lifecycle_cache))
-}
-
-/// Load routes via live FastAPI discovery (dev mode).
-fn load_from_discovery(
-    bootstrap: &WorkerBootstrap,
-    server_addr: std::net::SocketAddr,
-    loop_handle: crate::event_loop::EventLoopHandle,
-) -> Result<(Router, Arc<AppState>, Arc<LifecycleCache>), WorkerError> {
-    Python::attach(|py| {
-        let (routes, manifest) = discovery::discover_and_bind(py, &bootstrap.app_module)?;
-
-        let app_state = Arc::new(AppState {
-            max_body_limit: manifest.max_body_limit,
-            loop_handle: loop_handle.clone(),
-        });
-
-        // Live discovery doesn't extract lifecycle deps yet — use empty cache.
-        let lifecycle_cache = Arc::new(LifecycleCache::empty());
-        let router = build_router(routes, Arc::clone(&app_state), server_addr);
-        Ok((router, app_state, lifecycle_cache))
-    })
 }
 
 /// Phase 3: Serve requests until shutdown.

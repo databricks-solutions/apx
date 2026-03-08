@@ -7,7 +7,9 @@
 pub mod bind;
 pub mod fastapi;
 
+#[cfg(test)]
 use crate::route::{AppManifest, AppModule, BoundRoute};
+#[cfg(test)]
 use pyo3::Python;
 
 /// Errors during app discovery.
@@ -29,10 +31,14 @@ pub enum DiscoveryError {
 /// Imports the Python module, finds the `FastAPI` instance, extracts route
 /// metadata, and resolves Python types for runtime dispatch.
 ///
+/// Used by `apx dev` (live discovery) and integration tests. Production
+/// serving uses `bind_routes_from_manifest` instead.
+///
 /// # Errors
 ///
 /// Returns an error if the module cannot be imported, no `FastAPI` app is found,
 /// or route metadata is malformed.
+#[cfg(test)]
 pub fn discover_and_bind(
     py: Python<'_>,
     app_module: &AppModule,
@@ -45,6 +51,7 @@ pub fn discover_and_bind(
 // ── Shared helpers ──────────────────────────────────────────────────────
 
 /// Parse an HTTP method string (e.g. `"GET"`) to [`HttpMethod`].
+#[cfg(test)]
 pub fn parse_http_method(s: &str) -> Result<crate::route::HttpMethod, DiscoveryError> {
     use crate::route::HttpMethod;
     match s {

@@ -128,6 +128,7 @@ mod tests {
     use super::*;
     use crate::ipc::protocol::{Nonce, WorkerBootstrap};
     use crate::route::AppModule;
+    use std::path::PathBuf;
 
     #[tokio::test]
     async fn ipc_bootstrap_roundtrip_over_uds() {
@@ -150,7 +151,7 @@ mod tests {
                 .unwrap_or_else(|e| unreachable!("valid module: {e}")),
             request_timeout_secs: 30,
             nonce,
-            manifest_path: None,
+            manifest_path: PathBuf::from("/app/manifest.json"),
         };
 
         let supervisor_handle = tokio::spawn(async move {

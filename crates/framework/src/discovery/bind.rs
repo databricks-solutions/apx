@@ -111,28 +111,18 @@ pub fn bind_routes(
     Ok(bound)
 }
 
-/// Bind manifest routes to live Python handlers without importing FastAPI.
+/// Bind manifest routes to live Python handlers, importing the FastAPI app for ASGI dispatch.
 ///
-/// For each route, imports the handler by its dotted qualified name.
-/// No FastAPI app needed — used for manifest-based serving.
+/// For each route, imports the handler by its dotted qualified name and builds
+/// an endpoint map from the live FastAPI app so that `fastapi_app` is set on
+/// all bound routes — enabling proper ASGI dispatch through FastAPI middleware.
 pub fn bind_routes_from_manifest(
     py: Python<'_>,
     manifest: &AppManifest,
+    app_module: &crate::route::AppModule,
 ) -> Result<Vec<BoundRoute>, DiscoveryError> {
-    let mut bound = Vec::with_capacity(manifest.routes.len());
-
-    for rm in &manifest.routes {
-        let handler_obj = import_qualified_name(py, rm.handler_qualname.as_str())?;
-        let handler = Handler::new(py, handler_obj);
-
-        bound.push(BoundRoute {
-            manifest: rm.clone(),
-            handler,
-            fastapi_app: None,
-        });
-    }
-
-    Ok(bound)
+    let app = super::fastapi::find_fastapi_app(py, app_module)?;
+    bind_routes(py, manifest, &app)
 }
 
 /// Import a Python object by its dotted qualified name.

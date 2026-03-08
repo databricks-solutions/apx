@@ -20,6 +20,7 @@
 mod body;
 mod dependencies;
 mod handlers;
+mod manifest;
 mod middleware;
 mod params;
 mod responses;
@@ -203,6 +204,126 @@ impl TestServer {
 
         let app_state = Arc::new(AppState {
             max_body_limit: BodyLimit::DEFAULT,
+            loop_handle,
+        });
+        let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 0);
+        let listener = TcpListener::bind(&config).await.unwrap();
+        let addr = listener.local_addr();
+
+        let router = build_router(routes, app_state, addr);
+        let router = wrap_layers(router, None);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_handle = tokio::spawn(async move {
+            listener
+                .serve(router, async {
+                    shutdown_rx.await.ok();
+                })
+                .await
+                .unwrap();
+        });
+
+        Self {
+            base_url: format!("http://127.0.0.1:{}", addr.port()),
+            port: addr.port(),
+            client: reqwest::Client::new(),
+            shutdown_tx: Some(shutdown_tx),
+            server_handle: Some(server_handle),
+            event_loop,
+            _lifespan_guard: lifespan_guard,
+            _tmp_dir: tmp_dir,
+        }
+    }
+
+    /// Start a test server that goes through the full manifest roundtrip:
+    /// discover → serialize to JSON → deserialize → bind from manifest → serve.
+    ///
+    /// Tests the production serving path (manifest-based) end-to-end.
+    pub async fn start_from_manifest(python_app: &str, module_name: &str) -> Self {
+        ensure_tracing();
+        ensure_python_env();
+        with_py(|_| {});
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let app_file = tmp_dir.path().join(format!("{module_name}.py"));
+        std::fs::write(&app_file, python_app).unwrap();
+
+        let event_loop = EventLoop::start().unwrap();
+
+        let tmp_path = tmp_dir.path().to_path_buf();
+        let module = module_name.to_owned();
+        let manifest_path = tmp_dir.path().join("manifest.json");
+
+        // Phase 1: Discover routes and save as manifest JSON.
+        let app_module = with_py(|py| {
+            let sys = py.import("sys").unwrap();
+            let path = sys.getattr("path").unwrap();
+
+            let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+            let site_packages = manifest_dir
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join(format!(
+                    ".venv/lib/python{}/site-packages",
+                    python_version()
+                ));
+            path.call_method1("insert", (0, site_packages.to_str().unwrap()))
+                .unwrap();
+            path.call_method1("insert", (0, tmp_path.to_str().unwrap()))
+                .unwrap();
+
+            let app_module = AppModule::new(&module).unwrap();
+            let (_routes, mut manifest) = discovery::discover_and_bind(py, &app_module).unwrap();
+
+            // Attach meta so the manifest is valid for serving.
+            manifest.meta = Some(crate::route::ManifestMeta {
+                apx_version: env!("CARGO_PKG_VERSION").to_owned(),
+                python_version: python_version().to_owned(),
+                fastapi_version: None,
+                build_timestamp: "2025-01-01T00:00:00Z".to_owned(),
+                app_module: app_module.clone(),
+                source_hash: None,
+            });
+
+            crate::manifest::save(&manifest, &manifest_path).unwrap();
+            app_module
+        });
+
+        // Phase 2: Load manifest from JSON and bind routes (manifest serving path).
+        let loaded_manifest = crate::manifest::load(&manifest_path).unwrap();
+        let routes = with_py(|py| {
+            discovery::bind::bind_routes_from_manifest(py, &loaded_manifest, &app_module).unwrap()
+        });
+
+        assert!(
+            !routes.is_empty(),
+            "no routes in manifest for {module_name}"
+        );
+
+        let loop_handle = event_loop.handle();
+
+        // Run ASGI lifespan startup.
+        let lifespan_guard = if routes.iter().any(|r| r.fastapi_app.is_some()) {
+            let app_ref = routes
+                .iter()
+                .find_map(|r| r.fastapi_app.as_ref())
+                .unwrap()
+                .inner();
+            match run_lifespan_startup(app_ref, &loop_handle).await {
+                Ok(guard) => Some(guard),
+                Err(e) => {
+                    tracing::debug!(error = %e, "lifespan startup skipped");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let app_state = Arc::new(AppState {
+            max_body_limit: loaded_manifest.max_body_limit,
             loop_handle,
         });
         let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 0);

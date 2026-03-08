@@ -26,8 +26,8 @@ pub struct SupervisorConfig {
     pub app_dir: PathBuf,
     /// Per-request timeout passed to workers.
     pub request_timeout: Duration,
-    /// Path to pre-built manifest JSON (skips live FastAPI discovery).
-    pub manifest_path: Option<PathBuf>,
+    /// Path to pre-built manifest JSON (required for serving).
+    pub manifest_path: PathBuf,
 }
 
 /// What went wrong with supervisor config validation.
@@ -202,21 +202,16 @@ async fn spawn_worker(
 
     let mut cmd = Command::new(current_exe);
     cmd.arg("serve")
-        .arg("--app")
-        .arg(config.app_module.as_str())
         .arg("--host")
         .arg(&config.host)
         .arg("--port")
         .arg(config.port.to_string())
         .arg("--timeout")
         .arg(config.request_timeout.as_secs().to_string())
+        .arg(&config.manifest_path)
         .current_dir(&config.app_dir)
         .env("APX_WORKER_NONCE", nonce.as_str())
         .env("APX_WORKER_SOCK", sock_str);
-
-    if let Some(manifest) = &config.manifest_path {
-        cmd.arg("--manifest").arg(manifest);
-    }
 
     // Propagate OTEL env vars.
     for (key, value) in std::env::vars() {
@@ -447,7 +442,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
-            manifest_path: None,
+            manifest_path: PathBuf::from("/app/manifest.json"),
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -461,7 +456,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
-            manifest_path: None,
+            manifest_path: PathBuf::from("/app/manifest.json"),
         };
         let err = validate_config(&config).unwrap_err();
         assert!(matches!(
@@ -479,7 +474,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
-            manifest_path: None,
+            manifest_path: PathBuf::from("/app/manifest.json"),
         };
         let err = validate_config(&config).unwrap_err();
         assert!(matches!(

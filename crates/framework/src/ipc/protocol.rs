@@ -113,12 +113,8 @@ pub struct WorkerBootstrap {
     pub request_timeout_secs: u64,
     /// One-time nonce — verified against `APX_WORKER_NONCE` env var.
     pub nonce: Nonce,
-    /// Path to a pre-built `AppManifest` JSON file.
-    ///
-    /// When `Some`, the worker loads the manifest from disk instead of running
-    /// Python discovery. When `None` (dev mode), the worker runs discovery directly.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub manifest_path: Option<PathBuf>,
+    /// Path to the pre-built `AppManifest` JSON file (required for serving).
+    pub manifest_path: PathBuf,
 }
 
 // ── Bootstrap errors ────────────────────────────────────────────────────
@@ -201,7 +197,7 @@ mod tests {
                 .unwrap_or_else(|e| unreachable!("hardcoded valid module: {e}")),
             request_timeout_secs: 30,
             nonce: Nonce::generate(),
-            manifest_path: None,
+            manifest_path: PathBuf::from("/app/manifest.json"),
         };
         let msg = IpcMessage::Bootstrap(bootstrap);
         let encoded = rmp_serde::to_vec(&msg)
@@ -294,13 +290,13 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             request_timeout_secs: 30,
             nonce: Nonce::from_string("abc123".to_owned()),
-            manifest_path: Some(PathBuf::from("/app/manifest.json")),
+            manifest_path: PathBuf::from("/app/manifest.json"),
         };
         let encoded = rmp_serde::to_vec(&bootstrap).unwrap();
         let decoded: WorkerBootstrap = rmp_serde::from_slice(&encoded).unwrap();
         assert_eq!(
-            decoded.manifest_path.as_deref(),
-            Some(std::path::Path::new("/app/manifest.json"))
+            decoded.manifest_path,
+            std::path::Path::new("/app/manifest.json")
         );
     }
 }

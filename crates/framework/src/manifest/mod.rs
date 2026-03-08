@@ -5,7 +5,7 @@
 
 pub mod validate;
 
-use crate::route::AppManifest;
+use crate::route::{AppManifest, ManifestMeta};
 use std::path::Path;
 
 /// Manifest-specific errors.
@@ -25,6 +25,9 @@ pub enum ManifestError {
         /// Version of the currently running apx binary.
         running: String,
     },
+    /// Manifest is missing required build metadata (`meta` field).
+    #[error("manifest has no build metadata — was it produced by `apx build`?")]
+    MissingMeta,
 }
 
 /// Load an [`AppManifest`] from a JSON file.
@@ -57,6 +60,19 @@ pub fn check_version(manifest: &AppManifest) -> Result<(), ManifestError> {
         });
     }
     Ok(())
+}
+
+/// Validate that a manifest is suitable for production serving.
+///
+/// Checks that:
+/// - `meta` is present (manifest was produced by `apx build`)
+/// - The apx version matches the running binary
+///
+/// Returns the [`ManifestMeta`] on success.
+pub fn validate_for_serving(manifest: &AppManifest) -> Result<&ManifestMeta, ManifestError> {
+    let meta = manifest.meta.as_ref().ok_or(ManifestError::MissingMeta)?;
+    check_version(manifest)?;
+    Ok(meta)
 }
 
 #[cfg(test)]
@@ -164,5 +180,33 @@ mod tests {
     fn manifest_error_display_io() {
         let err = ManifestError::Io(io::Error::new(io::ErrorKind::NotFound, "gone"));
         assert!(err.to_string().contains("gone"));
+    }
+
+    #[test]
+    fn manifest_error_display_missing_meta() {
+        let err = ManifestError::MissingMeta;
+        let msg = err.to_string();
+        assert!(msg.contains("no build metadata"));
+    }
+
+    #[test]
+    fn validate_for_serving_with_meta() {
+        let m = manifest_with_version(env!("CARGO_PKG_VERSION"));
+        let meta = validate_for_serving(&m).unwrap();
+        assert_eq!(meta.apx_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn validate_for_serving_missing_meta() {
+        let m = minimal_manifest();
+        let err = validate_for_serving(&m).unwrap_err();
+        assert!(matches!(err, ManifestError::MissingMeta));
+    }
+
+    #[test]
+    fn validate_for_serving_version_mismatch() {
+        let m = manifest_with_version("0.0.0-fake");
+        let err = validate_for_serving(&m).unwrap_err();
+        assert!(matches!(err, ManifestError::VersionMismatch { .. }));
     }
 }

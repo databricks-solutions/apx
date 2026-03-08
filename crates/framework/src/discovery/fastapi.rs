@@ -1,39 +1,16 @@
 //! FastAPI-specific discovery: find app, walk routes, read `Dependant`.
 
 use crate::discovery::DiscoveryError;
-use crate::route::{
-    AppManifest, AppModule, BodyLimit, HandlerKind, ParamManifest, ParamSource, QualName,
-    ResponseType, RouteManifest, RoutePath,
-};
+use crate::route::AppModule;
 use pyo3::types::{PyAnyMethods, PyString};
-use pyo3::{Bound, FromPyObject, Python};
-use std::collections::HashSet;
-
-/// Import the user module, find the FastAPI app, and extract an [`AppManifest`].
-pub fn import_and_extract<'py>(
-    py: Python<'py>,
-    app_module: &AppModule,
-) -> Result<(Bound<'py, pyo3::PyAny>, AppManifest), DiscoveryError> {
-    let app = find_fastapi_app(py, app_module)?;
-    let routes = extract_routes(py, &app)?;
-
-    let manifest = AppManifest {
-        meta: None,
-        routes,
-        dependency_graph: Vec::new(),
-        lifecycle_deps: Vec::new(),
-        openapi_schema: None,
-        max_body_limit: BodyLimit::DEFAULT,
-        validation_results: Vec::new(),
-    };
-
-    Ok((app, manifest))
-}
+use pyo3::{Bound, Python};
 
 /// Find a `FastAPI` instance in the given module.
 ///
 /// Checks the conventional `app` attribute first, then walks `dir(module)`.
-fn find_fastapi_app<'py>(
+///
+/// Used by both production serving (manifest-based binding) and live discovery (tests/dev).
+pub fn find_fastapi_app<'py>(
     py: Python<'py>,
     app_module: &AppModule,
 ) -> Result<Bound<'py, pyo3::PyAny>, DiscoveryError> {
@@ -76,10 +53,40 @@ fn find_fastapi_app<'py>(
     Err(DiscoveryError::NoApp(app_module.as_str().to_owned()))
 }
 
+// ── Live discovery (test / dev only) ────────────────────────────────────
+//
+// The functions below extract route metadata by walking the live FastAPI
+// `app.routes` list. Production serving uses `bind_routes_from_manifest`
+// instead, which re-uses the already-extracted manifest. These functions
+// are gated behind `#[cfg(test)]` and will be un-gated when `apx dev` is
+// added.
+
+#[cfg(test)]
+pub fn import_and_extract<'py>(
+    py: Python<'py>,
+    app_module: &AppModule,
+) -> Result<(Bound<'py, pyo3::PyAny>, crate::route::AppManifest), DiscoveryError> {
+    let app = find_fastapi_app(py, app_module)?;
+    let routes = extract_routes(py, &app)?;
+
+    let manifest = crate::route::AppManifest {
+        meta: None,
+        routes,
+        dependency_graph: Vec::new(),
+        lifecycle_deps: Vec::new(),
+        openapi_schema: None,
+        max_body_limit: crate::route::BodyLimit::DEFAULT,
+        validation_results: Vec::new(),
+    };
+
+    Ok((app, manifest))
+}
+
+#[cfg(test)]
 /// Metadata extracted from a single `APIRoute` Python object.
 struct RouteMetadata {
     path: String,
-    methods: HashSet<String>,
+    methods: std::collections::HashSet<String>,
     status_code: u16,
     tags: Vec<String>,
     summary: Option<String>,
@@ -89,13 +96,14 @@ struct RouteMetadata {
     operation_id: Option<String>,
 }
 
+#[cfg(test)]
 /// Raw attributes extracted from a Python `APIRoute` via `FromPyObject`.
-#[derive(FromPyObject)]
+#[derive(pyo3::FromPyObject)]
 struct RouteAttrs {
     #[pyo3(attribute)]
     path: String,
     #[pyo3(attribute, default)]
-    methods: Option<HashSet<String>>,
+    methods: Option<std::collections::HashSet<String>>,
     #[pyo3(attribute, default)]
     status_code: Option<u16>,
     #[pyo3(attribute, default)]
@@ -112,6 +120,7 @@ struct RouteAttrs {
     operation_id: Option<String>,
 }
 
+#[cfg(test)]
 /// Read scalar metadata fields from a Python `APIRoute`.
 fn extract_route_metadata(route: &Bound<'_, pyo3::PyAny>) -> Result<RouteMetadata, DiscoveryError> {
     let raw: RouteAttrs = route
@@ -130,23 +139,27 @@ fn extract_route_metadata(route: &Bound<'_, pyo3::PyAny>) -> Result<RouteMetadat
     })
 }
 
+#[cfg(test)]
 /// Determine handler kind and response type for a route.
 fn classify_route(
     py: Python<'_>,
     endpoint: &Bound<'_, pyo3::PyAny>,
     _dependant: &Bound<'_, pyo3::PyAny>,
     response_model: &Bound<'_, pyo3::PyAny>,
-) -> Result<(HandlerKind, ResponseType), DiscoveryError> {
+) -> Result<(crate::route::HandlerKind, crate::route::ResponseType), DiscoveryError> {
     let response_type = classify_response_type(py, response_model)?;
     let kind = classify_handler_kind(py, endpoint)?;
     Ok((kind, response_type))
 }
 
+#[cfg(test)]
 /// Walk `app.routes`, filter `APIRoute`, extract [`RouteManifest`] for each.
 fn extract_routes(
     py: Python<'_>,
     app: &Bound<'_, pyo3::PyAny>,
-) -> Result<Vec<RouteManifest>, DiscoveryError> {
+) -> Result<Vec<crate::route::RouteManifest>, DiscoveryError> {
+    use crate::route::RoutePath;
+
     let routes_obj = app
         .getattr(c"routes")
         .map_err(|e| DiscoveryError::Python(format!("get routes from app: {e}")))?;
@@ -217,7 +230,7 @@ fn extract_routes(
         // One RouteManifest per HTTP method (FastAPI stores methods as a set).
         for method_str in &meta.methods {
             let method = super::parse_http_method(method_str)?;
-            manifests.push(RouteManifest {
+            manifests.push(crate::route::RouteManifest {
                 kind,
                 method,
                 path: route_path.clone(),
@@ -240,11 +253,14 @@ fn extract_routes(
     Ok(manifests)
 }
 
+#[cfg(test)]
 /// Extract a WebSocket route from an `APIWebSocketRoute`.
 fn extract_ws_route(
     py: Python<'_>,
     route: &Bound<'_, pyo3::PyAny>,
-) -> Result<Option<RouteManifest>, DiscoveryError> {
+) -> Result<Option<crate::route::RouteManifest>, DiscoveryError> {
+    use crate::route::{HandlerKind, ResponseType, RoutePath};
+
     let path: String = extract_attr(route, "path")?;
 
     let Ok(endpoint) = route.getattr(c"endpoint") else {
@@ -263,7 +279,7 @@ fn extract_ws_route(
 
     let _ = py; // suppress unused warning
 
-    Ok(Some(RouteManifest {
+    Ok(Some(crate::route::RouteManifest {
         kind: HandlerKind::WebSocket,
         method: crate::route::HttpMethod::Get,
         path: route_path,
@@ -282,6 +298,7 @@ fn extract_ws_route(
     }))
 }
 
+#[cfg(test)]
 /// Extract a string attribute from a Python object.
 fn extract_attr(obj: &Bound<'_, pyo3::PyAny>, attr: &str) -> Result<String, DiscoveryError> {
     let val = obj
@@ -291,11 +308,14 @@ fn extract_attr(obj: &Bound<'_, pyo3::PyAny>, attr: &str) -> Result<String, Disc
         .map_err(|e| DiscoveryError::Python(format!("route.{attr} extract: {e}")))
 }
 
+#[cfg(test)]
 /// Read `dependant.{path,query,header,cookie,body}_params` → `Vec<ParamManifest>`.
 fn extract_params_from_dependant(
     py: Python<'_>,
     dependant: &Bound<'_, pyo3::PyAny>,
-) -> Result<Vec<ParamManifest>, DiscoveryError> {
+) -> Result<Vec<crate::route::ParamManifest>, DiscoveryError> {
+    use crate::route::ParamSource;
+
     let mut params = Vec::new();
 
     let param_groups: &[(&str, ParamSource)] = &[
@@ -323,8 +343,9 @@ fn extract_params_from_dependant(
     Ok(params)
 }
 
+#[cfg(test)]
 /// Raw attributes extracted from a Python field info object.
-#[derive(FromPyObject)]
+#[derive(pyo3::FromPyObject)]
 struct FieldAttrs<'py> {
     #[pyo3(attribute)]
     name: String,
@@ -336,12 +357,15 @@ struct FieldAttrs<'py> {
     type_obj: Bound<'py, pyo3::PyAny>,
 }
 
+#[cfg(test)]
 /// Convert a FastAPI `FieldInfo` / `ModelField` → [`ParamManifest`].
 fn field_to_param_manifest(
     py: Python<'_>,
     field: &Bound<'_, pyo3::PyAny>,
-    source: ParamSource,
-) -> Result<ParamManifest, DiscoveryError> {
+    source: crate::route::ParamSource,
+) -> Result<crate::route::ParamManifest, DiscoveryError> {
+    use crate::route::QualName;
+
     let attrs: FieldAttrs<'_> = field
         .extract()
         .map_err(|e| DiscoveryError::Python(format!("field attrs: {e}")))?;
@@ -359,7 +383,7 @@ fn field_to_param_manifest(
     // Only store alias if it differs from the name.
     let alias = attrs.alias.filter(|a| a != &attrs.name);
 
-    Ok(ParamManifest {
+    Ok(crate::route::ParamManifest {
         name: attrs.name,
         source,
         type_qualname,
@@ -370,11 +394,8 @@ fn field_to_param_manifest(
     })
 }
 
+#[cfg(test)]
 /// Extract `__module__.__qualname__` from a Python object.
-///
-/// Builtins return just the qualname (e.g. `"int"`). All others return
-/// `"module.qualname"` (e.g. `"backend.app.Item"`). Returns `None` if
-/// either attribute is missing.
 fn extract_module_qualname(obj: &Bound<'_, pyo3::PyAny>) -> Option<String> {
     let module: String = obj
         .getattr(c"__module__")
@@ -391,6 +412,7 @@ fn extract_module_qualname(obj: &Bound<'_, pyo3::PyAny>) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 /// Get the qualified name of a Python type.
 fn python_type_qualname(
     _py: Python<'_>,
@@ -399,13 +421,13 @@ fn python_type_qualname(
     if let Some(name) = extract_module_qualname(type_obj) {
         return Ok(name);
     }
-    // Fallback: str(type_) for special forms like typing.Optional[int].
     type_obj
         .str()
         .and_then(|v| v.extract::<String>())
         .map_err(|e| DiscoveryError::Python(format!("type qualname: {e}")))
 }
 
+#[cfg(test)]
 /// Extract default value as JSON if the field has a default.
 fn extract_default_json(
     py: Python<'_>,
@@ -415,19 +437,16 @@ fn extract_default_json(
         return Ok(None);
     };
 
-    // None in Python means no default (or explicit None default).
     if default_obj.is_none() {
         return Ok(None);
     }
 
-    // Check for PydanticUndefined / dataclasses.MISSING sentinel.
     if let Ok(repr) = default_obj.repr().and_then(|r| r.extract::<String>())
         && (repr.contains("PydanticUndefined") || repr.contains("MISSING"))
     {
         return Ok(None);
     }
 
-    // Try JSON serialization via Python's json.dumps.
     let json_mod = py
         .import(c"json")
         .map_err(|e| DiscoveryError::Python(format!("import json: {e}")))?;
@@ -440,26 +459,30 @@ fn extract_default_json(
     Ok(Some(value))
 }
 
+#[cfg(test)]
 /// Get the handler's qualified name.
-fn get_handler_qualname(endpoint: &Bound<'_, pyo3::PyAny>) -> Result<QualName, DiscoveryError> {
+fn get_handler_qualname(
+    endpoint: &Bound<'_, pyo3::PyAny>,
+) -> Result<crate::route::QualName, DiscoveryError> {
     let full = extract_module_qualname(endpoint).ok_or_else(|| {
         DiscoveryError::Python("endpoint missing __module__ or __qualname__".to_owned())
     })?;
-    QualName::new(&full)
+    crate::route::QualName::new(&full)
         .map_err(|e| DiscoveryError::InvalidRoute(format!("handler qualname '{full}': {e}")))
 }
 
+#[cfg(test)]
 /// Classify the response type from `route.response_model`.
 fn classify_response_type(
     py: Python<'_>,
     response_model: &Bound<'_, pyo3::PyAny>,
-) -> Result<ResponseType, DiscoveryError> {
-    // If response_model is None, it's a raw response.
+) -> Result<crate::route::ResponseType, DiscoveryError> {
+    use crate::route::{QualName, ResponseType};
+
     if response_model.is_none() {
         return Ok(ResponseType::RawResponse);
     }
 
-    // Check if it's a streaming response type.
     if let Ok(streaming_cls) = py
         .import(c"starlette.responses")
         .and_then(|m| m.getattr(c"StreamingResponse"))
@@ -469,7 +492,6 @@ fn classify_response_type(
         return Ok(ResponseType::StreamingResponse);
     }
 
-    // It's a model — extract qualified name.
     let qualname_str = python_type_qualname(py, response_model)?;
     let qualname = QualName::new(&qualname_str).map_err(|e| {
         DiscoveryError::InvalidRoute(format!("response model '{qualname_str}': {e}"))
@@ -482,12 +504,14 @@ fn classify_response_type(
     })
 }
 
+#[cfg(test)]
 /// Classify the handler kind (request-response, SSE, websocket).
 fn classify_handler_kind(
     py: Python<'_>,
     endpoint: &Bound<'_, pyo3::PyAny>,
-) -> Result<HandlerKind, DiscoveryError> {
-    // Check return type annotation for StreamingResponse.
+) -> Result<crate::route::HandlerKind, DiscoveryError> {
+    use crate::route::HandlerKind;
+
     if let Ok(ann) = endpoint.getattr(c"__annotations__")
         && let Ok(ret) = ann.get_item(c"return")
         && let Ok(streaming_cls) = py
@@ -498,7 +522,6 @@ fn classify_handler_kind(
         return Ok(HandlerKind::SSE);
     }
 
-    // Check if it's an async generator (SSE pattern).
     let inspect = py
         .import(c"inspect")
         .map_err(|e| DiscoveryError::Python(format!("import inspect: {e}")))?;
