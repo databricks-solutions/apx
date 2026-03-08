@@ -1,0 +1,57 @@
+# ── Stage 1: Build APX wheel + manifest ─────────────────────────
+FROM python:3.11-slim AS builder
+
+# System deps for Rust compilation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl build-essential pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# uv + maturin
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+RUN uv pip install --system maturin
+
+# ── Copy source (order matters for Docker cache) ────────────────
+WORKDIR /build
+
+# 1. Cargo manifests + lockfile (cache deps layer)
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ ./crates/
+
+# 2. Python source
+COPY src/ ./src/
+COPY pyproject.toml ./
+
+# ── Build wheel ─────────────────────────────────────────────────
+RUN maturin build --release --out /build/dist/
+
+# ── Build manifest ──────────────────────────────────────────────
+RUN uv pip install --system /build/dist/apx-*.whl fastapi
+
+COPY scripts/bench/app/ /build/bench_app/app/
+WORKDIR /build/bench_app
+
+RUN python -c "\
+import sys; sys.argv = ['_manifest', 'app.main']; \
+import apx._manifest; apx._manifest.main()" > /build/manifest.json
+
+# ── Stage 2: Runtime ────────────────────────────────────────────
+FROM python:3.11-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+COPY --from=builder /build/dist/apx-*.whl /tmp/
+RUN uv pip install --system /tmp/apx-*.whl fastapi \
+    && rm -f /tmp/apx-*.whl
+
+WORKDIR /app
+COPY --from=builder /build/manifest.json ./manifest.json
+COPY scripts/bench/app/ ./app/
+
+EXPOSE 8000
+
+CMD ["apx", "serve", "manifest.json", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
