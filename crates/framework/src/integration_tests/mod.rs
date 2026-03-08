@@ -38,6 +38,19 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::sync::{Arc, Once, OnceLock};
 
+// ── Tracing setup ───────────────────────────────────────────────────────
+
+static TRACING_INIT: Once = Once::new();
+
+/// Ensure a tracing subscriber is registered so framework traces are visible
+/// in test output when `APX_LOG` is set. Safe to call from any test — runs
+/// exactly once, silently ignored if a subscriber is already set.
+fn ensure_tracing() {
+    TRACING_INIT.call_once(|| {
+        apx_common::tracing_fmt::init_fmt_subscriber("apx_framework");
+    });
+}
+
 // ── Python environment setup ────────────────────────────────────────────
 
 static PYTHON_ENV_INIT: Once = Once::new();
@@ -130,6 +143,7 @@ impl TestServer {
     /// The module name is derived from the test to avoid import collisions
     /// when multiple tests run in the same process.
     pub async fn start(python_app: &str, module_name: &str) -> Self {
+        ensure_tracing();
         ensure_python_env();
         with_py(|_| {});
 

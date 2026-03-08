@@ -203,6 +203,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -295,6 +297,7 @@ dependencies = [
 name = "apx-framework"
 version = "0.3.8"
 dependencies = [
+ "apx-common",
  "axum",
  "bytes",
  "form_urlencoded",

@@ -11,6 +11,8 @@ pub mod format;
 pub mod hosts;
 /// Pure types and logic for flux OTEL log records, filtering, and aggregation.
 pub mod storage;
+/// Shared tracing subscriber setup (`DevAwareFormatter`, `APX_LOG` filter, fmt-only init).
+pub mod tracing_fmt;
 
 use serde::{Deserialize, Serialize};
 use std::fs;
