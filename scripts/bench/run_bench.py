@@ -181,7 +181,7 @@ def wait_for_health(port: int, timeout: float = 30.0) -> None:
                 if resp.status_code == 200:
                     progress.update(task, description="[green]Server ready!")
                     return
-            except (httpx.ConnectError, httpx.ReadTimeout):
+            except httpx.HTTPError:
                 pass
             time.sleep(0.5)
 
