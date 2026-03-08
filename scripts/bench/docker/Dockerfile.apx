@@ -14,8 +14,8 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # uv + maturin + sccache
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 RUN uv pip install --system maturin \
-    && curl -sSL https://github.com/mozilla/sccache/releases/download/v0.9.1/sccache-v0.9.1-x86_64-unknown-linux-musl.tar.gz \
-       | tar xz -C /usr/local/bin --strip-components=1 sccache-v0.9.1-x86_64-unknown-linux-musl/sccache
+    && curl -sSL https://github.com/mozilla/sccache/releases/download/v0.13.0/sccache-v0.13.0-x86_64-unknown-linux-musl.tar.gz \
+       | tar xz -C /usr/local/bin --strip-components=1 sccache-v0.13.0-x86_64-unknown-linux-musl/sccache
 ENV RUSTC_WRAPPER=sccache
 
 # ── Copy source (order matters for Docker cache) ────────────────
