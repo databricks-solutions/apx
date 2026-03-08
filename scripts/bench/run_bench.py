@@ -204,7 +204,7 @@ def run_oha(
     """Run oha for a single scenario. Returns True on success."""
     cmd = [
         "oha",
-        "-j",
+        "--output-format", "json",
         "--no-tui",
         "-z", duration,
         "-c", str(connections),
