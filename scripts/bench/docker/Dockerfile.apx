@@ -22,10 +22,30 @@ RUN --mount=type=cache,target=/root/.cache/sccache \
     cargo install cargo-chef --locked
 
 # ── Stage 1: Plan (extract dependency recipe) ────────────────────
+# IMPORTANT: Only copy Cargo manifests and lock file — NOT full source.
+# This isolates the recipe from source-only changes, so cargo chef cook
+# stays cached when only .rs files change.
 FROM chef AS planner
-COPY . .
+COPY Cargo.toml Cargo.lock ./
+COPY crates/common/Cargo.toml crates/common/Cargo.toml
+COPY crates/db/Cargo.toml crates/db/Cargo.toml
+COPY crates/databricks_sdk/Cargo.toml crates/databricks_sdk/Cargo.toml
+COPY crates/core/Cargo.toml crates/core/Cargo.toml
+COPY crates/cli/Cargo.toml crates/cli/Cargo.toml
+COPY crates/apx/Cargo.toml crates/apx/Cargo.toml
+COPY crates/framework/Cargo.toml crates/framework/Cargo.toml
+COPY crates/agent/Cargo.toml crates/agent/Cargo.toml
+COPY crates/mcp/Cargo.toml crates/mcp/Cargo.toml
 # Exclude studio (tauri) — not needed for server builds
 RUN sed -i 's/, "crates\/studio"//' Cargo.toml
+# Create stub source files so cargo metadata succeeds
+RUN for dir in crates/*/; do \
+      mkdir -p "$dir/src"; \
+      if [ -f "$dir/Cargo.toml" ]; then \
+        grep -q '\[\[bin\]\]' "$dir/Cargo.toml" && touch "$dir/src/main.rs"; \
+        touch "$dir/src/lib.rs"; \
+      fi; \
+    done
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ── Stage 2: Build ───────────────────────────────────────────────
@@ -47,7 +67,8 @@ RUN --mount=type=cache,target=/root/.cache/sccache \
     PYO3_PYTHON=/opt/python/cp311-cp311/bin/python3.11 \
     cargo chef cook --release --recipe-path recipe.json
 
-# 2. Copy real source
+# 2. Copy real source — changes here invalidate only compile steps below.
+#    sccache ensures only the changed crates are recompiled (~10-20s).
 COPY Cargo.toml Cargo.lock rust-toolchain.toml README.md ./
 RUN sed -i 's/, "crates\/studio"//' Cargo.toml
 COPY crates/ ./crates/

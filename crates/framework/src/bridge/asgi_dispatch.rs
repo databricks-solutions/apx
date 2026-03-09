@@ -74,6 +74,10 @@ impl HandlerDispatch for AsgiBridgeDispatch {
 /// Events accumulate in a shared buffer. The coroutine runs on the
 /// persistent event loop with cooperative multiplexing — other in-flight
 /// requests can make progress at `await` points.
+///
+/// Uses `AsgiReceive::immediate` to avoid `future_into_py` overhead for
+/// the pre-buffered body (eliminates a tokio task + cross-thread callback
+/// on the first `await receive()` call).
 async fn dispatch_buffered(
     route: Arc<BoundRoute>,
     app_state: Arc<AppState>,
@@ -84,9 +88,7 @@ async fn dispatch_buffered(
 
     let handler_rx = app_state.loop_handle.schedule_with(|py| {
         let _span = tracing::trace_span!("build_scope").entered();
-        let coro = call_asgi_app(py, &route, &request, &app_state, body_bytes, |_py| {
-            AsgiSend::buffered(&event_buffer)
-        })?;
+        let coro = call_asgi_app_sync(py, &route, &request, &app_state, body_bytes, &event_buffer)?;
         Ok(coro)
     })?;
 
@@ -126,10 +128,47 @@ async fn dispatch_streaming(
     super::streaming::stream_asgi_response(send_rx, handler_task).await
 }
 
+/// Build ASGI scope, receive, and send for the buffered dispatch path.
+///
+/// Uses `AsgiReceive::immediate` (synchronous first-call body delivery)
+/// and `AsgiSend::buffered` for zero-overhead send collection.
+fn call_asgi_app_sync(
+    py: Python<'_>,
+    route: &BoundRoute,
+    request: &InboundRequest,
+    app_state: &AppState,
+    body_bytes: Bytes,
+    event_buffer: &AsgiEventBuffer,
+) -> Result<Py<PyAny>, AppError> {
+    let asgi_callable = route
+        .fastapi_app
+        .as_ref()
+        .map_or_else(|| route.handler.inner(), |a| a.inner());
+
+    let scope = build_http_scope(
+        py,
+        request,
+        route.fastapi_app.as_ref().map(|a| a.inner()),
+        &app_state.scope_interns,
+    )
+    .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
+
+    let receive = AsgiReceive::immediate(body_bytes);
+    let send = AsgiSend::buffered(event_buffer);
+
+    let receive_obj =
+        Py::new(py, receive).map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
+    let send_obj = Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
+
+    asgi_callable
+        .call(py, (scope, receive_obj, send_obj), None)
+        .map_err(|e| AppError::Internal(format!("handler call: {e}")))
+}
+
 /// Build ASGI scope, receive, and send objects, then call the ASGI app.
 ///
-/// Shared logic between buffered and streaming dispatch paths.
-/// The `make_send` closure creates the appropriate `AsgiSend` variant.
+/// Used by the streaming dispatch path. The `make_send` closure creates
+/// the appropriate `AsgiSend` variant.
 fn call_asgi_app(
     py: Python<'_>,
     route: &BoundRoute,

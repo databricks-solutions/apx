@@ -12,6 +12,12 @@
 pub mod core;
 pub mod handle;
 pub mod scheduling;
+// Thread-local event loop cache — available for future optimizations.
+#[allow(
+    dead_code,
+    reason = "reserved for future spawn_blocking dispatch paths"
+)]
+pub mod thread_local;
 
 pub use core::EventLoop;
 pub use handle::EventLoopHandle;

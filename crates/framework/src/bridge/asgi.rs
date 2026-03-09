@@ -166,13 +166,13 @@ pub enum AsgiEvent {
 
 /// ASGI `receive` callable backed by Rust.
 ///
-/// For HTTP: first call returns `http.request` with the pre-buffered body,
-/// subsequent calls pend forever (preventing Starlette's `listen_for_disconnect`
-/// from prematurely firing). Uses `Arc<Mutex<Option<Bytes>>>` for interior
-/// mutability across await points.
+/// For HTTP: first call returns `http.request` with the pre-buffered body
+/// synchronously (via `ResolvedAwaitableWithValue`, no tokio task overhead).
+/// Subsequent calls pend forever via `future_into_py` + `pending()`,
+/// preventing Starlette's `listen_for_disconnect` from prematurely firing.
 #[pyclass(module = "apx._core")]
 pub struct AsgiReceive {
-    body: Arc<Mutex<Option<Bytes>>>,
+    body: std::sync::Mutex<Option<Bytes>>,
 }
 
 impl std::fmt::Debug for AsgiReceive {
@@ -185,15 +185,20 @@ impl AsgiReceive {
     /// Create for an HTTP request with a known body.
     pub fn http(body: Bytes) -> Self {
         Self {
-            body: Arc::new(Mutex::new(Some(body))),
+            body: std::sync::Mutex::new(Some(body)),
         }
     }
 
     /// Create for an HTTP request with no body (GET, HEAD, DELETE).
     pub fn empty() -> Self {
         Self {
-            body: Arc::new(Mutex::new(Some(Bytes::new()))),
+            body: std::sync::Mutex::new(Some(Bytes::new())),
         }
+    }
+
+    /// Alias for `http` — used by the sync dispatch path.
+    pub fn immediate(body: Bytes) -> Self {
+        Self::http(body)
     }
 }
 
@@ -201,20 +206,30 @@ impl AsgiReceive {
 impl AsgiReceive {
     /// Python: `event = await receive()`
     ///
-    /// First call returns `http.request` with the pre-buffered body.
-    /// Subsequent calls pend forever (until the ASGI task is cancelled).
+    /// First call: returns body synchronously via `ResolvedAwaitableWithValue`
+    /// (no tokio task, no `future_into_py` overhead).
+    /// Subsequent calls: pend forever via `future_into_py` + `pending()`
+    /// (proper asyncio suspension for the disconnect listener).
     fn __call__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let body = Arc::clone(&self.body);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = body.lock().await;
-            if let Some(bytes) = guard.take() {
-                drop(guard);
-                Python::attach(|py| build_receive_event(py, Some(bytes)))
-            } else {
-                drop(guard);
-                std::future::pending::<PyResult<Py<PyAny>>>().await
+        let taken = self
+            .body
+            .lock()
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("receive mutex poisoned"))?
+            .take();
+
+        match taken {
+            Some(bytes) => {
+                let event = build_receive_event(py, Some(bytes))?;
+                Py::new(py, ResolvedAwaitableWithValue { value: Some(event) })
+                    .map(|obj| obj.into_bound(py).into_any())
             }
-        })
+            None => {
+                // Body already consumed — pend forever for disconnect listener.
+                pyo3_async_runtimes::tokio::future_into_py(py, async {
+                    std::future::pending::<PyResult<Py<PyAny>>>().await
+                })
+            }
+        }
     }
 }
 
@@ -257,6 +272,36 @@ impl ResolvedAwaitable {
     #[expect(clippy::unused_self, reason = "required by Python iterator protocol")]
     fn __next__(&self) -> Option<Py<PyAny>> {
         None // StopIteration — completes immediately
+    }
+}
+
+/// Zero-overhead Python awaitable that completes immediately with a value.
+///
+/// Used by `AsgiReceive::immediate` to return the receive dict without
+/// `future_into_py` (which requires a tokio runtime, unavailable on
+/// `spawn_blocking` threads).
+#[pyclass(module = "apx._core")]
+struct ResolvedAwaitableWithValue {
+    value: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl ResolvedAwaitableWithValue {
+    fn __await__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    fn __iter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    fn __next__(&mut self) -> PyResult<Py<PyAny>> {
+        // Raise StopIteration(value) — this is how Python awaitables return results.
+        let val = self
+            .value
+            .take()
+            .unwrap_or_else(|| Python::attach(|py| py.None()));
+        Err(pyo3::exceptions::PyStopIteration::new_err((val,)))
     }
 }
 

@@ -26,9 +26,11 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default max concurrent requests per worker.
 ///
-/// Each worker has one GIL. Even though we release the GIL during `await`,
-/// Python bytecode execution is serial. This limit prevents GIL thrashing.
-const DEFAULT_CONCURRENCY_LIMIT: usize = 16;
+/// Sized to allow the persistent asyncio event loop to efficiently
+/// interleave coroutines at `await` points. The GIL serializes
+/// bytecode execution but async I/O multiplexing works well at
+/// higher concurrency levels — matching uvicorn's model.
+const DEFAULT_CONCURRENCY_LIMIT: usize = 256;
 
 /// Per-route state baked into the axum handler via `.with_state()`.
 #[derive(Clone)]

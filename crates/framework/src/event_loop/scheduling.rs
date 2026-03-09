@@ -8,6 +8,23 @@ use crate::error::AppError;
 use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
+/// Cached `asyncio.ensure_future` function reference.
+///
+/// Avoids `py.import(c"asyncio")` + attribute lookup on every request.
+/// Initialized on first use; never changes after that.
+static ENSURE_FUTURE: std::sync::OnceLock<Py<PyAny>> = std::sync::OnceLock::new();
+
+/// Get or initialize the cached `asyncio.ensure_future` reference.
+fn ensure_future(py: Python<'_>) -> PyResult<&Py<PyAny>> {
+    if let Some(ef) = ENSURE_FUTURE.get() {
+        return Ok(ef);
+    }
+    let asyncio = py.import(c"asyncio")?;
+    let ef = asyncio.getattr(c"ensure_future")?.unbind();
+    // Race is harmless — all threads compute the same value.
+    Ok(ENSURE_FUTURE.get_or_init(|| ef))
+}
+
 /// Scheduled on the event loop via `call_soon_threadsafe`.
 ///
 /// When called (with no arguments, by the event loop), creates an
@@ -44,10 +61,9 @@ impl CoroutineScheduler {
         let callback = self.callback.take().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("scheduler already consumed")
         })?;
-        let task = py
-            .import(c"asyncio")?
-            .call_method1(c"ensure_future", (coro,))?;
-        task.call_method1(c"add_done_callback", (callback,))?;
+        let ef = ensure_future(py)?;
+        let task = ef.call1(py, (coro,))?;
+        task.call_method1(py, c"add_done_callback", (callback,))?;
         Ok(())
     }
 }
