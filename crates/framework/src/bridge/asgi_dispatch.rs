@@ -5,7 +5,7 @@
 //! Rust-backed ASGI objects from [`InboundRequest`] and collects the
 //! response from the ASGI send channel.
 
-use crate::bridge::asgi::{AsgiEvent, AsgiReceive, AsgiSend, build_http_scope};
+use crate::bridge::asgi::{AsgiEvent, AsgiEventBuffer, AsgiReceive, AsgiSend, build_http_scope};
 use crate::bridge::dispatch::{AppState, HandlerDispatch};
 use crate::error::{AppError, BodyParseKind};
 use crate::route::{BoundRoute, HandlerKind, ResponseType};
@@ -52,49 +52,8 @@ impl HandlerDispatch for AsgiBridgeDispatch {
                 .await
                 .map_err(|_| AppError::BodyParse(BodyParseKind::BodyTooLarge))?;
 
-            // 2. Build ASGI objects and get handler coroutine (brief GIL hold)
-            let (send_tx, mut send_rx) = mpsc::channel::<AsgiEvent>(ASGI_CHANNEL_SIZE);
-
-            let coro = Python::attach(|py| -> Result<Py<PyAny>, AppError> {
-                let _span = tracing::trace_span!("build_scope").entered();
-                let asgi_callable = route
-                    .fastapi_app
-                    .as_ref()
-                    .map_or_else(|| route.handler.inner(), |a| a.inner());
-
-                let scope = build_http_scope(
-                    py,
-                    &request,
-                    route.fastapi_app.as_ref().map(|a| a.inner()),
-                    &app_state.scope_interns,
-                )
-                .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
-
-                let receive = if body_bytes.is_empty() {
-                    AsgiReceive::empty()
-                } else {
-                    AsgiReceive::http(body_bytes)
-                };
-                let send = AsgiSend::new(send_tx);
-
-                let receive_obj = Py::new(py, receive)
-                    .map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
-                let send_obj =
-                    Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
-
-                asgi_callable
-                    .call(py, (scope, receive_obj, send_obj), None)
-                    .map_err(|e| AppError::Internal(format!("handler call: {e}")))
-            })?;
-
-            // 3. Drive handler coroutine on the persistent event loop.
-            //    This runs concurrently with Tokio response collection below.
-            //    BackgroundTasks, contextvars, and get_running_loop() all work
-            //    correctly because the coroutine runs on a real asyncio loop.
-            let loop_handle = app_state.loop_handle.clone();
-            let handler_task = tokio::spawn(async move { loop_handle.drive_coroutine(coro).await });
-
-            // 4. Branch: streaming vs buffered response collection
+            // 2. Branch on streaming vs buffered before creating ASGI objects.
+            //    Buffered path avoids mpsc channel and tokio::spawn entirely.
             let is_streaming = matches!(route.manifest.kind, HandlerKind::SSE)
                 || matches!(
                     route.manifest.response_type,
@@ -102,31 +61,134 @@ impl HandlerDispatch for AsgiBridgeDispatch {
                 );
 
             if is_streaming {
-                super::streaming::stream_asgi_response(send_rx, handler_task).await
+                dispatch_streaming(route, app_state, request, body_bytes).await
             } else {
-                let t0 = std::time::Instant::now();
-                let response = collect_asgi_response(&mut send_rx).await?;
-                tracing::trace!(elapsed_us = t0.elapsed().as_micros(), "response_collect");
-                let _ = handler_task.await;
-                Ok(response)
+                dispatch_buffered(route, app_state, request, body_bytes).await
             }
         })
     }
 }
 
-/// Collect ASGI send events into an [`OutboundResponse`].
+/// Buffered response path: no mpsc channel, no tokio::spawn.
 ///
-/// Expects `ResponseStart` followed by one or more `ResponseBody` chunks.
-pub async fn collect_asgi_response(
-    rx: &mut mpsc::Receiver<AsgiEvent>,
+/// Events accumulate in a shared buffer. The coroutine runs on the
+/// persistent event loop with cooperative multiplexing — other in-flight
+/// requests can make progress at `await` points.
+async fn dispatch_buffered(
+    route: Arc<BoundRoute>,
+    app_state: Arc<AppState>,
+    request: InboundRequest,
+    body_bytes: Bytes,
 ) -> Result<OutboundResponse, AppError> {
-    // First event must be ResponseStart
-    let (status, raw_headers) = recv_response_start(rx).await?;
+    let event_buffer = AsgiEventBuffer::new();
 
-    // Collect body chunks
-    let body = recv_response_body(rx).await?;
+    let handler_rx = app_state.loop_handle.schedule_with(|py| {
+        let _span = tracing::trace_span!("build_scope").entered();
+        let coro = call_asgi_app(py, &route, &request, &app_state, body_bytes, |_py| {
+            AsgiSend::buffered(&event_buffer)
+        })?;
+        Ok(coro)
+    })?;
 
-    // Build header map from raw byte pairs
+    handler_rx
+        .await
+        .map_err(|_| AppError::Internal("event loop closed before coroutine completed".to_owned()))?
+        .map(|_| ())?;
+
+    let t0 = std::time::Instant::now();
+    let response = collect_buffered_response(event_buffer)?;
+    tracing::trace!(elapsed_us = t0.elapsed().as_micros(), "response_collect");
+    Ok(response)
+}
+
+/// Streaming response path: uses mpsc channel for concurrent collection.
+async fn dispatch_streaming(
+    route: Arc<BoundRoute>,
+    app_state: Arc<AppState>,
+    request: InboundRequest,
+    body_bytes: Bytes,
+) -> Result<OutboundResponse, AppError> {
+    let (send_tx, send_rx) = mpsc::channel::<AsgiEvent>(ASGI_CHANNEL_SIZE);
+
+    let handler_rx = app_state.loop_handle.schedule_with(|py| {
+        let _span = tracing::trace_span!("build_scope").entered();
+        call_asgi_app(py, &route, &request, &app_state, body_bytes, |_py| {
+            AsgiSend::channel(send_tx)
+        })
+    })?;
+
+    // Wrap the receiver in a JoinHandle for abort-on-drop semantics.
+    let handler_task = tokio::spawn(async move {
+        handler_rx.await.map_err(|_| {
+            AppError::Internal("event loop closed before coroutine completed".to_owned())
+        })?
+    });
+    super::streaming::stream_asgi_response(send_rx, handler_task).await
+}
+
+/// Build ASGI scope, receive, and send objects, then call the ASGI app.
+///
+/// Shared logic between buffered and streaming dispatch paths.
+/// The `make_send` closure creates the appropriate `AsgiSend` variant.
+fn call_asgi_app(
+    py: Python<'_>,
+    route: &BoundRoute,
+    request: &InboundRequest,
+    app_state: &AppState,
+    body_bytes: Bytes,
+    make_send: impl FnOnce(Python<'_>) -> AsgiSend,
+) -> Result<Py<PyAny>, AppError> {
+    let asgi_callable = route
+        .fastapi_app
+        .as_ref()
+        .map_or_else(|| route.handler.inner(), |a| a.inner());
+
+    let scope = build_http_scope(
+        py,
+        request,
+        route.fastapi_app.as_ref().map(|a| a.inner()),
+        &app_state.scope_interns,
+    )
+    .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
+
+    let receive = if body_bytes.is_empty() {
+        AsgiReceive::empty()
+    } else {
+        AsgiReceive::http(body_bytes)
+    };
+    let send = make_send(py);
+
+    let receive_obj =
+        Py::new(py, receive).map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
+    let send_obj = Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
+
+    asgi_callable
+        .call(py, (scope, receive_obj, send_obj), None)
+        .map_err(|e| AppError::Internal(format!("handler call: {e}")))
+}
+
+/// Collect a buffered response from the event buffer.
+///
+/// Expects exactly one `ResponseStart` followed by one or more `ResponseBody` events.
+fn collect_buffered_response(buffer: AsgiEventBuffer) -> Result<OutboundResponse, AppError> {
+    let events = buffer.take();
+    let mut events_iter = events.into_iter();
+
+    let (status, raw_headers) = match events_iter.next() {
+        Some(AsgiEvent::ResponseStart { status, headers }) => (status, headers),
+        Some(_) => {
+            return Err(AppError::Internal(
+                "ASGI protocol error: first event is not response start".to_owned(),
+            ));
+        }
+        None => {
+            return Err(AppError::Internal(
+                "ASGI protocol error: no events in buffer".to_owned(),
+            ));
+        }
+    };
+
+    let body = collect_body_from_iter(&mut events_iter)?;
     let headers = build_header_map(&raw_headers)?;
 
     Ok(OutboundResponse {
@@ -134,6 +196,29 @@ pub async fn collect_asgi_response(
         headers,
         body: ResponseBody::Fixed(body),
     })
+}
+
+/// Collect body bytes from an iterator of ASGI events.
+fn collect_body_from_iter(events: &mut impl Iterator<Item = AsgiEvent>) -> Result<Bytes, AppError> {
+    match events.next() {
+        Some(AsgiEvent::ResponseBody { body, more_body }) if !more_body => Ok(body),
+        Some(AsgiEvent::ResponseBody { body, .. }) => {
+            let mut buf = Vec::from(body.as_ref());
+            for event in events {
+                if let AsgiEvent::ResponseBody { body, more_body } = event {
+                    buf.extend_from_slice(&body);
+                    if !more_body {
+                        break;
+                    }
+                }
+            }
+            Ok(Bytes::from(buf))
+        }
+        Some(_) => Err(AppError::Internal(
+            "ASGI protocol error: expected response body".to_owned(),
+        )),
+        None => Ok(Bytes::new()),
+    }
 }
 
 /// Receive the `ResponseStart` event from the channel.
@@ -154,20 +239,31 @@ pub(super) async fn recv_response_start(
     }
 }
 
-/// Receive and concatenate `ResponseBody` chunks from the channel.
-///
-/// Fast path: single-chunk response (common for JSON APIs) avoids
-/// intermediate `Vec` allocation — the `Bytes` from the channel is
-/// returned directly.
+/// Channel-based response collection — used by tests.
+#[cfg(test)]
+async fn collect_asgi_response(
+    rx: &mut mpsc::Receiver<AsgiEvent>,
+) -> Result<OutboundResponse, AppError> {
+    let (status, raw_headers) = recv_response_start(rx).await?;
+    let body = recv_response_body(rx).await?;
+    let headers = build_header_map(&raw_headers)?;
+    Ok(OutboundResponse {
+        status: StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        headers,
+        body: ResponseBody::Fixed(body),
+    })
+}
+
+#[cfg(test)]
 async fn recv_response_body(rx: &mut mpsc::Receiver<AsgiEvent>) -> Result<Bytes, AppError> {
     let (first_chunk, more) = recv_body_chunk(rx).await?;
     if !more {
-        return Ok(first_chunk); // single chunk — zero-copy return
+        return Ok(first_chunk);
     }
     accumulate_remaining_chunks(rx, first_chunk).await
 }
 
-/// Receive one body chunk from the channel.
+#[cfg(test)]
 async fn recv_body_chunk(rx: &mut mpsc::Receiver<AsgiEvent>) -> Result<(Bytes, bool), AppError> {
     match rx.recv().await {
         Some(AsgiEvent::ResponseBody { body, more_body }) => Ok((body, more_body)),
@@ -181,7 +277,7 @@ async fn recv_body_chunk(rx: &mut mpsc::Receiver<AsgiEvent>) -> Result<(Bytes, b
     }
 }
 
-/// Slow path: accumulate remaining chunks after the first.
+#[cfg(test)]
 async fn accumulate_remaining_chunks(
     rx: &mut mpsc::Receiver<AsgiEvent>,
     first: Bytes,

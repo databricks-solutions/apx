@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -105,7 +106,8 @@ def build_image(name: str, dockerfile: Path, context: str) -> None:
         "-t", f"bench-{name}",
         context,
     ]
-    result = subprocess.run(cmd, check=False)
+    env = {**os.environ, "DOCKER_BUILDKIT": "1"}
+    result = subprocess.run(cmd, env=env, check=False)
     if result.returncode != 0:
         console.print(f"[red]Error:[/] Failed to build {name} image.")
         sys.exit(1)
@@ -167,7 +169,7 @@ def print_container_logs(name: str) -> None:
 
 def wait_for_health(port: int, timeout: float = 30.0) -> None:
     """Poll /api/health until it responds 200."""
-    url = f"http://localhost:{port}/api/health"
+    url = f"http://127.0.0.1:{port}/api/health"
     deadline = time.monotonic() + timeout
 
     with Progress(
@@ -215,7 +217,7 @@ def run_oha(
         cmd.extend(["-d", json.dumps(scenario["body"])])
         cmd.extend(["-T", "application/json"])
 
-    cmd.append(f"http://localhost:{port}{scenario['path']}")
+    cmd.append(f"http://127.0.0.1:{port}{scenario['path']}")
 
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:

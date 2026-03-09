@@ -8,6 +8,7 @@ use crate::error::AppError;
 use pyo3::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::oneshot;
 
 /// Cloneable handle to the persistent asyncio event loop.
 ///
@@ -53,7 +54,7 @@ impl EventLoopHandle {
             return Err(AppError::Internal("event loop is not running".to_owned()));
         }
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
 
         // Single brief GIL acquisition — consistent with asgi_dispatch.rs:58.
         // call_soon_threadsafe is O(1) and thread-safe by design; the GIL hold
@@ -80,6 +81,48 @@ impl EventLoopHandle {
             "drive_coroutine_await"
         );
         result
+    }
+
+    /// Build a coroutine and schedule it in a single GIL hold.
+    ///
+    /// Combines scope construction and event loop scheduling into one
+    /// `Python::attach` call, eliminating a GIL acquire/release cycle
+    /// compared to separate `build` + `drive_coroutine` calls.
+    ///
+    /// Returns a receiver that resolves when the coroutine completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the event loop is stopped, the closure fails,
+    /// or scheduling fails.
+    pub fn schedule_with<F>(
+        &self,
+        f: F,
+    ) -> Result<oneshot::Receiver<Result<Py<PyAny>, AppError>>, AppError>
+    where
+        F: FnOnce(Python<'_>) -> Result<Py<PyAny>, AppError>,
+    {
+        if !self.running.load(Ordering::Acquire) {
+            return Err(AppError::Internal("event loop is not running".to_owned()));
+        }
+
+        let (tx, rx) = oneshot::channel();
+
+        Python::attach(|py| -> Result<(), AppError> {
+            let coro = f(py)?;
+
+            let callback = Py::new(py, TaskCallback::new(tx))
+                .map_err(|e| AppError::Internal(format!("TaskCallback: {e}")))?;
+            let scheduler = Py::new(py, CoroutineScheduler::new(coro, callback.into_any()))
+                .map_err(|e| AppError::Internal(format!("CoroutineScheduler: {e}")))?;
+
+            self.event_loop
+                .call_method1(py, "call_soon_threadsafe", (scheduler,))
+                .map_err(|e| AppError::Internal(format!("call_soon_threadsafe: {e}")))?;
+            Ok(())
+        })?;
+
+        Ok(rx)
     }
 
     /// Get a reference to the event loop Python object (for tests/diagnostics).

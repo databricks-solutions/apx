@@ -53,13 +53,18 @@ def parse_oha_json(path: Path, name: str) -> ScenarioResult | None:
         v = d.get(key)
         return float(v) if v is not None else default
 
+    # If no requests succeeded, latency/throughput numbers are meaningless.
+    success_rate = _f(summary, "successRate")
+    if success_rate == 0.0:
+        return None
+
     return ScenarioResult(
         name=name,
         requests_per_sec=_f(summary, "requestsPerSec"),
         latency_p50_ms=_f(percentiles, "p50") * 1000,
         latency_p90_ms=_f(percentiles, "p90") * 1000,
         latency_p99_ms=_f(percentiles, "p99") * 1000,
-        success_rate=_f(summary, "successRate"),
+        success_rate=success_rate,
         total_requests=int(_f(summary, "total")),
         transfer_per_sec_kb=_f(summary, "sizePerSec") / 1024,
     )

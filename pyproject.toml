@@ -6,6 +6,9 @@ readme = { file = "README.md", content-type = "text/markdown" }
 authors = [{ name = "renardeinside", email = "polarpersonal@gmail.com" }]
 requires-python = ">=3.11"
 dependencies = ["pydantic>=2.0"]
+
+[project.optional-dependencies]
+uvloop = ["uvloop>=0.21.0; sys_platform != 'win32'"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

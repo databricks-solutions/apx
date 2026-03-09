@@ -1,41 +1,76 @@
-# ── Stage 1: Build APX wheel + manifest ─────────────────────────
-FROM python:3.11-slim AS builder
+# ── Stage 0: Chef base (maturin + sccache + cargo-chef) ──────────
+FROM ghcr.io/pyo3/maturin:v1.8.3 AS chef
 
-# System deps for Rust compilation
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl build-essential pkg-config libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Rust toolchain
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# uv + maturin + sccache
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-RUN uv pip install --system maturin \
-    && curl -sSL https://github.com/mozilla/sccache/releases/download/v0.13.0/sccache-v0.13.0-x86_64-unknown-linux-musl.tar.gz \
-       | tar xz -C /usr/local/bin --strip-components=1 sccache-v0.13.0-x86_64-unknown-linux-musl/sccache
+
+# Pin Python 3.11 (manylinux image ships multiple versions; 3.9 is first on PATH)
+ENV PATH=/opt/python/cp311-cp311/bin:$PATH
+
+# sccache for cached compilation
+RUN curl -sSL https://github.com/mozilla/sccache/releases/download/v0.13.0/sccache-v0.13.0-x86_64-unknown-linux-musl.tar.gz \
+    | tar xz -C /usr/local/bin --strip-components=1 sccache-v0.13.0-x86_64-unknown-linux-musl/sccache
 ENV RUSTC_WRAPPER=sccache
 
-# ── Copy source (order matters for Docker cache) ────────────────
 WORKDIR /build
 
-# 1. Cargo manifests + lockfile (cache deps layer)
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY crates/ ./crates/
+# Copy rust-toolchain.toml so rustup installs the project toolchain (1.92)
+# before compiling cargo-chef (latest cargo-chef requires rustc >= 1.86)
+COPY rust-toolchain.toml ./
+RUN --mount=type=cache,target=/root/.cache/sccache \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    cargo install cargo-chef --locked
 
-# 2. Python source
+# ── Stage 1: Plan (extract dependency recipe) ────────────────────
+FROM chef AS planner
+COPY . .
+# Exclude studio (tauri) — not needed for server builds
+RUN sed -i 's/, "crates\/studio"//' Cargo.toml
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ── Stage 2: Build ───────────────────────────────────────────────
+FROM chef AS builder
+
+# 1. Cook dependencies (cached until Cargo.toml/Cargo.lock change)
+COPY --from=planner /build/recipe.json recipe.json
+
+# Stub files expected by crate build.rs scripts during cook
+# Detect arch so the stub filename matches what build.rs expects
+RUN mkdir -p .bins/agent skills/apx \
+    && ARCH=$(uname -m) && case "$ARCH" in x86_64) AGENT_ARCH=x64;; *) AGENT_ARCH="$ARCH";; esac \
+    && touch ".bins/agent/apx-agent-linux-${AGENT_ARCH}" \
+    && touch skills/apx/SKILL.md skills/apx/backend-patterns.md skills/apx/frontend-patterns.md
+
+RUN --mount=type=cache,target=/root/.cache/sccache \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    PYO3_PYTHON=/opt/python/cp311-cp311/bin/python3.11 \
+    cargo chef cook --release --recipe-path recipe.json
+
+# 2. Copy real source
+COPY Cargo.toml Cargo.lock rust-toolchain.toml README.md ./
+RUN sed -i 's/, "crates\/studio"//' Cargo.toml
+COPY crates/ ./crates/
 COPY src/ ./src/
 COPY pyproject.toml ./
+COPY skills/ ./skills/
 
-# ── Build wheel (with sccache + cargo registry cache) ──────────
+# 3. Build apx-agent binary and place where build.rs expects it
+RUN --mount=type=cache,target=/root/.cache/sccache \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    cargo build --release -p apx-agent \
+    && ARCH=$(uname -m) && case "$ARCH" in x86_64) AGENT_ARCH=x64;; *) AGENT_ARCH="$ARCH";; esac \
+    && mkdir -p .bins/agent \
+    && cp target/release/apx-agent ".bins/agent/apx-agent-linux-${AGENT_ARCH}"
+
+# ── Build wheel (with sccache + cargo registry cache) ────────────
 RUN --mount=type=cache,target=/root/.cache/sccache \
     --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     maturin build --release --out /build/dist/
 
-# ── Build manifest ──────────────────────────────────────────────
+# ── Build manifest ────────────────────────────────────────────────
 RUN uv pip install --system /build/dist/apx-*.whl fastapi
 
 COPY scripts/bench/app/ /build/bench_app/app/
@@ -45,13 +80,13 @@ RUN python -c "\
 import sys; sys.argv = ['_manifest', 'app.main']; \
 import apx._manifest; apx._manifest.main()" > /build/manifest.json
 
-# ── Stage 2: Runtime ────────────────────────────────────────────
+# ── Stage 3: Runtime ──────────────────────────────────────────────
 FROM python:3.11-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 COPY --from=builder /build/dist/apx-*.whl /tmp/
-RUN uv pip install --system /tmp/apx-*.whl fastapi \
+RUN uv pip install --system /tmp/apx-*.whl fastapi uvloop \
     && rm -f /tmp/apx-*.whl
 
 WORKDIR /app

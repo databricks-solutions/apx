@@ -146,7 +146,7 @@ async fn handle_ws_connection(
     let send_task = tokio::spawn(forward_ws_outgoing(outgoing_rx, ws_tx));
 
     let receive = asgi::AsgiWsReceive::new(incoming_rx);
-    let send = asgi::AsgiSend::new(outgoing_tx);
+    let send = asgi::AsgiSend::channel(outgoing_tx);
 
     // Build ASGI objects and get handler coroutine (brief GIL hold).
     let coro = pyo3::Python::attach(

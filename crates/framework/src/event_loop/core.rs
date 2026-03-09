@@ -9,6 +9,91 @@ use pyo3::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+// ── LoopPolicy ───────────────────────────────────────────────────────────
+
+/// Event loop implementation policy.
+///
+/// Determines which Python event loop implementation to use for the
+/// persistent worker loop.
+///
+/// Designed for future extension — a `RustNative` variant can replace
+/// the Python event loop with a Rust-driven coroutine executor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LoopPolicy {
+    /// Try uvloop first, fall back to default asyncio.
+    #[default]
+    Auto,
+    /// Force uvloop (fails if not installed).
+    UvLoop,
+    /// Force CPython's default asyncio event loop.
+    Asyncio,
+}
+
+impl std::fmt::Display for LoopPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => f.write_str("auto"),
+            Self::UvLoop => f.write_str("uvloop"),
+            Self::Asyncio => f.write_str("asyncio"),
+        }
+    }
+}
+
+/// Create a Python event loop according to the given policy.
+fn create_event_loop(py: Python<'_>, policy: LoopPolicy) -> PyResult<Bound<'_, PyAny>> {
+    match policy {
+        LoopPolicy::Auto => {
+            if let Ok(uvloop) = py.import(c"uvloop") {
+                tracing::info!("using uvloop event loop");
+                return uvloop.call_method0(c"new_event_loop");
+            }
+            tracing::info!("uvloop not available, using default asyncio");
+            py.import(c"asyncio")?.call_method0(c"new_event_loop")
+        }
+        LoopPolicy::UvLoop => {
+            let uvloop = py.import(c"uvloop")?;
+            tracing::info!("using uvloop event loop");
+            uvloop.call_method0(c"new_event_loop")
+        }
+        LoopPolicy::Asyncio => {
+            tracing::info!("using default asyncio event loop");
+            py.import(c"asyncio")?.call_method0(c"new_event_loop")
+        }
+    }
+}
+
+/// Cancel all pending asyncio tasks and run them to completion.
+///
+/// Without this step, `loop.close()` leaves live tasks whose cleanup
+/// callbacks call `call_soon_threadsafe` on the already-closed loop,
+/// producing `RuntimeError: Event loop is closed` on stderr.
+fn cancel_pending_tasks(py: Python<'_>, event_loop: &Bound<'_, PyAny>) {
+    let Ok(asyncio) = py.import(c"asyncio") else {
+        return;
+    };
+    let Ok(tasks) = asyncio.call_method1(c"all_tasks", (event_loop,)) else {
+        return;
+    };
+    let Ok(task_iter) = tasks.try_iter() else {
+        return;
+    };
+    for task in task_iter.flatten() {
+        let _ = task.call_method0(c"cancel");
+    }
+    // Drive cancelled tasks so their CancelledError propagates.
+    let Ok(gather) = asyncio.call_method(c"gather", (&tasks,), Some(&gather_kwargs(py))) else {
+        return;
+    };
+    let _ = event_loop.call_method1(c"run_until_complete", (gather,));
+}
+
+/// Build `return_exceptions=True` kwargs for `asyncio.gather`.
+fn gather_kwargs(py: Python<'_>) -> Bound<'_, pyo3::types::PyDict> {
+    let kwargs = pyo3::types::PyDict::new(py);
+    let _ = kwargs.set_item("return_exceptions", true);
+    kwargs
+}
+
 /// Persistent asyncio event loop running on a dedicated OS thread.
 ///
 /// Created once per worker via [`EventLoop::start`]. The loop runs
@@ -32,7 +117,16 @@ impl std::fmt::Debug for EventLoop {
 }
 
 impl EventLoop {
-    /// Start a persistent event loop on a new dedicated thread.
+    /// Start with [`LoopPolicy::Auto`] (uvloop if available, else asyncio).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Python initialization or event loop creation fails.
+    pub fn start() -> Result<Self, String> {
+        Self::start_with(LoopPolicy::default())
+    }
+
+    /// Start a persistent event loop with an explicit [`LoopPolicy`].
     ///
     /// Returns the `EventLoop` with the loop running `run_forever()`.
     /// The caller must call [`stop`] before dropping to cleanly shut down.
@@ -40,7 +134,7 @@ impl EventLoop {
     /// # Errors
     ///
     /// Returns an error if Python initialization or event loop creation fails.
-    pub fn start() -> Result<Self, String> {
+    pub fn start_with(policy: LoopPolicy) -> Result<Self, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = Arc::clone(&running);
@@ -48,31 +142,24 @@ impl EventLoop {
         let thread = std::thread::Builder::new()
             .name("apx-asyncio".to_owned())
             .spawn(move || {
-                // This thread owns the asyncio event loop for its lifetime.
-                // Python::attach acquires the GIL on this thread.
                 Python::attach(|py| {
                     let result = (|| -> PyResult<Py<PyAny>> {
+                        let event_loop = create_event_loop(py, policy)?;
                         let asyncio = py.import(c"asyncio")?;
-                        let event_loop = asyncio.call_method0(c"new_event_loop")?;
                         asyncio.call_method1(c"set_event_loop", (&event_loop,))?;
                         Ok(event_loop.unbind())
                     })();
 
                     match result {
                         Ok(event_loop) => {
-                            // Send the loop reference back to the calling thread.
                             let _ = tx.send(Ok(event_loop.clone_ref(py)));
 
-                            // run_forever() blocks until loop.stop() is called.
-                            // During selector waits, the GIL is released, allowing
-                            // other threads to acquire it for spawn_blocking work.
                             let loop_bound = event_loop.bind(py);
                             if let Err(e) = loop_bound.call_method0(c"run_forever") {
-                                tracing::error!(error = %e, "asyncio run_forever failed");
+                                tracing::error!(error = %e, "run_forever failed");
                             }
                             running_clone.store(false, Ordering::Release);
 
-                            // Cleanup after run_forever returns.
                             let _ = Self::close_loop(py, loop_bound);
                         }
                         Err(e) => {
@@ -83,7 +170,6 @@ impl EventLoop {
             })
             .map_err(|e| format!("failed to spawn asyncio thread: {e}"))?;
 
-        // Wait for the event loop reference from the new thread.
         let event_loop = rx
             .recv()
             .map_err(|_| "asyncio thread exited before sending loop".to_owned())??;
@@ -142,11 +228,30 @@ impl EventLoop {
         }
     }
 
-    /// Drain async generators and close the event loop.
-    fn close_loop(_py: Python<'_>, event_loop: &Bound<'_, PyAny>) -> PyResult<()> {
-        let shutdown_coro = event_loop.call_method0(c"shutdown_asyncgens")?;
-        let _ = event_loop.call_method1(c"run_until_complete", (shutdown_coro,));
+    /// Cancel pending tasks, drain generators, and close the event loop.
+    ///
+    /// Follows the standard asyncio shutdown sequence:
+    /// 1. Cancel all pending tasks and await their cancellation.
+    /// 2. Shut down async generators.
+    /// 3. Shut down the default executor.
+    /// 4. Close the loop.
+    fn close_loop(py: Python<'_>, event_loop: &Bound<'_, PyAny>) -> PyResult<()> {
+        cancel_pending_tasks(py, event_loop);
+
+        let shutdown_gens = event_loop.call_method0(c"shutdown_asyncgens")?;
+        let _ = event_loop.call_method1(c"run_until_complete", (shutdown_gens,));
+
+        let shutdown_exec = event_loop.call_method0(c"shutdown_default_executor")?;
+        let _ = event_loop.call_method1(c"run_until_complete", (shutdown_exec,));
+
         event_loop.call_method0(c"close")?;
+
+        // Replace call_soon_threadsafe with a no-op so late pyo3_async_runtimes
+        // cleanup callbacks (tokio tasks outliving the loop) don't produce
+        // `RuntimeError: Event loop is closed` on stderr.
+        let noop = py.eval(c"lambda *a, **kw: None", None, None)?;
+        event_loop.setattr(c"call_soon_threadsafe", noop)?;
+
         Ok(())
     }
 }

@@ -10,6 +10,7 @@ use crate::transport::types::InboundRequest;
 use bytes::Bytes;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyDictMethods, PyList, PyString, PyTuple};
+use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -62,25 +63,30 @@ pub struct ScopeKeys {
     pub(crate) path_params: Py<PyString>,
     pub(crate) app: Py<PyString>,
     pub(crate) router: Py<PyString>,
-    pub(crate) version: Py<PyString>,
-    pub(crate) spec_version: Py<PyString>,
 }
 
 /// Fixed dict values used in ASGI scope construction.
 pub struct ScopeValues {
     pub(crate) type_http: Py<PyString>,
     pub(crate) type_websocket: Py<PyString>,
-    pub(crate) asgi_version: Py<PyString>,
-    pub(crate) spec_version: Py<PyString>,
     pub(crate) scheme_http: Py<PyString>,
     pub(crate) scheme_ws: Py<PyString>,
     pub(crate) root_path_empty: Py<PyString>,
+    /// Pre-built `{"version": "3.0", "spec_version": "2.3"}` dict, shared per-request.
+    pub(crate) asgi_dict: Py<PyDict>,
 }
 
 impl ScopeInterns {
     /// Create all interned strings. Call once at worker startup with GIL held.
     pub(crate) fn new(py: Python<'_>) -> Self {
         let s = |v: &str| PyString::new(py, v).unbind();
+
+        // Pre-build the ASGI inner dict once instead of per-request.
+        let asgi_dict = PyDict::new(py);
+        // These set_item calls are infallible for interned string keys/values.
+        let _ = asgi_dict.set_item(s("version").bind(py), s(ASGI_VERSION).bind(py));
+        let _ = asgi_dict.set_item(s("spec_version").bind(py), s(ASGI_SPEC_VERSION).bind(py));
+
         Self {
             keys: ScopeKeys {
                 r#type: s("type"),
@@ -99,17 +105,14 @@ impl ScopeInterns {
                 path_params: s("path_params"),
                 app: s("app"),
                 router: s("router"),
-                version: s("version"),
-                spec_version: s("spec_version"),
             },
             vals: ScopeValues {
                 type_http: s("http"),
                 type_websocket: s("websocket"),
-                asgi_version: s(ASGI_VERSION),
-                spec_version: s(ASGI_SPEC_VERSION),
                 scheme_http: s(DEFAULT_SCHEME),
                 scheme_ws: s(WS_SCHEME),
                 root_path_empty: s(""),
+                asgi_dict: asgi_dict.unbind(),
             },
         }
     }
@@ -164,8 +167,9 @@ pub enum AsgiEvent {
 /// ASGI `receive` callable backed by Rust.
 ///
 /// For HTTP: first call returns `http.request` with the pre-buffered body,
-/// subsequent calls return `http.disconnect`. Uses `Arc<Mutex<Option<Bytes>>>`
-/// for interior mutability across await points.
+/// subsequent calls pend forever (preventing Starlette's `listen_for_disconnect`
+/// from prematurely firing). Uses `Arc<Mutex<Option<Bytes>>>` for interior
+/// mutability across await points.
 #[pyclass(module = "apx._core")]
 pub struct AsgiReceive {
     body: Arc<Mutex<Option<Bytes>>>,
@@ -199,9 +203,6 @@ impl AsgiReceive {
     ///
     /// First call returns `http.request` with the pre-buffered body.
     /// Subsequent calls pend forever (until the ASGI task is cancelled).
-    /// This prevents Starlette's `listen_for_disconnect` from prematurely
-    /// cancelling `StreamingResponse` handlers — the client hasn't actually
-    /// disconnected, so returning `http.disconnect` would be incorrect.
     fn __call__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let body = Arc::clone(&self.body);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -211,11 +212,6 @@ impl AsgiReceive {
                 Python::attach(|py| build_receive_event(py, Some(bytes)))
             } else {
                 drop(guard);
-                // Block until the ASGI handler task is cancelled.
-                // Starlette's StreamingResponse uses a task group where
-                // listen_for_disconnect races with stream_response —
-                // whichever finishes first cancels the other. By pending
-                // here, stream_response always wins and runs to completion.
                 std::future::pending::<PyResult<Py<PyAny>>>().await
             }
         })
@@ -238,15 +234,83 @@ fn build_receive_event(py: Python<'_>, body: Option<Bytes>) -> PyResult<Py<PyAny
     Ok(dict.into_any().unbind())
 }
 
+// ── ResolvedAwaitable ─────────────────────────────────────────────────────
+
+/// Zero-overhead Python awaitable that completes immediately.
+///
+/// Used by buffered `AsgiSend` to avoid `pyo3_async_runtimes::future_into_py`
+/// and its tokio task overhead. Implements the Python iterator protocol
+/// so `await resolved_awaitable` returns `None` with no scheduling.
+#[pyclass(module = "apx._core")]
+struct ResolvedAwaitable;
+
+#[pymethods]
+impl ResolvedAwaitable {
+    fn __await__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    fn __iter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    #[expect(clippy::unused_self, reason = "required by Python iterator protocol")]
+    fn __next__(&self) -> Option<Py<PyAny>> {
+        None // StopIteration — completes immediately
+    }
+}
+
 // ── AsgiSend ─────────────────────────────────────────────────────────────
+
+/// Send backend: channel for streaming, buffer for buffered responses.
+enum SendBackend {
+    /// Streaming: events flow through an mpsc channel to a concurrent reader.
+    Channel(mpsc::Sender<AsgiEvent>),
+    /// Buffered: events accumulate in a shared Vec, read after coroutine completion.
+    Buffer(Arc<std::sync::Mutex<Vec<AsgiEvent>>>),
+}
+
+/// Shared buffer for buffered ASGI response collection.
+///
+/// Created before scheduling the coroutine. After the coroutine completes,
+/// the Tokio side calls [`take`](AsgiEventBuffer::take) to drain the events.
+#[derive(Clone)]
+pub struct AsgiEventBuffer(Arc<std::sync::Mutex<Vec<AsgiEvent>>>);
+
+impl AsgiEventBuffer {
+    /// Create a new empty buffer.
+    pub fn new() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Vec::with_capacity(2))))
+    }
+
+    /// Drain all accumulated events.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mutex is poisoned (handler panicked mid-send).
+    #[expect(clippy::unwrap_used, reason = "poisoned mutex indicates handler panic")]
+    pub fn take(&self) -> Vec<AsgiEvent> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+impl std::fmt::Debug for AsgiEventBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsgiEventBuffer").finish_non_exhaustive()
+    }
+}
 
 /// ASGI `send` callable backed by Rust.
 ///
-/// Parses ASGI event dicts and pushes [`AsgiEvent`] through a tokio channel.
-/// `mpsc::Sender` is `Clone + Send + Sync` so no `Arc<Mutex>` wrapping needed.
+/// Supports two modes:
+/// - **Channel** (streaming): pushes events through an mpsc channel for
+///   concurrent response collection.
+/// - **Buffer** (buffered): accumulates events in a shared `Vec` for
+///   synchronous draining after coroutine completion. Avoids mpsc channel
+///   allocation and `future_into_py` overhead.
 #[pyclass(module = "apx._core")]
 pub struct AsgiSend {
-    tx: mpsc::Sender<AsgiEvent>,
+    backend: SendBackend,
 }
 
 impl std::fmt::Debug for AsgiSend {
@@ -256,9 +320,18 @@ impl std::fmt::Debug for AsgiSend {
 }
 
 impl AsgiSend {
-    /// Create a new `AsgiSend` backed by the given channel sender.
-    pub fn new(tx: mpsc::Sender<AsgiEvent>) -> Self {
-        Self { tx }
+    /// Create a channel-backed sender for streaming responses.
+    pub fn channel(tx: mpsc::Sender<AsgiEvent>) -> Self {
+        Self {
+            backend: SendBackend::Channel(tx),
+        }
+    }
+
+    /// Create a buffer-backed sender for buffered responses.
+    pub fn buffered(buffer: &AsgiEventBuffer) -> Self {
+        Self {
+            backend: SendBackend::Buffer(Arc::clone(&buffer.0)),
+        }
     }
 }
 
@@ -271,13 +344,23 @@ impl AsgiSend {
         event: Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let parsed = parse_asgi_send_event(&event)?;
-        let tx = self.tx.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            tx.send(parsed).await.map_err(|_| {
-                pyo3::exceptions::PyRuntimeError::new_err("response channel closed")
-            })?;
-            Python::attach(|py| Ok(py.None()))
-        })
+        match &self.backend {
+            SendBackend::Channel(tx) => {
+                let tx = tx.clone();
+                pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                    tx.send(parsed).await.map_err(|_| {
+                        pyo3::exceptions::PyRuntimeError::new_err("response channel closed")
+                    })?;
+                    Python::attach(|py| Ok(py.None()))
+                })
+            }
+            SendBackend::Buffer(buf) => {
+                buf.lock()
+                    .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("send buffer poisoned"))?
+                    .push(parsed);
+                Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
+            }
+        }
     }
 }
 
@@ -537,16 +620,7 @@ fn set_ws_scope_metadata(
         interns.keys.r#type.bind(py),
         interns.vals.type_websocket.bind(py),
     )?;
-    let asgi = PyDict::new(py);
-    asgi.set_item(
-        interns.keys.version.bind(py),
-        interns.vals.asgi_version.bind(py),
-    )?;
-    asgi.set_item(
-        interns.keys.spec_version.bind(py),
-        interns.vals.spec_version.bind(py),
-    )?;
-    dict.set_item(interns.keys.asgi.bind(py), asgi)?;
+    dict.set_item(interns.keys.asgi.bind(py), interns.vals.asgi_dict.bind(py))?;
     dict.set_item(
         interns.keys.scheme.bind(py),
         interns.vals.scheme_ws.bind(py),
@@ -591,16 +665,7 @@ fn set_scope_metadata(
         interns.keys.r#type.bind(py),
         interns.vals.type_http.bind(py),
     )?;
-    let asgi = PyDict::new(py);
-    asgi.set_item(
-        interns.keys.version.bind(py),
-        interns.vals.asgi_version.bind(py),
-    )?;
-    asgi.set_item(
-        interns.keys.spec_version.bind(py),
-        interns.vals.spec_version.bind(py),
-    )?;
-    dict.set_item(interns.keys.asgi.bind(py), asgi)?;
+    dict.set_item(interns.keys.asgi.bind(py), interns.vals.asgi_dict.bind(py))?;
     dict.set_item(
         interns.keys.scheme.bind(py),
         interns.vals.scheme_http.bind(py),
@@ -702,11 +767,11 @@ fn set_scope_path_params(
 
 /// Decode percent-encoded UTF-8 strings (e.g., `hello%20world` → `hello world`).
 ///
-/// Returns the original string unchanged if no percent sequences are present
-/// or if decoding produces invalid UTF-8.
-fn percent_decode(input: &str) -> String {
+/// Returns the original string borrowed if no percent sequences are present,
+/// avoiding a heap allocation on the common path.
+fn percent_decode(input: &str) -> Cow<'_, str> {
     if !input.contains('%') {
-        return input.to_owned();
+        return Cow::Borrowed(input);
     }
     let mut bytes = Vec::with_capacity(input.len());
     let mut chars = input.as_bytes().iter().copied();
@@ -732,7 +797,7 @@ fn percent_decode(input: &str) -> String {
             bytes.push(b);
         }
     }
-    String::from_utf8(bytes).unwrap_or_else(|_| input.to_owned())
+    Cow::Owned(String::from_utf8(bytes).unwrap_or_else(|_| input.to_owned()))
 }
 
 /// Convert an ASCII hex digit to its 4-bit value.
@@ -1004,7 +1069,7 @@ mod tests {
     #[test]
     fn asgi_send_debug() {
         let (tx, _rx) = mpsc::channel(1);
-        let send = AsgiSend::new(tx);
+        let send = AsgiSend::channel(tx);
         let dbg = format!("{send:?}");
         assert!(dbg.contains("AsgiSend"));
     }

@@ -197,10 +197,14 @@ async fn spawn_worker(
         source: std::io::Error::other(e.to_string()),
     })?;
 
-    let current_exe =
-        std::env::current_exe().map_err(|e| SupervisorError::WorkerSpawn { index, source: e })?;
+    // Prefer finding "apx" on PATH so this works when the binary is a
+    // pip-installed Python entry-point script (where current_exe() returns
+    // the Python interpreter, not "apx").  Fall back to current_exe() for
+    // the cargo-built native binary case.
+    let exe = which::which("apx")
+        .unwrap_or_else(|_| std::env::current_exe().unwrap_or_else(|_| PathBuf::from("apx")));
 
-    let mut cmd = Command::new(current_exe);
+    let mut cmd = Command::new(exe);
     cmd.arg("serve")
         .arg("--host")
         .arg(&config.host)
@@ -211,7 +215,8 @@ async fn spawn_worker(
         .arg(&config.manifest_path)
         .current_dir(&config.app_dir)
         .env("APX_WORKER_NONCE", nonce.as_str())
-        .env("APX_WORKER_SOCK", sock_str);
+        .env("APX_WORKER_SOCK", sock_str)
+        .env("PYTHONPATH", &config.app_dir);
 
     // Propagate OTEL env vars.
     for (key, value) in std::env::vars() {

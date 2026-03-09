@@ -34,6 +34,7 @@ http.workspace = true
 bytes.workspace = true
 http-body-util.workspace = true
 sysinfo.workspace = true
+which.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 tokio-stream.workspace = true
