@@ -170,13 +170,19 @@ impl EventLoopHandle {
             return Err(AppError::Internal("event loop is not running".to_owned()));
         }
 
+        let trace = crate::bridge::bench_trace_enabled();
+
         let (tx, rx) = oneshot::channel();
 
         // Wrap the builder + oneshot sender in Mutex<Option<...>> for FnOnce-in-Fn.
         let work = std::sync::Mutex::new(Some((f, tx)));
 
+        // Capture enqueue timestamp for cross-thread pickup delay measurement.
+        let enqueued_at = trace.then(std::time::Instant::now);
+
         // Single brief GIL hold: build PyCFunction closure + enqueue via
         // call_soon_threadsafe. The closure runs on the event loop thread.
+        let t_gil = trace.then(std::time::Instant::now);
         Python::attach(|py| -> Result<(), AppError> {
             let create_task = self.create_task.clone_ref(py);
             let deferred = PyCFunction::new_closure(
@@ -186,6 +192,15 @@ impl EventLoopHandle {
                 move |args: &Bound<'_, PyTuple>,
                       _kwargs: Option<&Bound<'_, PyDict>>|
                       -> PyResult<()> {
+                    // Measure cross-thread pickup delay (enqueue → closure execution).
+                    if let Some(enqueued_at) = enqueued_at {
+                        tracing::info!(
+                            target: "bench_trace",
+                            phase = "cross_thread_pickup",
+                            pickup_delay_us = enqueued_at.elapsed().as_micros(),
+                        );
+                    }
+
                     let py = args.py();
                     let (f, tx) = work
                         .lock()
@@ -215,6 +230,14 @@ impl EventLoopHandle {
                 .map_err(|e| AppError::Internal(format!("call_soon_threadsafe: {e}")))?;
             Ok(())
         })?;
+
+        if let Some(t_gil) = t_gil {
+            tracing::info!(
+                target: "bench_trace",
+                phase = "schedule_deferred_gil",
+                gil_hold_us = t_gil.elapsed().as_micros(),
+            );
+        }
 
         Ok(rx)
     }

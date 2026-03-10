@@ -83,6 +83,8 @@ def load_results(results_dir: Path) -> dict[str, dict[str, ScenarioResult]]:
         if not server_dir.is_dir():
             continue
         server_name = server_dir.name
+        if server_name == "sweep":
+            continue
         results[server_name] = {}
         for json_file in sorted(server_dir.glob("*.json")):
             scenario_name = json_file.stem
@@ -263,6 +265,77 @@ def generate_markdown(
 # ---------------------------------------------------------------------------
 
 
+def print_sweep_table(results_dir: Path) -> None:
+    """Print sweep results as a matrix table."""
+    sweep_dir = results_dir / "sweep"
+    manifest_path = sweep_dir / "manifest.json"
+    if not manifest_path.exists():
+        console.print("[yellow]No sweep manifest found.[/]")
+        return
+
+    manifest = json.loads(manifest_path.read_text())
+
+    table = Table(title="Sweep Results: echo endpoint (req/sec)")
+    table.add_column("Server", style="cyan")
+    table.add_column("Workers", justify="right")
+    table.add_column("Tokio Threads", justify="right")
+    table.add_column("Connections", justify="right")
+    table.add_column("Req/sec", justify="right", style="bold")
+    table.add_column("p50 (ms)", justify="right")
+    table.add_column("p99 (ms)", justify="right")
+
+    for entry in manifest:
+        json_path = sweep_dir / entry["file"]
+        parsed = parse_oha_json(json_path, entry["file"])
+        if not parsed:
+            continue
+        table.add_row(
+            entry["server"],
+            str(entry["workers"]),
+            str(entry.get("tokio_threads") or "-"),
+            str(entry["connections"]),
+            f"{parsed.requests_per_sec:,.0f}",
+            f"{parsed.latency_p50_ms:.2f}",
+            f"{parsed.latency_p99_ms:.2f}",
+        )
+
+    console.print(table)
+
+
+def generate_sweep_markdown(results_dir: Path, output: Path) -> None:
+    """Write a markdown sweep report."""
+    sweep_dir = results_dir / "sweep"
+    manifest_path = sweep_dir / "manifest.json"
+    if not manifest_path.exists():
+        return
+
+    manifest = json.loads(manifest_path.read_text())
+
+    lines: list[str] = [
+        "# Sweep Results: echo endpoint",
+        "",
+        "| Server | Workers | Tokio Threads | Connections | Req/sec | p50 (ms) | p99 (ms) |",
+        "|--------|--------:|--------------:|------------:|--------:|---------:|---------:|",
+    ]
+
+    for entry in manifest:
+        json_path = sweep_dir / entry["file"]
+        parsed = parse_oha_json(json_path, entry["file"])
+        if not parsed:
+            continue
+        lines.append(
+            f"| {entry['server']} | {entry['workers']} "
+            f"| {entry.get('tokio_threads') or '-'} "
+            f"| {entry['connections']} "
+            f"| {parsed.requests_per_sec:,.0f} "
+            f"| {parsed.latency_p50_ms:.2f} "
+            f"| {parsed.latency_p99_ms:.2f} |"
+        )
+
+    lines.append("")
+    output.write_text("\n".join(lines))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate benchmark comparison report")
     parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS)
@@ -272,11 +345,23 @@ def main() -> None:
         choices=["terminal", "markdown", "both"],
         default="both",
     )
+    parser.add_argument("--sweep", action="store_true", help="Report on sweep results")
     args = parser.parse_args()
 
     if not args.results_dir.exists():
         console.print(f"[red]Error:[/] Results directory not found: {args.results_dir}")
         sys.exit(1)
+
+    if args.sweep:
+        if args.format in ("terminal", "both"):
+            console.print("\n[bold]Sweep Results[/]\n")
+            print_sweep_table(args.results_dir)
+
+        if args.format in ("markdown", "both"):
+            md_output = args.output or (args.results_dir / "sweep_report.md")
+            generate_sweep_markdown(args.results_dir, md_output)
+            console.print(f"\n[dim]Sweep report saved to {md_output}[/]")
+        return
 
     results = load_results(args.results_dir)
 

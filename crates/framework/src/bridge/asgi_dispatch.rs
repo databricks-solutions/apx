@@ -6,6 +6,7 @@
 //! response from the ASGI send channel.
 
 use crate::bridge::asgi::{AsgiEvent, AsgiEventBuffer, AsgiReceive, AsgiSend};
+use crate::bridge::bench_trace_enabled;
 use crate::bridge::context_pool::scope_from_template;
 use crate::bridge::dispatch::{AppState, HandlerDispatch};
 use crate::error::{AppError, BodyParseKind};
@@ -81,6 +82,9 @@ async fn dispatch_buffered(
     request: InboundRequest,
     body_bytes: Bytes,
 ) -> Result<OutboundResponse, AppError> {
+    let trace = bench_trace_enabled();
+    let t_total = trace.then(std::time::Instant::now);
+
     let event_buffer = AsgiEventBuffer::new();
     let eb = event_buffer.clone();
 
@@ -88,18 +92,36 @@ async fn dispatch_buffered(
     // (which acquires the GIL to bump 3 Py refcounts). We borrow
     // app_state.loop_handle for the call and move the Arc clone into the closure.
     let app_state_inner = Arc::clone(&app_state);
+
+    let t_schedule = trace.then(std::time::Instant::now);
     let handler_rx = app_state.loop_handle.schedule_deferred(move |py| {
         call_asgi_app_sync(py, &route, &request, &app_state_inner, body_bytes, &eb)
     })?;
+    let schedule_us = t_schedule.map(|t| t.elapsed().as_micros());
 
+    let t_await = trace.then(std::time::Instant::now);
     handler_rx
         .await
         .map_err(|_| AppError::Internal("event loop closed before coroutine completed".to_owned()))?
         .map(|_| ())?;
+    let await_us = t_await.map(|t| t.elapsed().as_micros());
 
-    let t0 = std::time::Instant::now();
+    let t_collect = std::time::Instant::now();
     let response = collect_buffered_response(event_buffer)?;
-    tracing::trace!(elapsed_us = t0.elapsed().as_micros(), "response_collect");
+    let collect_us = t_collect.elapsed().as_micros();
+    tracing::trace!(elapsed_us = collect_us, "response_collect");
+
+    if let Some(t_total) = t_total {
+        tracing::info!(
+            target: "bench_trace",
+            phase = "dispatch_buffered",
+            total_us = t_total.elapsed().as_micros(),
+            schedule_us = schedule_us.unwrap_or(0),
+            await_us = await_us.unwrap_or(0),
+            collect_us = collect_us,
+        );
+    }
+
     Ok(response)
 }
 
@@ -140,11 +162,15 @@ fn call_asgi_app_sync(
     body_bytes: Bytes,
     event_buffer: &AsgiEventBuffer,
 ) -> Result<Py<PyAny>, AppError> {
+    let trace = bench_trace_enabled();
+    let t_total = trace.then(std::time::Instant::now);
+
     let asgi_callable = route
         .fastapi_app
         .as_ref()
         .map_or_else(|| route.handler.inner(), |a| a.inner());
 
+    let t_scope = trace.then(std::time::Instant::now);
     let scope = scope_from_template(
         py,
         &app_state.scope_template,
@@ -152,7 +178,9 @@ fn call_asgi_app_sync(
         &app_state.scope_interns,
     )
     .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
+    let scope_us = t_scope.map(|t| t.elapsed().as_micros());
 
+    let t_objects = trace.then(std::time::Instant::now);
     let receive_template = app_state.receive_template.clone_ref(py);
     let receive = AsgiReceive::http(body_bytes, receive_template);
     let send = AsgiSend::buffered(event_buffer);
@@ -160,10 +188,26 @@ fn call_asgi_app_sync(
     let receive_obj =
         Py::new(py, receive).map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
     let send_obj = Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
+    let objects_us = t_objects.map(|t| t.elapsed().as_micros());
 
-    asgi_callable
+    let t_call = trace.then(std::time::Instant::now);
+    let result = asgi_callable
         .call(py, (scope, receive_obj, send_obj), None)
-        .map_err(|e| AppError::Internal(format!("handler call: {e}")))
+        .map_err(|e| AppError::Internal(format!("handler call: {e}")))?;
+    let call_us = t_call.map(|t| t.elapsed().as_micros());
+
+    if let Some(t_total) = t_total {
+        tracing::info!(
+            target: "bench_trace",
+            phase = "call_asgi_app_sync",
+            total_us = t_total.elapsed().as_micros(),
+            scope_us = scope_us.unwrap_or(0),
+            objects_us = objects_us.unwrap_or(0),
+            call_us = call_us.unwrap_or(0),
+        );
+    }
+
+    Ok(result)
 }
 
 /// Build ASGI scope, receive, and send objects, then call the ASGI app.

@@ -32,6 +32,12 @@ def _seed() -> None:
 _seed()
 
 
+@router.get("/echo")
+def echo() -> dict[str, bool]:
+    """Minimal handler — isolates framework overhead from app logic."""
+    return {"echo": True}
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}

@@ -223,12 +223,21 @@ impl AsgiReceive {
 
         match taken {
             Some(bytes) => {
+                let t0 = super::bench_trace_enabled().then(std::time::Instant::now);
                 let event: Bound<'_, PyDict> = self
                     .receive_template
                     .bind(py)
                     .call_method0(pyo3::intern!(py, "copy"))?
                     .cast_into()?;
                 event.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, &bytes))?;
+                if let Some(t0) = t0 {
+                    tracing::info!(
+                        target: "bench_trace",
+                        phase = "receive_dict_copy",
+                        elapsed_us = t0.elapsed().as_micros(),
+                        body_len = bytes.len(),
+                    );
+                }
                 let event = event.unbind().into_any();
                 Py::new(py, ResolvedAwaitableWithValue { value: Some(event) })
                     .map(|obj| obj.into_bound(py).into_any())
@@ -382,7 +391,15 @@ impl AsgiSend {
         py: Python<'py>,
         event: Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let t0 = super::bench_trace_enabled().then(std::time::Instant::now);
         let parsed = parse_asgi_send_event(&event)?;
+        if let Some(t0) = t0 {
+            tracing::info!(
+                target: "bench_trace",
+                phase = "parse_asgi_send_event",
+                elapsed_us = t0.elapsed().as_micros(),
+            );
+        }
         match &self.backend {
             SendBackend::Channel(tx) => {
                 let tx = tx.clone();

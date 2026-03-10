@@ -1,5 +1,10 @@
 [
     {
+        "name": "echo",
+        "method": "GET",
+        "path": "/api/echo"
+    },
+    {
         "name": "health",
         "method": "GET",
         "path": "/api/health"

@@ -76,10 +76,14 @@ pub fn scope_from_template(
     request: &InboundRequest,
     interns: &ScopeInterns,
 ) -> PyResult<Py<PyDict>> {
+    let trace = super::bench_trace_enabled();
+
+    let t_copy = trace.then(std::time::Instant::now);
     let dict: Bound<'_, PyDict> = template
         .bind(py)
         .call_method0(pyo3::intern!(py, "copy"))?
         .cast_into()?;
+    let copy_us = t_copy.map(|t| t.elapsed().as_micros());
 
     // Variable per-request fields.
     dict.set_item(
@@ -101,6 +105,7 @@ pub fn scope_from_template(
     )?;
 
     // Headers.
+    let t_headers = trace.then(std::time::Instant::now);
     let headers_list = PyList::empty(py);
     for (name, value) in &request.headers {
         let n = PyBytes::new(py, name.as_str().as_bytes());
@@ -109,6 +114,7 @@ pub fn scope_from_template(
         headers_list.append(pair)?;
     }
     dict.set_item(interns.keys.headers.bind(py), headers_list)?;
+    let headers_us = t_headers.map(|t| t.elapsed().as_micros());
 
     // Client address — override the template's default None when present.
     // Server address is already baked into the template at startup.
@@ -120,14 +126,27 @@ pub fn scope_from_template(
     }
 
     // Path params.
+    let t_params = trace.then(std::time::Instant::now);
     let pp = PyDict::new(py);
     for (k, v) in &request.path_params {
         pp.set_item(k.as_str(), super::asgi::percent_decode(v.as_str()))?;
     }
     dict.set_item(interns.keys.path_params.bind(py), pp)?;
+    let params_us = t_params.map(|t| t.elapsed().as_micros());
 
     // Fresh state dict per request.
     dict.set_item(interns.keys.state.bind(py), PyDict::new(py))?;
+
+    if trace {
+        tracing::info!(
+            target: "bench_trace",
+            phase = "scope_from_template",
+            dict_copy_us = copy_us.unwrap_or(0),
+            headers_us = headers_us.unwrap_or(0),
+            path_params_us = params_us.unwrap_or(0),
+            header_count = request.headers.len(),
+        );
+    }
 
     Ok(dict.unbind())
 }

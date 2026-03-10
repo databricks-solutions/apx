@@ -69,6 +69,28 @@ def parse_args() -> argparse.Namespace:
         help="Which server to benchmark",
     )
     p.add_argument("--no-report", action="store_true", help="Skip report generation")
+    p.add_argument(
+        "--tokio-threads",
+        type=int,
+        default=None,
+        help="Set TOKIO_WORKER_THREADS in APX container (validates H1)",
+    )
+    p.add_argument(
+        "--warmup",
+        type=int,
+        default=1000,
+        help="Number of warmup requests before benchmarking (default: 1000)",
+    )
+    p.add_argument(
+        "--profile",
+        action="store_true",
+        help="Capture py-spy flamegraph during APX benchmark",
+    )
+    p.add_argument(
+        "--sweep",
+        action="store_true",
+        help="Run sweep mode: echo scenario across worker/thread/connection matrix",
+    )
     return p.parse_args()
 
 
@@ -122,7 +144,15 @@ def remove_stale_container(name: str) -> None:
     )
 
 
-def start_container(name: str, port: int, cpus: str, memory: str) -> str:
+def start_container(
+    name: str,
+    port: int,
+    cpus: str,
+    memory: str,
+    *,
+    tokio_threads: int | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> str:
     """Start a container, return container ID."""
     remove_stale_container(name)
     cmd = [
@@ -131,14 +161,29 @@ def start_container(name: str, port: int, cpus: str, memory: str) -> str:
         f"--cpus={cpus}",
         f"--memory={memory}",
         "-p", f"{port}:8000",
-        f"bench-{name}",
     ]
+
+    # Pass environment variables to the container.
+    env_vars: dict[str, str] = {}
+    if tokio_threads is not None and name == "apx":
+        env_vars["TOKIO_WORKER_THREADS"] = str(tokio_threads)
+    if extra_env:
+        env_vars.update(extra_env)
+    for k, v in env_vars.items():
+        cmd.extend(["-e", f"{k}={v}"])
+
+    # py-spy needs SYS_PTRACE capability.
+    if extra_env and extra_env.get("_PROFILE"):
+        cmd.extend(["--cap-add", "SYS_PTRACE"])
+
+    cmd.append(f"bench-{name}")
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         console.print(f"[red]Error:[/] Failed to start {name}: {result.stderr}")
         sys.exit(1)
     container_id = result.stdout.strip()
-    console.print(f"[green]Started bench-{name}[/] ({container_id[:12]})")
+    env_str = f" env={env_vars}" if env_vars else ""
+    console.print(f"[green]Started bench-{name}[/] ({container_id[:12]}){env_str}")
     return container_id
 
 
@@ -192,6 +237,87 @@ def wait_for_health(port: int, timeout: float = 30.0) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Warmup
+# ---------------------------------------------------------------------------
+
+
+def run_warmup(port: int, warmup_requests: int) -> None:
+    """Send warmup requests before benchmarking."""
+    if warmup_requests <= 0:
+        return
+    console.print(f"  [dim]Warming up with {warmup_requests} requests...[/]")
+    cmd = [
+        "oha",
+        "--no-tui",
+        "-n", str(warmup_requests),
+        "-c", str(min(warmup_requests, 50)),
+        f"http://127.0.0.1:{port}/api/health",
+    ]
+    subprocess.run(cmd, capture_output=True, check=False)
+
+
+# ---------------------------------------------------------------------------
+# py-spy profiling
+# ---------------------------------------------------------------------------
+
+
+def run_profile(name: str, port: int, duration: str, results_dir: Path) -> None:
+    """Capture a py-spy flamegraph during a benchmark run."""
+    console.print(f"\n  [bold yellow]Profiling {name}...[/]")
+
+    # Warmup before profiling.
+    run_warmup(port, 2000)
+
+    # Parse duration to seconds for py-spy.
+    dur_s = _parse_duration_secs(duration)
+
+    # Start py-spy in the container (background).
+    spy_cmd = [
+        "docker", "exec", "-d", f"bench-{name}",
+        "py-spy", "record",
+        "-d", str(dur_s),
+        "-o", "/tmp/profile.svg",
+        "--pid", "1",
+    ]
+    subprocess.run(spy_cmd, check=False)
+
+    # Run oha concurrently for the same duration.
+    oha_cmd = [
+        "oha", "--no-tui",
+        "-z", duration,
+        "-c", "100",
+        f"http://127.0.0.1:{port}/api/echo",
+    ]
+    subprocess.run(oha_cmd, capture_output=True, check=False)
+
+    # Wait a moment for py-spy to finish writing.
+    time.sleep(2)
+
+    # Copy flamegraph out.
+    svg_path = results_dir / "profile.svg"
+    cp_cmd = [
+        "docker", "cp",
+        f"bench-{name}:/tmp/profile.svg",
+        str(svg_path),
+    ]
+    result = subprocess.run(cp_cmd, capture_output=True, text=True, check=False)
+    if result.returncode == 0:
+        console.print(f"  [green]Flamegraph saved:[/] {svg_path}")
+    else:
+        console.print(f"  [yellow]Warning:[/] Failed to copy flamegraph: {result.stderr[:200]}")
+
+
+def _parse_duration_secs(duration: str) -> int:
+    """Parse oha-style duration string (e.g. '10s', '1m') to seconds."""
+    d = duration.strip()
+    if d.endswith("s"):
+        return int(d[:-1])
+    if d.endswith("m"):
+        return int(d[:-1]) * 60
+    return int(d)
+
+
+# ---------------------------------------------------------------------------
 # oha runner
 # ---------------------------------------------------------------------------
 
@@ -231,6 +357,149 @@ def run_oha(
 
 
 # ---------------------------------------------------------------------------
+# Sweep mode
+# ---------------------------------------------------------------------------
+
+SWEEP_WORKERS = [1, 2]
+SWEEP_TOKIO_THREADS = [1, 2, 4]
+SWEEP_CONNECTIONS = [10, 50, 100, 200]
+
+
+def run_sweep(args: argparse.Namespace) -> None:
+    """Run echo scenario across a worker/thread/connection matrix."""
+    echo_scenario = {"name": "echo", "method": "GET", "path": "/api/echo"}
+
+    servers = ["uvicorn", "apx"] if args.server == "both" else [args.server]
+
+    if not args.skip_build:
+        for server in servers:
+            cfg = SERVERS[server]
+            build_image(server, cfg["dockerfile"], cfg["context"])
+
+    sweep_dir = args.results_dir / "sweep"
+    sweep_dir.mkdir(parents=True, exist_ok=True)
+
+    results: list[dict] = []
+
+    for server in servers:
+        thread_values = SWEEP_TOKIO_THREADS if server == "apx" else [None]
+        for workers in SWEEP_WORKERS:
+            for tokio_threads in thread_values:
+                for connections in SWEEP_CONNECTIONS:
+                    label = f"{server}_w{workers}"
+                    if tokio_threads is not None:
+                        label += f"_t{tokio_threads}"
+                    label += f"_c{connections}"
+
+                    console.print(f"\n[cyan]Sweep:[/] {label}")
+
+                    # Build custom CMD for different worker counts.
+                    # We override the container CMD via docker run args.
+                    container_id = _start_sweep_container(
+                        server, args.port, args.cpus, args.memory,
+                        workers=workers, tokio_threads=tokio_threads,
+                    )
+                    try:
+                        wait_for_health(args.port)
+                        run_warmup(args.port, args.warmup)
+
+                        output_path = sweep_dir / f"{label}.json"
+                        ok = run_oha(
+                            echo_scenario, args.port, args.duration,
+                            connections, output_path,
+                        )
+                        if ok:
+                            results.append({
+                                "server": server,
+                                "workers": workers,
+                                "tokio_threads": tokio_threads,
+                                "connections": connections,
+                                "file": str(output_path.name),
+                            })
+                            console.print(f"  [green]Done:[/] {output_path}")
+                        else:
+                            console.print(f"  [yellow]Skipped:[/] {label}")
+                    except Exception:
+                        print_container_logs(server)
+                        raise
+                    finally:
+                        stop_container(server)
+
+    # Write sweep manifest for report.py.
+    manifest_path = sweep_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(results, indent=2))
+    console.print(f"\n[bold green]Sweep complete.[/] {len(results)} configurations tested.")
+    console.print(f"Manifest: {manifest_path}")
+
+    if not args.no_report:
+        console.print("\n[bold blue]Generating sweep report...[/]")
+        subprocess.run(
+            [
+                "uv", "run", str(BENCH_DIR / "report.py"),
+                "--results-dir", str(args.results_dir),
+                "--sweep",
+            ],
+            check=False,
+        )
+
+
+def _start_sweep_container(
+    name: str,
+    port: int,
+    cpus: str,
+    memory: str,
+    *,
+    workers: int,
+    tokio_threads: int | None,
+) -> str:
+    """Start a container with overridden worker count for sweep."""
+    remove_stale_container(name)
+    cmd = [
+        "docker", "run", "-d",
+        "--name", f"bench-{name}",
+        f"--cpus={cpus}",
+        f"--memory={memory}",
+        "-p", f"{port}:8000",
+    ]
+
+    env_vars: dict[str, str] = {}
+    if tokio_threads is not None and name == "apx":
+        env_vars["TOKIO_WORKER_THREADS"] = str(tokio_threads)
+    for k, v in env_vars.items():
+        cmd.extend(["-e", f"{k}={v}"])
+
+    cmd.append(f"bench-{name}")
+
+    # Override CMD to set worker count.
+    if name == "apx":
+        cmd.extend([
+            "apx", "serve", "manifest.json",
+            "--host", "0.0.0.0", "--port", "8000",
+            "--workers", str(workers),
+        ])
+    elif name == "uvicorn":
+        cmd.extend([
+            "uvicorn", "app.main:app",
+            "--host", "0.0.0.0", "--port", "8000",
+            "--workers", str(workers),
+            "--loop", "uvloop",
+            "--http", "httptools",
+        ])
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        console.print(f"[red]Error:[/] Failed to start {name}: {result.stderr}")
+        sys.exit(1)
+    container_id = result.stdout.strip()
+    thread_str = f" tokio_threads={tokio_threads}" if tokio_threads else ""
+    console.print(
+        f"[green]Started bench-{name}[/] ({container_id[:12]})"
+        f" workers={workers}{thread_str}"
+    )
+    return container_id
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -238,6 +507,11 @@ def run_oha(
 def main() -> None:
     args = parse_args()
     check_prerequisites()
+
+    # Sweep mode — runs its own matrix and exits.
+    if args.sweep:
+        run_sweep(args)
+        return
 
     if not args.scenarios.exists():
         console.print(f"[red]Error:[/] Scenarios file not found: {args.scenarios}")
@@ -259,9 +533,22 @@ def main() -> None:
         results_dir = args.results_dir / server
         results_dir.mkdir(parents=True, exist_ok=True)
 
-        container_id = start_container(server, args.port, args.cpus, args.memory)
+        extra_env: dict[str, str] = {}
+        if args.profile and server == "apx":
+            extra_env["_PROFILE"] = "1"
+
+        container_id = start_container(
+            server, args.port, args.cpus, args.memory,
+            tokio_threads=args.tokio_threads if server == "apx" else None,
+            extra_env=extra_env or None,
+        )
         try:
             wait_for_health(args.port)
+            run_warmup(args.port, args.warmup)
+
+            # Profile if requested (APX only).
+            if args.profile and server == "apx":
+                run_profile(server, args.port, args.duration, results_dir)
 
             for scenario in scenarios:
                 name = scenario["name"]

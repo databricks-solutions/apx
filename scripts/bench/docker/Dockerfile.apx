@@ -107,7 +107,7 @@ FROM python:3.11-slim
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 COPY --from=builder /build/dist/apx-*.whl /tmp/
-RUN uv pip install --system /tmp/apx-*.whl fastapi uvloop \
+RUN uv pip install --system /tmp/apx-*.whl fastapi uvloop py-spy \
     && rm -f /tmp/apx-*.whl
 
 WORKDIR /app
@@ -115,5 +115,10 @@ COPY --from=builder /build/manifest.json ./manifest.json
 COPY scripts/bench/app/ ./app/
 
 EXPOSE 8000
+
+# Match tokio thread count to the container CPU limit (--cpus=2) for fair
+# comparison with uvicorn's 1-thread-per-worker model. Without this, tokio
+# defaults to the host's CPU count, creating unnecessary contention.
+ENV TOKIO_WORKER_THREADS=2
 
 CMD ["apx", "serve", "manifest.json", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
