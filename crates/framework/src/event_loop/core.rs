@@ -86,21 +86,20 @@ fn create_event_loop(py: Python<'_>, policy: LoopPolicy) -> PyResult<Bound<'_, P
     }
 }
 
-/// Install Rust scheduler shims on the current event loop thread.
+/// Initialize Rust scheduler state on the current event loop thread.
 ///
-/// Patches `asyncio.sleep` and `asyncio.Event` to use Rust-backed primitives.
-/// The shim is intentionally leaked — it lives for the worker lifetime and is
-/// implicitly cleaned up when the process exits.
-fn install_rust_scheduler(py: Python<'_>) -> PyResult<()> {
-    use crate::scheduler::adapters::asyncio_shim::AsyncioShim;
-
-    tracing::info!("installing Rust scheduler shims");
-    let _shim = AsyncioShim::install(py)?;
-    // Note: we intentionally leak the shim — it lives for the worker lifetime.
-    // Uninstall happens implicitly when the process exits.
-    // The AnyIO backend registration will be added when we have the full
-    // backend registration mechanism.
-
+/// Stores the tokio runtime handle in a thread-local for use by
+/// scheduler primitives (Timer, spawn_blocking). Does NOT monkeypatch
+/// asyncio — native asyncio coroutines are handled by the driver's
+/// `WaitingOnAsyncioFuture` / `FallbackToAsyncio` paths.
+fn install_rust_scheduler(
+    _py: Python<'_>,
+    tokio_handle: Option<tokio::runtime::Handle>,
+) -> PyResult<()> {
+    if let Some(handle) = tokio_handle {
+        crate::scheduler::set_tokio_handle(handle);
+    }
+    tracing::info!("rust scheduler initialized (no asyncio monkeypatching)");
     Ok(())
 }
 
@@ -264,11 +263,11 @@ impl EventLoop {
             .call_method1(c"set_event_loop", (&event_loop,))
             .map_err(|e| format!("set_event_loop: {e}"))?;
 
-        let drainer_ref =
-            Self::install_drainer(py, &event_loop, queue_rx, needs_wake, policy, tokio_handle)?;
+        let drainer_ref = Self::install_drainer(py, &event_loop, queue_rx, needs_wake, policy)?;
 
         if policy == LoopPolicy::RustNative {
-            install_rust_scheduler(py).map_err(|e| format!("scheduler install: {e}"))?;
+            install_rust_scheduler(py, tokio_handle)
+                .map_err(|e| format!("scheduler install: {e}"))?;
         }
 
         Ok((event_loop.unbind(), drainer_ref))
@@ -281,7 +280,6 @@ impl EventLoop {
         queue_rx: mpsc::UnboundedReceiver<WorkItem>,
         needs_wake: Arc<AtomicBool>,
         policy: LoopPolicy,
-        tokio_handle: Option<tokio::runtime::Handle>,
     ) -> Result<Py<PyAny>, String> {
         let create_task = event_loop
             .getattr(c"create_task")
@@ -307,7 +305,6 @@ impl EventLoop {
                 cached_types,
                 call_soon: call_soon.clone_ref(py),
                 ensure_future,
-                tokio_handle,
             })
         } else {
             None

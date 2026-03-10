@@ -374,12 +374,25 @@ impl Timer {
             let (future, tx) = RustFuture::with_channel();
             let inner = Py::new(py, future)?;
             let duration = std::time::Duration::from_secs_f64(delay_secs);
-            std::thread::spawn(move || {
-                std::thread::sleep(duration);
-                Python::attach(|py| {
-                    let _ = tx.send(py.None());
+
+            // Prefer tokio timer wheel (efficient, no OS thread per timer).
+            // Fall back to raw thread + sleep if no tokio runtime available.
+            let handle = crate::scheduler::with_tokio_handle(tokio::runtime::Handle::clone);
+            if let Some(handle) = handle {
+                handle.spawn(async move {
+                    tokio::time::sleep(duration).await;
+                    Python::attach(|py| {
+                        let _ = tx.send(py.None());
+                    });
                 });
-            });
+            } else {
+                std::thread::spawn(move || {
+                    std::thread::sleep(duration);
+                    Python::attach(|py| {
+                        let _ = tx.send(py.None());
+                    });
+                });
+            }
             inner
         };
         Ok(Self { inner })

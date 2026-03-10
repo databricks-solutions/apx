@@ -47,11 +47,6 @@ pub struct SchedulerState {
     pub(crate) cached_types: Arc<CachedTypes>,
     pub(crate) call_soon: Py<PyAny>,
     pub(crate) ensure_future: Py<PyAny>,
-    /// Tokio runtime handle for spawning timer/blocking tasks from the
-    /// event loop thread. `None` if the tokio runtime was not available
-    /// when the event loop was created (e.g. in tests).
-    #[expect(dead_code, reason = "used by Timer and spawn_blocking refactors")]
-    pub(crate) tokio_handle: Option<tokio::runtime::Handle>,
 }
 
 impl fmt::Debug for SchedulerState {

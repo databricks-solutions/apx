@@ -52,10 +52,6 @@ impl CheckpointResolver {
 /// fall back to the stock asyncio backend.
 #[pyclass(module = "apx._core")]
 pub struct ApxSchedulerCore {
-    #[expect(
-        dead_code,
-        reason = "passed to driver during full anyio dispatch wiring"
-    )]
     cached_types: Arc<CachedTypes>,
     epoch: std::time::Instant,
 }
@@ -146,12 +142,18 @@ impl ApxSchedulerCore {
         let _ = abandon_on_cancel; // accepted for API compat, not yet honoured
         let (tx, rx) = oneshot::channel();
 
-        // Spawn actual blocking work on a thread that acquires the GIL.
-        std::thread::spawn(move || {
+        // Prefer tokio's blocking pool (backpressure, reuse). Fall back to
+        // raw thread if no tokio runtime is available (e.g. tests).
+        let handle = crate::scheduler::with_tokio_handle(tokio::runtime::Handle::clone);
+        let work = move || {
             let result = Python::attach(|py| func.call0(py));
-            // Best-effort send -- if the receiver is dropped, the result is discarded.
             let _ = tx.send(result);
-        });
+        };
+        if let Some(handle) = handle {
+            handle.spawn_blocking(work);
+        } else {
+            std::thread::spawn(work);
+        }
 
         Ok(BlockingTask::with_receiver(rx))
     }
@@ -162,13 +164,11 @@ impl ApxSchedulerCore {
     }
 
     /// Return `asyncio.CancelledError` for use as the cancelled exception class.
-    #[allow(
-        clippy::unused_self,
-        reason = "Python instance method — &self required by protocol"
-    )]
-    fn cancelled_exception_class(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let cls = py.import(c"asyncio")?.getattr(c"CancelledError")?.unbind();
-        Ok(cls)
+    fn cancelled_exception_class(&self, py: Python<'_>) -> Py<PyAny> {
+        self.cached_types
+            .cancelled_error_cls
+            .clone_ref(py)
+            .into_any()
     }
 }
 
@@ -313,7 +313,7 @@ mod tests {
     fn cancelled_exception_class_is_asyncio_cancelled_error() {
         crate::with_py(|py| {
             let core = ApxSchedulerCore::new(py).unwrap();
-            let cls = core.cancelled_exception_class(py).unwrap();
+            let cls = core.cancelled_exception_class(py);
             let asyncio_cls = py
                 .import(c"asyncio")
                 .unwrap()

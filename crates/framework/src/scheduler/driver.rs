@@ -51,6 +51,8 @@ pub struct CachedTypes {
     pub rust_future_type: Py<PyType>,
     /// Our `RustEventWaiter` type object.
     pub rust_event_waiter_type: Py<PyType>,
+    /// `asyncio.CancelledError` — cached for error creation.
+    pub cancelled_error_cls: Py<PyType>,
 }
 
 impl std::fmt::Debug for CachedTypes {
@@ -78,6 +80,10 @@ impl CachedTypes {
                 .unbind(),
             rust_future_type: RustFuture::type_object(py).unbind(),
             rust_event_waiter_type: RustEventWaiter::type_object(py).unbind(),
+            cancelled_error_cls: asyncio
+                .getattr(c"CancelledError")?
+                .cast_into::<PyType>()?
+                .unbind(),
         })
     }
 }
