@@ -650,6 +650,198 @@ send(data).await;
 - **Prefer `std::sync::OnceLock`** over `lazy_static!` or `once_cell::sync::Lazy` for one-time initialization.
 - See also [Async trait + future abstraction](#async-trait--future-abstraction) in Ecosystem patterns.
 
+## Python interop (PyO3)
+
+Treat Python as an external runtime boundary, not a normal library. The `bridge/` module is the canonical boundary between Rust domain logic and the Python interpreter — all PyO3 usage is contained there.
+
+> *Architectural application of DDD "Modules as bounded contexts." The Python boundary is a bounded context with its own adapter layer.*
+
+### Python boundary layer
+
+Only boundary modules may import PyO3 types (`PyObject`, `Py<PyAny>`, `Python<'py>`). Everything outside the boundary uses Rust domain types. The data pipeline is:
+
+```
+InboundRequest → PythonAdapter → ASGI callable → PythonAdapter → OutboundResponse
+```
+
+Rust domain types (`InboundRequest`, `OutboundResponse`, `AppState`) flow through the system. PyO3 conversions happen at the boundary, not deep in business logic.
+
+**Rule:** If a module outside `bridge/` needs to touch Python, it belongs in the bridge or needs a new adapter.
+
+### Domain types for Python objects
+
+Wrap `Py<PyAny>` and `Py<PyString>` in semantic newtypes when they cross function boundaries. Raw `Py<PyAny>` in a function signature says nothing about what the object is.
+
+> *Complements [Newtype](#newtype) pattern: same principle, applied to Python references.*
+
+```rust
+// bad — raw Python reference with no domain meaning
+fn call_app(app: &Py<PyAny>, scope: &Py<PyAny>) -> PyResult<Py<PyAny>>
+
+// good — semantic types document the protocol
+struct AsgiApp(Py<PyAny>);
+struct AsgiScope(Py<PyDict>);
+struct AsgiReceive(Py<PyAny>);
+
+fn call_app(app: &AsgiApp, scope: &AsgiScope) -> PyResult<AsgiReceive>
+```
+
+Group related interned Python objects into a struct rather than passing individual `Py<PyString>` values:
+
+```rust
+// from crates/framework/src/bridge/asgi.rs — ScopeInterns
+pub struct ScopeInterns {
+    pub type_key: Py<PyString>,
+    pub asgi_key: Py<PyString>,
+    pub http_version_key: Py<PyString>,
+    // ...
+}
+```
+
+### Zero allocation in the hot path
+
+**Core rule:** Python objects must not be constructed in the hot request path. All Python objects must either be cached, pooled, or reused.
+
+Three strategies:
+
+1. **Intern** — for strings and dict keys that are the same on every request. Use `pyo3::intern!` or pre-build `Py<PyString>` at startup.
+2. **Template + copy** — for dicts with a fixed structure. Build a template dict once at startup, then `dict.copy()` + mutate per-request fields. Cheaper than `PyDict::new()` + full population.
+3. **Pool** — for complex objects that are expensive to construct. Allocate a pool of objects, check out per-request, reset and return.
+
+```rust
+// bad — allocates a new dict and all keys on every request
+fn build_scope(py: Python<'_>, request: &InboundRequest) -> PyResult<Py<PyDict>> {
+    let scope = PyDict::new(py);
+    scope.set_item("type", "http")?;       // allocates "type" string
+    scope.set_item("asgi", asgi_dict)?;     // allocates "asgi" string
+    // ... 15 more keys
+    Ok(scope.into())
+}
+
+// good — copy pre-built template, mutate only per-request fields
+fn scope_from_template(
+    py: Python<'_>,
+    template: &Py<PyDict>,
+    request: &InboundRequest,
+    interns: &ScopeInterns,
+) -> PyResult<Py<PyDict>> {
+    let scope = template.bind(py).call_method0(intern!(py, "copy"))?;
+    scope.set_item(&interns.path_key, &request.path)?;  // only per-request data
+    Ok(scope.unbind())
+}
+```
+
+Use `Vec::with_capacity` / pre-sized `PyList` + append over building collections from scratch.
+
+### Pre-resolve Python symbols
+
+Cache Python attributes at startup in a struct, not via per-call `getattr`. Every `getattr` does a dict lookup on the Python side.
+
+```rust
+// bad — resolves attribute on every call
+fn schedule(py: Python<'_>, loop_obj: &Py<PyAny>, callback: Py<PyAny>) -> PyResult<()> {
+    loop_obj.call_method1(py, "call_soon_threadsafe", (callback,))?;
+    Ok(())
+}
+
+// good — resolve once, use cached reference
+pub struct EventLoopHandle {
+    call_soon_threadsafe: Py<PyAny>,
+    create_task: Py<PyAny>,
+    // ... other cached callables
+}
+
+impl EventLoopHandle {
+    fn schedule(&self, py: Python<'_>, callback: Py<PyAny>) -> PyResult<()> {
+        self.call_soon_threadsafe.call1(py, (callback,))?;
+        Ok(())
+    }
+}
+```
+
+Use `pyo3::intern!` for string keys used in dict operations (`set_item`, `get_item`). The macro caches the Python string across calls.
+
+### Minimize pyclass in hot paths
+
+`#[pyclass]` creates Python heap objects — every instantiation goes through Python's allocator. In request-handling hot paths, prefer alternatives:
+
+- **`PyCFunction::new_closure`** for one-shot callables. Creates a Python callable from a Rust closure without a `#[pyclass]` heap allocation.
+- **`#[pyo3(freelist = N)]`** when a pyclass is unavoidable in the hot path. Maintains a free list of pre-allocated instances.
+- **Zero-overhead awaitables** (e.g. `ResolvedAwaitable`) over `pyo3_async_runtimes::tokio::future_into_py` when the result is already available synchronously.
+
+```rust
+// bad — allocates a new pyclass on every request
+#[pyclass]
+struct Callback { inner: Box<dyn FnOnce()> }
+
+// good — closure avoids heap allocation
+let callback = PyCFunction::new_closure(py, None, None, move |args, _kwargs| {
+    // handle the callback
+    Ok(())
+})?;
+```
+
+> *See [RAII guard](#raii-guard) for cleanup patterns on pyclass objects that own resources.*
+
+### GIL discipline
+
+The GIL is the single biggest contention point at the Python boundary. Rules:
+
+1. **Keep GIL holds as short as possible.** Acquire, enqueue work, release. Don't execute heavy logic under the GIL.
+2. **Never hold GIL across `.await`.** This extends the async rule about locks — the GIL is a global lock.
+3. **Defer heavy Python work to the event loop thread** via `call_soon_threadsafe`. Brief GIL on the tokio worker (to enqueue), heavy Python work on the event loop thread.
+4. **Batch boundary crossings.** Multiple sequential `Python::attach` calls that could be one are wasted overhead.
+
+```rust
+// bad — holds GIL while doing work
+Python::attach(|py| {
+    let result = expensive_python_call(py)?;    // long hold
+    process_result(py, &result)?;               // still holding
+    schedule_next(py, &result)?;                // still holding
+    Ok(())
+})
+
+// good — brief GIL to enqueue, work happens on event loop thread
+Python::attach(|py| {
+    let callback = prepare_callback(py, &data)?;  // brief: build closure
+    event_loop.schedule(py, callback)?;            // brief: enqueue
+    Ok(())
+})
+// Heavy Python work runs on the event loop thread, not under our GIL hold
+```
+
+### One Python runtime per worker
+
+Each worker owns its own: interpreter, event loop, symbol cache, and object pools. Nothing crosses worker boundaries — there is no GIL contention between workers.
+
+Worker-scoped Python state lives in `AppState`. This includes interned strings, scope templates, cached callables, and connection pools. Initialize all of it once during worker startup.
+
+**Rule:** Never pass `Py<T>` between workers. If data must cross workers, serialize to Rust types first.
+
+### Treat Python as an RPC boundary
+
+Mental model: Rust sends a request to the Python runtime and receives a response. It does not "call Python functions" — it dispatches work across a boundary.
+
+Consequences:
+- **Batch work.** Prepare all data on the Rust side, make one boundary crossing, collect all results.
+- **Reuse objects.** Templates, interns, and pools amortize the cost of boundary crossings over many requests.
+- **Minimize crossings.** Each `Python::attach` / `call_method` is an RPC call with overhead. Coalesce where possible.
+
+**Anti-pattern:** Multiple sequential `Python::attach` calls that could be a single attach block:
+```rust
+// bad — three boundary crossings
+Python::attach(|py| build_scope(py, &req))?;
+Python::attach(|py| call_app(py, &scope))?;
+Python::attach(|py| read_response(py, &result))?;
+
+// good — one boundary crossing
+Python::attach(|py| {
+    let scope = build_scope(py, &req)?;
+    let result = call_app(py, &scope)?;
+    read_response(py, &result)
+})
+```
+
 ## Lints & static analysis
 
 *Sources: Microsoft M-STATIC-VERIFICATION; Cloudflare foundations*
