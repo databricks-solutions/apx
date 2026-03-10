@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use pyo3::prelude::*;
+use tokio::sync::oneshot;
 
 use super::super::driver::CachedTypes;
 use super::super::primitives::{BlockingTask, RustEvent, RustFuture, Timer};
@@ -22,6 +23,26 @@ use super::super::primitives::{BlockingTask, RustEvent, RustFuture, Timer};
 // ---------------------------------------------------------------------------
 // ApxSchedulerCore -- the Rust pyclass backing the AnyIO adapter
 // ---------------------------------------------------------------------------
+
+/// One-shot callable that resolves a [`RustFuture`] when invoked.
+///
+/// Used by [`ApxSchedulerCore::checkpoint`] as the `call_soon` target
+/// to ensure the future resolves on the next event loop iteration.
+#[pyclass(module = "apx._core")]
+struct CheckpointResolver {
+    tx: Option<oneshot::Sender<Py<PyAny>>>,
+}
+
+#[pymethods]
+impl CheckpointResolver {
+    fn __call__(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            Python::attach(|py| {
+                let _ = tx.send(py.None());
+            });
+        }
+    }
+}
 
 /// Rust-backed scheduler core exposed to Python.
 ///
@@ -63,8 +84,8 @@ impl ApxSchedulerCore {
         clippy::unused_self,
         reason = "Python instance method — &self required by protocol"
     )]
-    fn sleep(&self, delay: f64) -> Timer {
-        Timer::new(delay)
+    fn sleep(&self, py: Python<'_>, delay: f64) -> PyResult<Timer> {
+        Timer::new(py, delay)
     }
 
     /// Create a new async event flag.
@@ -76,15 +97,30 @@ impl ApxSchedulerCore {
         RustEvent::new()
     }
 
-    /// Return an awaitable that immediately resolves with `None`.
+    /// Return an awaitable that resolves on the next event loop tick.
     ///
-    /// This is the anyio checkpoint -- it yields once to let other tasks run.
+    /// This is the anyio checkpoint — yields once to let other tasks run.
+    /// The future is resolved via `loop.call_soon`, ensuring one event loop
+    /// iteration passes before the coroutine resumes.
     #[allow(
         clippy::unused_self,
         reason = "Python instance method — &self required by protocol"
     )]
-    fn checkpoint(&self, py: Python<'_>) -> RustFuture {
-        RustFuture::resolved(py.None())
+    fn checkpoint(&self, py: Python<'_>) -> PyResult<Py<RustFuture>> {
+        let asyncio = py.import(c"asyncio")?;
+        match asyncio.call_method0(c"get_running_loop") {
+            Ok(event_loop) => {
+                let (future, tx) = RustFuture::with_channel();
+                let py_future = Py::new(py, future)?;
+                let resolver = Py::new(py, CheckpointResolver { tx: Some(tx) })?;
+                event_loop.call_method1(c"call_soon", (resolver,))?;
+                Ok(py_future)
+            }
+            Err(_) => {
+                // No running loop (test/diagnostic context) — resolve immediately.
+                Ok(Py::new(py, RustFuture::resolved(py.None()))?)
+            }
+        }
     }
 
     /// Return elapsed time since the scheduler was created.
@@ -108,7 +144,7 @@ impl ApxSchedulerCore {
         abandon_on_cancel: bool,
     ) -> PyResult<BlockingTask> {
         let _ = abandon_on_cancel; // accepted for API compat, not yet honoured
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
 
         // Spawn actual blocking work on a thread that acquires the GIL.
         std::thread::spawn(move || {
@@ -249,8 +285,8 @@ mod tests {
     fn sleep_returns_timer() {
         crate::with_py(|py| {
             let core = ApxSchedulerCore::new(py).unwrap();
-            let timer = core.sleep(1.0);
-            assert!(!timer.done());
+            let timer = core.sleep(py, 1.0).unwrap();
+            assert!(!timer.done(py));
         });
     }
 
@@ -267,8 +303,9 @@ mod tests {
     fn checkpoint_returns_resolved_future() {
         crate::with_py(|py| {
             let core = ApxSchedulerCore::new(py).unwrap();
-            let future = core.checkpoint(py);
-            assert!(future.done());
+            // No running event loop in test → falls back to immediate resolution.
+            let future = core.checkpoint(py).unwrap();
+            assert!(future.borrow(py).done());
         });
     }
 

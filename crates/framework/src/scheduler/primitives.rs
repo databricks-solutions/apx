@@ -38,8 +38,8 @@ use tokio::sync::oneshot;
 ///
 /// Python's `await` desugars to calling `__await__()` to get an iterator,
 /// then repeatedly calling `__next__()` on it. When the result is ready,
-/// `__next__` raises `StopIteration(value)`. Until then it yields `None`
-/// to hand control back to the driving loop.
+/// `__next__` raises `StopIteration(value)`. Until then it yields `self`
+/// so the Rust scheduler can classify and suspend on the future.
 #[pyclass(module = "apx._core")]
 pub struct RustFuture {
     /// Oneshot receiver for results arriving from Rust.
@@ -118,7 +118,9 @@ impl RustFuture {
     ///
     /// - If the result is ready, raises `StopIteration(value)`.
     /// - If an exception was stored, re-raises it.
-    /// - Otherwise returns `None` (yields control back to the driver).
+    /// - Otherwise yields `self` so the Rust scheduler can classify it as
+    ///   `RustFuture` and suspend (attach a done-callback) instead of
+    ///   busy-looping on `YieldNone`.
     fn __next__(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let mut this = slf.borrow_mut(py);
 
@@ -140,8 +142,9 @@ impl RustFuture {
                     Err(stop)
                 }
                 Err(oneshot::error::TryRecvError::Empty) => {
-                    // Not ready yet — yield control.
-                    Ok(py.None())
+                    // Not ready yet — yield self so the scheduler can suspend.
+                    drop(this);
+                    Ok(slf.into_any())
                 }
                 Err(oneshot::error::TryRecvError::Closed) => {
                     // Sender dropped without sending — treat as cancellation.
@@ -241,18 +244,21 @@ impl RustFuture {
 
 /// A Rust-backed async event flag, analogous to `asyncio.Event`.
 ///
-/// Uses `tokio::sync::Notify` internally. The `wait()` method returns an
-/// awaitable [`RustEventWaiter`] that yields until the event is set.
+/// `wait()` returns a [`RustEventWaiter`] that wraps a [`RustFuture`].
+/// When `set()` is called, all pending waiter futures are resolved,
+/// causing the Rust scheduler to resume waiting coroutines via
+/// done-callbacks instead of busy-polling.
 #[pyclass(module = "apx._core")]
 pub struct RustEvent {
-    notify: Arc<tokio::sync::Notify>,
-    set: Arc<AtomicBool>,
+    is_set: AtomicBool,
+    /// Pending waiter senders — resolved when `set()` is called.
+    pending: std::sync::Mutex<Vec<oneshot::Sender<Py<PyAny>>>>,
 }
 
 impl std::fmt::Debug for RustEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RustEvent")
-            .field("set", &self.set.load(Ordering::Relaxed))
+            .field("set", &self.is_set.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -262,69 +268,75 @@ impl RustEvent {
     #[new]
     pub(crate) fn new() -> Self {
         Self {
-            notify: Arc::new(tokio::sync::Notify::new()),
-            set: Arc::new(AtomicBool::new(false)),
+            is_set: AtomicBool::new(false),
+            pending: std::sync::Mutex::new(Vec::new()),
         }
     }
 
-    /// Set the event flag and notify all waiters.
+    /// Set the event flag and resolve all pending waiter futures.
     fn set(&self) {
-        self.set.store(true, Ordering::Release);
-        self.notify.notify_waiters();
+        self.is_set.store(true, Ordering::Release);
+        let senders = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *pending)
+        };
+        Python::attach(|py| {
+            for tx in senders {
+                let _ = tx.send(py.None());
+            }
+        });
     }
 
     /// Check whether the event is currently set.
     pub(crate) fn is_set(&self) -> bool {
-        self.set.load(Ordering::Acquire)
+        self.is_set.load(Ordering::Acquire)
     }
 
     /// Reset the event flag.
     fn clear(&self) {
-        self.set.store(false, Ordering::Release);
+        self.is_set.store(false, Ordering::Release);
     }
 
     /// Return an awaitable that resolves when the event is set.
-    fn wait(slf: Py<Self>, py: Python<'_>) -> RustEventWaiter {
-        let this = slf.borrow(py);
-        RustEventWaiter {
-            set: Arc::clone(&this.set),
+    fn wait(&self, py: Python<'_>) -> PyResult<RustEventWaiter> {
+        if self.is_set.load(Ordering::Acquire) {
+            let inner = Py::new(py, RustFuture::resolved(py.None()))?;
+            return Ok(RustEventWaiter { inner });
         }
+        let (future, tx) = RustFuture::with_channel();
+        let inner = Py::new(py, future)?;
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        // Double-check after acquiring lock — event may have been set.
+        if self.is_set.load(Ordering::Acquire) {
+            drop(pending);
+            let _ = tx.send(py.None());
+        } else {
+            pending.push(tx);
+        }
+        Ok(RustEventWaiter { inner })
     }
 }
 
 /// Awaitable returned by [`RustEvent::wait`].
 ///
-/// Implements the Python awaitable protocol: yields `None` until the
-/// parent event is set, then raises `StopIteration(None)`.
+/// Wraps a [`RustFuture`] that resolves when the parent event is set.
+/// The scheduler can classify and suspend on the inner future properly.
 #[pyclass(module = "apx._core")]
 pub struct RustEventWaiter {
-    set: Arc<AtomicBool>,
+    inner: Py<RustFuture>,
 }
 
 impl std::fmt::Debug for RustEventWaiter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RustEventWaiter")
-            .field("set", &self.set.load(Ordering::Relaxed))
-            .finish()
+        f.debug_struct("RustEventWaiter").finish_non_exhaustive()
     }
 }
 
 #[pymethods]
 impl RustEventWaiter {
-    fn __await__(slf: Py<Self>) -> Py<Self> {
-        slf
-    }
-
-    fn __iter__(slf: Py<Self>) -> Py<Self> {
-        slf
-    }
-
-    fn __next__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if self.set.load(Ordering::Acquire) {
-            Err(pyo3::exceptions::PyStopIteration::new_err((py.None(),)))
-        } else {
-            Ok(py.None())
-        }
+    /// Python awaitable protocol: delegate to the inner RustFuture.
+    fn __await__(&self, py: Python<'_>) -> Py<RustFuture> {
+        self.inner.clone_ref(py)
     }
 }
 
@@ -334,52 +346,53 @@ impl RustEventWaiter {
 
 /// A Rust-backed awaitable timer.
 ///
-/// Implements the Python awaitable protocol: yields `None` until the
-/// deadline has passed, then raises `StopIteration(None)`.
-#[derive(Debug)]
+/// Wraps a [`RustFuture`] that is resolved after the specified delay.
+/// For zero-delay timers, the future is resolved immediately.
+/// For non-zero delays, a background thread sleeps and resolves the future.
+///
+/// The awaitable protocol delegates to the inner `RustFuture`, so the
+/// Rust scheduler can classify and suspend on it properly.
 #[pyclass(module = "apx._core")]
 pub struct Timer {
-    /// When this timer fires (tokio Instant).
-    deadline: tokio::time::Instant,
-    /// Whether the timer has already fired.
-    done: bool,
+    inner: Py<RustFuture>,
+}
+
+impl std::fmt::Debug for Timer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Timer").finish_non_exhaustive()
+    }
 }
 
 #[pymethods]
 impl Timer {
     /// Create a new timer that fires after `delay_secs` seconds.
     #[new]
-    pub(crate) fn new(delay_secs: f64) -> Self {
-        let duration = std::time::Duration::from_secs_f64(delay_secs);
-        Self {
-            deadline: tokio::time::Instant::now() + duration,
-            done: false,
-        }
-    }
-
-    fn __await__(slf: Py<Self>) -> Py<Self> {
-        slf
-    }
-
-    fn __iter__(slf: Py<Self>) -> Py<Self> {
-        slf
-    }
-
-    fn __next__(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if self.done {
-            return Err(pyo3::exceptions::PyStopIteration::new_err((py.None(),)));
-        }
-        if tokio::time::Instant::now() >= self.deadline {
-            self.done = true;
-            Err(pyo3::exceptions::PyStopIteration::new_err((py.None(),)))
+    pub(crate) fn new(py: Python<'_>, delay_secs: f64) -> PyResult<Self> {
+        let inner = if delay_secs <= 0.0 {
+            Py::new(py, RustFuture::resolved(py.None()))?
         } else {
-            Ok(py.None())
-        }
+            let (future, tx) = RustFuture::with_channel();
+            let inner = Py::new(py, future)?;
+            let duration = std::time::Duration::from_secs_f64(delay_secs);
+            std::thread::spawn(move || {
+                std::thread::sleep(duration);
+                Python::attach(|py| {
+                    let _ = tx.send(py.None());
+                });
+            });
+            inner
+        };
+        Ok(Self { inner })
+    }
+
+    /// Python awaitable protocol: delegate to the inner RustFuture.
+    fn __await__(&self, py: Python<'_>) -> Py<RustFuture> {
+        self.inner.clone_ref(py)
     }
 
     /// Check whether the timer has fired.
-    pub(crate) fn done(&self) -> bool {
-        self.done
+    pub(crate) fn done(&self, py: Python<'_>) -> bool {
+        self.inner.borrow(py).done()
     }
 }
 
@@ -862,24 +875,18 @@ mod tests {
 
     #[test]
     fn timer_zero_delay_fires_immediately() {
-        let mut timer = Timer::new(0.0);
-        assert!(!timer.done);
-        // Simulate a poll — with 0 delay the deadline is already passed.
         crate::with_py(|py| {
-            let result = timer.__next__(py);
-            assert!(result.is_err()); // StopIteration
-            assert!(timer.done());
+            let timer = Timer::new(py, 0.0).unwrap();
+            // Zero-delay timer wraps a resolved RustFuture.
+            assert!(timer.done(py));
         });
     }
 
     #[test]
     fn timer_future_delay_not_ready() {
-        let mut timer = Timer::new(999.0);
-        assert!(!timer.done());
         crate::with_py(|py| {
-            let result = timer.__next__(py);
-            assert!(result.is_ok()); // yields None
-            assert!(!timer.done());
+            let timer = Timer::new(py, 999.0).unwrap();
+            assert!(!timer.done(py));
         });
     }
 

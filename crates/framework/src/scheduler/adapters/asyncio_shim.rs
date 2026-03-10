@@ -29,9 +29,9 @@ use super::super::primitives::{RustEvent, Timer};
 /// `asyncio.sleep` but is currently ignored (returns `None` on completion).
 #[pyfunction]
 #[pyo3(signature = (delay, result=None))]
-fn shim_sleep(_py: Python<'_>, delay: f64, result: Option<Py<PyAny>>) -> Timer {
+fn shim_sleep(py: Python<'_>, delay: f64, result: Option<Py<PyAny>>) -> PyResult<Timer> {
     let _ = result; // TODO: support the result parameter
-    Timer::new(delay)
+    Timer::new(py, delay)
 }
 
 /// Replacement for `asyncio.Event()`.
@@ -153,17 +153,17 @@ mod tests {
     #[test]
     fn shim_sleep_returns_timer() {
         crate::with_py(|py| {
-            let timer = shim_sleep(py, 1.0, None);
-            assert!(!timer.done());
+            let timer = shim_sleep(py, 1.0, None).unwrap();
+            assert!(!timer.done(py));
         });
     }
 
     #[test]
     fn shim_sleep_zero_delay() {
         crate::with_py(|py| {
-            let timer = shim_sleep(py, 0.0, None);
-            // Zero-delay timer should fire on first poll.
-            assert!(!timer.done()); // not polled yet
+            let timer = shim_sleep(py, 0.0, None).unwrap();
+            // Zero-delay timer wraps a resolved RustFuture.
+            assert!(timer.done(py));
         });
     }
 

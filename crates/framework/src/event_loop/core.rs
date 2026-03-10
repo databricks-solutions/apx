@@ -192,12 +192,25 @@ impl EventLoop {
         let needs_wake = Arc::new(AtomicBool::new(false));
         let needs_wake_clone = Arc::clone(&needs_wake);
 
+        // Capture the tokio runtime handle (if available) for spawning timer/blocking
+        // tasks from the event loop thread. Only meaningful for RustNative mode.
+        let tokio_handle = if policy == LoopPolicy::RustNative {
+            tokio::runtime::Handle::try_current().ok()
+        } else {
+            None
+        };
+
         let thread = std::thread::Builder::new()
             .name("apx-asyncio".to_owned())
             .spawn(move || {
                 Python::attach(|py| {
-                    let result =
-                        Self::init_event_loop_thread(py, policy, queue_rx, needs_wake_clone);
+                    let result = Self::init_event_loop_thread(
+                        py,
+                        policy,
+                        queue_rx,
+                        needs_wake_clone,
+                        tokio_handle,
+                    );
 
                     match result {
                         Ok((event_loop, drainer_ref)) => {
@@ -240,6 +253,7 @@ impl EventLoop {
         policy: LoopPolicy,
         queue_rx: mpsc::UnboundedReceiver<WorkItem>,
         needs_wake: Arc<AtomicBool>,
+        tokio_handle: Option<tokio::runtime::Handle>,
     ) -> Result<(Py<PyAny>, Py<PyAny>), String> {
         let event_loop =
             create_event_loop(py, policy).map_err(|e| format!("create_event_loop: {e}"))?;
@@ -250,7 +264,8 @@ impl EventLoop {
             .call_method1(c"set_event_loop", (&event_loop,))
             .map_err(|e| format!("set_event_loop: {e}"))?;
 
-        let drainer_ref = Self::install_drainer(py, &event_loop, queue_rx, needs_wake, policy)?;
+        let drainer_ref =
+            Self::install_drainer(py, &event_loop, queue_rx, needs_wake, policy, tokio_handle)?;
 
         if policy == LoopPolicy::RustNative {
             install_rust_scheduler(py).map_err(|e| format!("scheduler install: {e}"))?;
@@ -266,6 +281,7 @@ impl EventLoop {
         queue_rx: mpsc::UnboundedReceiver<WorkItem>,
         needs_wake: Arc<AtomicBool>,
         policy: LoopPolicy,
+        tokio_handle: Option<tokio::runtime::Handle>,
     ) -> Result<Py<PyAny>, String> {
         let create_task = event_loop
             .getattr(c"create_task")
@@ -291,6 +307,7 @@ impl EventLoop {
                 cached_types,
                 call_soon: call_soon.clone_ref(py),
                 ensure_future,
+                tokio_handle,
             })
         } else {
             None
