@@ -170,9 +170,10 @@ pub enum AsgiEvent {
 /// synchronously (via `ResolvedAwaitableWithValue`, no tokio task overhead).
 /// Subsequent calls pend forever via `future_into_py` + `pending()`,
 /// preventing Starlette's `listen_for_disconnect` from prematurely firing.
-#[pyclass(module = "apx._core")]
+#[pyclass(module = "apx._core", freelist = 64)]
 pub struct AsgiReceive {
     body: std::sync::Mutex<Option<Bytes>>,
+    receive_template: Py<PyDict>,
 }
 
 impl std::fmt::Debug for AsgiReceive {
@@ -183,22 +184,24 @@ impl std::fmt::Debug for AsgiReceive {
 
 impl AsgiReceive {
     /// Create for an HTTP request with a known body.
-    pub fn http(body: Bytes) -> Self {
+    pub fn http(body: Bytes, receive_template: Py<PyDict>) -> Self {
         Self {
             body: std::sync::Mutex::new(Some(body)),
+            receive_template,
         }
     }
 
     /// Create for an HTTP request with no body (GET, HEAD, DELETE).
-    pub fn empty() -> Self {
+    pub fn empty(receive_template: Py<PyDict>) -> Self {
         Self {
             body: std::sync::Mutex::new(Some(Bytes::new())),
+            receive_template,
         }
     }
 
-    /// Alias for `http` — used by the sync dispatch path.
-    pub fn immediate(body: Bytes) -> Self {
-        Self::http(body)
+    /// Reset for reuse with a new request body.
+    pub fn reset(&mut self, body: Bytes) {
+        *self.body.get_mut().unwrap_or_else(|e| e.into_inner()) = Some(body);
     }
 }
 
@@ -219,7 +222,13 @@ impl AsgiReceive {
 
         match taken {
             Some(bytes) => {
-                let event = build_receive_event(py, Some(bytes))?;
+                let event: Bound<'_, PyDict> = self
+                    .receive_template
+                    .bind(py)
+                    .call_method0(pyo3::intern!(py, "copy"))?
+                    .cast_into()?;
+                event.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, &bytes))?;
+                let event = event.unbind().into_any();
                 Py::new(py, ResolvedAwaitableWithValue { value: Some(event) })
                     .map(|obj| obj.into_bound(py).into_any())
             }
@@ -233,22 +242,6 @@ impl AsgiReceive {
     }
 }
 
-/// Build the ASGI receive event dict.
-fn build_receive_event(py: Python<'_>, body: Option<Bytes>) -> PyResult<Py<PyAny>> {
-    let dict = PyDict::new(py);
-    match body {
-        Some(bytes) => {
-            dict.set_item("type", "http.request")?;
-            dict.set_item("body", PyBytes::new(py, &bytes))?;
-            dict.set_item("more_body", false)?;
-        }
-        None => {
-            dict.set_item("type", "http.disconnect")?;
-        }
-    }
-    Ok(dict.into_any().unbind())
-}
-
 // ── ResolvedAwaitable ─────────────────────────────────────────────────────
 
 /// Zero-overhead Python awaitable that completes immediately.
@@ -256,7 +249,7 @@ fn build_receive_event(py: Python<'_>, body: Option<Bytes>) -> PyResult<Py<PyAny
 /// Used by buffered `AsgiSend` to avoid `pyo3_async_runtimes::future_into_py`
 /// and its tokio task overhead. Implements the Python iterator protocol
 /// so `await resolved_awaitable` returns `None` with no scheduling.
-#[pyclass(module = "apx._core")]
+#[pyclass(module = "apx._core", freelist = 128)]
 struct ResolvedAwaitable;
 
 #[pymethods]
@@ -277,10 +270,10 @@ impl ResolvedAwaitable {
 
 /// Zero-overhead Python awaitable that completes immediately with a value.
 ///
-/// Used by `AsgiReceive::immediate` to return the receive dict without
+/// Used by `AsgiReceive` to return the receive dict without
 /// `future_into_py` (which requires a tokio runtime, unavailable on
 /// `spawn_blocking` threads).
-#[pyclass(module = "apx._core")]
+#[pyclass(module = "apx._core", freelist = 64)]
 struct ResolvedAwaitableWithValue {
     value: Option<Py<PyAny>>,
 }
@@ -353,7 +346,7 @@ impl std::fmt::Debug for AsgiEventBuffer {
 /// - **Buffer** (buffered): accumulates events in a shared `Vec` for
 ///   synchronous draining after coroutine completion. Avoids mpsc channel
 ///   allocation and `future_into_py` overhead.
-#[pyclass(module = "apx._core")]
+#[pyclass(module = "apx._core", freelist = 64)]
 pub struct AsgiSend {
     backend: SendBackend,
 }
@@ -471,26 +464,27 @@ impl AsgiWsReceive {
 /// Build an ASGI WebSocket receive event dict.
 fn build_ws_receive_event(py: Python<'_>, event: Option<WsIncomingEvent>) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
+    let type_key = pyo3::intern!(py, "type");
     match event {
         Some(WsIncomingEvent::Connect) => {
-            dict.set_item("type", "websocket.connect")?;
+            dict.set_item(type_key, pyo3::intern!(py, "websocket.connect"))?;
         }
         Some(WsIncomingEvent::Receive { text, bytes }) => {
-            dict.set_item("type", "websocket.receive")?;
+            dict.set_item(type_key, pyo3::intern!(py, "websocket.receive"))?;
             if let Some(t) = text {
-                dict.set_item("text", t)?;
+                dict.set_item(pyo3::intern!(py, "text"), t)?;
             }
             if let Some(b) = bytes {
-                dict.set_item("bytes", PyBytes::new(py, &b))?;
+                dict.set_item(pyo3::intern!(py, "bytes"), PyBytes::new(py, &b))?;
             }
         }
         Some(WsIncomingEvent::Disconnect { code }) => {
-            dict.set_item("type", "websocket.disconnect")?;
-            dict.set_item("code", code)?;
+            dict.set_item(type_key, pyo3::intern!(py, "websocket.disconnect"))?;
+            dict.set_item(pyo3::intern!(py, "code"), code)?;
         }
         None => {
-            dict.set_item("type", "websocket.disconnect")?;
-            dict.set_item("code", 1000u16)?;
+            dict.set_item(type_key, pyo3::intern!(py, "websocket.disconnect"))?;
+            dict.set_item(pyo3::intern!(py, "code"), 1000u16)?;
         }
     }
     Ok(dict.into_any().unbind())
@@ -500,8 +494,9 @@ fn build_ws_receive_event(py: Python<'_>, event: Option<WsIncomingEvent>) -> PyR
 
 /// Parse an ASGI send event dict into a typed [`AsgiEvent`].
 fn parse_asgi_send_event(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
+    let py = event.py();
     let event_type: String = event
-        .get_item("type")?
+        .get_item(pyo3::intern!(py, "type"))?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("type"))?
         .extract()?;
 
@@ -519,8 +514,9 @@ fn parse_asgi_send_event(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
 
 /// Parse `http.response.start` — extract status and headers.
 fn parse_response_start(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
+    let py = event.py();
     let status: u16 = event
-        .get_item("status")?
+        .get_item(pyo3::intern!(py, "status"))?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("status"))?
         .extract()?;
     let headers = extract_header_list(event)?;
@@ -529,9 +525,10 @@ fn parse_response_start(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
 
 /// Parse `http.response.body` — extract body bytes and more_body flag.
 fn parse_response_body(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
+    let py = event.py();
     let body = extract_body_bytes(event)?;
     let more_body: bool = event
-        .get_item("more_body")?
+        .get_item(pyo3::intern!(py, "more_body"))?
         .map(|b| b.extract())
         .transpose()?
         .unwrap_or(false);
@@ -540,7 +537,8 @@ fn parse_response_body(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
 
 /// Extract body bytes from an ASGI event dict, preferring zero-copy via `PyBytes`.
 fn extract_body_bytes(event: &Bound<'_, PyDict>) -> PyResult<Bytes> {
-    let Some(obj) = event.get_item("body")? else {
+    let py = event.py();
+    let Some(obj) = event.get_item(pyo3::intern!(py, "body"))? else {
         return Ok(Bytes::new());
     };
     match obj.cast::<PyBytes>() {
@@ -551,8 +549,9 @@ fn extract_body_bytes(event: &Bound<'_, PyDict>) -> PyResult<Bytes> {
 
 /// Parse `websocket.accept` — extract optional subprotocol and headers.
 fn parse_ws_accept(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
+    let py = event.py();
     let subprotocol: Option<String> = event
-        .get_item("subprotocol")?
+        .get_item(pyo3::intern!(py, "subprotocol"))?
         .and_then(|v| v.extract().ok());
     let headers = extract_header_list(event)?;
     Ok(AsgiEvent::WsAccept {
@@ -563,15 +562,21 @@ fn parse_ws_accept(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
 
 /// Parse `websocket.send` — extract text or binary payload.
 fn parse_ws_send(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
-    let text: Option<String> = event.get_item("text")?.and_then(|v| v.extract().ok());
-    let bytes: Option<Vec<u8>> = event.get_item("bytes")?.and_then(|v| v.extract().ok());
+    let py = event.py();
+    let text: Option<String> = event
+        .get_item(pyo3::intern!(py, "text"))?
+        .and_then(|v| v.extract().ok());
+    let bytes: Option<Vec<u8>> = event
+        .get_item(pyo3::intern!(py, "bytes"))?
+        .and_then(|v| v.extract().ok());
     Ok(AsgiEvent::WsSend { text, bytes })
 }
 
 /// Parse `websocket.close` — extract close code.
 fn parse_ws_close(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
+    let py = event.py();
     let code: u16 = event
-        .get_item("code")?
+        .get_item(pyo3::intern!(py, "code"))?
         .map(|v| v.extract())
         .transpose()?
         .unwrap_or(1000);
@@ -583,7 +588,7 @@ fn parse_ws_close(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
 /// Uses `PyBytes::as_bytes()` to borrow directly from Python objects,
 /// avoiding pyo3's generic extraction overhead per header pair.
 fn extract_header_list(event: &Bound<'_, PyDict>) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
-    let Some(list) = event.get_item("headers")? else {
+    let Some(list) = event.get_item(pyo3::intern!(event.py(), "headers"))? else {
         return Ok(Vec::new());
     };
     list.try_iter()?
@@ -613,6 +618,7 @@ fn extract_bytes_field(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
 ///
 /// When `fastapi_app` is provided, `scope["app"]` and `scope["router"]` are
 /// set so that FastAPI/Starlette routing and dependency injection work.
+#[cfg(test)]
 pub fn build_http_scope(
     py: Python<'_>,
     request: &InboundRequest,
@@ -701,6 +707,7 @@ fn set_ws_scope_request_fields(
 }
 
 /// Set ASGI scope metadata fields: type, asgi, http_version, scheme, root_path.
+#[cfg(test)]
 fn set_scope_metadata(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
@@ -723,6 +730,7 @@ fn set_scope_metadata(
 }
 
 /// Set request-specific scope fields: http_version, method, path, raw_path, query_string.
+#[cfg(test)]
 fn set_scope_request_fields(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
@@ -814,7 +822,7 @@ fn set_scope_path_params(
 ///
 /// Returns the original string borrowed if no percent sequences are present,
 /// avoiding a heap allocation on the common path.
-fn percent_decode(input: &str) -> Cow<'_, str> {
+pub(super) fn percent_decode(input: &str) -> Cow<'_, str> {
     if !input.contains('%') {
         return Cow::Borrowed(input);
     }
@@ -1106,9 +1114,12 @@ mod tests {
 
     #[test]
     fn asgi_receive_debug() {
-        let recv = AsgiReceive::empty();
-        let dbg = format!("{recv:?}");
-        assert!(dbg.contains("AsgiReceive"));
+        with_py(|py| {
+            let template = super::super::context_pool::build_receive_template(py).unwrap();
+            let recv = AsgiReceive::empty(template);
+            let dbg = format!("{recv:?}");
+            assert!(dbg.contains("AsgiReceive"));
+        });
     }
 
     #[test]
@@ -1384,29 +1395,45 @@ mod tests {
 
     // ── AsgiReceive logic tests ─────────────────────────────────────────
 
-    #[tokio::test]
-    async fn receive_http_body_then_disconnect() {
-        let body = Arc::new(Mutex::new(Some(Bytes::from("hello"))));
-
-        // First call: http.request with body
-        let taken = body.lock().await.take();
+    #[test]
+    fn receive_template_copy_sets_body() {
         with_py(|py| {
-            let result = build_receive_event(py, taken).unwrap();
-            let dict = result.bind(py);
-            let event_type: String = dict.get_item("type").unwrap().extract().unwrap();
+            let template = crate::bridge::context_pool::build_receive_template(py).unwrap();
+            let event: Bound<'_, PyDict> = template
+                .bind(py)
+                .call_method0(pyo3::intern!(py, "copy"))
+                .unwrap()
+                .cast_into()
+                .unwrap();
+            event
+                .set_item(pyo3::intern!(py, "body"), PyBytes::new(py, b"hello"))
+                .unwrap();
+
+            let event_type: String = event.get_item("type").unwrap().unwrap().extract().unwrap();
             assert_eq!(event_type, "http.request");
-            let body_bytes: Vec<u8> = dict.get_item("body").unwrap().extract().unwrap();
+            let body_bytes: Vec<u8> = event.get_item("body").unwrap().unwrap().extract().unwrap();
             assert_eq!(body_bytes, b"hello");
-            let more: bool = dict.get_item("more_body").unwrap().extract().unwrap();
+            let more: bool = event
+                .get_item("more_body")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
             assert!(!more);
         });
+    }
 
-        // Second call: http.disconnect
-        let taken = body.lock().await.take();
+    #[test]
+    fn receive_disconnect_event() {
         with_py(|py| {
-            let result = build_receive_event(py, taken).unwrap();
-            let dict = result.bind(py);
-            let event_type: String = dict.get_item("type").unwrap().extract().unwrap();
+            let dict = PyDict::new(py);
+            dict.set_item(
+                pyo3::intern!(py, "type"),
+                pyo3::intern!(py, "http.disconnect"),
+            )
+            .unwrap();
+
+            let event_type: String = dict.get_item("type").unwrap().unwrap().extract().unwrap();
             assert_eq!(event_type, "http.disconnect");
         });
     }
@@ -1414,11 +1441,17 @@ mod tests {
     #[test]
     fn receive_empty_body() {
         with_py(|py| {
-            let result = build_receive_event(py, Some(Bytes::new())).unwrap();
-            let dict = result.bind(py);
-            let event_type: String = dict.get_item("type").unwrap().extract().unwrap();
+            let template = crate::bridge::context_pool::build_receive_template(py).unwrap();
+            let event: Bound<'_, PyDict> = template
+                .bind(py)
+                .call_method0(pyo3::intern!(py, "copy"))
+                .unwrap()
+                .cast_into()
+                .unwrap();
+
+            let event_type: String = event.get_item("type").unwrap().unwrap().extract().unwrap();
             assert_eq!(event_type, "http.request");
-            let body_bytes: Vec<u8> = dict.get_item("body").unwrap().extract().unwrap();
+            let body_bytes: Vec<u8> = event.get_item("body").unwrap().unwrap().extract().unwrap();
             assert!(body_bytes.is_empty());
         });
     }

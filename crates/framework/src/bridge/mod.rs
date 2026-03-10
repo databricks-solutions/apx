@@ -4,6 +4,7 @@
 //! to the appropriate [`dispatch::HandlerDispatch`] implementation.
 
 pub mod asgi;
+pub mod context_pool;
 pub mod dispatch;
 
 pub mod asgi_dispatch;
@@ -354,27 +355,24 @@ pub fn build_router(
 /// be added via a custom axum middleware in the future.
 pub fn wrap_layers(router: Router, request_timeout: Option<Duration>) -> Router {
     use axum::error_handling::HandleErrorLayer;
-    use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
-    use tower_http::trace::TraceLayer;
 
     let timeout = request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT);
 
     // Fallible layers (timeout, concurrency) must be wrapped in HandleErrorLayer
     // to convert their errors to responses before axum sees them.
-    router
-        .layer(
-            tower::ServiceBuilder::new()
-                .layer(HandleErrorLayer::new(handle_infra_error))
-                .layer(tower::timeout::TimeoutLayer::new(timeout))
-                .layer(tower::limit::ConcurrencyLimitLayer::new(
-                    DEFAULT_CONCURRENCY_LIMIT,
-                ))
-                .into_inner(),
-        )
-        // Infallible layers applied directly.
-        .layer(TraceLayer::new_for_http())
-        .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+    //
+    // Note: UUID request-id and full TraceLayer removed — they add measurable
+    // per-request overhead (UUID crypto-random + tracing span creation) without
+    // benefit for ASGI dispatch where Python middleware handles observability.
+    router.layer(
+        tower::ServiceBuilder::new()
+            .layer(HandleErrorLayer::new(handle_infra_error))
+            .layer(tower::timeout::TimeoutLayer::new(timeout))
+            .layer(tower::limit::ConcurrencyLimitLayer::new(
+                DEFAULT_CONCURRENCY_LIMIT,
+            ))
+            .into_inner(),
+    )
 }
 
 /// Convert tower infrastructure errors (timeout, concurrency limit) to responses.
@@ -497,10 +495,18 @@ mod tests {
         let ws_route = make_route(HandlerKind::WebSocket);
         let mut event_loop = crate::event_loop::EventLoop::start().unwrap();
         let scope_interns = pyo3::Python::attach(asgi::ScopeInterns::new);
+        let scope_interns = Arc::new(scope_interns);
+        let scope_template = pyo3::Python::attach(|py| {
+            context_pool::build_scope_template(py, &scope_interns, None).unwrap()
+        });
+        let receive_template =
+            pyo3::Python::attach(|py| context_pool::build_receive_template(py).unwrap());
         let app_state = Arc::new(AppState {
             max_body_limit: crate::route::BodyLimit::DEFAULT,
-            loop_handle: event_loop.handle(),
-            scope_interns: Arc::new(scope_interns),
+            loop_handle: event_loop.handle().unwrap(),
+            scope_interns,
+            scope_template: Arc::new(scope_template),
+            receive_template: Arc::new(receive_template),
         });
         let server_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
 

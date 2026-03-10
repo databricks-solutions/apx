@@ -115,7 +115,9 @@ pub fn load_app(
     server_addr: std::net::SocketAddr,
     py_event_loop: &EventLoop,
 ) -> Result<(Router, Arc<AppState>, Arc<LifecycleCache>), WorkerError> {
-    let loop_handle = py_event_loop.handle();
+    let loop_handle = py_event_loop
+        .handle()
+        .map_err(|e| WorkerError::PythonInit(format!("event loop handle: {e}")))?;
     let manifest = crate::manifest::load(&bootstrap.manifest_path)?;
     let meta = crate::manifest::validate_for_serving(&manifest)?;
     let app_module = meta.app_module.clone();
@@ -128,10 +130,30 @@ pub fn load_app(
     })?;
     let lifecycle_cache = Arc::new(lifecycle_cache);
 
+    let scope_interns = Arc::new(scope_interns);
+
+    // Build scope template with fixed ASGI fields.
+    // Use the FastAPI app from the first route (all routes share the same app).
+    let scope_template = Python::attach(|py| {
+        let fastapi_app = routes.iter().find_map(|r| r.fastapi_app.as_ref());
+        crate::bridge::context_pool::build_scope_template(
+            py,
+            &scope_interns,
+            fastapi_app.map(|a| a.inner()),
+        )
+    })
+    .map_err(|e| WorkerError::PythonInit(format!("scope template: {e}")))?;
+
+    // Build receive template with fixed ASGI fields.
+    let receive_template = Python::attach(crate::bridge::context_pool::build_receive_template)
+        .map_err(|e| WorkerError::PythonInit(format!("receive template: {e}")))?;
+
     let app_state = Arc::new(AppState {
         max_body_limit: manifest.max_body_limit,
         loop_handle,
-        scope_interns: Arc::new(scope_interns),
+        scope_interns,
+        scope_template: Arc::new(scope_template),
+        receive_template: Arc::new(receive_template),
     });
 
     let router = build_router(routes, Arc::clone(&app_state), server_addr);

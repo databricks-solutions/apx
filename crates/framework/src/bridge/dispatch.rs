@@ -8,6 +8,7 @@ use crate::error::AppError;
 use crate::event_loop::EventLoopHandle;
 use crate::route::BoundRoute;
 use crate::transport::types::{InboundRequest, OutboundResponse};
+use pyo3::Py;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -21,6 +22,10 @@ pub struct AppState {
     pub loop_handle: EventLoopHandle,
     /// Pre-interned Python strings for ASGI scope construction.
     pub scope_interns: Arc<ScopeInterns>,
+    /// Pre-built scope template dict with fixed ASGI fields.
+    pub scope_template: Arc<Py<pyo3::types::PyDict>>,
+    /// Pre-built receive-event template dict with fixed ASGI fields.
+    pub receive_template: Arc<Py<pyo3::types::PyDict>>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -60,10 +65,19 @@ mod tests {
     fn app_state_debug() {
         let mut event_loop = crate::event_loop::EventLoop::start().unwrap();
         let scope_interns = pyo3::Python::attach(ScopeInterns::new);
+        let scope_template = pyo3::Python::attach(|py| {
+            let d = pyo3::types::PyDict::new(py);
+            d.unbind()
+        });
+        let receive_template = pyo3::Python::attach(|py| {
+            crate::bridge::context_pool::build_receive_template(py).unwrap()
+        });
         let state = AppState {
             max_body_limit: crate::route::BodyLimit::DEFAULT,
-            loop_handle: event_loop.handle(),
+            loop_handle: event_loop.handle().unwrap(),
             scope_interns: Arc::new(scope_interns),
+            scope_template: Arc::new(scope_template),
+            receive_template: Arc::new(receive_template),
         };
         let dbg = format!("{state:?}");
         assert!(dbg.contains("AppState"));

@@ -5,7 +5,8 @@
 //! Rust-backed ASGI objects from [`InboundRequest`] and collects the
 //! response from the ASGI send channel.
 
-use crate::bridge::asgi::{AsgiEvent, AsgiEventBuffer, AsgiReceive, AsgiSend, build_http_scope};
+use crate::bridge::asgi::{AsgiEvent, AsgiEventBuffer, AsgiReceive, AsgiSend};
+use crate::bridge::context_pool::scope_from_template;
 use crate::bridge::dispatch::{AppState, HandlerDispatch};
 use crate::error::{AppError, BodyParseKind};
 use crate::route::{BoundRoute, HandlerKind, ResponseType};
@@ -69,15 +70,12 @@ impl HandlerDispatch for AsgiBridgeDispatch {
     }
 }
 
-/// Buffered response path: no mpsc channel, no tokio::spawn.
+/// Buffered response path: deferred scope building on the event loop.
 ///
-/// Events accumulate in a shared buffer. The coroutine runs on the
-/// persistent event loop with cooperative multiplexing — other in-flight
-/// requests can make progress at `await` points.
-///
-/// Uses `AsgiReceive::immediate` to avoid `future_into_py` overhead for
-/// the pre-buffered body (eliminates a tokio task + cross-thread callback
-/// on the first `await receive()` call).
+/// All Python work (scope construction, ASGI object creation, coroutine
+/// scheduling) runs on the event loop thread. The tokio thread only does
+/// a brief GIL hold to enqueue the deferred callback, reducing GIL
+/// contention from concurrent requests.
 async fn dispatch_buffered(
     route: Arc<BoundRoute>,
     app_state: Arc<AppState>,
@@ -85,11 +83,11 @@ async fn dispatch_buffered(
     body_bytes: Bytes,
 ) -> Result<OutboundResponse, AppError> {
     let event_buffer = AsgiEventBuffer::new();
+    let eb = event_buffer.clone();
+    let handle = app_state.loop_handle.clone();
 
-    let handler_rx = app_state.loop_handle.schedule_with(|py| {
-        let _span = tracing::trace_span!("build_scope").entered();
-        let coro = call_asgi_app_sync(py, &route, &request, &app_state, body_bytes, &event_buffer)?;
-        Ok(coro)
+    let handler_rx = handle.schedule_deferred(move |py| {
+        call_asgi_app_sync(py, &route, &request, &app_state, body_bytes, &eb)
     })?;
 
     handler_rx
@@ -130,7 +128,7 @@ async fn dispatch_streaming(
 
 /// Build ASGI scope, receive, and send for the buffered dispatch path.
 ///
-/// Uses `AsgiReceive::immediate` (synchronous first-call body delivery)
+/// Uses `AsgiReceive::http` (synchronous first-call body delivery)
 /// and `AsgiSend::buffered` for zero-overhead send collection.
 fn call_asgi_app_sync(
     py: Python<'_>,
@@ -145,15 +143,16 @@ fn call_asgi_app_sync(
         .as_ref()
         .map_or_else(|| route.handler.inner(), |a| a.inner());
 
-    let scope = build_http_scope(
+    let scope = scope_from_template(
         py,
+        &app_state.scope_template,
         request,
-        route.fastapi_app.as_ref().map(|a| a.inner()),
         &app_state.scope_interns,
     )
     .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
 
-    let receive = AsgiReceive::immediate(body_bytes);
+    let receive_template = app_state.receive_template.clone_ref(py);
+    let receive = AsgiReceive::http(body_bytes, receive_template);
     let send = AsgiSend::buffered(event_buffer);
 
     let receive_obj =
@@ -182,18 +181,19 @@ fn call_asgi_app(
         .as_ref()
         .map_or_else(|| route.handler.inner(), |a| a.inner());
 
-    let scope = build_http_scope(
+    let scope = scope_from_template(
         py,
+        &app_state.scope_template,
         request,
-        route.fastapi_app.as_ref().map(|a| a.inner()),
         &app_state.scope_interns,
     )
     .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
 
+    let receive_template = app_state.receive_template.clone_ref(py);
     let receive = if body_bytes.is_empty() {
-        AsgiReceive::empty()
+        AsgiReceive::empty(receive_template)
     } else {
-        AsgiReceive::http(body_bytes)
+        AsgiReceive::http(body_bytes, receive_template)
     };
     let send = make_send(py);
 

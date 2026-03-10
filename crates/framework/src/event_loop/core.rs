@@ -182,7 +182,11 @@ impl EventLoop {
     }
 
     /// Get a cloneable handle for submitting work to this event loop.
-    pub fn handle(&self) -> EventLoopHandle {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if event loop method caching fails.
+    pub fn handle(&self) -> Result<EventLoopHandle, String> {
         Python::attach(|py| {
             EventLoopHandle::new(self.event_loop.clone_ref(py), Arc::clone(&self.running))
         })
@@ -278,7 +282,7 @@ mod tests {
         let mut event_loop = EventLoop::start().unwrap();
         assert!(event_loop.running.load(Ordering::Acquire));
 
-        let handle = event_loop.handle();
+        let handle = event_loop.handle().unwrap();
         // Verify handle is valid (loop ref is not None).
         Python::attach(|py| {
             assert!(!handle.event_loop().bind(py).is_none());

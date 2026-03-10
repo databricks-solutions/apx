@@ -1,45 +1,31 @@
 //! Pure-Rust scheduling primitives for the persistent event loop.
 //!
-//! `CoroutineScheduler` and `TaskCallback` replace the inline Python
-//! dispatch wrapper. They use asyncio's native `Task.add_done_callback`
-//! mechanism — no Python source code strings.
+//! `CoroutineScheduler` and `TaskCallback` implement asyncio's
+//! `call_soon_threadsafe` + `Task.add_done_callback` scheduling pattern
+//! as Rust pyclasses — no Python source code strings.
 
 use crate::error::AppError;
 use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
-/// Cached `asyncio.ensure_future` function reference.
-///
-/// Avoids `py.import(c"asyncio")` + attribute lookup on every request.
-/// Initialized on first use; never changes after that.
-static ENSURE_FUTURE: std::sync::OnceLock<Py<PyAny>> = std::sync::OnceLock::new();
-
-/// Get or initialize the cached `asyncio.ensure_future` reference.
-fn ensure_future(py: Python<'_>) -> PyResult<&Py<PyAny>> {
-    if let Some(ef) = ENSURE_FUTURE.get() {
-        return Ok(ef);
-    }
-    let asyncio = py.import(c"asyncio")?;
-    let ef = asyncio.getattr(c"ensure_future")?.unbind();
-    // Race is harmless — all threads compute the same value.
-    Ok(ENSURE_FUTURE.get_or_init(|| ef))
-}
-
 /// Scheduled on the event loop via `call_soon_threadsafe`.
 ///
 /// When called (with no arguments, by the event loop), creates an
 /// `asyncio.Task` from the coroutine and attaches the done callback.
-#[pyclass(module = "apx._core")]
+/// Uses a cached `loop.create_task` reference — no `asyncio` module dispatch.
+#[pyclass(module = "apx._core", freelist = 64)]
 pub struct CoroutineScheduler {
     coro: Option<Py<PyAny>>,
     callback: Option<Py<PyAny>>,
+    create_task: Option<Py<PyAny>>,
 }
 
 impl CoroutineScheduler {
-    pub fn new(coro: Py<PyAny>, callback: Py<PyAny>) -> Self {
+    pub fn new(coro: Py<PyAny>, callback: Py<PyAny>, create_task: Py<PyAny>) -> Self {
         Self {
             coro: Some(coro),
             callback: Some(callback),
+            create_task: Some(create_task),
         }
     }
 }
@@ -61,8 +47,10 @@ impl CoroutineScheduler {
         let callback = self.callback.take().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("scheduler already consumed")
         })?;
-        let ef = ensure_future(py)?;
-        let task = ef.call1(py, (coro,))?;
+        let create_task = self.create_task.take().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("scheduler already consumed")
+        })?;
+        let task = create_task.call1(py, (coro,))?;
         task.call_method1(py, c"add_done_callback", (callback,))?;
         Ok(())
     }
@@ -72,7 +60,7 @@ impl CoroutineScheduler {
 ///
 /// Extracts `task.result()` or catches the exception, classifies it,
 /// and sends the result through a Tokio oneshot channel.
-#[pyclass(module = "apx._core")]
+#[pyclass(module = "apx._core", freelist = 64)]
 pub struct TaskCallback {
     tx: Option<oneshot::Sender<Result<Py<PyAny>, AppError>>>,
 }
@@ -134,7 +122,8 @@ mod tests {
         with_py(|py| {
             let coro = py.None();
             let callback = py.None();
-            let scheduler = CoroutineScheduler::new(coro, callback);
+            let create_task = py.None();
+            let scheduler = CoroutineScheduler::new(coro, callback, create_task);
             let dbg = format!("{scheduler:?}");
             assert!(dbg.contains("CoroutineScheduler"));
             assert!(dbg.contains("pending: true"));

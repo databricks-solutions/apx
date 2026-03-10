@@ -37,7 +37,30 @@ use crate::with_py;
 use pyo3::types::PyAnyMethods;
 use std::net::IpAddr;
 use std::path::Path;
-use std::sync::{Arc, Once, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock};
+
+// ── Discovery lock ──────────────────────────────────────────────────────
+
+/// Serialize sys.path manipulation + module import across parallel tests.
+///
+/// Python's import machinery reads `sys.path` at import time. Without this
+/// lock, concurrent tests inserting different temp dirs into `sys.path` can
+/// cause one test's module to be discovered under another test's namespace.
+static DISCOVERY_LOCK: Mutex<()> = Mutex::new(());
+
+/// Shared event loop for all integration tests.
+///
+/// Lazily created on first use. Never stopped — lives for the process
+/// lifetime. Reduces GIL contention from N concurrent event loop threads
+/// to exactly one.
+static SHARED_EVENT_LOOP: Mutex<Option<EventLoop>> = Mutex::new(None);
+
+/// Get a handle to the shared event loop, creating it if needed.
+fn shared_event_loop_handle() -> crate::event_loop::EventLoopHandle {
+    let mut guard = SHARED_EVENT_LOOP.lock().unwrap_or_else(|e| e.into_inner());
+    let event_loop = guard.get_or_insert_with(|| EventLoop::start().unwrap());
+    event_loop.handle().unwrap()
+}
 
 // ── Tracing setup ───────────────────────────────────────────────────────
 
@@ -133,7 +156,6 @@ pub struct TestServer {
     client: reqwest::Client,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     server_handle: Option<tokio::task::JoinHandle<()>>,
-    event_loop: EventLoop,
     _lifespan_guard: Option<LifespanGuard>,
     _tmp_dir: tempfile::TempDir,
 }
@@ -144,6 +166,7 @@ impl TestServer {
     /// The module name is derived from the test to avoid import collisions
     /// when multiple tests run in the same process.
     pub async fn start(python_app: &str, module_name: &str) -> Self {
+        // Limit concurrent event loops to avoid GIL starvation.
         ensure_tracing();
         ensure_python_env();
         with_py(|_| {});
@@ -152,37 +175,43 @@ impl TestServer {
         let app_file = tmp_dir.path().join(format!("{module_name}.py"));
         std::fs::write(&app_file, python_app).unwrap();
 
-        let event_loop = EventLoop::start().unwrap();
-
         let tmp_path = tmp_dir.path().to_path_buf();
         let module = module_name.to_owned();
-        let routes = with_py(|py| {
-            let sys = py.import("sys").unwrap();
-            let path = sys.getattr("path").unwrap();
 
-            let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-            let site_packages = manifest_dir
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join(format!(
-                    ".venv/lib/python{}/site-packages",
-                    python_version()
-                ));
-            path.call_method1("insert", (0, site_packages.to_str().unwrap()))
-                .unwrap();
-            path.call_method1("insert", (0, tmp_path.to_str().unwrap()))
-                .unwrap();
+        let (loop_handle, routes) = {
+            let _guard = DISCOVERY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let loop_handle = shared_event_loop_handle();
+            let routes = with_py(|py| {
+                let sys = py.import("sys").unwrap();
+                let path = sys.getattr("path").unwrap();
 
-            let app_module = AppModule::new(&module).unwrap();
-            let (routes, _manifest) = discovery::discover_and_bind(py, &app_module).unwrap();
-            routes
-        });
+                let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+                let site_packages = manifest_dir
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(format!(
+                        ".venv/lib/python{}/site-packages",
+                        python_version()
+                    ));
+                path.call_method1("insert", (0, site_packages.to_str().unwrap()))
+                    .unwrap();
+                path.call_method1("insert", (0, tmp_path.to_str().unwrap()))
+                    .unwrap();
+
+                // Remove stale cached module to force fresh import.
+                let modules = sys.getattr("modules").unwrap();
+                let _ = modules.call_method1("pop", (&*module, py.None()));
+
+                let app_module = AppModule::new(&module).unwrap();
+                let (routes, _manifest) = discovery::discover_and_bind(py, &app_module).unwrap();
+                routes
+            });
+            (loop_handle, routes)
+        };
 
         assert!(!routes.is_empty(), "no routes discovered in {module_name}");
-
-        let loop_handle = event_loop.handle();
 
         // Run ASGI lifespan startup if any route has a FastAPI app reference.
         let lifespan_guard = if routes.iter().any(|r| r.fastapi_app.is_some()) {
@@ -203,10 +232,25 @@ impl TestServer {
         };
 
         let scope_interns = with_py(crate::bridge::asgi::ScopeInterns::new);
+        let scope_interns = Arc::new(scope_interns);
+        let scope_template = pyo3::Python::attach(|py| {
+            let app_ref = routes.iter().find_map(|r| r.fastapi_app.as_ref());
+            crate::bridge::context_pool::build_scope_template(
+                py,
+                &scope_interns,
+                app_ref.map(|a| a.inner()),
+            )
+            .unwrap()
+        });
+        let receive_template = pyo3::Python::attach(|py| {
+            crate::bridge::context_pool::build_receive_template(py).unwrap()
+        });
         let app_state = Arc::new(AppState {
             max_body_limit: BodyLimit::DEFAULT,
             loop_handle,
-            scope_interns: Arc::new(scope_interns),
+            scope_interns,
+            scope_template: Arc::new(scope_template),
+            receive_template: Arc::new(receive_template),
         });
         let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 0);
         let listener = TcpListener::bind(&config).await.unwrap();
@@ -231,7 +275,6 @@ impl TestServer {
             client: reqwest::Client::new(),
             shutdown_tx: Some(shutdown_tx),
             server_handle: Some(server_handle),
-            event_loop,
             _lifespan_guard: lifespan_guard,
             _tmp_dir: tmp_dir,
         }
@@ -250,51 +293,60 @@ impl TestServer {
         let app_file = tmp_dir.path().join(format!("{module_name}.py"));
         std::fs::write(&app_file, python_app).unwrap();
 
-        let event_loop = EventLoop::start().unwrap();
-
         let tmp_path = tmp_dir.path().to_path_buf();
         let module = module_name.to_owned();
         let manifest_path = tmp_dir.path().join("manifest.json");
 
-        // Phase 1: Discover routes and save as manifest JSON.
-        let app_module = with_py(|py| {
-            let sys = py.import("sys").unwrap();
-            let path = sys.getattr("path").unwrap();
+        let (loop_handle, app_module, loaded_manifest) = {
+            let _guard = DISCOVERY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let loop_handle = shared_event_loop_handle();
 
-            let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-            let site_packages = manifest_dir
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join(format!(
-                    ".venv/lib/python{}/site-packages",
-                    python_version()
-                ));
-            path.call_method1("insert", (0, site_packages.to_str().unwrap()))
-                .unwrap();
-            path.call_method1("insert", (0, tmp_path.to_str().unwrap()))
-                .unwrap();
+            // Phase 1: Discover routes and save as manifest JSON.
+            let app_module = with_py(|py| {
+                let sys = py.import("sys").unwrap();
+                let path = sys.getattr("path").unwrap();
 
-            let app_module = AppModule::new(&module).unwrap();
-            let (_routes, mut manifest) = discovery::discover_and_bind(py, &app_module).unwrap();
+                let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+                let site_packages = manifest_dir
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(format!(
+                        ".venv/lib/python{}/site-packages",
+                        python_version()
+                    ));
+                path.call_method1("insert", (0, site_packages.to_str().unwrap()))
+                    .unwrap();
+                path.call_method1("insert", (0, tmp_path.to_str().unwrap()))
+                    .unwrap();
 
-            // Attach meta so the manifest is valid for serving.
-            manifest.meta = Some(crate::route::ManifestMeta {
-                apx_version: env!("CARGO_PKG_VERSION").to_owned(),
-                python_version: python_version().to_owned(),
-                fastapi_version: None,
-                build_timestamp: "2025-01-01T00:00:00Z".to_owned(),
-                app_module: app_module.clone(),
-                source_hash: None,
+                // Remove stale cached module to force fresh import.
+                let modules = sys.getattr("modules").unwrap();
+                let _ = modules.call_method1("pop", (&*module, py.None()));
+
+                let app_module = AppModule::new(&module).unwrap();
+                let (_routes, mut manifest) =
+                    discovery::discover_and_bind(py, &app_module).unwrap();
+
+                manifest.meta = Some(crate::route::ManifestMeta {
+                    apx_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    python_version: python_version().to_owned(),
+                    fastapi_version: None,
+                    build_timestamp: "2025-01-01T00:00:00Z".to_owned(),
+                    app_module: app_module.clone(),
+                    source_hash: None,
+                });
+
+                crate::manifest::save(&manifest, &manifest_path).unwrap();
+                app_module
             });
 
-            crate::manifest::save(&manifest, &manifest_path).unwrap();
-            app_module
-        });
+            let loaded_manifest = crate::manifest::load(&manifest_path).unwrap();
+            (loop_handle, app_module, loaded_manifest)
+        };
 
         // Phase 2: Load manifest from JSON and bind routes (manifest serving path).
-        let loaded_manifest = crate::manifest::load(&manifest_path).unwrap();
         let routes = with_py(|py| {
             discovery::bind::bind_routes_from_manifest(py, &loaded_manifest, &app_module).unwrap()
         });
@@ -303,8 +355,6 @@ impl TestServer {
             !routes.is_empty(),
             "no routes in manifest for {module_name}"
         );
-
-        let loop_handle = event_loop.handle();
 
         // Run ASGI lifespan startup.
         let lifespan_guard = if routes.iter().any(|r| r.fastapi_app.is_some()) {
@@ -325,10 +375,19 @@ impl TestServer {
         };
 
         let scope_interns = with_py(crate::bridge::asgi::ScopeInterns::new);
+        let scope_interns = Arc::new(scope_interns);
+        let scope_template = pyo3::Python::attach(|py| {
+            crate::bridge::context_pool::build_scope_template(py, &scope_interns, None).unwrap()
+        });
+        let receive_template = pyo3::Python::attach(|py| {
+            crate::bridge::context_pool::build_receive_template(py).unwrap()
+        });
         let app_state = Arc::new(AppState {
             max_body_limit: loaded_manifest.max_body_limit,
             loop_handle,
-            scope_interns: Arc::new(scope_interns),
+            scope_interns,
+            scope_template: Arc::new(scope_template),
+            receive_template: Arc::new(receive_template),
         });
         let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 0);
         let listener = TcpListener::bind(&config).await.unwrap();
@@ -353,7 +412,6 @@ impl TestServer {
             client: reqwest::Client::new(),
             shutdown_tx: Some(shutdown_tx),
             server_handle: Some(server_handle),
-            event_loop,
             _lifespan_guard: lifespan_guard,
             _tmp_dir: tmp_dir,
         }
@@ -568,7 +626,7 @@ impl TestServer {
         (status, headers)
     }
 
-    /// Shut down the server and event loop.
+    /// Shut down the server.
     pub async fn stop(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
@@ -576,7 +634,6 @@ impl TestServer {
         if let Some(handle) = self.server_handle.take() {
             let _ = handle.await;
         }
-        self.event_loop.stop();
     }
 }
 
@@ -585,6 +642,5 @@ impl Drop for TestServer {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        self.event_loop.stop();
     }
 }
