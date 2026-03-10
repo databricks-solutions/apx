@@ -510,6 +510,9 @@ fn make_resume_callback(
 /// Synchronous: either completes immediately (for trivial coroutines) or
 /// suspends by attaching a [`ResumeCallback`] to the first awaitable.
 /// The final result is sent through `result_tx`.
+///
+/// Sets the task as `asyncio.current_task()` for the duration of driving
+/// so that Starlette/FastAPI middleware can create weak references to it.
 pub fn spawn_and_drive(
     py: Python<'_>,
     coro: Py<PyAny>,
@@ -525,6 +528,12 @@ pub fn spawn_and_drive(
             return;
         }
     };
+
+    // Set our task as asyncio's "current task" so Starlette/FastAPI
+    // middleware that calls asyncio.current_task() gets a valid object
+    // (needed for weakref support in ServerErrorMiddleware, etc.).
+    let current_tasks = set_current_task(py, &task);
+
     let drive_result = drive_task(py, &mut task, cached_types);
     if let Err(e) = handle_drive_result(
         py,
@@ -537,6 +546,33 @@ pub fn spawn_and_drive(
     ) {
         tracing::warn!(error = %e, "scheduler drive result handling failed");
     }
+
+    clear_current_task(py, current_tasks);
+}
+
+/// Set `SchedulerTask` as `asyncio.current_task()` for the running loop.
+///
+/// Returns the `_current_tasks` dict for cleanup via [`clear_current_task`].
+fn set_current_task(py: Python<'_>, task: &SchedulerTask) -> Option<Py<PyAny>> {
+    let asyncio = py.import(c"asyncio").ok()?;
+    let tasks_mod = py.import(c"asyncio.tasks").ok()?;
+    let current_tasks = tasks_mod.getattr(c"_current_tasks").ok()?;
+    let loop_obj = asyncio.call_method0(c"get_running_loop").ok()?;
+    let py_task = task.result_future.bind(py); // use the awaitable as task proxy
+    let _ = current_tasks.call_method1(c"__setitem__", (&loop_obj, py_task));
+    Some(current_tasks.unbind())
+}
+
+/// Remove our task from `asyncio._current_tasks`.
+fn clear_current_task(py: Python<'_>, current_tasks: Option<Py<PyAny>>) {
+    let Some(ct) = current_tasks else { return };
+    let Ok(asyncio) = py.import(c"asyncio") else {
+        return;
+    };
+    let Ok(loop_obj) = asyncio.call_method0(c"get_running_loop") else {
+        return;
+    };
+    let _ = ct.call_method1(py, c"pop", (&loop_obj, py.None()));
 }
 
 // ---------------------------------------------------------------------------

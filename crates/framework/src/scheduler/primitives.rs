@@ -40,7 +40,7 @@ use tokio::sync::oneshot;
 /// then repeatedly calling `__next__()` on it. When the result is ready,
 /// `__next__` raises `StopIteration(value)`. Until then it yields `self`
 /// so the Rust scheduler can classify and suspend on the future.
-#[pyclass(module = "apx._core")]
+#[pyclass(module = "apx._core", weakref)]
 pub struct RustFuture {
     /// Oneshot receiver for results arriving from Rust.
     rx: Option<oneshot::Receiver<Py<PyAny>>>,

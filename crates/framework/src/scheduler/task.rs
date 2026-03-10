@@ -18,7 +18,7 @@ use super::primitives::RustFuture;
 /// Instead of wrapping each coroutine in an `asyncio.Task`, the scheduler
 /// drives it directly via [`super::driver::drive_task`]. Sub-coroutines are
 /// pushed onto an internal stack and driven inline — no extra task objects.
-#[pyclass(module = "apx._core")]
+#[pyclass(module = "apx._core", weakref)]
 pub struct SchedulerTask {
     /// Stack of coroutines (top = active). When a sub-coroutine is yielded,
     /// it is pushed; when it completes, it is popped and the result is sent
