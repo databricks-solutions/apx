@@ -550,16 +550,32 @@ pub fn spawn_and_drive(
     clear_current_task(py, current_tasks);
 }
 
-/// Set `SchedulerTask` as `asyncio.current_task()` for the running loop.
+/// Set a task proxy as `asyncio.current_task()` for the running loop.
 ///
-/// Returns the `_current_tasks` dict for cleanup via [`clear_current_task`].
-fn set_current_task(py: Python<'_>, task: &SchedulerTask) -> Option<Py<PyAny>> {
+/// Creates a lightweight Python object with the attributes Starlette/FastAPI
+/// expect (`_loop`, weakref support) and installs it in
+/// `asyncio.tasks._current_tasks`. Returns the dict for cleanup.
+fn set_current_task(py: Python<'_>, _task: &SchedulerTask) -> Option<Py<PyAny>> {
     let asyncio = py.import(c"asyncio").ok()?;
     let tasks_mod = py.import(c"asyncio.tasks").ok()?;
     let current_tasks = tasks_mod.getattr(c"_current_tasks").ok()?;
     let loop_obj = asyncio.call_method0(c"get_running_loop").ok()?;
-    let py_task = task.result_future.bind(py); // use the awaitable as task proxy
-    let _ = current_tasks.call_method1(c"__setitem__", (&loop_obj, py_task));
+
+    // Create a lightweight proxy with weakref + _loop support.
+    // Regular Python classes support weakref; __slots__-only types don't.
+    let proxy = py
+        .eval(
+            c"type('_TaskProxy', (), {'_loop': loop})()",
+            None,
+            Some(&{
+                let locals = pyo3::types::PyDict::new(py);
+                let _ = locals.set_item("loop", &loop_obj);
+                locals
+            }),
+        )
+        .ok()?;
+
+    let _ = current_tasks.call_method1(c"__setitem__", (&loop_obj, &proxy));
     Some(current_tasks.unbind())
 }
 
