@@ -4,14 +4,17 @@
 //! drain: tokio threads push [`WorkItem`]s into an unbounded channel, and
 //! [`QueueDrainer`] processes them all in one Python frame.
 
-use super::scheduling::TaskCallback;
-use crate::error::AppError;
-use pyo3::prelude::*;
 use std::fmt;
 use std::ops::Not;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use pyo3::prelude::*;
 use tokio::sync::mpsc;
+
+use super::scheduling::TaskCallback;
+use crate::error::AppError;
+use crate::scheduler::driver::{CachedTypes, spawn_and_drive};
 
 /// Closure that builds a Python coroutine on the event loop thread.
 pub type CoroutineBuilder = Box<dyn FnOnce(Python<'_>) -> Result<Py<PyAny>, AppError> + Send>;
@@ -32,12 +35,36 @@ impl fmt::Debug for WorkItem {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SchedulerState — cached refs for Rust-driven scheduling
+// ---------------------------------------------------------------------------
+
+/// Pre-resolved Python references for Rust-driven coroutine scheduling.
+///
+/// Constructed once during event loop initialization when
+/// [`LoopPolicy::RustNative`](super::core::LoopPolicy::RustNative) is active.
+pub struct SchedulerState {
+    pub(crate) cached_types: Arc<CachedTypes>,
+    pub(crate) call_soon: Py<PyAny>,
+    pub(crate) ensure_future: Py<PyAny>,
+}
+
+impl fmt::Debug for SchedulerState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SchedulerState").finish_non_exhaustive()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// QueueDrainer
+// ---------------------------------------------------------------------------
+
 /// Singleton drainer that runs on the event loop thread.
 ///
 /// Installed as a recurring callback via `loop.call_soon(drainer)`. When
-/// invoked, drains all pending [`WorkItem`]s from the channel and creates
-/// asyncio tasks for each. When the queue is empty, transitions to sleep
-/// and waits for a producer to wake it via `call_soon_threadsafe`.
+/// invoked, drains all pending [`WorkItem`]s from the channel. If a
+/// [`SchedulerState`] is present, coroutines are driven by the Rust
+/// scheduler; otherwise they are dispatched as asyncio tasks.
 #[pyclass(module = "apx._core")]
 pub struct QueueDrainer {
     rx: mpsc::UnboundedReceiver<WorkItem>,
@@ -53,6 +80,8 @@ pub struct QueueDrainer {
     /// Shared flag: `true` means the drainer is sleeping and producers
     /// must call `call_soon_threadsafe` to wake it.
     needs_wake: Arc<AtomicBool>,
+    /// Rust scheduler state (present when `LoopPolicy::RustNative`).
+    scheduler: Option<SchedulerState>,
 }
 
 impl fmt::Debug for QueueDrainer {
@@ -70,6 +99,7 @@ impl QueueDrainer {
         create_task: Py<PyAny>,
         call_soon: Py<PyAny>,
         needs_wake: Arc<AtomicBool>,
+        scheduler: Option<SchedulerState>,
     ) -> Self {
         Self {
             rx,
@@ -77,6 +107,7 @@ impl QueueDrainer {
             call_soon,
             self_ref: None,
             needs_wake,
+            scheduler,
         }
     }
 
@@ -108,8 +139,36 @@ impl QueueDrainer {
         count
     }
 
-    /// Create an asyncio task from one work item. Error-isolated.
+    /// Dispatch one work item — either via the Rust scheduler or asyncio.
     fn dispatch_item(&self, py: Python<'_>, item: WorkItem) {
+        if let Some(ref sched) = self.scheduler {
+            QueueDrainer::dispatch_via_scheduler(py, item, sched);
+        } else {
+            self.dispatch_via_asyncio(py, item);
+        }
+    }
+
+    /// Drive the coroutine through the Rust scheduler.
+    fn dispatch_via_scheduler(py: Python<'_>, item: WorkItem, sched: &SchedulerState) {
+        let coro = match (item.builder)(py) {
+            Ok(coro) => coro,
+            Err(e) => {
+                let _ = item.tx.send(Err(e));
+                return;
+            }
+        };
+        spawn_and_drive(
+            py,
+            coro,
+            item.tx,
+            &sched.cached_types,
+            &sched.call_soon,
+            &sched.ensure_future,
+        );
+    }
+
+    /// Create an asyncio task from one work item (original path).
+    fn dispatch_via_asyncio(&self, py: Python<'_>, item: WorkItem) {
         let result = self.try_create_task(py, item.builder);
         match result {
             Ok(task) => attach_done_callback(py, task, item.tx),
@@ -218,7 +277,7 @@ mod tests {
         crate::with_py(|py| {
             let (_tx, rx) = mpsc::unbounded_channel();
             let needs_wake = Arc::new(AtomicBool::new(false));
-            let drainer = QueueDrainer::new(rx, py.None(), py.None(), needs_wake);
+            let drainer = QueueDrainer::new(rx, py.None(), py.None(), needs_wake, None);
             let dbg = format!("{drainer:?}");
             assert!(dbg.contains("QueueDrainer"));
             assert!(dbg.contains("needs_wake: false"));
@@ -232,7 +291,7 @@ mod tests {
             let needs_wake = Arc::new(AtomicBool::new(false));
             // We can't call __call__ directly without call_soon/self_ref setup,
             // but we can test the state transition logic.
-            let mut drainer = QueueDrainer::new(rx, py.None(), py.None(), needs_wake.clone());
+            let mut drainer = QueueDrainer::new(rx, py.None(), py.None(), needs_wake.clone(), None);
             let count = drainer.drain_pending(py);
             assert_eq!(count, 0);
             // Simulate transition_to_sleep (without reschedule since no self_ref)
@@ -253,7 +312,7 @@ mod tests {
             let create_task = event_loop.getattr(c"create_task").unwrap().unbind();
             let call_soon = event_loop.getattr(c"call_soon").unwrap().unbind();
 
-            let mut drainer = QueueDrainer::new(rx, create_task, call_soon, needs_wake);
+            let mut drainer = QueueDrainer::new(rx, create_task, call_soon, needs_wake, None);
 
             // Push a work item with a trivial coroutine builder
             let (result_tx, mut result_rx) = oneshot::channel();
@@ -290,7 +349,7 @@ mod tests {
             let create_task = event_loop.getattr(c"create_task").unwrap().unbind();
             let call_soon = event_loop.getattr(c"call_soon").unwrap().unbind();
 
-            let mut drainer = QueueDrainer::new(rx, create_task, call_soon, needs_wake);
+            let mut drainer = QueueDrainer::new(rx, create_task, call_soon, needs_wake, None);
 
             // Item 1: failing builder
             let (tx1, mut rx1) = oneshot::channel();

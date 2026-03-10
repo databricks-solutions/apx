@@ -7,12 +7,16 @@
 //! driver handles this by looping immediately without any
 //! Python→asyncio→Python round trip.
 
+use std::sync::Arc;
+
 use pyo3::PyTypeInfo;
 use pyo3::prelude::*;
 use pyo3::types::PyType;
+use tokio::sync::oneshot;
 
 use super::primitives::{RustEventWaiter, RustFuture};
 use super::task::SchedulerTask;
+use crate::error::AppError;
 
 // ---------------------------------------------------------------------------
 // CachedTypes — pre-resolved Python type references
@@ -20,18 +24,28 @@ use super::task::SchedulerTask;
 
 /// Pre-resolved Python type references, cached at startup to avoid repeated
 /// `import` / `getattr` calls in the hot path.
-#[allow(
-    dead_code,
-    reason = "will be used by scheduler integration in a future phase"
-)]
 pub struct CachedTypes {
     /// `asyncio.Future`
     pub asyncio_future: Py<PyType>,
     /// `asyncio.Task`
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reserved for Task-vs-Future distinction in classify"
+        )
+    )]
     pub asyncio_task: Py<PyType>,
     /// `types.CoroutineType`
     pub coroutine_type: Py<PyType>,
     /// `types.GeneratorType`
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reserved for generator-based coroutine detection in classify"
+        )
+    )]
     pub generator_type: Py<PyType>,
     /// Our `RustFuture` type object.
     pub rust_future_type: Py<PyType>,
@@ -39,12 +53,14 @@ pub struct CachedTypes {
     pub rust_event_waiter_type: Py<PyType>,
 }
 
+impl std::fmt::Debug for CachedTypes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedTypes").finish_non_exhaustive()
+    }
+}
+
 impl CachedTypes {
     /// Resolve all Python types once at startup.
-    #[allow(
-        dead_code,
-        reason = "will be used by scheduler integration in a future phase"
-    )]
     pub fn resolve(py: Python<'_>) -> PyResult<Self> {
         let asyncio = py.import(c"asyncio")?;
         let types = py.import(c"types")?;
@@ -71,10 +87,6 @@ impl CachedTypes {
 // ---------------------------------------------------------------------------
 
 /// Outcome of a single `send` / `throw` cycle on a coroutine.
-#[allow(
-    dead_code,
-    reason = "will be used by scheduler integration in a future phase"
-)]
 pub enum StepResult {
     /// Coroutine yielded a value (needs classification).
     Yielded(Py<PyAny>),
@@ -89,10 +101,6 @@ pub enum StepResult {
 // ---------------------------------------------------------------------------
 
 /// Advance a coroutine one step by calling `coro.send(value)`.
-#[allow(
-    dead_code,
-    reason = "will be used by scheduler integration in a future phase"
-)]
 pub fn step(
     py: Python<'_>,
     coro: &Bound<'_, PyAny>,
@@ -115,10 +123,6 @@ pub fn step(
 /// Advance a coroutine one step by calling `coro.throw(exc)`.
 ///
 /// Python 3.12+ accepts just the exception instance.
-#[allow(
-    dead_code,
-    reason = "will be used by scheduler integration in a future phase"
-)]
 pub fn step_throw(py: Python<'_>, coro: &Bound<'_, PyAny>, err: PyErr) -> StepResult {
     match coro.call_method1(c"throw", (err.value(py),)) {
         Ok(yielded) => StepResult::Yielded(yielded.unbind()),
@@ -138,10 +142,6 @@ pub fn step_throw(py: Python<'_>, coro: &Bound<'_, PyAny>, err: PyErr) -> StepRe
 // ---------------------------------------------------------------------------
 
 /// Classification of a yielded object from a coroutine.
-#[allow(
-    dead_code,
-    reason = "will be used by scheduler integration in a future phase"
-)]
 pub enum AwaitableKind {
     /// Our own `RustFuture` — poll directly via `__next__`.
     RustFuture,
@@ -165,10 +165,6 @@ pub enum AwaitableKind {
 ///
 /// Check order is optimised for the common case: `yield None` first (36% of
 /// all calls), then our own types, then coroutines, then asyncio futures.
-#[allow(
-    dead_code,
-    reason = "will be used by scheduler integration in a future phase"
-)]
 pub fn classify(py: Python<'_>, yielded: &Bound<'_, PyAny>, types: &CachedTypes) -> AwaitableKind {
     // Fast path: yield None is the most common case.
     if yielded.is_none() {
@@ -213,10 +209,6 @@ pub fn classify(py: Python<'_>, yielded: &Bound<'_, PyAny>, types: &CachedTypes)
 // ---------------------------------------------------------------------------
 
 /// Outcome of driving a [`SchedulerTask`] until it suspends or completes.
-#[allow(
-    dead_code,
-    reason = "will be used by scheduler integration in a future phase"
-)]
 pub enum DriveResult {
     /// Task completed with a value.
     Completed(Py<PyAny>),
@@ -241,11 +233,9 @@ pub enum DriveResult {
 /// This is the hot loop. When the yielded object is `None` (most common case),
 /// it immediately loops without suspending. Sub-coroutines are pushed onto the
 /// task's coroutine stack and driven inline.
-#[allow(
-    dead_code,
+#[expect(
     clippy::needless_continue,
-    reason = "dead_code: will be used by scheduler integration in a future phase; \
-              needless_continue: explicit `continue` documents intent to re-enter the drive loop"
+    reason = "explicit `continue` documents intent to re-enter the drive loop"
 )]
 pub fn drive_task(py: Python<'_>, task: &mut SchedulerTask, types: &CachedTypes) -> DriveResult {
     loop {
@@ -305,6 +295,241 @@ pub fn drive_task(py: Python<'_>, task: &mut SchedulerTask, types: &CachedTypes)
                 return DriveResult::Error(e);
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ResumeCallback — re-drives the task when a future resolves
+// ---------------------------------------------------------------------------
+
+/// Callback that re-drives a [`SchedulerTask`] after a suspended awaitable
+/// resolves.
+///
+/// Used as `add_done_callback` on asyncio/Rust futures, and as a
+/// `call_soon` target for event waiter re-polls. The optional `future`
+/// argument distinguishes the two cases: present for done callbacks, absent
+/// for re-poll.
+#[pyclass(module = "apx._core")]
+pub struct ResumeCallback {
+    task: Option<SchedulerTask>,
+    cached_types: Arc<CachedTypes>,
+    result_tx: Option<oneshot::Sender<Result<Py<PyAny>, AppError>>>,
+    call_soon: Py<PyAny>,
+    ensure_future: Py<PyAny>,
+}
+
+impl std::fmt::Debug for ResumeCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResumeCallback")
+            .field("has_task", &self.task.is_some())
+            .field("has_result_tx", &self.result_tx.is_some())
+            .finish()
+    }
+}
+
+#[pymethods]
+impl ResumeCallback {
+    /// Called by Python when the awaited future completes, or by `call_soon`
+    /// for event waiter re-polls.
+    #[pyo3(signature = (future=None))]
+    fn __call__(&mut self, py: Python<'_>, future: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let mut task = self.task.take().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("ResumeCallback invoked twice")
+        })?;
+        let result_tx = self.result_tx.take().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("ResumeCallback result_tx already consumed")
+        })?;
+
+        if let Some(fut) = future {
+            match extract_future_result(py, fut) {
+                Ok(value) => task.set_send_value(value),
+                Err(err) => task.set_throw_error(err),
+            }
+        }
+
+        let drive_result = drive_task(py, &mut task, &self.cached_types);
+        handle_drive_result(
+            py,
+            task,
+            drive_result,
+            result_tx,
+            &self.cached_types,
+            &self.call_soon,
+            &self.ensure_future,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// extract_future_result — pull result from a resolved future
+// ---------------------------------------------------------------------------
+
+/// Extract the result from a resolved Python future.
+///
+/// Handles both `asyncio.Future` (checks `cancelled()` first) and
+/// `RustFuture` (which has no `cancelled` method — the attribute error
+/// is silently ignored).
+fn extract_future_result(py: Python<'_>, future: &Bound<'_, PyAny>) -> Result<Py<PyAny>, PyErr> {
+    if let Ok(cancelled) = future.call_method0(c"cancelled")
+        && cancelled.is_truthy().unwrap_or(false)
+    {
+        let cls = py.import(c"asyncio")?.getattr(c"CancelledError")?;
+        return Err(PyErr::from_value(cls.call0()?));
+    }
+    future.call_method0(c"result").map(|v| v.unbind())
+}
+
+// ---------------------------------------------------------------------------
+// handle_drive_result — dispatch on DriveResult after driving
+// ---------------------------------------------------------------------------
+
+/// Route a [`DriveResult`] to the appropriate continuation.
+///
+/// Either completes the task (sending through `result_tx`), or creates a
+/// [`ResumeCallback`] and attaches it to the awaitable so the task is
+/// re-driven when the awaitable resolves.
+fn handle_drive_result(
+    py: Python<'_>,
+    task: SchedulerTask,
+    drive_result: DriveResult,
+    result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
+    cached_types: &Arc<CachedTypes>,
+    call_soon: &Py<PyAny>,
+    ensure_future: &Py<PyAny>,
+) -> PyResult<()> {
+    match drive_result {
+        DriveResult::Completed(value) => {
+            let _ = result_tx.send(Ok(value));
+            Ok(())
+        }
+        DriveResult::Error(err) => {
+            let _ = result_tx.send(Err(AppError::Internal(err.to_string())));
+            Ok(())
+        }
+        DriveResult::WaitingOnRustFuture(fut) => handle_rust_future(
+            py,
+            task,
+            fut,
+            result_tx,
+            cached_types,
+            call_soon,
+            ensure_future,
+        ),
+        DriveResult::WaitingOnEvent(_waiter) => {
+            let cb =
+                make_resume_callback(py, task, result_tx, cached_types, call_soon, ensure_future)?;
+            call_soon.call1(py, (cb,))?;
+            Ok(())
+        }
+        DriveResult::WaitingOnAsyncioFuture(fut) => {
+            let cb =
+                make_resume_callback(py, task, result_tx, cached_types, call_soon, ensure_future)?;
+            fut.call_method1(py, c"add_done_callback", (cb,))?;
+            Ok(())
+        }
+        DriveResult::FallbackToAsyncio(obj) => {
+            let asyncio_task = ensure_future.call1(py, (obj,))?;
+            let cb =
+                make_resume_callback(py, task, result_tx, cached_types, call_soon, ensure_future)?;
+            asyncio_task.call_method1(py, c"add_done_callback", (cb,))?;
+            Ok(())
+        }
+    }
+}
+
+/// Handle `WaitingOnRustFuture`: if already done, re-drive immediately;
+/// otherwise attach a done callback.
+fn handle_rust_future(
+    py: Python<'_>,
+    task: SchedulerTask,
+    fut: Py<PyAny>,
+    result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
+    cached_types: &Arc<CachedTypes>,
+    call_soon: &Py<PyAny>,
+    ensure_future: &Py<PyAny>,
+) -> PyResult<()> {
+    let is_done = fut.call_method0(py, c"done")?.is_truthy(py)?;
+    if is_done {
+        let mut task = task;
+        match extract_future_result(py, fut.bind(py)) {
+            Ok(value) => task.set_send_value(value),
+            Err(err) => task.set_throw_error(err),
+        }
+        let drive_result = drive_task(py, &mut task, cached_types);
+        return handle_drive_result(
+            py,
+            task,
+            drive_result,
+            result_tx,
+            cached_types,
+            call_soon,
+            ensure_future,
+        );
+    }
+    let cb = make_resume_callback(py, task, result_tx, cached_types, call_soon, ensure_future)?;
+    fut.call_method1(py, c"add_done_callback", (cb,))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// make_resume_callback — factory for ResumeCallback instances
+// ---------------------------------------------------------------------------
+
+fn make_resume_callback(
+    py: Python<'_>,
+    task: SchedulerTask,
+    result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
+    cached_types: &Arc<CachedTypes>,
+    call_soon: &Py<PyAny>,
+    ensure_future: &Py<PyAny>,
+) -> PyResult<Py<ResumeCallback>> {
+    Py::new(
+        py,
+        ResumeCallback {
+            task: Some(task),
+            cached_types: Arc::clone(cached_types),
+            result_tx: Some(result_tx),
+            call_soon: call_soon.clone_ref(py),
+            ensure_future: ensure_future.clone_ref(py),
+        },
+    )
+}
+
+// ---------------------------------------------------------------------------
+// spawn_and_drive — entry point for the scheduler
+// ---------------------------------------------------------------------------
+
+/// Create a [`SchedulerTask`] from a coroutine and drive it.
+///
+/// Synchronous: either completes immediately (for trivial coroutines) or
+/// suspends by attaching a [`ResumeCallback`] to the first awaitable.
+/// The final result is sent through `result_tx`.
+pub fn spawn_and_drive(
+    py: Python<'_>,
+    coro: Py<PyAny>,
+    result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
+    cached_types: &Arc<CachedTypes>,
+    call_soon: &Py<PyAny>,
+    ensure_future: &Py<PyAny>,
+) {
+    let mut task = match SchedulerTask::new(py, coro) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = result_tx.send(Err(AppError::Internal(format!("task creation: {e}"))));
+            return;
+        }
+    };
+    let drive_result = drive_task(py, &mut task, cached_types);
+    if let Err(e) = handle_drive_result(
+        py,
+        task,
+        drive_result,
+        result_tx,
+        cached_types,
+        call_soon,
+        ensure_future,
+    ) {
+        tracing::warn!(error = %e, "scheduler drive result handling failed");
     }
 }
 
@@ -399,6 +624,78 @@ async def coro():
             let err = pyo3::exceptions::PyValueError::new_err("test error");
             let result = step_throw(py, &coro, err);
             assert!(matches!(result, StepResult::Error(_)));
+        });
+    }
+
+    // -- spawn_and_drive tests -----------------------------------------------
+
+    /// Helper: create dummy `call_soon` and `ensure_future` refs for tests
+    /// where they won't actually be called (trivial coroutines).
+    fn dummy_loop_fns(py: Python<'_>) -> (Py<PyAny>, Py<PyAny>) {
+        let noop = py.eval(c"lambda *a, **kw: None", None, None).unwrap();
+        (noop.clone().unbind(), noop.unbind())
+    }
+
+    #[test]
+    fn spawn_and_drive_trivial_coroutine() {
+        crate::with_py(|py| {
+            let types = Arc::new(CachedTypes::resolve(py).unwrap());
+            let (call_soon, ensure_future) = dummy_loop_fns(py);
+
+            py.run(c"async def _f(): return 42", None, None).unwrap();
+            let coro = py.eval(c"_f()", None, None).unwrap().unbind();
+
+            let (tx, mut rx) = oneshot::channel();
+            spawn_and_drive(py, coro, tx, &types, &call_soon, &ensure_future);
+
+            let result = rx.try_recv().unwrap().unwrap();
+            let num: i64 = result.extract(py).unwrap();
+            assert_eq!(num, 42);
+        });
+    }
+
+    #[test]
+    fn spawn_and_drive_coroutine_error() {
+        crate::with_py(|py| {
+            let types = Arc::new(CachedTypes::resolve(py).unwrap());
+            let (call_soon, ensure_future) = dummy_loop_fns(py);
+
+            py.run(c"async def _err(): raise ValueError('boom')", None, None)
+                .unwrap();
+            let coro = py.eval(c"_err()", None, None).unwrap().unbind();
+
+            let (tx, mut rx) = oneshot::channel();
+            spawn_and_drive(py, coro, tx, &types, &call_soon, &ensure_future);
+
+            let result = rx.try_recv().unwrap();
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err, AppError::Internal(ref s) if s.contains("boom")),
+                "expected Internal('boom'), got {err:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn resume_callback_debug() {
+        crate::with_py(|py| {
+            let types = Arc::new(CachedTypes::resolve(py).unwrap());
+            let (call_soon, ensure_future) = dummy_loop_fns(py);
+            let (tx, _rx) = oneshot::channel();
+
+            let task = SchedulerTask::new(py, py.None()).unwrap();
+            let cb = ResumeCallback {
+                task: Some(task),
+                cached_types: types,
+                result_tx: Some(tx),
+                call_soon,
+                ensure_future,
+            };
+            let dbg = format!("{cb:?}");
+            assert!(dbg.contains("ResumeCallback"));
+            assert!(dbg.contains("has_task: true"));
+            assert!(dbg.contains("has_result_tx: true"));
         });
     }
 }

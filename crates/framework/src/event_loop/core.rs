@@ -4,12 +4,15 @@
 //! which drives all handler coroutines, `BackgroundTasks`, and `contextvars`
 //! natively. Other threads submit work via [`super::handle::EventLoopHandle`].
 
-use super::handle::EventLoopHandle;
-use super::queue::{QueueDrainer, WorkItem};
-use pyo3::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use pyo3::prelude::*;
 use tokio::sync::mpsc;
+
+use super::handle::EventLoopHandle;
+use super::queue::{QueueDrainer, SchedulerState, WorkItem};
+use crate::scheduler::driver::CachedTypes;
 
 // ── LoopPolicy ───────────────────────────────────────────────────────────
 
@@ -247,7 +250,7 @@ impl EventLoop {
             .call_method1(c"set_event_loop", (&event_loop,))
             .map_err(|e| format!("set_event_loop: {e}"))?;
 
-        let drainer_ref = Self::install_drainer(py, &event_loop, queue_rx, needs_wake)?;
+        let drainer_ref = Self::install_drainer(py, &event_loop, queue_rx, needs_wake, policy)?;
 
         if policy == LoopPolicy::RustNative {
             install_rust_scheduler(py).map_err(|e| format!("scheduler install: {e}"))?;
@@ -262,6 +265,7 @@ impl EventLoop {
         event_loop: &Bound<'_, PyAny>,
         queue_rx: mpsc::UnboundedReceiver<WorkItem>,
         needs_wake: Arc<AtomicBool>,
+        policy: LoopPolicy,
     ) -> Result<Py<PyAny>, String> {
         let create_task = event_loop
             .getattr(c"create_task")
@@ -272,7 +276,27 @@ impl EventLoop {
             .map_err(|e| format!("missing call_soon: {e}"))?
             .unbind();
 
-        let drainer = QueueDrainer::new(queue_rx, create_task, call_soon, needs_wake);
+        let scheduler = if policy == LoopPolicy::RustNative {
+            let cached_types = Arc::new(
+                CachedTypes::resolve(py).map_err(|e| format!("CachedTypes::resolve: {e}"))?,
+            );
+            let asyncio = py
+                .import(c"asyncio")
+                .map_err(|e| format!("import asyncio: {e}"))?;
+            let ensure_future = asyncio
+                .getattr(c"ensure_future")
+                .map_err(|e| format!("missing ensure_future: {e}"))?
+                .unbind();
+            Some(SchedulerState {
+                cached_types,
+                call_soon: call_soon.clone_ref(py),
+                ensure_future,
+            })
+        } else {
+            None
+        };
+
+        let drainer = QueueDrainer::new(queue_rx, create_task, call_soon, needs_wake, scheduler);
         let drainer_obj =
             Py::new(py, drainer).map_err(|e| format!("QueueDrainer allocation: {e}"))?;
 

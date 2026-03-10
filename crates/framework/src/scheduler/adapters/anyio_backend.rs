@@ -31,9 +31,9 @@ use super::super::primitives::{BlockingTask, RustEvent, RustFuture, Timer};
 /// fall back to the stock asyncio backend.
 #[pyclass(module = "apx._core")]
 pub struct ApxSchedulerCore {
-    #[allow(
+    #[expect(
         dead_code,
-        reason = "will be used when full async dispatch is wired up"
+        reason = "passed to driver during full anyio dispatch wiring"
     )]
     cached_types: Arc<CachedTypes>,
     epoch: std::time::Instant,
@@ -204,9 +204,9 @@ class ApxBackend(AsyncBackend):
 /// The returned object inherits from `anyio.abc.AsyncBackend` and can be used
 /// wherever anyio expects a backend instance. Registration with anyio's plugin
 /// system is handled by the integration layer (not here).
-#[allow(
+#[expect(
     dead_code,
-    reason = "will be called by scheduler integration in a future phase"
+    reason = "called when anyio backend registration is wired up"
 )]
 pub fn create_backend(py: Python<'_>, core: &Py<ApxSchedulerCore>) -> PyResult<Py<PyAny>> {
     let code = std::ffi::CString::new(BACKEND_GLUE)?;

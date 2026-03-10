@@ -746,9 +746,12 @@ impl BlockingTask {
 /// actual `spawn_blocking` integration (calling the callable on a blocking
 /// thread with GIL acquired) happens in the driver/adapters layer.
 #[pyfunction]
-#[allow(
-    dead_code,
-    reason = "will be registered as a Python function in a future phase"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "registered as Python function when blocking dispatch is wired"
+    )
 )]
 pub fn spawn_blocking(_py: Python<'_>, _callable: Py<PyAny>) -> PyResult<BlockingTask> {
     let (_tx, rx) = oneshot::channel();
