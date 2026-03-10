@@ -170,7 +170,7 @@ impl EventLoop {
     ///
     /// Returns an error if Python initialization or event loop creation fails.
     pub fn start() -> Result<Self, String> {
-        Self::start_with(LoopPolicy::default())
+        Self::start_with(LoopPolicy::from_env())
     }
 
     /// Start a persistent event loop with an explicit [`LoopPolicy`].
