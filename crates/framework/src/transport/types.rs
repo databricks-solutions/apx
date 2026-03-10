@@ -119,12 +119,19 @@ impl BodyStream {
     }
 }
 
+/// Default initial capacity for streaming body collection.
+///
+/// Sized to hold a typical small API request body without reallocation.
+/// Capped independently of the body size limit to avoid over-allocating
+/// for endpoints with large limits but small actual bodies.
+const STREAM_COLLECT_INITIAL_CAPACITY: usize = 4096;
+
 /// Collect a stream of bytes into a single `Bytes`, enforcing a size limit.
 async fn collect_stream(
     stream: &mut Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
     limit: usize,
 ) -> Result<Bytes, BodyError> {
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(limit.min(STREAM_COLLECT_INITIAL_CAPACITY));
     loop {
         let chunk = std::future::poll_fn(|cx| Pin::as_mut(stream).poll_next(cx)).await;
         match chunk {

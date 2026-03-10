@@ -4,7 +4,7 @@
 //! [`ResponseBody::Stream`] body. Used for SSE and `StreamingResponse` routes.
 
 use super::asgi::AsgiEvent;
-use super::asgi_dispatch::{build_header_map, recv_response_start};
+use super::asgi_dispatch::recv_response_start;
 use crate::error::AppError;
 use crate::transport::types::{OutboundResponse, ResponseBody};
 use bytes::Bytes;
@@ -91,8 +91,7 @@ pub async fn stream_asgi_response<T: Send + 'static>(
     mut rx: mpsc::Receiver<AsgiEvent>,
     handler_task: JoinHandle<Result<T, AppError>>,
 ) -> Result<OutboundResponse, AppError> {
-    let (status, raw_headers) = recv_response_start(&mut rx).await?;
-    let headers = build_header_map(&raw_headers)?;
+    let (status, headers) = recv_response_start(&mut rx).await?;
     let status =
         http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
 
@@ -189,12 +188,24 @@ mod tests {
         assert!(abort_handle.is_finished());
     }
 
+    /// Build a `HeaderMap` from byte pair slices (test convenience).
+    fn headers(pairs: &[(&[u8], &[u8])]) -> http::header::HeaderMap {
+        let mut map = http::header::HeaderMap::with_capacity(pairs.len());
+        for (name, value) in pairs {
+            map.insert(
+                http::HeaderName::from_bytes(name).unwrap(),
+                http::HeaderValue::from_bytes(value).unwrap(),
+            );
+        }
+        map
+    }
+
     #[tokio::test]
     async fn stream_asgi_response_success() {
         let (tx, rx) = mpsc::channel(4);
         tx.send(AsgiEvent::ResponseStart {
             status: 200,
-            headers: vec![(b"content-type".to_vec(), b"text/event-stream".to_vec())],
+            headers: headers(&[(b"content-type", b"text/event-stream")]),
         })
         .await
         .unwrap();
@@ -240,10 +251,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(4);
         tx.send(AsgiEvent::ResponseStart {
             status: 201,
-            headers: vec![
-                (b"x-custom".to_vec(), b"value".to_vec()),
-                (b"content-type".to_vec(), b"text/plain".to_vec()),
-            ],
+            headers: headers(&[(b"x-custom", b"value"), (b"content-type", b"text/plain")]),
         })
         .await
         .unwrap();

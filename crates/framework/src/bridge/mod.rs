@@ -494,10 +494,11 @@ mod tests {
     fn register_ws_route_uses_get() {
         let ws_route = make_route(HandlerKind::WebSocket);
         let mut event_loop = crate::event_loop::EventLoop::start().unwrap();
+        let server_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
         let scope_interns = pyo3::Python::attach(asgi::ScopeInterns::new);
         let scope_interns = Arc::new(scope_interns);
         let scope_template = pyo3::Python::attach(|py| {
-            context_pool::build_scope_template(py, &scope_interns, None).unwrap()
+            context_pool::build_scope_template(py, &scope_interns, None, server_addr).unwrap()
         });
         let receive_template =
             pyo3::Python::attach(|py| context_pool::build_receive_template(py).unwrap());
@@ -508,7 +509,6 @@ mod tests {
             scope_template: Arc::new(scope_template),
             receive_template: Arc::new(receive_template),
         });
-        let server_addr = SocketAddr::from(([127, 0, 0, 1], 8080));
 
         let _router = register_routes(Router::new(), vec![ws_route], &app_state, server_addr);
         event_loop.stop();

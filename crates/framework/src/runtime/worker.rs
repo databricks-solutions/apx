@@ -140,6 +140,7 @@ pub fn load_app(
             py,
             &scope_interns,
             fastapi_app.map(|a| a.inner()),
+            server_addr,
         )
     })
     .map_err(|e| WorkerError::PythonInit(format!("scope template: {e}")))?;

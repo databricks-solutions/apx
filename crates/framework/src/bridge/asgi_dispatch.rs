@@ -13,7 +13,6 @@ use crate::route::{BoundRoute, HandlerKind, ResponseType};
 use crate::transport::types::{InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
 use http::StatusCode;
-use http::header::HeaderMap;
 use pyo3::prelude::*;
 use std::future::Future;
 use std::pin::Pin;
@@ -84,10 +83,13 @@ async fn dispatch_buffered(
 ) -> Result<OutboundResponse, AppError> {
     let event_buffer = AsgiEventBuffer::new();
     let eb = event_buffer.clone();
-    let handle = app_state.loop_handle.clone();
 
-    let handler_rx = handle.schedule_deferred(move |py| {
-        call_asgi_app_sync(py, &route, &request, &app_state, body_bytes, &eb)
+    // Clone the Arc (cheap atomic increment) instead of cloning EventLoopHandle
+    // (which acquires the GIL to bump 3 Py refcounts). We borrow
+    // app_state.loop_handle for the call and move the Arc clone into the closure.
+    let app_state_inner = Arc::clone(&app_state);
+    let handler_rx = app_state.loop_handle.schedule_deferred(move |py| {
+        call_asgi_app_sync(py, &route, &request, &app_state_inner, body_bytes, &eb)
     })?;
 
     handler_rx
@@ -213,7 +215,7 @@ fn collect_buffered_response(buffer: AsgiEventBuffer) -> Result<OutboundResponse
     let events = buffer.take();
     let mut events_iter = events.into_iter();
 
-    let (status, raw_headers) = match events_iter.next() {
+    let (status, headers) = match events_iter.next() {
         Some(AsgiEvent::ResponseStart { status, headers }) => (status, headers),
         Some(_) => {
             return Err(AppError::Internal(
@@ -228,7 +230,6 @@ fn collect_buffered_response(buffer: AsgiEventBuffer) -> Result<OutboundResponse
     };
 
     let body = collect_body_from_iter(&mut events_iter)?;
-    let headers = build_header_map(&raw_headers)?;
 
     Ok(OutboundResponse {
         status: StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -263,7 +264,7 @@ fn collect_body_from_iter(events: &mut impl Iterator<Item = AsgiEvent>) -> Resul
 /// Receive the `ResponseStart` event from the channel.
 pub(super) async fn recv_response_start(
     rx: &mut mpsc::Receiver<AsgiEvent>,
-) -> Result<(u16, Vec<(Vec<u8>, Vec<u8>)>), AppError> {
+) -> Result<(u16, http::header::HeaderMap), AppError> {
     match rx.recv().await {
         Some(AsgiEvent::ResponseStart { status, headers }) => Ok((status, headers)),
         Some(AsgiEvent::ResponseBody { .. }) => Err(AppError::Internal(
@@ -283,9 +284,8 @@ pub(super) async fn recv_response_start(
 async fn collect_asgi_response(
     rx: &mut mpsc::Receiver<AsgiEvent>,
 ) -> Result<OutboundResponse, AppError> {
-    let (status, raw_headers) = recv_response_start(rx).await?;
+    let (status, headers) = recv_response_start(rx).await?;
     let body = recv_response_body(rx).await?;
-    let headers = build_header_map(&raw_headers)?;
     Ok(OutboundResponse {
         status: StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         headers,
@@ -331,19 +331,6 @@ async fn accumulate_remaining_chunks(
     }
 }
 
-/// Convert raw ASGI header byte pairs to an [`http::HeaderMap`].
-pub(super) fn build_header_map(raw: &[(Vec<u8>, Vec<u8>)]) -> Result<HeaderMap, AppError> {
-    let mut headers = HeaderMap::with_capacity(raw.len());
-    for (name, value) in raw {
-        let name = http::HeaderName::from_bytes(name)
-            .map_err(|e| AppError::Internal(format!("invalid header name: {e}")))?;
-        let value = http::HeaderValue::from_bytes(value)
-            .map_err(|e| AppError::Internal(format!("invalid header value: {e}")))?;
-        headers.insert(name, value);
-    }
-    Ok(headers)
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -354,13 +341,26 @@ pub(super) fn build_header_map(raw: &[(Vec<u8>, Vec<u8>)]) -> Result<HeaderMap, 
 )]
 mod tests {
     use super::*;
+    use http::header::HeaderMap;
+
+    /// Build a `HeaderMap` from byte pair slices (test convenience).
+    fn headers(pairs: &[(&[u8], &[u8])]) -> HeaderMap {
+        let mut map = HeaderMap::with_capacity(pairs.len());
+        for (name, value) in pairs {
+            map.insert(
+                http::HeaderName::from_bytes(name).unwrap(),
+                http::HeaderValue::from_bytes(value).unwrap(),
+            );
+        }
+        map
+    }
 
     #[tokio::test]
     async fn collect_asgi_response_simple() {
         let (tx, mut rx) = mpsc::channel(4);
         tx.send(AsgiEvent::ResponseStart {
             status: 200,
-            headers: vec![(b"content-type".to_vec(), b"text/plain".to_vec())],
+            headers: headers(&[(b"content-type", b"text/plain")]),
         })
         .await
         .unwrap();
@@ -386,7 +386,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         tx.send(AsgiEvent::ResponseStart {
             status: 200,
-            headers: Vec::new(),
+            headers: HeaderMap::new(),
         })
         .await
         .unwrap();
@@ -434,7 +434,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         tx.send(AsgiEvent::ResponseStart {
             status: 204,
-            headers: Vec::new(),
+            headers: HeaderMap::new(),
         })
         .await
         .unwrap();
@@ -470,29 +470,12 @@ mod tests {
         assert!(dbg.contains("AsgiBridgeDispatch"));
     }
 
-    #[test]
-    fn build_header_map_valid() {
-        let raw = vec![
-            (b"content-type".to_vec(), b"application/json".to_vec()),
-            (b"x-custom".to_vec(), b"value".to_vec()),
-        ];
-        let headers = build_header_map(&raw).unwrap();
-        assert_eq!(headers.get("content-type").unwrap(), "application/json");
-        assert_eq!(headers.get("x-custom").unwrap(), "value");
-    }
-
-    #[test]
-    fn build_header_map_invalid_name() {
-        let raw = vec![(b"invalid header\x00".to_vec(), b"value".to_vec())];
-        assert!(build_header_map(&raw).is_err());
-    }
-
     #[tokio::test]
     async fn collect_asgi_response_buffered_unchanged() {
         let (tx, mut rx) = mpsc::channel(4);
         tx.send(AsgiEvent::ResponseStart {
             status: 200,
-            headers: vec![(b"content-type".to_vec(), b"application/json".to_vec())],
+            headers: headers(&[(b"content-type", b"application/json")]),
         })
         .await
         .unwrap();
@@ -521,7 +504,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         tx.send(AsgiEvent::ResponseStart {
             status: 201,
-            headers: vec![(b"x-test".to_vec(), b"yes".to_vec())],
+            headers: headers(&[(b"x-test", b"yes")]),
         })
         .await
         .unwrap();
@@ -531,13 +514,6 @@ mod tests {
         assert_eq!(headers.len(), 1);
     }
 
-    #[test]
-    fn build_header_map_pub_super_accessible() {
-        let raw = vec![(b"x-test".to_vec(), b"value".to_vec())];
-        let headers = build_header_map(&raw).unwrap();
-        assert_eq!(headers.get("x-test").unwrap(), "value");
-    }
-
     // ── recv_response_body error branches ────────────────────────────────
 
     #[tokio::test]
@@ -545,14 +521,14 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         tx.send(AsgiEvent::ResponseStart {
             status: 200,
-            headers: Vec::new(),
+            headers: HeaderMap::new(),
         })
         .await
         .unwrap();
         // Send another start where a body chunk is expected
         tx.send(AsgiEvent::ResponseStart {
             status: 200,
-            headers: Vec::new(),
+            headers: HeaderMap::new(),
         })
         .await
         .unwrap();
@@ -571,7 +547,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         tx.send(AsgiEvent::ResponseStart {
             status: 200,
-            headers: Vec::new(),
+            headers: HeaderMap::new(),
         })
         .await
         .unwrap();
@@ -592,7 +568,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         tx.send(AsgiEvent::ResponseStart {
             status: 200,
-            headers: Vec::new(),
+            headers: HeaderMap::new(),
         })
         .await
         .unwrap();

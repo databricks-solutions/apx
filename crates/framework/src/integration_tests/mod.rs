@@ -231,6 +231,11 @@ impl TestServer {
             None
         };
 
+        // Bind listener first so the scope template gets the real server address.
+        let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 0);
+        let listener = TcpListener::bind(&config).await.unwrap();
+        let addr = listener.local_addr();
+
         let scope_interns = with_py(crate::bridge::asgi::ScopeInterns::new);
         let scope_interns = Arc::new(scope_interns);
         let scope_template = pyo3::Python::attach(|py| {
@@ -239,6 +244,7 @@ impl TestServer {
                 py,
                 &scope_interns,
                 app_ref.map(|a| a.inner()),
+                addr,
             )
             .unwrap()
         });
@@ -252,9 +258,6 @@ impl TestServer {
             scope_template: Arc::new(scope_template),
             receive_template: Arc::new(receive_template),
         });
-        let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 0);
-        let listener = TcpListener::bind(&config).await.unwrap();
-        let addr = listener.local_addr();
 
         let router = build_router(routes, app_state, addr);
         let router = wrap_layers(router, None);
@@ -374,10 +377,16 @@ impl TestServer {
             None
         };
 
+        // Bind listener first so the scope template gets the real server address.
+        let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 0);
+        let listener = TcpListener::bind(&config).await.unwrap();
+        let addr = listener.local_addr();
+
         let scope_interns = with_py(crate::bridge::asgi::ScopeInterns::new);
         let scope_interns = Arc::new(scope_interns);
         let scope_template = pyo3::Python::attach(|py| {
-            crate::bridge::context_pool::build_scope_template(py, &scope_interns, None).unwrap()
+            crate::bridge::context_pool::build_scope_template(py, &scope_interns, None, addr)
+                .unwrap()
         });
         let receive_template = pyo3::Python::attach(|py| {
             crate::bridge::context_pool::build_receive_template(py).unwrap()
@@ -389,9 +398,6 @@ impl TestServer {
             scope_template: Arc::new(scope_template),
             receive_template: Arc::new(receive_template),
         });
-        let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 0);
-        let listener = TcpListener::bind(&config).await.unwrap();
-        let addr = listener.local_addr();
 
         let router = build_router(routes, app_state, addr);
         let router = wrap_layers(router, None);

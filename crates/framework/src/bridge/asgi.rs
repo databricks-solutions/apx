@@ -8,6 +8,7 @@
 
 use crate::transport::types::InboundRequest;
 use bytes::Bytes;
+use http::header::HeaderMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyDictMethods, PyList, PyString, PyTuple};
 use std::borrow::Cow;
@@ -131,8 +132,8 @@ pub enum AsgiEvent {
     ResponseStart {
         /// HTTP status code.
         status: u16,
-        /// Response headers as raw byte pairs.
-        headers: Vec<(Vec<u8>, Vec<u8>)>,
+        /// Response headers, built directly from Python bytes.
+        headers: HeaderMap,
     },
     /// `http.response.body` — body chunk with continuation flag.
     ResponseBody {
@@ -493,33 +494,46 @@ fn build_ws_receive_event(py: Python<'_>, event: Option<WsIncomingEvent>) -> PyR
 // ── Parse helpers ────────────────────────────────────────────────────────
 
 /// Parse an ASGI send event dict into a typed [`AsgiEvent`].
+///
+/// Compares the `"type"` value against interned Python strings directly,
+/// avoiding a Rust `String` allocation on every call. Only the error path
+/// (unsupported event type) extracts the string for the error message.
 fn parse_asgi_send_event(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
     let py = event.py();
-    let event_type: String = event
+    let type_obj = event
         .get_item(pyo3::intern!(py, "type"))?
-        .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("type"))?
-        .extract()?;
+        .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("type"))?;
 
-    match event_type.as_str() {
-        "http.response.start" => parse_response_start(event),
-        "http.response.body" => parse_response_body(event),
-        "websocket.accept" => parse_ws_accept(event),
-        "websocket.send" => parse_ws_send(event),
-        "websocket.close" => parse_ws_close(event),
-        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "unsupported ASGI event type: {other}"
-        ))),
+    if type_obj.eq(pyo3::intern!(py, "http.response.start"))? {
+        parse_response_start(event)
+    } else if type_obj.eq(pyo3::intern!(py, "http.response.body"))? {
+        parse_response_body(event)
+    } else if type_obj.eq(pyo3::intern!(py, "websocket.accept"))? {
+        parse_ws_accept(event)
+    } else if type_obj.eq(pyo3::intern!(py, "websocket.send"))? {
+        parse_ws_send(event)
+    } else if type_obj.eq(pyo3::intern!(py, "websocket.close"))? {
+        parse_ws_close(event)
+    } else {
+        let event_type: String = type_obj.extract()?;
+        Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unsupported ASGI event type: {event_type}"
+        )))
     }
 }
 
-/// Parse `http.response.start` — extract status and headers.
+/// Parse `http.response.start` — extract status and build `HeaderMap` directly.
+///
+/// Builds the `HeaderMap` from `PyBytes` references without intermediate
+/// `Vec<u8>` allocations. Standard header names (content-type, etc.) are
+/// recognized as constants with zero allocation.
 fn parse_response_start(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
     let py = event.py();
     let status: u16 = event
         .get_item(pyo3::intern!(py, "status"))?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("status"))?
         .extract()?;
-    let headers = extract_header_list(event)?;
+    let headers = parse_header_map(event)?;
     Ok(AsgiEvent::ResponseStart { status, headers })
 }
 
@@ -583,10 +597,63 @@ fn parse_ws_close(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
     Ok(AsgiEvent::WsClose { code })
 }
 
-/// Parse ASGI headers list: `[(b"name", b"value"), ...]`.
+/// Build an `http::HeaderMap` directly from an ASGI headers list.
 ///
-/// Uses `PyBytes::as_bytes()` to borrow directly from Python objects,
-/// avoiding pyo3's generic extraction overhead per header pair.
+/// Reads `[(b"name", b"value"), ...]` from the Python dict and constructs
+/// `HeaderName`/`HeaderValue` directly from `PyBytes::as_bytes()` borrows,
+/// eliminating intermediate `Vec<u8>` allocations per header.
+fn parse_header_map(event: &Bound<'_, PyDict>) -> PyResult<HeaderMap> {
+    let py = event.py();
+    let Some(list) = event.get_item(pyo3::intern!(py, "headers"))? else {
+        return Ok(HeaderMap::new());
+    };
+    let iter = list.try_iter()?;
+    let size_hint = iter.size_hint().0;
+    let mut headers = HeaderMap::with_capacity(size_hint);
+    for item in iter {
+        let tuple = item?;
+        let name = header_name_from_py(&tuple.get_item(0)?)?;
+        let value = header_value_from_py(&tuple.get_item(1)?)?;
+        headers.insert(name, value);
+    }
+    Ok(headers)
+}
+
+/// Build a `HeaderName` from a Python bytes-like object.
+fn header_name_from_py(obj: &Bound<'_, PyAny>) -> PyResult<http::HeaderName> {
+    let bytes = match obj.cast::<PyBytes>() {
+        Ok(py_bytes) => py_bytes.as_bytes(),
+        Err(_) => return header_name_from_extracted(obj),
+    };
+    http::HeaderName::from_bytes(bytes)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid header name: {e}")))
+}
+
+/// Fallback: extract bytes then parse header name.
+fn header_name_from_extracted(obj: &Bound<'_, PyAny>) -> PyResult<http::HeaderName> {
+    let bytes: Vec<u8> = obj.extract()?;
+    http::HeaderName::from_bytes(&bytes)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid header name: {e}")))
+}
+
+/// Build a `HeaderValue` from a Python bytes-like object.
+fn header_value_from_py(obj: &Bound<'_, PyAny>) -> PyResult<http::HeaderValue> {
+    let bytes = match obj.cast::<PyBytes>() {
+        Ok(py_bytes) => py_bytes.as_bytes(),
+        Err(_) => return header_value_from_extracted(obj),
+    };
+    http::HeaderValue::from_bytes(bytes)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid header value: {e}")))
+}
+
+/// Fallback: extract bytes then parse header value.
+fn header_value_from_extracted(obj: &Bound<'_, PyAny>) -> PyResult<http::HeaderValue> {
+    let bytes: Vec<u8> = obj.extract()?;
+    http::HeaderValue::from_bytes(&bytes)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid header value: {e}")))
+}
+
+/// Extract raw byte pairs from an ASGI headers list (for WebSocket events).
 fn extract_header_list(event: &Bound<'_, PyDict>) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
     let Some(list) = event.get_item(pyo3::intern!(event.py(), "headers"))? else {
         return Ok(Vec::new());
@@ -1079,7 +1146,6 @@ pub mod lifespan {
 #[expect(
     clippy::unwrap_used,
     clippy::panic,
-    clippy::indexing_slicing,
     reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
@@ -1093,9 +1159,11 @@ mod tests {
 
     #[test]
     fn asgi_event_debug_response_start() {
+        let mut h = HeaderMap::new();
+        h.insert("content-type", "text/plain".parse().unwrap());
         let event = AsgiEvent::ResponseStart {
             status: 200,
-            headers: vec![(b"content-type".to_vec(), b"text/plain".to_vec())],
+            headers: h,
         };
         let dbg = format!("{event:?}");
         assert!(dbg.contains("ResponseStart"));
@@ -1481,8 +1549,7 @@ mod tests {
                 AsgiEvent::ResponseStart { status, headers } => {
                     assert_eq!(status, 200);
                     assert_eq!(headers.len(), 1);
-                    assert_eq!(headers[0].0, b"content-type");
-                    assert_eq!(headers[0].1, b"text/plain");
+                    assert_eq!(headers.get("content-type").unwrap(), "text/plain");
                 }
                 other => panic!("expected ResponseStart, got {other:?}"),
             }
@@ -1511,9 +1578,11 @@ mod tests {
     #[tokio::test]
     async fn send_event_through_channel() {
         let (tx, mut rx) = mpsc::channel(4);
+        let mut h = HeaderMap::new();
+        h.insert("content-type", "text/plain".parse().unwrap());
         let event = AsgiEvent::ResponseStart {
             status: 200,
-            headers: vec![(b"content-type".to_vec(), b"text/plain".to_vec())],
+            headers: h,
         };
         tx.send(event).await.unwrap();
         let received = rx.recv().await.unwrap();

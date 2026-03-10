@@ -8,6 +8,7 @@ use super::asgi::ScopeInterns;
 use crate::transport::types::InboundRequest;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
+use std::net::SocketAddr;
 
 /// Build the receive-event template dict with fixed ASGI fields.
 ///
@@ -24,11 +25,13 @@ pub fn build_receive_template(py: Python<'_>) -> PyResult<Py<PyDict>> {
 /// Build the scope template dict with fixed ASGI fields.
 ///
 /// Called once per worker at startup. The returned dict is stored
-/// on `AppState` and copied per request.
+/// on `AppState` and copied per request. Includes the server address
+/// tuple so `scope_from_template` doesn't format it on every request.
 pub fn build_scope_template(
     py: Python<'_>,
     interns: &ScopeInterns,
     fastapi_app: Option<&Py<PyAny>>,
+    server_addr: SocketAddr,
 ) -> PyResult<Py<PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item(
@@ -44,6 +47,15 @@ pub fn build_scope_template(
         interns.keys.root_path.bind(py),
         interns.vals.root_path_empty.bind(py),
     )?;
+
+    // Server address — fixed for all requests on this worker.
+    dict.set_item(
+        interns.keys.server.bind(py),
+        (server_addr.ip().to_string(), server_addr.port()),
+    )?;
+    // Client address defaults to None; overridden per-request when present.
+    dict.set_item(interns.keys.client.bind(py), py.None())?;
+
     if let Some(app) = fastapi_app {
         dict.set_item(interns.keys.app.bind(py), app.bind(py))?;
         dict.set_item(
@@ -98,22 +110,13 @@ pub fn scope_from_template(
     }
     dict.set_item(interns.keys.headers.bind(py), headers_list)?;
 
-    // Addresses.
-    dict.set_item(
-        interns.keys.server.bind(py),
-        (
-            request.server_addr.ip().to_string(),
-            request.server_addr.port(),
-        ),
-    )?;
-    match request.client_addr {
-        Some(addr) => {
-            dict.set_item(
-                interns.keys.client.bind(py),
-                (addr.ip().to_string(), addr.port()),
-            )?;
-        }
-        None => dict.set_item(interns.keys.client.bind(py), py.None())?,
+    // Client address — override the template's default None when present.
+    // Server address is already baked into the template at startup.
+    if let Some(addr) = request.client_addr {
+        dict.set_item(
+            interns.keys.client.bind(py),
+            (addr.ip().to_string(), addr.port()),
+        )?;
     }
 
     // Path params.
