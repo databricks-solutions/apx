@@ -53,6 +53,11 @@ pub struct CachedTypes {
     pub event_waiter_type: Py<PyType>,
     /// `asyncio.CancelledError` — cached for error creation.
     pub cancelled_error_cls: Py<PyType>,
+    /// Cancel scope glue: `_check_cancel_scope_for_task(task_id) -> bool`.
+    ///
+    /// Called at `YieldNone` checkpoints to implement anyio's level-cancellation.
+    /// `None` when cancel scope glue has not been initialized.
+    pub cancel_scope_checker: Option<Py<PyAny>>,
 }
 
 impl std::fmt::Debug for CachedTypes {
@@ -84,7 +89,17 @@ impl CachedTypes {
                 .getattr(c"CancelledError")?
                 .cast_into::<PyType>()?
                 .unbind(),
+            cancel_scope_checker: None,
         })
+    }
+
+    /// Install the cancel scope checker function from the evaluated glue dict.
+    ///
+    /// Called after the cancel scope Python glue has been evaluated.
+    /// The `checker` should be the `_check_cancel_scope_for_task` function.
+    #[expect(dead_code, reason = "wired in Phase 5 via anyio_backend rewrite")]
+    pub fn set_cancel_scope_checker(&mut self, checker: Py<PyAny>) {
+        self.cancel_scope_checker = Some(checker);
     }
 }
 
@@ -234,16 +249,48 @@ pub enum DriveResult {
 // drive_task — the main drive loop
 // ---------------------------------------------------------------------------
 
+/// Check if the current task's cancel scope is effectively cancelled.
+///
+/// Called at `YieldNone` checkpoints to implement anyio's level-cancellation:
+/// cancelled scopes re-throw `CancelledError` at every yield point.
+fn check_cancel_scope(
+    py: Python<'_>,
+    types: &CachedTypes,
+    proxy_id: Option<isize>,
+) -> Option<PyErr> {
+    let checker = types.cancel_scope_checker.as_ref()?;
+    let task_id = proxy_id?;
+    let should_cancel = checker
+        .call1(py, (task_id,))
+        .ok()?
+        .is_truthy(py)
+        .unwrap_or(false);
+    if should_cancel {
+        let err = types.cancelled_error_cls.call0(py).ok()?;
+        Some(PyErr::from_value(err.into_bound(py)))
+    } else {
+        None
+    }
+}
+
 /// Drive a [`SchedulerTask`] until it suspends or completes.
 ///
 /// This is the hot loop. When the yielded object is `None` (most common case),
 /// it immediately loops without suspending. Sub-coroutines are pushed onto the
 /// task's coroutine stack and driven inline.
+///
+/// `proxy_id` is the Python `id()` of the `TaskProxy` installed as
+/// `asyncio.current_task()` — used for cancel scope checking at yield points.
 #[expect(
     clippy::needless_continue,
     reason = "explicit `continue` documents intent to re-enter the drive loop"
 )]
-pub fn drive_task(py: Python<'_>, task: &mut SchedulerTask, types: &CachedTypes) -> DriveResult {
+pub fn drive_task(
+    py: Python<'_>,
+    task: &mut SchedulerTask,
+    types: &CachedTypes,
+    proxy_id: Option<isize>,
+) -> DriveResult {
     loop {
         // Obtain step result, dropping the `coro` borrow before we mutate `task`.
         let step_result = {
@@ -264,7 +311,15 @@ pub fn drive_task(py: Python<'_>, task: &mut SchedulerTask, types: &CachedTypes)
             StepResult::Yielded(obj) => {
                 let kind = classify(py, obj.bind(py), types);
                 match kind {
-                    AwaitableKind::YieldNone => continue, // immediate reschedule
+                    AwaitableKind::YieldNone => {
+                        // Check cancel scope BEFORE re-entering the loop.
+                        // Implements anyio's level-cancellation: cancelled scopes
+                        // re-throw CancelledError at every yield point (checkpoint).
+                        if let Some(cancel_err) = check_cancel_scope(py, types, proxy_id) {
+                            task.set_throw_error(cancel_err);
+                        }
+                        continue;
+                    }
                     AwaitableKind::Future => {
                         return DriveResult::WaitingOnFuture(obj);
                     }
@@ -356,8 +411,9 @@ impl ResumeCallback {
 
         // Reinstall the proxy as current_task so resumed middleware sees it.
         let current_tasks = install_proxy(py, self.proxy.as_ref());
+        let proxy_id = self.proxy.as_ref().map(|p| p.as_ptr() as isize);
 
-        let drive_result = drive_task(py, &mut task, &self.cached_types);
+        let drive_result = drive_task(py, &mut task, &self.cached_types, proxy_id);
         let proxy = self.proxy.take();
         let result = handle_drive_result(
             py,
@@ -502,7 +558,8 @@ fn handle_rust_future(
             Ok(value) => task.set_send_value(value),
             Err(err) => task.set_throw_error(err),
         }
-        let drive_result = drive_task(py, &mut task, cached_types);
+        let proxy_id = proxy.as_ref().map(|p| p.as_ptr() as isize);
+        let drive_result = drive_task(py, &mut task, cached_types, proxy_id);
         return handle_drive_result(
             py,
             task,
@@ -585,8 +642,9 @@ pub fn spawn_and_drive(
     // middleware that calls asyncio.current_task() gets a valid object
     // (needed for weakref support in ServerErrorMiddleware, etc.).
     let task_ctx = set_current_task(py, &task);
+    let proxy_id = task_ctx.as_ref().map(|(_, p)| p.as_ptr() as isize);
 
-    let drive_result = drive_task(py, &mut task, cached_types);
+    let drive_result = drive_task(py, &mut task, cached_types, proxy_id);
     let proxy = task_ctx.as_ref().map(|(_, p)| p.clone_ref(py));
     if let Err(e) = handle_drive_result(
         py,

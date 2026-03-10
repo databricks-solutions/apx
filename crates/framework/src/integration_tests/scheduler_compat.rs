@@ -468,3 +468,203 @@ async def stream():
     assert_eq!(text, "chunk0\nchunk1\nchunk2\n");
     server.stop().await;
 }
+
+// ── Category 6: Native CancelScope, TaskGroup, MemoryObjectStream ────
+
+#[tokio::test]
+async fn sched_cancel_scope_no_cancel() {
+    let app = r#"
+import anyio
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/cs-no-cancel")
+async def cs_test():
+    with anyio.CancelScope() as scope:
+        await anyio.sleep(0)
+    return {"cancelled_caught": scope.cancelled_caught, "cancel_called": scope.cancel_called}
+"#;
+    let mut server = TestServer::start_with_scheduler(app, "_sched_cs_no").await;
+    let (status, body) = server.get("/cs-no-cancel").await;
+    assert_eq!(status, 200, "cancel_scope no cancel: {body}");
+    assert_eq!(body["cancelled_caught"], false);
+    assert_eq!(body["cancel_called"], false);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn sched_cancel_scope_manual_cancel() {
+    let app = r#"
+import anyio
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/cs-manual")
+async def cs_manual():
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        try:
+            await anyio.sleep(0)
+            reached = True
+        except Exception:
+            reached = False
+    return {"cancel_called": scope.cancel_called, "cancelled_caught": scope.cancelled_caught}
+"#;
+    let mut server = TestServer::start_with_scheduler(app, "_sched_cs_man").await;
+    let (status, body) = server.get("/cs-manual").await;
+    assert_eq!(status, 200, "cancel_scope manual: {body}");
+    assert_eq!(body["cancel_called"], true);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn sched_cancel_scope_deadline() {
+    let app = r#"
+import anyio
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/cs-deadline")
+async def cs_deadline():
+    with anyio.CancelScope(deadline=anyio.current_time() + 10) as scope:
+        await anyio.sleep(0)
+    return {"cancelled": scope.cancel_called, "caught": scope.cancelled_caught}
+"#;
+    let mut server = TestServer::start_with_scheduler(app, "_sched_cs_dl").await;
+    let (status, body) = server.get("/cs-deadline").await;
+    assert_eq!(status, 200, "cancel_scope deadline: {body}");
+    assert_eq!(body["cancelled"], false);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn sched_task_group_fan_out() {
+    let app = r#"
+import anyio
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/tg-fan")
+async def tg_fan():
+    results = []
+    async def worker(n):
+        results.append(n)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(worker, 10)
+        tg.start_soon(worker, 20)
+        tg.start_soon(worker, 30)
+    return {"count": len(results), "sum": sum(results)}
+"#;
+    let mut server = TestServer::start_with_scheduler(app, "_sched_tg_fan").await;
+    let (status, body) = server.get("/tg-fan").await;
+    assert_eq!(status, 200, "task_group fan-out: {body}");
+    assert_eq!(body["count"], 3);
+    assert_eq!(body["sum"], 60);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn sched_task_group_error_propagation() {
+    let app = r#"
+import anyio
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/tg-err")
+async def tg_err():
+    async def bad_worker():
+        raise ValueError("child failed")
+    try:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(bad_worker)
+        caught = False
+    except (ValueError, BaseExceptionGroup):
+        caught = True
+    return {"caught": caught}
+"#;
+    let mut server = TestServer::start_with_scheduler(app, "_sched_tg_err").await;
+    let (status, body) = server.get("/tg-err").await;
+    assert_eq!(status, 200, "task_group error: {body}");
+    assert_eq!(body["caught"], true);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn sched_memory_stream_basic() {
+    let app = r#"
+import anyio
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/ms-basic")
+async def ms_basic():
+    send, receive = anyio.create_memory_object_stream(max_buffer_size=10)
+    await send.send("hello")
+    await send.send("world")
+    item1 = await receive.receive()
+    item2 = await receive.receive()
+    await send.aclose()
+    await receive.aclose()
+    return {"items": [item1, item2]}
+"#;
+    let mut server = TestServer::start_with_scheduler(app, "_sched_ms").await;
+    let (status, body) = server.get("/ms-basic").await;
+    assert_eq!(status, 200, "memory_stream basic: {body}");
+    assert_eq!(body["items"][0], "hello");
+    assert_eq!(body["items"][1], "world");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn sched_memory_stream_close() {
+    let app = r#"
+import anyio
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/ms-close")
+async def ms_close():
+    send, receive = anyio.create_memory_object_stream(max_buffer_size=10)
+    await send.send("data")
+    await send.aclose()
+    item = await receive.receive()
+    try:
+        await receive.receive()
+        end = False
+    except anyio.EndOfStream:
+        end = True
+    await receive.aclose()
+    return {"item": item, "end_of_stream": end}
+"#;
+    let mut server = TestServer::start_with_scheduler(app, "_sched_ms_cl").await;
+    let (status, body) = server.get("/ms-close").await;
+    assert_eq!(status, 200, "memory_stream close: {body}");
+    assert_eq!(body["item"], "data");
+    assert_eq!(body["end_of_stream"], true);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn sched_task_group_with_cancel_scope() {
+    let app = r#"
+import anyio
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/tg-cs")
+async def tg_cs():
+    results = []
+    async with anyio.create_task_group() as tg:
+        async def worker(n):
+            results.append(n)
+        with anyio.CancelScope() as scope:
+            tg.start_soon(worker, 1)
+            tg.start_soon(worker, 2)
+    return {"count": len(results)}
+"#;
+    let mut server = TestServer::start_with_scheduler(app, "_sched_tg_cs").await;
+    let (status, body) = server.get("/tg-cs").await;
+    assert_eq!(status, 200, "task_group + cancel_scope: {body}");
+    assert_eq!(body["count"], 2);
+    server.stop().await;
+}
