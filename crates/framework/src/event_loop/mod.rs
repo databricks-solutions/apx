@@ -11,6 +11,7 @@
 
 pub mod core;
 pub mod handle;
+pub mod queue;
 pub mod scheduling;
 // Thread-local event loop cache — available for future optimizations.
 #[allow(

@@ -5,9 +5,11 @@
 //! natively. Other threads submit work via [`super::handle::EventLoopHandle`].
 
 use super::handle::EventLoopHandle;
+use super::queue::{QueueDrainer, WorkItem};
 use pyo3::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::mpsc;
 
 // ── LoopPolicy ───────────────────────────────────────────────────────────
 
@@ -106,6 +108,12 @@ pub struct EventLoop {
     thread: Option<std::thread::JoinHandle<()>>,
     /// Whether the loop is still running (guards `call_soon_threadsafe`).
     running: Arc<AtomicBool>,
+    /// Producer side of the work queue.
+    queue_tx: mpsc::UnboundedSender<WorkItem>,
+    /// Shared flag: `true` means drainer is sleeping and needs a wake.
+    needs_wake: Arc<AtomicBool>,
+    /// Python reference to the [`QueueDrainer`] singleton.
+    drainer_ref: Py<PyAny>,
 }
 
 impl std::fmt::Debug for EventLoop {
@@ -135,24 +143,25 @@ impl EventLoop {
     ///
     /// Returns an error if Python initialization or event loop creation fails.
     pub fn start_with(policy: LoopPolicy) -> Result<Self, String> {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (startup_tx, startup_rx) = std::sync::mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = Arc::clone(&running);
+
+        // Create the work queue before spawning — rx moves into the thread.
+        let (queue_tx, queue_rx) = mpsc::unbounded_channel::<WorkItem>();
+        let needs_wake = Arc::new(AtomicBool::new(false));
+        let needs_wake_clone = Arc::clone(&needs_wake);
 
         let thread = std::thread::Builder::new()
             .name("apx-asyncio".to_owned())
             .spawn(move || {
                 Python::attach(|py| {
-                    let result = (|| -> PyResult<Py<PyAny>> {
-                        let event_loop = create_event_loop(py, policy)?;
-                        let asyncio = py.import(c"asyncio")?;
-                        asyncio.call_method1(c"set_event_loop", (&event_loop,))?;
-                        Ok(event_loop.unbind())
-                    })();
+                    let result =
+                        Self::init_event_loop_thread(py, policy, queue_rx, needs_wake_clone);
 
                     match result {
-                        Ok(event_loop) => {
-                            let _ = tx.send(Ok(event_loop.clone_ref(py)));
+                        Ok((event_loop, drainer_ref)) => {
+                            let _ = startup_tx.send(Ok((event_loop.clone_ref(py), drainer_ref)));
 
                             let loop_bound = event_loop.bind(py);
                             if let Err(e) = loop_bound.call_method0(c"run_forever") {
@@ -163,14 +172,15 @@ impl EventLoop {
                             let _ = Self::close_loop(py, loop_bound);
                         }
                         Err(e) => {
-                            let _ = tx.send(Err(format!("event loop creation failed: {e}")));
+                            let _ =
+                                startup_tx.send(Err(format!("event loop creation failed: {e}")));
                         }
                     }
                 });
             })
             .map_err(|e| format!("failed to spawn asyncio thread: {e}"))?;
 
-        let event_loop = rx
+        let (event_loop, drainer_ref) = startup_rx
             .recv()
             .map_err(|_| "asyncio thread exited before sending loop".to_owned())??;
 
@@ -178,7 +188,64 @@ impl EventLoop {
             event_loop,
             thread: Some(thread),
             running,
+            queue_tx,
+            needs_wake,
+            drainer_ref,
         })
+    }
+
+    /// Initialize the event loop, install the [`QueueDrainer`], and return both.
+    fn init_event_loop_thread(
+        py: Python<'_>,
+        policy: LoopPolicy,
+        queue_rx: mpsc::UnboundedReceiver<WorkItem>,
+        needs_wake: Arc<AtomicBool>,
+    ) -> Result<(Py<PyAny>, Py<PyAny>), String> {
+        let event_loop =
+            create_event_loop(py, policy).map_err(|e| format!("create_event_loop: {e}"))?;
+        let asyncio = py
+            .import(c"asyncio")
+            .map_err(|e| format!("import asyncio: {e}"))?;
+        asyncio
+            .call_method1(c"set_event_loop", (&event_loop,))
+            .map_err(|e| format!("set_event_loop: {e}"))?;
+
+        let drainer_ref = Self::install_drainer(py, &event_loop, queue_rx, needs_wake)?;
+
+        Ok((event_loop.unbind(), drainer_ref))
+    }
+
+    /// Create and install the [`QueueDrainer`] on the event loop.
+    fn install_drainer(
+        py: Python<'_>,
+        event_loop: &Bound<'_, PyAny>,
+        queue_rx: mpsc::UnboundedReceiver<WorkItem>,
+        needs_wake: Arc<AtomicBool>,
+    ) -> Result<Py<PyAny>, String> {
+        let create_task = event_loop
+            .getattr(c"create_task")
+            .map_err(|e| format!("missing create_task: {e}"))?
+            .unbind();
+        let call_soon = event_loop
+            .getattr(c"call_soon")
+            .map_err(|e| format!("missing call_soon: {e}"))?
+            .unbind();
+
+        let drainer = QueueDrainer::new(queue_rx, create_task, call_soon, needs_wake);
+        let drainer_obj =
+            Py::new(py, drainer).map_err(|e| format!("QueueDrainer allocation: {e}"))?;
+
+        // Set self_ref for call_soon(self) rescheduling.
+        drainer_obj
+            .borrow_mut(py)
+            .set_self_ref(drainer_obj.clone_ref(py).into_any());
+
+        // Install initial callback so the drainer starts processing.
+        event_loop
+            .call_method1(c"call_soon", (&drainer_obj,))
+            .map_err(|e| format!("initial call_soon: {e}"))?;
+
+        Ok(drainer_obj.into_any())
     }
 
     /// Get a cloneable handle for submitting work to this event loop.
@@ -188,7 +255,13 @@ impl EventLoop {
     /// Returns an error if event loop method caching fails.
     pub fn handle(&self) -> Result<EventLoopHandle, String> {
         Python::attach(|py| {
-            EventLoopHandle::new(self.event_loop.clone_ref(py), Arc::clone(&self.running))
+            EventLoopHandle::new(
+                self.event_loop.clone_ref(py),
+                Arc::clone(&self.running),
+                self.queue_tx.clone(),
+                Arc::clone(&self.needs_wake),
+                self.drainer_ref.clone_ref(py),
+            )
         })
     }
 

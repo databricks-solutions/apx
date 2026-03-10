@@ -1,60 +1,11 @@
-//! Pure-Rust scheduling primitives for the persistent event loop.
+//! Scheduling primitives for the persistent event loop.
 //!
-//! `CoroutineScheduler` and `TaskCallback` implement asyncio's
-//! `call_soon_threadsafe` + `Task.add_done_callback` scheduling pattern
-//! as Rust pyclasses — no Python source code strings.
+//! [`TaskCallback`] receives asyncio `Task.add_done_callback` completions
+//! and sends results through a Tokio oneshot channel back to the caller.
 
 use crate::error::AppError;
 use pyo3::prelude::*;
 use tokio::sync::oneshot;
-
-/// Scheduled on the event loop via `call_soon_threadsafe`.
-///
-/// When called (with no arguments, by the event loop), creates an
-/// `asyncio.Task` from the coroutine and attaches the done callback.
-/// Uses a cached `loop.create_task` reference — no `asyncio` module dispatch.
-#[pyclass(module = "apx._core", freelist = 64)]
-pub struct CoroutineScheduler {
-    coro: Option<Py<PyAny>>,
-    callback: Option<Py<PyAny>>,
-    create_task: Option<Py<PyAny>>,
-}
-
-impl CoroutineScheduler {
-    pub fn new(coro: Py<PyAny>, callback: Py<PyAny>, create_task: Py<PyAny>) -> Self {
-        Self {
-            coro: Some(coro),
-            callback: Some(callback),
-            create_task: Some(create_task),
-        }
-    }
-}
-
-impl std::fmt::Debug for CoroutineScheduler {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CoroutineScheduler")
-            .field("pending", &self.coro.is_some())
-            .finish()
-    }
-}
-
-#[pymethods]
-impl CoroutineScheduler {
-    fn __call__(&mut self, py: Python<'_>) -> PyResult<()> {
-        let coro = self.coro.take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("scheduler already consumed")
-        })?;
-        let callback = self.callback.take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("scheduler already consumed")
-        })?;
-        let create_task = self.create_task.take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("scheduler already consumed")
-        })?;
-        let task = create_task.call1(py, (coro,))?;
-        task.call_method1(py, c"add_done_callback", (callback,))?;
-        Ok(())
-    }
-}
 
 /// Receives asyncio Task completion via `add_done_callback`.
 ///
@@ -116,19 +67,6 @@ fn classify_python_error(_py: Python<'_>, err: &PyErr) -> AppError {
 mod tests {
     use super::*;
     use crate::with_py;
-
-    #[test]
-    fn coroutine_scheduler_debug() {
-        with_py(|py| {
-            let coro = py.None();
-            let callback = py.None();
-            let create_task = py.None();
-            let scheduler = CoroutineScheduler::new(coro, callback, create_task);
-            let dbg = format!("{scheduler:?}");
-            assert!(dbg.contains("CoroutineScheduler"));
-            assert!(dbg.contains("pending: true"));
-        });
-    }
 
     #[test]
     fn task_callback_debug() {

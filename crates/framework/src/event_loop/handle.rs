@@ -2,26 +2,35 @@
 //!
 //! [`EventLoopHandle`] is the main interface used by dispatch code. It's
 //! cheaply cloneable (`Arc`-backed) and safe to use from any Tokio task.
+//!
+//! The hot path (`schedule_deferred`) pushes work items to an MPSC queue
+//! with zero GIL acquisition. The event loop thread's [`QueueDrainer`]
+//! processes them in batch.
 
-use super::scheduling::{CoroutineScheduler, TaskCallback};
+use super::queue::WorkItem;
 use crate::error::AppError;
 use pyo3::prelude::*;
-use pyo3::types::{PyCFunction, PyDict, PyTuple};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 /// Cloneable handle to the persistent asyncio event loop.
 ///
-/// Caches bound Python methods (`call_soon_threadsafe`, `create_task`)
-/// resolved once at startup. Request-path scheduling uses direct calls
-/// to the cached callables — no per-request attribute lookup.
+/// Caches `call_soon_threadsafe` for rare wake signals. Hot-path scheduling
+/// goes through the lock-free MPSC queue — no GIL, no Python object allocation.
 pub struct EventLoopHandle {
+    /// Python event loop reference (diagnostics/tests).
     event_loop: Py<PyAny>,
-    /// Cached `loop.call_soon_threadsafe` bound method.
-    call_soon: Py<PyAny>,
-    /// Cached `loop.create_task` bound method.
-    create_task: Py<PyAny>,
+    /// Cached `loop.call_soon_threadsafe` — used only to wake the drainer.
+    call_soon_threadsafe: Py<PyAny>,
+    /// Python reference to the [`QueueDrainer`] singleton — wake target.
+    drainer_ref: Py<PyAny>,
+    /// Producer side of the work queue (lock-free push).
+    queue_tx: mpsc::UnboundedSender<WorkItem>,
+    /// Shared flag: `true` means drainer is sleeping and needs a wake.
+    needs_wake: Arc<AtomicBool>,
+    /// Whether the event loop is still running.
     running: Arc<AtomicBool>,
 }
 
@@ -29,34 +38,40 @@ impl Clone for EventLoopHandle {
     fn clone(&self) -> Self {
         Python::attach(|py| Self {
             event_loop: self.event_loop.clone_ref(py),
-            call_soon: self.call_soon.clone_ref(py),
-            create_task: self.create_task.clone_ref(py),
+            call_soon_threadsafe: self.call_soon_threadsafe.clone_ref(py),
+            drainer_ref: self.drainer_ref.clone_ref(py),
+            queue_tx: self.queue_tx.clone(),
+            needs_wake: Arc::clone(&self.needs_wake),
             running: Arc::clone(&self.running),
         })
     }
 }
 
 impl EventLoopHandle {
-    /// Create a new handle with cached bound methods.
+    /// Create a new handle with queue and wake infrastructure.
     ///
     /// # Errors
     ///
     /// Returns an error if the event loop is missing expected methods.
-    pub fn new(event_loop: Py<PyAny>, running: Arc<AtomicBool>) -> Result<Self, String> {
+    pub(crate) fn new(
+        event_loop: Py<PyAny>,
+        running: Arc<AtomicBool>,
+        queue_tx: mpsc::UnboundedSender<WorkItem>,
+        needs_wake: Arc<AtomicBool>,
+        drainer_ref: Py<PyAny>,
+    ) -> Result<Self, String> {
         Python::attach(|py| {
-            let loop_obj = event_loop.bind(py);
-            let call_soon = loop_obj
+            let call_soon_threadsafe = event_loop
+                .bind(py)
                 .getattr(c"call_soon_threadsafe")
                 .map_err(|e| format!("event loop missing call_soon_threadsafe: {e}"))?
                 .unbind();
-            let create_task = loop_obj
-                .getattr(c"create_task")
-                .map_err(|e| format!("event loop missing create_task: {e}"))?
-                .unbind();
             Ok(Self {
                 event_loop,
-                call_soon,
-                create_task,
+                call_soon_threadsafe,
+                drainer_ref,
+                queue_tx,
+                needs_wake,
                 running,
             })
         })
@@ -64,7 +79,6 @@ impl EventLoopHandle {
 
     /// Submit a Python coroutine to the running event loop.
     ///
-    /// Returns a Tokio future that resolves when the coroutine completes.
     /// The coroutine runs on the event loop thread with full asyncio context
     /// (BackgroundTasks, contextvars, get_running_loop).
     ///
@@ -72,28 +86,7 @@ impl EventLoopHandle {
     ///
     /// - `AppError::Internal` if the event loop is stopped or scheduling fails.
     pub async fn drive_coroutine(&self, coro: Py<PyAny>) -> Result<Py<PyAny>, AppError> {
-        if !self.running.load(Ordering::Acquire) {
-            return Err(AppError::Internal("event loop is not running".to_owned()));
-        }
-
-        let (tx, rx) = oneshot::channel();
-
-        // Single brief GIL acquisition — consistent with asgi_dispatch.rs:58.
-        // call_soon_threadsafe is O(1) and thread-safe by design; the GIL hold
-        // covers only 2 object allocations + enqueue (<5µs).
-        Python::attach(|py| -> Result<(), AppError> {
-            let callback = Py::new(py, TaskCallback::new(tx))
-                .map_err(|e| AppError::Internal(format!("TaskCallback: {e}")))?;
-            let ct = self.create_task.clone_ref(py);
-            let scheduler = Py::new(py, CoroutineScheduler::new(coro, callback.into_any(), ct))
-                .map_err(|e| AppError::Internal(format!("CoroutineScheduler: {e}")))?;
-
-            self.call_soon
-                .call1(py, (scheduler,))
-                .map_err(|e| AppError::Internal(format!("call_soon_threadsafe: {e}")))?;
-            Ok(())
-        })?;
-
+        let rx = self.schedule_deferred(move |_py| Ok(coro))?;
         let t0 = std::time::Instant::now();
         let result = rx.await.map_err(|_| {
             AppError::Internal("event loop closed before coroutine completed".to_owned())
@@ -105,18 +98,16 @@ impl EventLoopHandle {
         result
     }
 
-    /// Build a coroutine and schedule it in a single GIL hold.
+    /// Build a coroutine on the calling thread and schedule it via the queue.
     ///
-    /// Combines scope construction and event loop scheduling into one
-    /// `Python::attach` call, eliminating a GIL acquire/release cycle
-    /// compared to separate `build` + `drive_coroutine` calls.
-    ///
-    /// Returns a receiver that resolves when the coroutine completes.
+    /// The closure executes on the calling (tokio) thread under GIL to build
+    /// the coroutine. The resulting `Py<PyAny>` is then pushed through the
+    /// lock-free queue for task creation on the event loop thread.
     ///
     /// # Errors
     ///
     /// Returns an error if the event loop is stopped, the closure fails,
-    /// or scheduling fails.
+    /// or enqueue fails.
     pub fn schedule_with<F>(
         &self,
         f: F,
@@ -128,33 +119,28 @@ impl EventLoopHandle {
             return Err(AppError::Internal("event loop is not running".to_owned()));
         }
 
+        // Build the coroutine on the calling thread under GIL.
+        let coro = Python::attach(f)?;
+
+        // Push to queue for task creation on the event loop thread.
         let (tx, rx) = oneshot::channel();
-
-        Python::attach(|py| -> Result<(), AppError> {
-            let coro = f(py)?;
-
-            let callback = Py::new(py, TaskCallback::new(tx))
-                .map_err(|e| AppError::Internal(format!("TaskCallback: {e}")))?;
-            let ct = self.create_task.clone_ref(py);
-            let scheduler = Py::new(py, CoroutineScheduler::new(coro, callback.into_any(), ct))
-                .map_err(|e| AppError::Internal(format!("CoroutineScheduler: {e}")))?;
-
-            self.call_soon
-                .call1(py, (scheduler,))
-                .map_err(|e| AppError::Internal(format!("call_soon_threadsafe: {e}")))?;
-            Ok(())
-        })?;
+        let item = WorkItem {
+            builder: Box::new(move |_py| Ok(coro)),
+            tx,
+        };
+        self.queue_tx
+            .send(item)
+            .map_err(|_| AppError::Internal("work queue closed".to_owned()))?;
+        self.wake_if_sleeping();
 
         Ok(rx)
     }
 
-    /// Defer all Python work to the event loop thread.
+    /// Defer all Python work to the event loop thread via the MPSC queue.
     ///
-    /// Unlike [`schedule_with`](Self::schedule_with) which builds the coroutine
-    /// on the calling (tokio) thread with GIL held, this method only acquires
-    /// the GIL briefly to enqueue a lightweight closure via `call_soon_threadsafe`.
-    /// The closure runs entirely on the event loop thread, reducing GIL
-    /// contention from concurrent tokio tasks.
+    /// Hot path: no GIL acquisition. The builder closure is boxed and pushed
+    /// to the queue. If the drainer is sleeping, a single
+    /// `call_soon_threadsafe` wakes it.
     ///
     /// # Errors
     ///
@@ -171,75 +157,43 @@ impl EventLoopHandle {
         }
 
         let trace = crate::bridge::bench_trace_enabled();
+        let t_push = trace.then(std::time::Instant::now);
 
         let (tx, rx) = oneshot::channel();
+        let item = WorkItem {
+            builder: Box::new(f),
+            tx,
+        };
 
-        // Wrap the builder + oneshot sender in Mutex<Option<...>> for FnOnce-in-Fn.
-        let work = std::sync::Mutex::new(Some((f, tx)));
+        self.queue_tx
+            .send(item)
+            .map_err(|_| AppError::Internal("work queue closed".to_owned()))?;
 
-        // Capture enqueue timestamp for cross-thread pickup delay measurement.
-        let enqueued_at = trace.then(std::time::Instant::now);
-
-        // Single brief GIL hold: build PyCFunction closure + enqueue via
-        // call_soon_threadsafe. The closure runs on the event loop thread.
-        let t_gil = trace.then(std::time::Instant::now);
-        Python::attach(|py| -> Result<(), AppError> {
-            let create_task = self.create_task.clone_ref(py);
-            let deferred = PyCFunction::new_closure(
-                py,
-                None,
-                None,
-                move |args: &Bound<'_, PyTuple>,
-                      _kwargs: Option<&Bound<'_, PyDict>>|
-                      -> PyResult<()> {
-                    // Measure cross-thread pickup delay (enqueue → closure execution).
-                    if let Some(enqueued_at) = enqueued_at {
-                        tracing::info!(
-                            target: "bench_trace",
-                            phase = "cross_thread_pickup",
-                            pickup_delay_us = enqueued_at.elapsed().as_micros(),
-                        );
-                    }
-
-                    let py = args.py();
-                    let (f, tx) = work
-                        .lock()
-                        .map_err(|_| {
-                            pyo3::exceptions::PyRuntimeError::new_err("deferred dispatch poisoned")
-                        })?
-                        .take()
-                        .ok_or_else(|| {
-                            pyo3::exceptions::PyRuntimeError::new_err(
-                                "deferred dispatch already consumed",
-                            )
-                        })?;
-
-                    let coro = f(py)
-                        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e}")))?;
-
-                    let callback = Py::new(py, TaskCallback::new(tx))?;
-                    let task = create_task.call1(py, (coro,))?;
-                    task.call_method1(py, c"add_done_callback", (callback,))?;
-                    Ok(())
-                },
-            )
-            .map_err(|e| AppError::Internal(format!("deferred closure: {e}")))?;
-
-            self.call_soon
-                .call1(py, (deferred,))
-                .map_err(|e| AppError::Internal(format!("call_soon_threadsafe: {e}")))?;
-            Ok(())
-        })?;
-
-        if let Some(t_gil) = t_gil {
+        if let Some(t_push) = t_push {
             tracing::info!(
                 target: "bench_trace",
-                phase = "schedule_deferred_gil",
-                gil_hold_us = t_gil.elapsed().as_micros(),
+                phase = "queue_push",
+                push_us = t_push.elapsed().as_micros(),
             );
         }
 
+        self.wake_if_sleeping();
+
         Ok(rx)
+    }
+
+    /// Wake the drainer if it's sleeping (idle→active transition).
+    ///
+    /// Uses `swap(false, AcqRel)` — the Acquire synchronizes with the
+    /// drainer's Release store, ensuring our queue push is visible.
+    fn wake_if_sleeping(&self) {
+        let was_sleeping = self.needs_wake.swap(false, Ordering::AcqRel);
+        if !was_sleeping {
+            return;
+        }
+        Python::attach(|py| {
+            let _ = self.call_soon_threadsafe.call1(py, (&self.drainer_ref,));
+        });
     }
 
     /// Get a reference to the event loop Python object (for tests/diagnostics).
@@ -264,6 +218,7 @@ impl std::fmt::Debug for EventLoopHandle {
 mod tests {
     use super::*;
     use crate::event_loop::core::EventLoop;
+    use pyo3::types::PyDict;
 
     #[tokio::test]
     async fn drive_trivial_coroutine() {
@@ -298,7 +253,6 @@ mod tests {
         let handle = event_loop.handle().unwrap();
 
         // Coroutine that uses asyncio.sleep (requires running event loop).
-        // Import inside the function body so the reference is captured in the closure.
         let coro = Python::attach(|py| {
             let code = std::ffi::CString::new(
                 "async def _t():\n    import asyncio\n    await asyncio.sleep(0)\n    return 'ok'\ncoro = _t()\n",
