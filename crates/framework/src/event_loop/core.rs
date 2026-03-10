@@ -17,9 +17,6 @@ use tokio::sync::mpsc;
 ///
 /// Determines which Python event loop implementation to use for the
 /// persistent worker loop.
-///
-/// Designed for future extension — a `RustNative` variant can replace
-/// the Python event loop with a Rust-driven coroutine executor.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LoopPolicy {
     /// Try uvloop first, fall back to default asyncio.
@@ -29,6 +26,8 @@ pub enum LoopPolicy {
     UvLoop,
     /// Force CPython's default asyncio event loop.
     Asyncio,
+    /// Rust-driven scheduler with asyncio fallback.
+    RustNative,
 }
 
 impl std::fmt::Display for LoopPolicy {
@@ -37,6 +36,20 @@ impl std::fmt::Display for LoopPolicy {
             Self::Auto => f.write_str("auto"),
             Self::UvLoop => f.write_str("uvloop"),
             Self::Asyncio => f.write_str("asyncio"),
+            Self::RustNative => f.write_str("rust-native"),
+        }
+    }
+}
+
+impl LoopPolicy {
+    /// Create a policy from the `APX_SCHEDULER` environment variable.
+    ///
+    /// - `APX_SCHEDULER=rust` -> `RustNative`
+    /// - Anything else -> `Auto` (default)
+    pub fn from_env() -> Self {
+        match std::env::var("APX_SCHEDULER").as_deref() {
+            Ok("rust") => Self::RustNative,
+            _ => Self::default(),
         }
     }
 }
@@ -61,7 +74,31 @@ fn create_event_loop(py: Python<'_>, policy: LoopPolicy) -> PyResult<Bound<'_, P
             tracing::info!("using default asyncio event loop");
             py.import(c"asyncio")?.call_method0(c"new_event_loop")
         }
+        LoopPolicy::RustNative => {
+            // RustNative still needs an asyncio event loop as fallback.
+            // Use the default asyncio loop (not uvloop) for predictability.
+            tracing::info!("using rust-native scheduler with asyncio fallback");
+            py.import(c"asyncio")?.call_method0(c"new_event_loop")
+        }
     }
+}
+
+/// Install Rust scheduler shims on the current event loop thread.
+///
+/// Patches `asyncio.sleep` and `asyncio.Event` to use Rust-backed primitives.
+/// The shim is intentionally leaked — it lives for the worker lifetime and is
+/// implicitly cleaned up when the process exits.
+fn install_rust_scheduler(py: Python<'_>) -> PyResult<()> {
+    use crate::scheduler::adapters::asyncio_shim::AsyncioShim;
+
+    tracing::info!("installing Rust scheduler shims");
+    let _shim = AsyncioShim::install(py)?;
+    // Note: we intentionally leak the shim — it lives for the worker lifetime.
+    // Uninstall happens implicitly when the process exits.
+    // The AnyIO backend registration will be added when we have the full
+    // backend registration mechanism.
+
+    Ok(())
 }
 
 /// Cancel all pending asyncio tasks and run them to completion.
@@ -211,6 +248,10 @@ impl EventLoop {
             .map_err(|e| format!("set_event_loop: {e}"))?;
 
         let drainer_ref = Self::install_drainer(py, &event_loop, queue_rx, needs_wake)?;
+
+        if policy == LoopPolicy::RustNative {
+            install_rust_scheduler(py).map_err(|e| format!("scheduler install: {e}"))?;
+        }
 
         Ok((event_loop.unbind(), drainer_ref))
     }

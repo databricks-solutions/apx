@@ -22,6 +22,7 @@ pub(crate) mod bridge;
 pub(crate) mod discovery;
 pub(crate) mod event_loop;
 pub(crate) mod ipc;
+pub(crate) mod scheduler;
 pub(crate) mod signal;
 
 #[cfg(test)]
