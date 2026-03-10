@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use super::handle::EventLoopHandle;
 use super::queue::{QueueDrainer, SchedulerState, WorkItem};
 use crate::scheduler::driver::CachedTypes;
+use crate::scheduler::queue::ReadyQueue;
 
 // ── LoopPolicy ───────────────────────────────────────────────────────────
 
@@ -305,12 +306,22 @@ impl EventLoop {
                 cached_types,
                 call_soon: call_soon.clone_ref(py),
                 ensure_future,
+                ready_queue: Arc::new(ReadyQueue::new()),
             })
         } else {
             None
         };
 
-        let drainer = QueueDrainer::new(queue_rx, create_task, call_soon, needs_wake, scheduler);
+        // Clone the ready_queue Arc before scheduler moves into the drainer.
+        let ready_queue_ref = scheduler.as_ref().map(|s| Arc::clone(&s.ready_queue));
+
+        let drainer = QueueDrainer::new(
+            queue_rx,
+            create_task,
+            call_soon.clone_ref(py),
+            Arc::clone(&needs_wake),
+            scheduler,
+        );
         let drainer_obj =
             Py::new(py, drainer).map_err(|e| format!("QueueDrainer allocation: {e}"))?;
 
@@ -318,6 +329,12 @@ impl EventLoop {
         drainer_obj
             .borrow_mut(py)
             .set_self_ref(drainer_obj.clone_ref(py).into_any());
+
+        // Set wake state on the ready queue so push() can reschedule
+        // the drainer when it is sleeping.
+        if let Some(ref rq) = ready_queue_ref {
+            rq.set_wake(needs_wake, call_soon, drainer_obj.clone_ref(py).into_any());
+        }
 
         // Install initial callback so the drainer starts processing.
         event_loop

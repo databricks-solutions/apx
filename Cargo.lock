@@ -300,6 +300,7 @@ dependencies = [
  "apx-common",
  "axum",
  "bytes",
+ "crossbeam-queue",
  "form_urlencoded",
  "futures-core",
  "futures-util",

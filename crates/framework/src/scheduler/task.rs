@@ -6,8 +6,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pyo3::prelude::*;
+use tokio::sync::oneshot;
 
 use super::primitives::Future;
+use crate::error::AppError;
 
 // ---------------------------------------------------------------------------
 // SchedulerTask
@@ -26,6 +28,8 @@ pub struct SchedulerTask {
     coro_stack: Vec<Py<PyAny>>,
     /// Result future — where the final result goes.
     pub result_future: Py<Future>,
+    /// Completion channel — consumed when the task completes or errors.
+    result_tx: Option<oneshot::Sender<Result<Py<PyAny>, AppError>>>,
     /// Pending value to send to the active coroutine on next step.
     send_value: Option<Py<PyAny>>,
     /// Pending exception to throw into the active coroutine on next step.
@@ -36,13 +40,18 @@ pub struct SchedulerTask {
 
 impl SchedulerTask {
     /// Wrap a coroutine and create a [`Future`] for its result.
-    pub fn new(py: Python<'_>, coro: Py<PyAny>) -> PyResult<Self> {
+    pub fn new(
+        py: Python<'_>,
+        coro: Py<PyAny>,
+        result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
+    ) -> PyResult<Self> {
         let (fresh_future, _tx) = Future::with_channel();
         let result_future = Py::new(py, fresh_future)?;
 
         Ok(Self {
             coro_stack: vec![coro],
             result_future,
+            result_tx: Some(result_tx),
             send_value: None,
             throw_error: None,
             cancelled: AtomicBool::new(false),
@@ -104,6 +113,11 @@ impl SchedulerTask {
         self.throw_error.take()
     }
 
+    /// Take the completion channel (consumed when the task completes or errors).
+    pub fn take_result_tx(&mut self) -> Option<oneshot::Sender<Result<Py<PyAny>, AppError>>> {
+        self.result_tx.take()
+    }
+
     /// Resolve the result future with a value.
     pub fn complete(&self, py: Python<'_>, value: Py<PyAny>) {
         let fut = self.result_future.bind(py);
@@ -136,6 +150,7 @@ impl std::fmt::Debug for SchedulerTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SchedulerTask")
             .field("stack_depth", &self.coro_stack.len())
+            .field("has_result_tx", &self.result_tx.is_some())
             .field("cancelled", &self.cancelled.load(Ordering::Relaxed))
             .field("has_send_value", &self.send_value.is_some())
             .field("has_throw_error", &self.throw_error.is_some())
@@ -334,11 +349,15 @@ impl TaskProxy {
 mod tests {
     use super::*;
 
+    fn dummy_tx() -> oneshot::Sender<Result<Py<PyAny>, AppError>> {
+        oneshot::channel().0
+    }
+
     #[test]
     fn new_task_has_single_coro() {
         crate::with_py(|py| {
             let coro = py.None();
-            let task = SchedulerTask::new(py, coro).unwrap();
+            let task = SchedulerTask::new(py, coro, dummy_tx()).unwrap();
             assert_eq!(task.coro_stack.len(), 1);
             assert!(!task.is_cancelled());
         });
@@ -348,7 +367,7 @@ mod tests {
     fn push_and_pop_coro_stack() {
         crate::with_py(|py| {
             let coro = py.None();
-            let mut task = SchedulerTask::new(py, coro).unwrap();
+            let mut task = SchedulerTask::new(py, coro, dummy_tx()).unwrap();
             assert_eq!(task.coro_stack.len(), 1);
 
             task.push_coro(py.None());
@@ -368,7 +387,7 @@ mod tests {
     fn send_value_round_trip() {
         crate::with_py(|py| {
             let coro = py.None();
-            let mut task = SchedulerTask::new(py, coro).unwrap();
+            let mut task = SchedulerTask::new(py, coro, dummy_tx()).unwrap();
 
             assert!(task.take_send_value(py).is_none());
 
@@ -388,7 +407,7 @@ mod tests {
     fn throw_error_round_trip() {
         crate::with_py(|py| {
             let coro = py.None();
-            let mut task = SchedulerTask::new(py, coro).unwrap();
+            let mut task = SchedulerTask::new(py, coro, dummy_tx()).unwrap();
 
             assert!(task.take_throw_error().is_none());
 
@@ -409,7 +428,7 @@ mod tests {
     #[test]
     fn cancel_flag() {
         crate::with_py(|py| {
-            let task = SchedulerTask::new(py, py.None()).unwrap();
+            let task = SchedulerTask::new(py, py.None(), dummy_tx()).unwrap();
             assert!(!task.is_cancelled());
             task.cancel_flag();
             assert!(task.is_cancelled());
@@ -419,7 +438,7 @@ mod tests {
     #[test]
     fn debug_format() {
         crate::with_py(|py| {
-            let task = SchedulerTask::new(py, py.None()).unwrap();
+            let task = SchedulerTask::new(py, py.None(), dummy_tx()).unwrap();
             let dbg = format!("{task:?}");
             assert!(dbg.contains("SchedulerTask"));
             assert!(dbg.contains("stack_depth: 1"));

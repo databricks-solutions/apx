@@ -37,6 +37,7 @@ sysinfo.workspace = true
 which.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
+crossbeam-queue.workspace = true
 tokio-stream.workspace = true
 
 [dev-dependencies]

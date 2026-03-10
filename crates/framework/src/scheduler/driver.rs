@@ -15,6 +15,7 @@ use pyo3::types::PyType;
 use tokio::sync::oneshot;
 
 use super::primitives::{EventWaiter, Future};
+use super::queue::{ReadyQueue, ReadyTask};
 use super::task::{SchedulerTask, TaskProxy};
 use crate::error::AppError;
 
@@ -243,7 +244,12 @@ pub enum DriveResult {
     WaitingOnAsyncioFuture(Py<PyAny>),
     /// Unknown awaitable — fall back to `asyncio.ensure_future`.
     FallbackToAsyncio(Py<PyAny>),
+    /// Step budget exhausted — re-enqueue for fairness.
+    BudgetExhausted,
 }
+
+/// Maximum `YieldNone` steps before re-enqueueing for fairness.
+const DEFAULT_STEP_BUDGET: usize = 128;
 
 // ---------------------------------------------------------------------------
 // drive_task — the main drive loop
@@ -290,7 +296,9 @@ pub fn drive_task(
     task: &mut SchedulerTask,
     types: &CachedTypes,
     proxy_id: Option<isize>,
+    step_budget: usize,
 ) -> DriveResult {
+    let mut steps: usize = 0;
     loop {
         // Obtain step result, dropping the `coro` borrow before we mutate `task`.
         let step_result = {
@@ -317,6 +325,10 @@ pub fn drive_task(
                         // re-throw CancelledError at every yield point (checkpoint).
                         if let Some(cancel_err) = check_cancel_scope(py, types, proxy_id) {
                             task.set_throw_error(cancel_err);
+                        }
+                        steps += 1;
+                        if steps >= step_budget {
+                            return DriveResult::BudgetExhausted;
                         }
                         continue;
                     }
@@ -373,18 +385,14 @@ pub fn drive_task(
 #[pyclass(module = "apx._core")]
 pub struct ResumeCallback {
     task: Option<SchedulerTask>,
-    cached_types: Arc<CachedTypes>,
-    result_tx: Option<oneshot::Sender<Result<Py<PyAny>, AppError>>>,
-    call_soon: Py<PyAny>,
-    ensure_future: Py<PyAny>,
     proxy: Option<Py<TaskProxy>>,
+    queue: Arc<ReadyQueue>,
 }
 
 impl std::fmt::Debug for ResumeCallback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResumeCallback")
             .field("has_task", &self.task.is_some())
-            .field("has_result_tx", &self.result_tx.is_some())
             .finish()
     }
 }
@@ -393,13 +401,13 @@ impl std::fmt::Debug for ResumeCallback {
 impl ResumeCallback {
     /// Called by Python when the awaited future completes, or by `call_soon`
     /// for event waiter re-polls.
+    ///
+    /// O(1): extracts the future result and enqueues the task for the drain
+    /// loop. No `drive_task` here — all re-drive work happens in the drain.
     #[pyo3(signature = (future=None))]
     fn __call__(&mut self, py: Python<'_>, future: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
         let mut task = self.task.take().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("ResumeCallback invoked twice")
-        })?;
-        let result_tx = self.result_tx.take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("ResumeCallback result_tx already consumed")
         })?;
 
         if let Some(fut) = future {
@@ -409,25 +417,10 @@ impl ResumeCallback {
             }
         }
 
-        // Reinstall the proxy as current_task so resumed middleware sees it.
-        let current_tasks = install_proxy(py, self.proxy.as_ref());
-        let proxy_id = self.proxy.as_ref().map(|p| p.as_ptr() as isize);
-
-        let drive_result = drive_task(py, &mut task, &self.cached_types, proxy_id);
         let proxy = self.proxy.take();
-        let result = handle_drive_result(
-            py,
-            task,
-            drive_result,
-            result_tx,
-            &self.cached_types,
-            &self.call_soon,
-            &self.ensure_future,
-            proxy,
-        );
-
-        clear_current_task(py, current_tasks);
-        result
+        tracing::trace!("resume_callback: enqueue");
+        self.queue.push(py, ReadyTask { task, proxy });
+        Ok(())
     }
 }
 
@@ -459,96 +452,59 @@ fn extract_future_result(py: Python<'_>, future: &Bound<'_, PyAny>) -> Result<Py
 /// Either completes the task (sending through `result_tx`), or creates a
 /// [`ResumeCallback`] and attaches it to the awaitable so the task is
 /// re-driven when the awaitable resolves.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "proxy added for current_task propagation; all params are co-dependent"
-)]
 fn handle_drive_result(
     py: Python<'_>,
-    task: SchedulerTask,
+    mut task: SchedulerTask,
     drive_result: DriveResult,
-    result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
-    cached_types: &Arc<CachedTypes>,
     call_soon: &Py<PyAny>,
     ensure_future: &Py<PyAny>,
+    ready_queue: &Arc<ReadyQueue>,
     proxy: Option<Py<TaskProxy>>,
 ) -> PyResult<()> {
     match drive_result {
         DriveResult::Completed(value) => {
-            let _ = result_tx.send(Ok(value));
+            if let Some(tx) = task.take_result_tx() {
+                let _ = tx.send(Ok(value));
+            }
             Ok(())
         }
         DriveResult::Error(err) => {
-            let _ = result_tx.send(Err(AppError::Internal(err.to_string())));
+            if let Some(tx) = task.take_result_tx() {
+                let _ = tx.send(Err(AppError::Internal(err.to_string())));
+            }
             Ok(())
         }
-        DriveResult::WaitingOnFuture(fut) => handle_rust_future(
-            py,
-            task,
-            fut,
-            result_tx,
-            cached_types,
-            call_soon,
-            ensure_future,
-            proxy,
-        ),
+        DriveResult::WaitingOnFuture(fut) => handle_rust_future(py, task, fut, ready_queue, proxy),
         DriveResult::WaitingOnEvent(_waiter) => {
-            let cb = make_resume_callback(
-                py,
-                task,
-                result_tx,
-                cached_types,
-                call_soon,
-                ensure_future,
-                proxy,
-            )?;
+            let cb = make_resume_callback(py, task, ready_queue, proxy)?;
             call_soon.call1(py, (cb,))?;
             Ok(())
         }
         DriveResult::WaitingOnAsyncioFuture(fut) => {
-            let cb = make_resume_callback(
-                py,
-                task,
-                result_tx,
-                cached_types,
-                call_soon,
-                ensure_future,
-                proxy,
-            )?;
+            let cb = make_resume_callback(py, task, ready_queue, proxy)?;
             fut.call_method1(py, c"add_done_callback", (cb,))?;
             Ok(())
         }
         DriveResult::FallbackToAsyncio(obj) => {
             let asyncio_task = ensure_future.call1(py, (obj,))?;
-            let cb = make_resume_callback(
-                py,
-                task,
-                result_tx,
-                cached_types,
-                call_soon,
-                ensure_future,
-                proxy,
-            )?;
+            let cb = make_resume_callback(py, task, ready_queue, proxy)?;
             asyncio_task.call_method1(py, c"add_done_callback", (cb,))?;
+            Ok(())
+        }
+        DriveResult::BudgetExhausted => {
+            ready_queue.push(py, ReadyTask { task, proxy });
             Ok(())
         }
     }
 }
 
-/// Handle `WaitingOnFuture`: if already done, re-drive immediately;
+/// Handle `WaitingOnFuture`: if already done, enqueue for re-drive;
 /// otherwise attach a done callback.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "proxy added for current_task propagation; all params are co-dependent"
-)]
 fn handle_rust_future(
     py: Python<'_>,
     task: SchedulerTask,
     fut: Py<PyAny>,
-    result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
-    cached_types: &Arc<CachedTypes>,
-    call_soon: &Py<PyAny>,
-    ensure_future: &Py<PyAny>,
+    ready_queue: &Arc<ReadyQueue>,
     proxy: Option<Py<TaskProxy>>,
 ) -> PyResult<()> {
     let is_done = fut.call_method0(py, c"done")?.is_truthy(py)?;
@@ -558,30 +514,48 @@ fn handle_rust_future(
             Ok(value) => task.set_send_value(value),
             Err(err) => task.set_throw_error(err),
         }
-        let proxy_id = proxy.as_ref().map(|p| p.as_ptr() as isize);
-        let drive_result = drive_task(py, &mut task, cached_types, proxy_id);
-        return handle_drive_result(
-            py,
-            task,
-            drive_result,
-            result_tx,
-            cached_types,
-            call_soon,
-            ensure_future,
-            proxy,
-        );
+        ready_queue.push(py, ReadyTask { task, proxy });
+        return Ok(());
     }
-    let cb = make_resume_callback(
-        py,
-        task,
-        result_tx,
-        cached_types,
-        call_soon,
-        ensure_future,
-        proxy,
-    )?;
+    let cb = make_resume_callback(py, task, ready_queue, proxy)?;
     fut.call_method1(py, c"add_done_callback", (cb,))?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// resume_task — re-drive a task from the ready queue
+// ---------------------------------------------------------------------------
+
+/// Re-drive a task that became ready via the queue.
+///
+/// Reinstalls the proxy, calls [`drive_task`], dispatches the result.
+/// `result_tx` is inside `task` — no separate channel parameter.
+pub fn resume_task(
+    py: Python<'_>,
+    ready: ReadyTask,
+    cached_types: &Arc<CachedTypes>,
+    call_soon: &Py<PyAny>,
+    ensure_future: &Py<PyAny>,
+    ready_queue: &Arc<ReadyQueue>,
+) -> PyResult<()> {
+    let ReadyTask { mut task, proxy } = ready;
+
+    let current_tasks = install_proxy(py, proxy.as_ref());
+    let proxy_id = proxy.as_ref().map(|p| p.as_ptr() as isize);
+
+    let drive_result = drive_task(py, &mut task, cached_types, proxy_id, DEFAULT_STEP_BUDGET);
+    let result = handle_drive_result(
+        py,
+        task,
+        drive_result,
+        call_soon,
+        ensure_future,
+        ready_queue,
+        proxy,
+    );
+
+    clear_current_task(py, current_tasks);
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -591,21 +565,15 @@ fn handle_rust_future(
 fn make_resume_callback(
     py: Python<'_>,
     task: SchedulerTask,
-    result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
-    cached_types: &Arc<CachedTypes>,
-    call_soon: &Py<PyAny>,
-    ensure_future: &Py<PyAny>,
+    ready_queue: &Arc<ReadyQueue>,
     proxy: Option<Py<TaskProxy>>,
 ) -> PyResult<Py<ResumeCallback>> {
     Py::new(
         py,
         ResumeCallback {
             task: Some(task),
-            cached_types: Arc::clone(cached_types),
-            result_tx: Some(result_tx),
-            call_soon: call_soon.clone_ref(py),
-            ensure_future: ensure_future.clone_ref(py),
             proxy,
+            queue: Arc::clone(ready_queue),
         },
     )
 }
@@ -629,11 +597,12 @@ pub fn spawn_and_drive(
     cached_types: &Arc<CachedTypes>,
     call_soon: &Py<PyAny>,
     ensure_future: &Py<PyAny>,
+    ready_queue: &Arc<ReadyQueue>,
 ) {
-    let mut task = match SchedulerTask::new(py, coro) {
+    let mut task = match SchedulerTask::new(py, coro, result_tx) {
         Ok(t) => t,
         Err(e) => {
-            let _ = result_tx.send(Err(AppError::Internal(format!("task creation: {e}"))));
+            tracing::warn!(error = %e, "scheduler task creation failed");
             return;
         }
     };
@@ -644,16 +613,15 @@ pub fn spawn_and_drive(
     let task_ctx = set_current_task(py, &task);
     let proxy_id = task_ctx.as_ref().map(|(_, p)| p.as_ptr() as isize);
 
-    let drive_result = drive_task(py, &mut task, cached_types, proxy_id);
+    let drive_result = drive_task(py, &mut task, cached_types, proxy_id, DEFAULT_STEP_BUDGET);
     let proxy = task_ctx.as_ref().map(|(_, p)| p.clone_ref(py));
     if let Err(e) = handle_drive_result(
         py,
         task,
         drive_result,
-        result_tx,
-        cached_types,
         call_soon,
         ensure_future,
+        ready_queue,
         proxy,
     ) {
         tracing::warn!(error = %e, "scheduler drive result handling failed");
@@ -820,12 +788,21 @@ async def coro():
         crate::with_py(|py| {
             let types = Arc::new(CachedTypes::resolve(py).unwrap());
             let (call_soon, ensure_future) = dummy_loop_fns(py);
+            let ready_queue = Arc::new(ReadyQueue::new());
 
             py.run(c"async def _f(): return 42", None, None).unwrap();
             let coro = py.eval(c"_f()", None, None).unwrap().unbind();
 
             let (tx, mut rx) = oneshot::channel();
-            spawn_and_drive(py, coro, tx, &types, &call_soon, &ensure_future);
+            spawn_and_drive(
+                py,
+                coro,
+                tx,
+                &types,
+                &call_soon,
+                &ensure_future,
+                &ready_queue,
+            );
 
             let result = rx.try_recv().unwrap().unwrap();
             let num: i64 = result.extract(py).unwrap();
@@ -838,13 +815,22 @@ async def coro():
         crate::with_py(|py| {
             let types = Arc::new(CachedTypes::resolve(py).unwrap());
             let (call_soon, ensure_future) = dummy_loop_fns(py);
+            let ready_queue = Arc::new(ReadyQueue::new());
 
             py.run(c"async def _err(): raise ValueError('boom')", None, None)
                 .unwrap();
             let coro = py.eval(c"_err()", None, None).unwrap().unbind();
 
             let (tx, mut rx) = oneshot::channel();
-            spawn_and_drive(py, coro, tx, &types, &call_soon, &ensure_future);
+            spawn_and_drive(
+                py,
+                coro,
+                tx,
+                &types,
+                &call_soon,
+                &ensure_future,
+                &ready_queue,
+            );
 
             let result = rx.try_recv().unwrap();
             assert!(result.is_err());
@@ -859,23 +845,18 @@ async def coro():
     #[test]
     fn resume_callback_debug() {
         crate::with_py(|py| {
-            let types = Arc::new(CachedTypes::resolve(py).unwrap());
-            let (call_soon, ensure_future) = dummy_loop_fns(py);
+            let ready_queue = Arc::new(ReadyQueue::new());
             let (tx, _rx) = oneshot::channel();
 
-            let task = SchedulerTask::new(py, py.None()).unwrap();
+            let task = SchedulerTask::new(py, py.None(), tx).unwrap();
             let cb = ResumeCallback {
                 task: Some(task),
-                cached_types: types,
-                result_tx: Some(tx),
-                call_soon,
-                ensure_future,
                 proxy: None,
+                queue: ready_queue,
             };
             let dbg = format!("{cb:?}");
             assert!(dbg.contains("ResumeCallback"));
             assert!(dbg.contains("has_task: true"));
-            assert!(dbg.contains("has_result_tx: true"));
         });
     }
 }

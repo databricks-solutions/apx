@@ -6,6 +6,7 @@
 pub mod adapters;
 pub mod driver;
 pub mod primitives;
+pub mod queue;
 pub mod task;
 
 // ---------------------------------------------------------------------------

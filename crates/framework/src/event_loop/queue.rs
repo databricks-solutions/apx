@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use super::scheduling::TaskCallback;
 use crate::error::AppError;
 use crate::scheduler::driver::{CachedTypes, spawn_and_drive};
+use crate::scheduler::queue::ReadyQueue;
 
 /// Closure that builds a Python coroutine on the event loop thread.
 pub type CoroutineBuilder = Box<dyn FnOnce(Python<'_>) -> Result<Py<PyAny>, AppError> + Send>;
@@ -47,6 +48,7 @@ pub struct SchedulerState {
     pub(crate) cached_types: Arc<CachedTypes>,
     pub(crate) call_soon: Py<PyAny>,
     pub(crate) ensure_future: Py<PyAny>,
+    pub(crate) ready_queue: Arc<ReadyQueue>,
 }
 
 impl fmt::Debug for SchedulerState {
@@ -129,12 +131,22 @@ impl QueueDrainer {
 }
 
 impl QueueDrainer {
-    /// Pop all pending items and dispatch each.
+    /// Pop all pending items, dispatch each, then drain ready tasks.
     fn drain_pending(&mut self, py: Python<'_>) -> usize {
         let mut count = 0;
         while let Ok(item) = self.rx.try_recv() {
             count += 1;
             self.dispatch_item(py, item);
+        }
+        // Drain ready tasks (re-drives from suspended awaitable resolution).
+        if let Some(ref sched) = self.scheduler {
+            count += sched.ready_queue.drain(
+                py,
+                &sched.cached_types,
+                &sched.call_soon,
+                &sched.ensure_future,
+                &sched.ready_queue,
+            );
         }
         count
     }
@@ -164,6 +176,7 @@ impl QueueDrainer {
             &sched.cached_types,
             &sched.call_soon,
             &sched.ensure_future,
+            &sched.ready_queue,
         );
     }
 
