@@ -74,7 +74,7 @@ pub struct Lock {
 #[pymethods]
 impl Lock {
     #[new]
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -184,7 +184,7 @@ pub struct Semaphore {
 #[pymethods]
 impl Semaphore {
     #[new]
-    fn new(permits: u32) -> Self {
+    pub fn new(permits: u32) -> Self {
         Self {
             inner: Arc::new(tokio::sync::Semaphore::new(permits as usize)),
         }

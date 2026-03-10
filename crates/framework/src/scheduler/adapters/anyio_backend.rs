@@ -6,11 +6,12 @@
 //!
 //! # Architecture
 //!
-//! A [`ApxSchedulerCore`] pyclass holds the method implementations. A small
-//! Python class (embedded as [`BACKEND_GLUE`]) inherits from
+//! A [`ApxSchedulerCore`] pyclass holds the method implementations. The
+//! Python `ApxBackend` class (in `src/apx/_backend/`) inherits from
 //! `anyio.abc.AsyncBackend` and delegates to the Rust core. CancelScope,
-//! TaskGroup, and MemoryObjectStream are implemented natively. Remaining
-//! features fall back to the stock `asyncio` backend via `__getattr__`.
+//! TaskGroup, MemoryObjectStream, sync primitives, task introspection,
+//! thread bridge, process/signal, and entry points are implemented natively.
+//! Networking methods delegate explicitly to the stock asyncio backend.
 
 use std::sync::Arc;
 
@@ -18,7 +19,7 @@ use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
 use super::super::driver::CachedTypes;
-use super::super::primitives::{BlockingTask, Event, Future, Timer};
+use super::super::primitives::{BlockingTask, Event, Future, Lock, Semaphore, Timer};
 use super::cancel_scope::CancelScopeState;
 use super::task_group::TaskGroupCore;
 
@@ -190,74 +191,25 @@ impl ApxSchedulerCore {
     fn create_task_group_core(&self, py: Python<'_>) -> PyResult<TaskGroupCore> {
         TaskGroupCore::new(py)
     }
+
+    /// Create a new Rust-backed async Lock.
+    #[allow(
+        clippy::unused_self,
+        reason = "Python instance method — &self required by protocol"
+    )]
+    fn create_lock_primitive(&self) -> Lock {
+        Lock::new()
+    }
+
+    /// Create a new Rust-backed counting Semaphore.
+    #[allow(
+        clippy::unused_self,
+        reason = "Python instance method — &self required by protocol"
+    )]
+    fn create_semaphore_primitive(&self, permits: u32) -> Semaphore {
+        Semaphore::new(permits)
+    }
 }
-
-// ---------------------------------------------------------------------------
-// Embedded Python glue
-// ---------------------------------------------------------------------------
-
-/// Python source for the `ApxBackend` class that inherits from
-/// `anyio.abc.AsyncBackend` and delegates to the Rust `ApxSchedulerCore`.
-///
-/// CancelScope, TaskGroup, and MemoryObjectStream are implemented natively.
-/// The `__getattr__` fallback handles remaining features (networking, files,
-/// thread integration).
-const BACKEND_GLUE: &str = r#"
-from anyio.abc import AsyncBackend
-
-class ApxBackend(AsyncBackend):
-    def __init__(self, core, cancel_scope_cls, task_group_cls, create_stream_pair):
-        self._core = core
-        self._cancel_scope_cls = cancel_scope_cls
-        self._task_group_cls = task_group_cls
-        self._create_stream_pair = create_stream_pair
-        self._fallback = None
-
-    async def sleep(self, delay):
-        return await self._core.sleep(delay)
-
-    def create_event(self):
-        return self._core.create_event()
-
-    def create_cancel_scope(self, *, deadline=float('inf'), shield=False):
-        state = self._core.create_cancel_scope_state(deadline, shield)
-        return self._cancel_scope_cls(state)
-
-    def create_task_group(self):
-        core = self._core.create_task_group_core()
-        # Create a cancel scope for the task group
-        state = self._core.create_cancel_scope_state()
-        scope = self._cancel_scope_cls(state)
-        return self._task_group_cls(core, scope)
-
-    async def run_sync_in_worker_thread(self, func, *, abandon_on_cancel=False, limiter=None):
-        return await self._core.run_sync_in_worker_thread(func, abandon_on_cancel)
-
-    def create_memory_object_stream(self, max_buffer_size=0, item_type=None):
-        return self._create_stream_pair(max_buffer_size, self._core.create_event)
-
-    async def checkpoint(self):
-        return await self._core.checkpoint()
-
-    def current_time(self):
-        return self._core.current_time()
-
-    def current_token(self):
-        return self._core.current_token()
-
-    @property
-    def cancelled_exception_class(self):
-        return self._core.cancelled_exception_class()
-
-    def _get_fallback(self):
-        if self._fallback is None:
-            from anyio._backends._asyncio import AsyncIOBackend
-            self._fallback = AsyncIOBackend()
-        return self._fallback
-
-    def __getattr__(self, name):
-        return getattr(self._get_fallback(), name)
-"#;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -265,63 +217,17 @@ class ApxBackend(AsyncBackend):
 
 /// Create an `ApxBackend` instance wrapping the given scheduler core.
 ///
-/// Evaluates all Python glue code (cancel scope, task group, memory stream)
-/// and wires them into the backend. The returned object inherits from
+/// Imports `apx._backend` and calls `create_backend(core)` to construct
+/// the Python backend object. The returned object inherits from
 /// `anyio.abc.AsyncBackend` and can be used wherever anyio expects a backend.
 #[expect(
     dead_code,
     reason = "called when anyio backend registration is wired up"
 )]
 pub fn create_backend(py: Python<'_>, core: &Py<ApxSchedulerCore>) -> PyResult<Py<PyAny>> {
-    // Helper: extract a key from a glue dict (Py<PyAny> wrapping a PyDict).
-    fn get_glue_item<'py>(
-        dict: &Bound<'py, pyo3::types::PyDict>,
-        key: &str,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        dict.get_item(key)?.ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("{key} not found in glue"))
-        })
-    }
-
-    // Evaluate cancel scope glue
-    let cs_dict = super::cancel_scope::eval_cancel_scope_glue(py)?
-        .into_bound(py)
-        .cast_into::<pyo3::types::PyDict>()?;
-    let cancel_scope_cls = get_glue_item(&cs_dict, "ApxCancelScope")?;
-
-    // Evaluate task group glue
-    let tg_dict = super::task_group::eval_task_group_glue(py)?
-        .into_bound(py)
-        .cast_into::<pyo3::types::PyDict>()?;
-    let task_group_cls = get_glue_item(&tg_dict, "ApxTaskGroup")?;
-
-    // Evaluate memory stream glue
-    let ms_dict = super::memory_stream::eval_memory_stream_glue(py)?
-        .into_bound(py)
-        .cast_into::<pyo3::types::PyDict>()?;
-    let create_stream_pair = get_glue_item(&ms_dict, "create_memory_object_stream_pair")?;
-
-    // Evaluate the backend glue
-    let code = std::ffi::CString::new(BACKEND_GLUE)?;
-    let locals = pyo3::types::PyDict::new(py);
-    locals.set_item("core", core)?;
-    locals.set_item("cancel_scope_cls", &cancel_scope_cls)?;
-    locals.set_item("task_group_cls", &task_group_cls)?;
-    locals.set_item("create_stream_pair", &create_stream_pair)?;
-    py.run(&code, None, Some(&locals))?;
-
-    let backend_cls = locals.get_item("ApxBackend")?.ok_or_else(|| {
-        pyo3::exceptions::PyRuntimeError::new_err("ApxBackend class not found after eval")
-    })?;
-
-    // Instantiate: ApxBackend(core, cancel_scope_cls, task_group_cls, create_stream_pair)
-    let instance = backend_cls.call1((
-        core,
-        &cancel_scope_cls,
-        &task_group_cls,
-        &create_stream_pair,
-    ))?;
-    Ok(instance.unbind())
+    let factory = py.import(c"apx._backend")?.getattr(c"create_backend")?;
+    let backend = factory.call1((core,))?;
+    Ok(backend.unbind())
 }
 
 // ---------------------------------------------------------------------------
