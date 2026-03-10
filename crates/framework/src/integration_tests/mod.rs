@@ -25,6 +25,7 @@ mod middleware;
 mod params;
 mod responses;
 mod routing;
+mod scheduler_compat;
 
 use crate::bridge::asgi::lifespan::{LifespanGuard, run_lifespan_startup};
 use crate::bridge::dispatch::AppState;
@@ -158,6 +159,8 @@ pub struct TestServer {
     server_handle: Option<tokio::task::JoinHandle<()>>,
     _lifespan_guard: Option<LifespanGuard>,
     _tmp_dir: tempfile::TempDir,
+    /// Per-test event loop (only for `start_with_scheduler`; shared loop tests use `None`).
+    _event_loop: Option<EventLoop>,
 }
 
 impl TestServer {
@@ -280,6 +283,7 @@ impl TestServer {
             server_handle: Some(server_handle),
             _lifespan_guard: lifespan_guard,
             _tmp_dir: tmp_dir,
+            _event_loop: None,
         }
     }
 
@@ -420,6 +424,129 @@ impl TestServer {
             server_handle: Some(server_handle),
             _lifespan_guard: lifespan_guard,
             _tmp_dir: tmp_dir,
+            _event_loop: None,
+        }
+    }
+
+    /// Start a test server with `LoopPolicy::RustNative` (the Rust scheduler).
+    ///
+    /// Creates an isolated event loop per test — does NOT use the shared loop.
+    /// Used by scheduler compatibility tests to find asyncio/anyio
+    /// incompatibilities when the Rust driver replaces asyncio.Task.
+    pub async fn start_with_scheduler(python_app: &str, module_name: &str) -> Self {
+        ensure_tracing();
+        ensure_python_env();
+        with_py(|_| {});
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let app_file = tmp_dir.path().join(format!("{module_name}.py"));
+        std::fs::write(&app_file, python_app).unwrap();
+
+        let tmp_path = tmp_dir.path().to_path_buf();
+        let module = module_name.to_owned();
+
+        let (event_loop, loop_handle, routes) = {
+            let _guard = DISCOVERY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let event_loop =
+                EventLoop::start_with(crate::event_loop::core::LoopPolicy::RustNative).unwrap();
+            let loop_handle = event_loop.handle().unwrap();
+            let routes = with_py(|py| {
+                let sys = py.import("sys").unwrap();
+                let path = sys.getattr("path").unwrap();
+
+                let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+                let site_packages = manifest_dir
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(format!(
+                        ".venv/lib/python{}/site-packages",
+                        python_version()
+                    ));
+                path.call_method1("insert", (0, site_packages.to_str().unwrap()))
+                    .unwrap();
+                path.call_method1("insert", (0, tmp_path.to_str().unwrap()))
+                    .unwrap();
+
+                let modules = sys.getattr("modules").unwrap();
+                let _ = modules.call_method1("pop", (&*module, py.None()));
+
+                let app_module = AppModule::new(&module).unwrap();
+                let (routes, _manifest) = discovery::discover_and_bind(py, &app_module).unwrap();
+                routes
+            });
+            (event_loop, loop_handle, routes)
+        };
+
+        assert!(!routes.is_empty(), "no routes discovered in {module_name}");
+
+        let lifespan_guard = if routes.iter().any(|r| r.fastapi_app.is_some()) {
+            let app_ref = routes
+                .iter()
+                .find_map(|r| r.fastapi_app.as_ref())
+                .unwrap()
+                .inner();
+            match run_lifespan_startup(app_ref, &loop_handle).await {
+                Ok(guard) => Some(guard),
+                Err(e) => {
+                    tracing::debug!(error = %e, "lifespan startup skipped");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 0);
+        let listener = TcpListener::bind(&config).await.unwrap();
+        let addr = listener.local_addr();
+
+        let scope_interns = with_py(crate::bridge::asgi::ScopeInterns::new);
+        let scope_interns = Arc::new(scope_interns);
+        let scope_template = pyo3::Python::attach(|py| {
+            let app_ref = routes.iter().find_map(|r| r.fastapi_app.as_ref());
+            crate::bridge::context_pool::build_scope_template(
+                py,
+                &scope_interns,
+                app_ref.map(|a| a.inner()),
+                addr,
+            )
+            .unwrap()
+        });
+        let receive_template = pyo3::Python::attach(|py| {
+            crate::bridge::context_pool::build_receive_template(py).unwrap()
+        });
+        let app_state = Arc::new(AppState {
+            max_body_limit: BodyLimit::DEFAULT,
+            loop_handle,
+            scope_interns,
+            scope_template: Arc::new(scope_template),
+            receive_template: Arc::new(receive_template),
+        });
+
+        let router = build_router(routes, app_state, addr);
+        let router = wrap_layers(router, None);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_handle = tokio::spawn(async move {
+            listener
+                .serve(router, async {
+                    shutdown_rx.await.ok();
+                })
+                .await
+                .unwrap();
+        });
+
+        Self {
+            base_url: format!("http://127.0.0.1:{}", addr.port()),
+            port: addr.port(),
+            client: reqwest::Client::new(),
+            shutdown_tx: Some(shutdown_tx),
+            server_handle: Some(server_handle),
+            _lifespan_guard: lifespan_guard,
+            _tmp_dir: tmp_dir,
+            _event_loop: Some(event_loop),
         }
     }
 
