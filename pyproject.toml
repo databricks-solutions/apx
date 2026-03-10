@@ -56,6 +56,7 @@ dev = [
     "types-requests>=2.32.4.20250913",
     "types-tqdm>=4.67.0.20250809",
     "types-ujson>=5.10.0.20250822",
+    "uvloop>=0.22.1",
 ]
 
 
