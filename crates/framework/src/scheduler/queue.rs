@@ -147,7 +147,7 @@ impl ReadyQueue {
     reason = "test code uses unwrap/assert for clarity"
 )]
 #[expect(
-    clippy::used_underscore_items
+    clippy::used_underscore_items,
     reason = "test code uses underscore for clarity"
 )]
 mod tests {
