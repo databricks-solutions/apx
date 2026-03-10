@@ -18,13 +18,13 @@ use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
 use super::super::driver::CachedTypes;
-use super::super::primitives::{BlockingTask, RustEvent, RustFuture, Timer};
+use super::super::primitives::{BlockingTask, Event, Future, Timer};
 
 // ---------------------------------------------------------------------------
 // ApxSchedulerCore -- the Rust pyclass backing the AnyIO adapter
 // ---------------------------------------------------------------------------
 
-/// One-shot callable that resolves a [`RustFuture`] when invoked.
+/// One-shot callable that resolves a [`Future`] when invoked.
 ///
 /// Used by [`ApxSchedulerCore::checkpoint`] as the `call_soon` target
 /// to ensure the future resolves on the next event loop iteration.
@@ -89,8 +89,8 @@ impl ApxSchedulerCore {
         clippy::unused_self,
         reason = "Python instance method — &self required by protocol"
     )]
-    fn create_event(&self) -> RustEvent {
-        RustEvent::new()
+    fn create_event(&self) -> Event {
+        Event::new()
     }
 
     /// Return an awaitable that resolves on the next event loop tick.
@@ -102,11 +102,11 @@ impl ApxSchedulerCore {
         clippy::unused_self,
         reason = "Python instance method — &self required by protocol"
     )]
-    fn checkpoint(&self, py: Python<'_>) -> PyResult<Py<RustFuture>> {
+    fn checkpoint(&self, py: Python<'_>) -> PyResult<Py<Future>> {
         let asyncio = py.import(c"asyncio")?;
         match asyncio.call_method0(c"get_running_loop") {
             Ok(event_loop) => {
-                let (future, tx) = RustFuture::with_channel();
+                let (future, tx) = Future::with_channel();
                 let py_future = Py::new(py, future)?;
                 let resolver = Py::new(py, CheckpointResolver { tx: Some(tx) })?;
                 event_loop.call_method1(c"call_soon", (resolver,))?;
@@ -114,7 +114,7 @@ impl ApxSchedulerCore {
             }
             Err(_) => {
                 // No running loop (test/diagnostic context) — resolve immediately.
-                Ok(Py::new(py, RustFuture::resolved(py.None()))?)
+                Ok(Py::new(py, Future::resolved(py.None()))?)
             }
         }
     }

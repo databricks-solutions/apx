@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use pyo3::prelude::*;
 
-use super::primitives::RustFuture;
+use super::primitives::Future;
 
 // ---------------------------------------------------------------------------
 // SchedulerTask
@@ -25,7 +25,7 @@ pub struct SchedulerTask {
     /// to the parent.
     coro_stack: Vec<Py<PyAny>>,
     /// Result future — where the final result goes.
-    pub result_future: Py<RustFuture>,
+    pub result_future: Py<Future>,
     /// Pending value to send to the active coroutine on next step.
     send_value: Option<Py<PyAny>>,
     /// Pending exception to throw into the active coroutine on next step.
@@ -35,9 +35,9 @@ pub struct SchedulerTask {
 }
 
 impl SchedulerTask {
-    /// Wrap a coroutine and create a [`RustFuture`] for its result.
+    /// Wrap a coroutine and create a [`Future`] for its result.
     pub fn new(py: Python<'_>, coro: Py<PyAny>) -> PyResult<Self> {
-        let (fresh_future, _tx) = RustFuture::with_channel();
+        let (fresh_future, _tx) = Future::with_channel();
         let result_future = Py::new(py, fresh_future)?;
 
         Ok(Self {
@@ -47,6 +47,14 @@ impl SchedulerTask {
             throw_error: None,
             cancelled: AtomicBool::new(false),
         })
+    }
+
+    /// Returns the root coroutine (the one originally passed to `new`).
+    pub fn root_coro(&self, py: Python<'_>) -> Py<PyAny> {
+        match self.coro_stack.first() {
+            Some(c) => c.clone_ref(py),
+            None => py.None(),
+        }
     }
 
     /// Returns the top of the coroutine stack (the one currently being driven).
@@ -139,7 +147,7 @@ impl std::fmt::Debug for SchedulerTask {
 impl SchedulerTask {
     /// Python awaitable protocol: return the result future (which itself
     /// implements `__await__` / `__iter__` / `__next__`).
-    fn __await__(&self, py: Python<'_>) -> Py<RustFuture> {
+    fn __await__(&self, py: Python<'_>) -> Py<Future> {
         self.result_future.clone_ref(py)
     }
 
@@ -158,6 +166,159 @@ impl SchedulerTask {
     fn result(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let val = self.result_future.bind(py).call_method0(c"result")?;
         Ok(val.unbind())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TaskProxy — lightweight asyncio.Task-compatible proxy
+// ---------------------------------------------------------------------------
+
+/// Lightweight proxy installed as `asyncio.current_task()` during driving.
+///
+/// Implements enough of the `asyncio.Task` interface for Starlette's
+/// `BaseHTTPMiddleware`, anyio's asyncio backend, and other middleware
+/// that inspect the current task.
+#[pyclass(module = "apx._core", weakref, freelist = 64)]
+pub struct TaskProxy {
+    result_future: Py<Future>,
+    loop_ref: Py<PyAny>,
+    coro: Py<PyAny>,
+    cancelled: bool,
+    name: String,
+}
+
+impl TaskProxy {
+    /// Create a new proxy wrapping the given result future and event loop.
+    pub fn new(result_future: Py<Future>, loop_ref: Py<PyAny>, coro: Py<PyAny>) -> Self {
+        Self {
+            result_future,
+            loop_ref,
+            coro,
+            cancelled: false,
+            name: "TaskProxy".to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Debug for TaskProxy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskProxy")
+            .field("name", &self.name)
+            .field("cancelled", &self.cancelled)
+            .finish()
+    }
+}
+
+#[pymethods]
+impl TaskProxy {
+    /// Register a done callback (delegates to the inner `Future`).
+    #[pyo3(signature = (callback, *, context=None))]
+    fn add_done_callback(
+        &self,
+        py: Python<'_>,
+        callback: Py<PyAny>,
+        context: Option<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let _ = context; // accepted for asyncio.Task API compat
+        self.result_future
+            .call_method1(py, c"add_done_callback", (callback,))?;
+        Ok(())
+    }
+
+    /// Remove a done callback (stub — returns 0 removed).
+    #[allow(clippy::unused_self, reason = "asyncio.Task API compatibility")]
+    fn remove_done_callback(&self, _callback: Py<PyAny>) -> i32 {
+        0
+    }
+
+    /// Request cancellation of the task.
+    #[pyo3(signature = (msg=None))]
+    fn cancel(&mut self, msg: Option<Py<PyAny>>) -> bool {
+        let _ = msg;
+        self.cancelled = true;
+        true
+    }
+
+    /// Check whether the task has been cancelled.
+    fn cancelled(&self) -> bool {
+        self.cancelled
+    }
+
+    /// Check whether the task is done.
+    fn done(&self, py: Python<'_>) -> bool {
+        self.result_future.borrow(py).done()
+    }
+
+    /// Get the result (delegates to the inner `Future`).
+    fn result(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.result_future.borrow(py).get_result(py)
+    }
+
+    /// Get the exception if the task failed, else `None`.
+    fn exception(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.result_future.borrow(py).exception(py)
+    }
+
+    /// Get the task name.
+    fn get_name(&self) -> &str {
+        &self.name
+    }
+
+    /// Set the task name.
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    /// The event loop associated with this task.
+    #[getter]
+    fn _loop(&self, py: Python<'_>) -> Py<PyAny> {
+        self.loop_ref.clone_ref(py)
+    }
+
+    // -- asyncio.Task internal attributes used by anyio's asyncio backend --
+
+    /// Internal cancel flag (anyio reads this directly).
+    #[getter]
+    fn _must_cancel(&self) -> bool {
+        self.cancelled
+    }
+
+    /// Internal waiter (anyio checks this for cancel propagation).
+    #[getter]
+    #[allow(clippy::unused_self, reason = "Python getter protocol requires &self")]
+    fn _fut_waiter(&self) -> Option<Py<PyAny>> {
+        None
+    }
+
+    /// Internal callbacks list (anyio reads this).
+    #[getter]
+    #[allow(clippy::unused_self, reason = "Python getter protocol requires &self")]
+    fn _callbacks(&self) -> Vec<Py<PyAny>> {
+        Vec::new()
+    }
+
+    /// Number of pending cancel requests (Python 3.11+).
+    fn cancelling(&self) -> i32 {
+        i32::from(self.cancelled)
+    }
+
+    /// Decrement cancel counter (Python 3.11+).
+    fn uncancel(&mut self) -> i32 {
+        self.cancelled = false;
+        0
+    }
+
+    /// Return the wrapped coroutine.
+    fn get_coro(&self, py: Python<'_>) -> Py<PyAny> {
+        self.coro.clone_ref(py)
+    }
+
+    /// Return the task's context (returns current context).
+    #[allow(clippy::unused_self, reason = "Python method protocol requires &self")]
+    fn get_context(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let contextvars = py.import(c"contextvars")?;
+        let ctx = contextvars.call_method0(c"copy_context")?;
+        Ok(ctx.unbind())
     }
 }
 

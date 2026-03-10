@@ -9,14 +9,14 @@
 //! | Original              | Replacement            |
 //! |-----------------------|------------------------|
 //! | `asyncio.sleep(d)`    | [`shim_sleep`] (returns [`Timer`]) |
-//! | `asyncio.Event()`     | [`shim_event`] (returns [`RustEvent`]) |
+//! | `asyncio.Event()`     | [`shim_event`] (returns [`Event`]) |
 //!
 //! Loop-level method patching is intentionally deferred to the full scheduler
 //! integration phase -- only module-level functions are shimmed here.
 
 use pyo3::prelude::*;
 
-use super::super::primitives::{RustEvent, Timer};
+use super::super::primitives::{Event, Timer};
 
 // ---------------------------------------------------------------------------
 // Replacement functions
@@ -36,11 +36,11 @@ fn shim_sleep(py: Python<'_>, delay: f64, result: Option<Py<PyAny>>) -> PyResult
 
 /// Replacement for `asyncio.Event()`.
 ///
-/// Returns a [`RustEvent`] backed by `tokio::sync::Notify` instead of the
+/// Returns a [`Event`] backed by `tokio::sync::Notify` instead of the
 /// stock asyncio event implementation.
 #[pyfunction]
-fn shim_event() -> RustEvent {
-    RustEvent::new()
+fn shim_event() -> Event {
+    Event::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +162,7 @@ mod tests {
     fn shim_sleep_zero_delay() {
         crate::with_py(|py| {
             let timer = shim_sleep(py, 0.0, None).unwrap();
-            // Zero-delay timer wraps a resolved RustFuture.
+            // Zero-delay timer wraps a resolved Future.
             assert!(timer.done(py));
         });
     }

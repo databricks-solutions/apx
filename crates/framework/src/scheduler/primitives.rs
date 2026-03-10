@@ -1,15 +1,15 @@
 //! Core awaitable primitives for the Rust-driven scheduler.
 //!
-//! [`RustFuture`] is the foundational awaitable — it implements the Python
+//! [`Future`] is the foundational awaitable — it implements the Python
 //! awaitable protocol so that both asyncio and our Rust coroutine driver
 //! can drive it.
 //!
 //! Additional primitives:
-//! - [`RustEvent`] — async event flag (wraps `tokio::sync::Notify`)
+//! - [`Event`] — async event flag (wraps `tokio::sync::Notify`)
 //! - [`Timer`] — deadline-based awaitable timer
 //! - [`CancelToken`] — structured cancellation flag
-//! - [`RustLock`] — async mutex (wraps `tokio::sync::Mutex`)
-//! - [`RustSemaphore`] — counting semaphore (wraps `tokio::sync::Semaphore`)
+//! - [`Lock`] — async mutex (wraps `tokio::sync::Mutex`)
+//! - [`Semaphore`] — counting semaphore (wraps `tokio::sync::Semaphore`)
 //! - [`BlockingTask`] — awaitable for work spawned on a blocking thread
 //! - [`IoHandle`] — stub for future I/O integration
 
@@ -24,15 +24,15 @@ use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
 // ---------------------------------------------------------------------------
-// RustFuture
+// Future
 // ---------------------------------------------------------------------------
 
 /// A Rust-backed Python awaitable.
 ///
 /// Implements the Python awaitable protocol (`__await__` + `__next__`) and
-/// can be resolved from Rust via [`set_result`](RustFuture::set_result) or
-/// [`set_exception`](RustFuture::set_exception), or through a
-/// [`oneshot::Sender`] returned by [`RustFuture::with_channel`].
+/// can be resolved from Rust via [`set_result`](Future::set_result) or
+/// [`set_exception`](Future::set_exception), or through a
+/// [`oneshot::Sender`] returned by [`Future::with_channel`].
 ///
 /// # Awaitable protocol
 ///
@@ -41,7 +41,7 @@ use tokio::sync::oneshot;
 /// `__next__` raises `StopIteration(value)`. Until then it yields `self`
 /// so the Rust scheduler can classify and suspend on the future.
 #[pyclass(module = "apx._core", weakref)]
-pub struct RustFuture {
+pub struct Future {
     /// Oneshot receiver for results arriving from Rust.
     rx: Option<oneshot::Receiver<Py<PyAny>>>,
     /// Stored result (once resolved).
@@ -50,8 +50,8 @@ pub struct RustFuture {
     wakers: Vec<Py<PyAny>>,
 }
 
-impl RustFuture {
-    /// Create a `RustFuture` paired with a [`oneshot::Sender`] for resolution.
+impl Future {
+    /// Create a `Future` paired with a [`oneshot::Sender`] for resolution.
     ///
     /// The sender can be moved to any thread; sending a value through it
     /// will resolve the future on the next `__next__` poll.
@@ -65,7 +65,7 @@ impl RustFuture {
         (future, tx)
     }
 
-    /// Create a `RustFuture` that is already resolved with the given value.
+    /// Create a `Future` that is already resolved with the given value.
     pub fn resolved(value: Py<PyAny>) -> Self {
         Self {
             rx: None,
@@ -79,7 +79,7 @@ impl RustFuture {
         for cb in self.wakers.drain(..) {
             // Best-effort: swallow exceptions from callbacks (matches asyncio behaviour).
             if let Err(e) = cb.call1(py, (slf,)) {
-                tracing::warn!(error = %e, "RustFuture done-callback raised");
+                tracing::warn!(error = %e, "Future done-callback raised");
             }
         }
     }
@@ -93,9 +93,9 @@ impl RustFuture {
     }
 }
 
-impl std::fmt::Debug for RustFuture {
+impl std::fmt::Debug for Future {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RustFuture")
+        f.debug_struct("Future")
             .field("done", &self.inner_result.is_some())
             .field("wakers", &self.wakers.len())
             .finish()
@@ -103,7 +103,7 @@ impl std::fmt::Debug for RustFuture {
 }
 
 #[pymethods]
-impl RustFuture {
+impl Future {
     /// Python awaitable protocol: return self as the iterator.
     fn __await__(slf: Py<Self>) -> Py<Self> {
         slf
@@ -119,7 +119,7 @@ impl RustFuture {
     /// - If the result is ready, raises `StopIteration(value)`.
     /// - If an exception was stored, re-raises it.
     /// - Otherwise yields `self` so the Rust scheduler can classify it as
-    ///   `RustFuture` and suspend (attach a done-callback) instead of
+    ///   `Future` and suspend (attach a done-callback) instead of
     ///   busy-looping on `YieldNone`.
     fn __next__(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let mut this = slf.borrow_mut(py);
@@ -149,7 +149,7 @@ impl RustFuture {
                 Err(oneshot::error::TryRecvError::Closed) => {
                     // Sender dropped without sending — treat as cancellation.
                     let err = pyo3::exceptions::PyRuntimeError::new_err(
-                        "RustFuture: sender dropped without producing a result",
+                        "Future: sender dropped without producing a result",
                     );
                     this.inner_result = Some(Err(err.clone_ref(py)));
                     this.rx = None;
@@ -161,7 +161,7 @@ impl RustFuture {
         } else {
             // No channel and no result — should not happen, but handle gracefully.
             Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "RustFuture: no channel and no result",
+                "Future: no channel and no result",
             ))
         }
     }
@@ -174,7 +174,7 @@ impl RustFuture {
             let mut this = slf.borrow_mut(py);
             if this.inner_result.is_some() {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "RustFuture: result already set",
+                    "Future: result already set",
                 ));
             }
             this.inner_result = Some(Ok(value));
@@ -193,7 +193,7 @@ impl RustFuture {
             let mut this = slf.borrow_mut(py);
             if this.inner_result.is_some() {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "RustFuture: result already set",
+                    "Future: result already set",
                 ));
             }
             let err = PyErr::from_value(exc.into_bound(py));
@@ -206,12 +206,12 @@ impl RustFuture {
 
     /// Get the result if available. Raises if not yet resolved or if an exception was stored.
     #[pyo3(name = "result")]
-    fn get_result(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    pub(crate) fn get_result(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match &self.inner_result {
             Some(Ok(value)) => Ok(value.clone_ref(py)),
             Some(Err(err)) => Err(err.clone_ref(py)),
             None => Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "RustFuture: result not yet available",
+                "Future: result not yet available",
             )),
         }
     }
@@ -219,6 +219,14 @@ impl RustFuture {
     /// Check whether the future has been resolved.
     pub(crate) fn done(&self) -> bool {
         self.inner_result.is_some()
+    }
+
+    /// Return the stored exception, if the future resolved with an error.
+    pub(crate) fn exception(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        match &self.inner_result {
+            Some(Err(err)) => Some(err.value(py).clone().unbind().into()),
+            _ => None,
+        }
     }
 
     /// Register a callback to be invoked when the future resolves.
@@ -229,7 +237,7 @@ impl RustFuture {
         if done {
             // Already done — fire immediately.
             if let Err(e) = callback.call1(py, (&slf,)) {
-                tracing::warn!(error = %e, "RustFuture done-callback raised");
+                tracing::warn!(error = %e, "Future done-callback raised");
             }
         } else {
             slf.borrow_mut(py).wakers.push(callback);
@@ -239,32 +247,32 @@ impl RustFuture {
 }
 
 // ---------------------------------------------------------------------------
-// RustEvent — async event flag (wraps Arc<tokio::sync::Notify>)
+// Event — async event flag (wraps Arc<tokio::sync::Notify>)
 // ---------------------------------------------------------------------------
 
 /// A Rust-backed async event flag, analogous to `asyncio.Event`.
 ///
-/// `wait()` returns a [`RustEventWaiter`] that wraps a [`RustFuture`].
+/// `wait()` returns a [`EventWaiter`] that wraps a [`Future`].
 /// When `set()` is called, all pending waiter futures are resolved,
 /// causing the Rust scheduler to resume waiting coroutines via
 /// done-callbacks instead of busy-polling.
 #[pyclass(module = "apx._core")]
-pub struct RustEvent {
+pub struct Event {
     is_set: AtomicBool,
     /// Pending waiter senders — resolved when `set()` is called.
     pending: std::sync::Mutex<Vec<oneshot::Sender<Py<PyAny>>>>,
 }
 
-impl std::fmt::Debug for RustEvent {
+impl std::fmt::Debug for Event {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RustEvent")
+        f.debug_struct("Event")
             .field("set", &self.is_set.load(Ordering::Relaxed))
             .finish()
     }
 }
 
 #[pymethods]
-impl RustEvent {
+impl Event {
     #[new]
     pub(crate) fn new() -> Self {
         Self {
@@ -298,12 +306,12 @@ impl RustEvent {
     }
 
     /// Return an awaitable that resolves when the event is set.
-    fn wait(&self, py: Python<'_>) -> PyResult<RustEventWaiter> {
+    fn wait(&self, py: Python<'_>) -> PyResult<EventWaiter> {
         if self.is_set.load(Ordering::Acquire) {
-            let inner = Py::new(py, RustFuture::resolved(py.None()))?;
-            return Ok(RustEventWaiter { inner });
+            let inner = Py::new(py, Future::resolved(py.None()))?;
+            return Ok(EventWaiter { inner });
         }
-        let (future, tx) = RustFuture::with_channel();
+        let (future, tx) = Future::with_channel();
         let inner = Py::new(py, future)?;
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         // Double-check after acquiring lock — event may have been set.
@@ -313,29 +321,29 @@ impl RustEvent {
         } else {
             pending.push(tx);
         }
-        Ok(RustEventWaiter { inner })
+        Ok(EventWaiter { inner })
     }
 }
 
-/// Awaitable returned by [`RustEvent::wait`].
+/// Awaitable returned by [`Event::wait`].
 ///
-/// Wraps a [`RustFuture`] that resolves when the parent event is set.
+/// Wraps a [`Future`] that resolves when the parent event is set.
 /// The scheduler can classify and suspend on the inner future properly.
 #[pyclass(module = "apx._core")]
-pub struct RustEventWaiter {
-    inner: Py<RustFuture>,
+pub struct EventWaiter {
+    inner: Py<Future>,
 }
 
-impl std::fmt::Debug for RustEventWaiter {
+impl std::fmt::Debug for EventWaiter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RustEventWaiter").finish_non_exhaustive()
+        f.debug_struct("EventWaiter").finish_non_exhaustive()
     }
 }
 
 #[pymethods]
-impl RustEventWaiter {
-    /// Python awaitable protocol: delegate to the inner RustFuture.
-    fn __await__(&self, py: Python<'_>) -> Py<RustFuture> {
+impl EventWaiter {
+    /// Python awaitable protocol: delegate to the inner Future.
+    fn __await__(&self, py: Python<'_>) -> Py<Future> {
         self.inner.clone_ref(py)
     }
 }
@@ -346,15 +354,15 @@ impl RustEventWaiter {
 
 /// A Rust-backed awaitable timer.
 ///
-/// Wraps a [`RustFuture`] that is resolved after the specified delay.
+/// Wraps a [`Future`] that is resolved after the specified delay.
 /// For zero-delay timers, the future is resolved immediately.
 /// For non-zero delays, a background thread sleeps and resolves the future.
 ///
-/// The awaitable protocol delegates to the inner `RustFuture`, so the
+/// The awaitable protocol delegates to the inner `Future`, so the
 /// Rust scheduler can classify and suspend on it properly.
 #[pyclass(module = "apx._core")]
 pub struct Timer {
-    inner: Py<RustFuture>,
+    inner: Py<Future>,
 }
 
 impl std::fmt::Debug for Timer {
@@ -369,9 +377,9 @@ impl Timer {
     #[new]
     pub(crate) fn new(py: Python<'_>, delay_secs: f64) -> PyResult<Self> {
         let inner = if delay_secs <= 0.0 {
-            Py::new(py, RustFuture::resolved(py.None()))?
+            Py::new(py, Future::resolved(py.None()))?
         } else {
-            let (future, tx) = RustFuture::with_channel();
+            let (future, tx) = Future::with_channel();
             let inner = Py::new(py, future)?;
             let duration = std::time::Duration::from_secs_f64(delay_secs);
 
@@ -398,8 +406,8 @@ impl Timer {
         Ok(Self { inner })
     }
 
-    /// Python awaitable protocol: delegate to the inner RustFuture.
-    fn __await__(&self, py: Python<'_>) -> Py<RustFuture> {
+    /// Python awaitable protocol: delegate to the inner Future.
+    fn __await__(&self, py: Python<'_>) -> Py<Future> {
         self.inner.clone_ref(py)
     }
 
@@ -462,21 +470,21 @@ impl CancelToken {
 }
 
 // ---------------------------------------------------------------------------
-// RustLock — async mutex (wraps Arc<tokio::sync::Mutex<()>>)
+// Lock — async mutex (wraps Arc<tokio::sync::Mutex<()>>)
 // ---------------------------------------------------------------------------
 
 /// A Rust-backed async mutex, analogous to `asyncio.Lock`.
 ///
 /// Uses `tokio::sync::Mutex` internally. The `acquire()` method returns an
-/// awaitable [`RustLockGuardFuture`] that resolves to a [`RustLockGuard`].
+/// awaitable [`LockGuardFuture`] that resolves to a [`LockGuard`].
 #[derive(Debug)]
 #[pyclass(module = "apx._core")]
-pub struct RustLock {
+pub struct Lock {
     inner: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[pymethods]
-impl RustLock {
+impl Lock {
     #[new]
     fn new() -> Self {
         Self {
@@ -484,10 +492,10 @@ impl RustLock {
         }
     }
 
-    /// Return an awaitable that resolves to a [`RustLockGuard`] once acquired.
-    fn acquire(slf: Py<Self>, py: Python<'_>) -> RustLockGuardFuture {
+    /// Return an awaitable that resolves to a [`LockGuard`] once acquired.
+    fn acquire(slf: Py<Self>, py: Python<'_>) -> LockGuardFuture {
         let this = slf.borrow(py);
-        RustLockGuardFuture {
+        LockGuardFuture {
             mutex: Arc::clone(&this.inner),
         }
     }
@@ -498,18 +506,18 @@ impl RustLock {
     }
 }
 
-/// Awaitable returned by [`RustLock::acquire`].
+/// Awaitable returned by [`Lock::acquire`].
 ///
 /// Implements the Python awaitable protocol: tries `try_lock` on each poll.
-/// When acquired, raises `StopIteration(guard)` with a [`RustLockGuard`].
+/// When acquired, raises `StopIteration(guard)` with a [`LockGuard`].
 #[derive(Debug)]
 #[pyclass(module = "apx._core")]
-pub struct RustLockGuardFuture {
+pub struct LockGuardFuture {
     mutex: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[pymethods]
-impl RustLockGuardFuture {
+impl LockGuardFuture {
     fn __await__(slf: Py<Self>) -> Py<Self> {
         slf
     }
@@ -521,7 +529,7 @@ impl RustLockGuardFuture {
     fn __next__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match Arc::clone(&self.mutex).try_lock_owned() {
             Ok(guard) => {
-                let py_guard = Py::new(py, RustLockGuard { guard: Some(guard) })?;
+                let py_guard = Py::new(py, LockGuard { guard: Some(guard) })?;
                 Err(pyo3::exceptions::PyStopIteration::new_err((py_guard,)))
             }
             Err(_) => Ok(py.None()),
@@ -529,25 +537,25 @@ impl RustLockGuardFuture {
     }
 }
 
-/// RAII guard for a [`RustLock`].
+/// RAII guard for a [`Lock`].
 ///
-/// Dropping or calling [`release`](RustLockGuard::release) releases the lock.
+/// Dropping or calling [`release`](LockGuard::release) releases the lock.
 /// Also supports the context-manager protocol (`with guard: ...`).
 #[pyclass(module = "apx._core")]
-pub struct RustLockGuard {
+pub struct LockGuard {
     guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
-impl std::fmt::Debug for RustLockGuard {
+impl std::fmt::Debug for LockGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RustLockGuard")
+        f.debug_struct("LockGuard")
             .field("held", &self.guard.is_some())
             .finish()
     }
 }
 
 #[pymethods]
-impl RustLockGuard {
+impl LockGuard {
     /// Release the lock explicitly.
     fn release(&mut self) {
         self.guard.take();
@@ -571,22 +579,22 @@ impl RustLockGuard {
 }
 
 // ---------------------------------------------------------------------------
-// RustSemaphore — counting semaphore (wraps Arc<tokio::sync::Semaphore>)
+// Semaphore — counting semaphore (wraps Arc<tokio::sync::Semaphore>)
 // ---------------------------------------------------------------------------
 
 /// A Rust-backed counting semaphore, analogous to `asyncio.Semaphore`.
 ///
 /// Uses `tokio::sync::Semaphore` internally. The `acquire()` method returns
-/// an awaitable [`RustSemaphoreAcquire`] that resolves to a
-/// [`RustSemaphorePermit`].
+/// an awaitable [`SemaphoreAcquire`] that resolves to a
+/// [`SemaphorePermit`].
 #[derive(Debug)]
 #[pyclass(module = "apx._core")]
-pub struct RustSemaphore {
+pub struct Semaphore {
     inner: Arc<tokio::sync::Semaphore>,
 }
 
 #[pymethods]
-impl RustSemaphore {
+impl Semaphore {
     #[new]
     fn new(permits: u32) -> Self {
         Self {
@@ -594,10 +602,10 @@ impl RustSemaphore {
         }
     }
 
-    /// Return an awaitable that resolves to a [`RustSemaphorePermit`].
-    fn acquire(slf: Py<Self>, py: Python<'_>) -> RustSemaphoreAcquire {
+    /// Return an awaitable that resolves to a [`SemaphorePermit`].
+    fn acquire(slf: Py<Self>, py: Python<'_>) -> SemaphoreAcquire {
         let this = slf.borrow(py);
-        RustSemaphoreAcquire {
+        SemaphoreAcquire {
             semaphore: Arc::clone(&this.inner),
         }
     }
@@ -608,18 +616,18 @@ impl RustSemaphore {
     }
 }
 
-/// Awaitable returned by [`RustSemaphore::acquire`].
+/// Awaitable returned by [`Semaphore::acquire`].
 ///
 /// Implements the Python awaitable protocol: tries `try_acquire_owned` on
 /// each poll. When acquired, raises `StopIteration(permit)`.
 #[derive(Debug)]
 #[pyclass(module = "apx._core")]
-pub struct RustSemaphoreAcquire {
+pub struct SemaphoreAcquire {
     semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 #[pymethods]
-impl RustSemaphoreAcquire {
+impl SemaphoreAcquire {
     fn __await__(slf: Py<Self>) -> Py<Self> {
         slf
     }
@@ -633,7 +641,7 @@ impl RustSemaphoreAcquire {
             Ok(permit) => {
                 let py_permit = Py::new(
                     py,
-                    RustSemaphorePermit {
+                    SemaphorePermit {
                         permit: Some(permit),
                     },
                 )?;
@@ -644,25 +652,25 @@ impl RustSemaphoreAcquire {
     }
 }
 
-/// RAII permit for a [`RustSemaphore`].
+/// RAII permit for a [`Semaphore`].
 ///
-/// Dropping or calling [`release`](RustSemaphorePermit::release) returns the
+/// Dropping or calling [`release`](SemaphorePermit::release) returns the
 /// permit to the semaphore.
 #[pyclass(module = "apx._core")]
-pub struct RustSemaphorePermit {
+pub struct SemaphorePermit {
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
-impl std::fmt::Debug for RustSemaphorePermit {
+impl std::fmt::Debug for SemaphorePermit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RustSemaphorePermit")
+        f.debug_struct("SemaphorePermit")
             .field("held", &self.permit.is_some())
             .finish()
     }
 }
 
 #[pymethods]
-impl RustSemaphorePermit {
+impl SemaphorePermit {
     /// Release the permit explicitly (returns it to the semaphore).
     fn release(&mut self) {
         self.permit.take();
@@ -829,11 +837,11 @@ impl IoHandle {
 mod tests {
     use super::*;
 
-    // -- RustFuture tests ---------------------------------------------------
+    // -- Future tests ---------------------------------------------------
 
     #[test]
     fn with_channel_creates_pair() {
-        let (future, _tx) = RustFuture::with_channel();
+        let (future, _tx) = Future::with_channel();
         assert!(!future.done());
         assert!(future.rx.is_some());
         assert!(future.inner_result.is_none());
@@ -842,7 +850,7 @@ mod tests {
     #[test]
     fn resolved_is_immediately_done() {
         crate::with_py(|py| {
-            let future = RustFuture::resolved(py.None());
+            let future = Future::resolved(py.None());
             assert!(future.done());
             assert!(future.rx.is_none());
         });
@@ -850,9 +858,9 @@ mod tests {
 
     #[test]
     fn debug_format() {
-        let (future, _tx) = RustFuture::with_channel();
+        let (future, _tx) = Future::with_channel();
         let dbg = format!("{future:?}");
-        assert!(dbg.contains("RustFuture"));
+        assert!(dbg.contains("Future"));
         assert!(dbg.contains("done: false"));
         assert!(dbg.contains("wakers: 0"));
     }
@@ -860,24 +868,24 @@ mod tests {
     #[test]
     fn double_set_result_errors() {
         crate::with_py(|py| {
-            let future = RustFuture::resolved(py.None());
+            let future = Future::resolved(py.None());
             let slf = Py::new(py, future).unwrap();
-            let err = RustFuture::set_result(slf, py, py.None());
+            let err = Future::set_result(slf, py, py.None());
             assert!(err.is_err());
         });
     }
 
-    // -- RustEvent tests ----------------------------------------------------
+    // -- Event tests ----------------------------------------------------
 
     #[test]
     fn event_starts_unset() {
-        let event = RustEvent::new();
+        let event = Event::new();
         assert!(!event.is_set());
     }
 
     #[test]
     fn event_set_and_clear() {
-        let event = RustEvent::new();
+        let event = Event::new();
         event.set();
         assert!(event.is_set());
         event.clear();
@@ -890,7 +898,7 @@ mod tests {
     fn timer_zero_delay_fires_immediately() {
         crate::with_py(|py| {
             let timer = Timer::new(py, 0.0).unwrap();
-            // Zero-delay timer wraps a resolved RustFuture.
+            // Zero-delay timer wraps a resolved Future.
             assert!(timer.done(py));
         });
     }
@@ -928,19 +936,19 @@ mod tests {
         });
     }
 
-    // -- RustLock tests -----------------------------------------------------
+    // -- Lock tests -----------------------------------------------------
 
     #[test]
     fn lock_starts_unlocked() {
-        let lock = RustLock::new();
+        let lock = Lock::new();
         assert!(!lock.locked());
     }
 
-    // -- RustSemaphore tests ------------------------------------------------
+    // -- Semaphore tests ------------------------------------------------
 
     #[test]
     fn semaphore_available_permits() {
-        let sem = RustSemaphore::new(5);
+        let sem = Semaphore::new(5);
         assert_eq!(sem.available_permits(), 5);
     }
 

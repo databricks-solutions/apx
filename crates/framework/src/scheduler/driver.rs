@@ -14,8 +14,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyType;
 use tokio::sync::oneshot;
 
-use super::primitives::{RustEventWaiter, RustFuture};
-use super::task::SchedulerTask;
+use super::primitives::{EventWaiter, Future};
+use super::task::{SchedulerTask, TaskProxy};
 use crate::error::AppError;
 
 // ---------------------------------------------------------------------------
@@ -47,10 +47,10 @@ pub struct CachedTypes {
         )
     )]
     pub generator_type: Py<PyType>,
-    /// Our `RustFuture` type object.
-    pub rust_future_type: Py<PyType>,
-    /// Our `RustEventWaiter` type object.
-    pub rust_event_waiter_type: Py<PyType>,
+    /// Our `Future` type object.
+    pub future_type: Py<PyType>,
+    /// Our `EventWaiter` type object.
+    pub event_waiter_type: Py<PyType>,
     /// `asyncio.CancelledError` — cached for error creation.
     pub cancelled_error_cls: Py<PyType>,
 }
@@ -78,8 +78,8 @@ impl CachedTypes {
                 .getattr(c"GeneratorType")?
                 .cast_into::<PyType>()?
                 .unbind(),
-            rust_future_type: RustFuture::type_object(py).unbind(),
-            rust_event_waiter_type: RustEventWaiter::type_object(py).unbind(),
+            future_type: Future::type_object(py).unbind(),
+            event_waiter_type: EventWaiter::type_object(py).unbind(),
             cancelled_error_cls: asyncio
                 .getattr(c"CancelledError")?
                 .cast_into::<PyType>()?
@@ -149,10 +149,10 @@ pub fn step_throw(py: Python<'_>, coro: &Bound<'_, PyAny>, err: PyErr) -> StepRe
 
 /// Classification of a yielded object from a coroutine.
 pub enum AwaitableKind {
-    /// Our own `RustFuture` — poll directly via `__next__`.
-    RustFuture,
-    /// Our own `RustEventWaiter` — check event flag.
-    RustEventWaiter,
+    /// Our own `Future` — poll directly via `__next__`.
+    Future,
+    /// Our own `EventWaiter` — check event flag.
+    EventWaiter,
     /// `asyncio.Future` (not Task) — attach done callback.
     AsyncioFuture,
     /// A coroutine object — push onto coroutine stack.
@@ -179,16 +179,16 @@ pub fn classify(py: Python<'_>, yielded: &Bound<'_, PyAny>, types: &CachedTypes)
 
     // Check our own types first (fast isinstance checks).
     if yielded
-        .is_instance(types.rust_future_type.bind(py).as_any())
+        .is_instance(types.future_type.bind(py).as_any())
         .unwrap_or(false)
     {
-        return AwaitableKind::RustFuture;
+        return AwaitableKind::Future;
     }
     if yielded
-        .is_instance(types.rust_event_waiter_type.bind(py).as_any())
+        .is_instance(types.event_waiter_type.bind(py).as_any())
         .unwrap_or(false)
     {
-        return AwaitableKind::RustEventWaiter;
+        return AwaitableKind::EventWaiter;
     }
 
     // Check for coroutine (sub-coroutine yield).
@@ -220,9 +220,9 @@ pub enum DriveResult {
     Completed(Py<PyAny>),
     /// Task raised an exception.
     Error(PyErr),
-    /// Waiting on a `RustFuture` — resume when it resolves.
-    WaitingOnRustFuture(Py<PyAny>),
-    /// Waiting on a `RustEventWaiter` — resume when event is set.
+    /// Waiting on a `Future` — resume when it resolves.
+    WaitingOnFuture(Py<PyAny>),
+    /// Waiting on a `EventWaiter` — resume when event is set.
     WaitingOnEvent(Py<PyAny>),
     /// Waiting on an `asyncio.Future` — attach done callback.
     WaitingOnAsyncioFuture(Py<PyAny>),
@@ -265,10 +265,10 @@ pub fn drive_task(py: Python<'_>, task: &mut SchedulerTask, types: &CachedTypes)
                 let kind = classify(py, obj.bind(py), types);
                 match kind {
                     AwaitableKind::YieldNone => continue, // immediate reschedule
-                    AwaitableKind::RustFuture => {
-                        return DriveResult::WaitingOnRustFuture(obj);
+                    AwaitableKind::Future => {
+                        return DriveResult::WaitingOnFuture(obj);
                     }
-                    AwaitableKind::RustEventWaiter => {
+                    AwaitableKind::EventWaiter => {
                         return DriveResult::WaitingOnEvent(obj);
                     }
                     AwaitableKind::Coroutine => {
@@ -322,6 +322,7 @@ pub struct ResumeCallback {
     result_tx: Option<oneshot::Sender<Result<Py<PyAny>, AppError>>>,
     call_soon: Py<PyAny>,
     ensure_future: Py<PyAny>,
+    proxy: Option<Py<TaskProxy>>,
 }
 
 impl std::fmt::Debug for ResumeCallback {
@@ -353,8 +354,12 @@ impl ResumeCallback {
             }
         }
 
+        // Reinstall the proxy as current_task so resumed middleware sees it.
+        let current_tasks = install_proxy(py, self.proxy.as_ref());
+
         let drive_result = drive_task(py, &mut task, &self.cached_types);
-        handle_drive_result(
+        let proxy = self.proxy.take();
+        let result = handle_drive_result(
             py,
             task,
             drive_result,
@@ -362,7 +367,11 @@ impl ResumeCallback {
             &self.cached_types,
             &self.call_soon,
             &self.ensure_future,
-        )
+            proxy,
+        );
+
+        clear_current_task(py, current_tasks);
+        result
     }
 }
 
@@ -373,7 +382,7 @@ impl ResumeCallback {
 /// Extract the result from a resolved Python future.
 ///
 /// Handles both `asyncio.Future` (checks `cancelled()` first) and
-/// `RustFuture` (which has no `cancelled` method — the attribute error
+/// `Future` (which has no `cancelled` method — the attribute error
 /// is silently ignored).
 fn extract_future_result(py: Python<'_>, future: &Bound<'_, PyAny>) -> Result<Py<PyAny>, PyErr> {
     if let Ok(cancelled) = future.call_method0(c"cancelled")
@@ -394,6 +403,10 @@ fn extract_future_result(py: Python<'_>, future: &Bound<'_, PyAny>) -> Result<Py
 /// Either completes the task (sending through `result_tx`), or creates a
 /// [`ResumeCallback`] and attaches it to the awaitable so the task is
 /// re-driven when the awaitable resolves.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "proxy added for current_task propagation; all params are co-dependent"
+)]
 fn handle_drive_result(
     py: Python<'_>,
     task: SchedulerTask,
@@ -402,6 +415,7 @@ fn handle_drive_result(
     cached_types: &Arc<CachedTypes>,
     call_soon: &Py<PyAny>,
     ensure_future: &Py<PyAny>,
+    proxy: Option<Py<TaskProxy>>,
 ) -> PyResult<()> {
     match drive_result {
         DriveResult::Completed(value) => {
@@ -412,7 +426,7 @@ fn handle_drive_result(
             let _ = result_tx.send(Err(AppError::Internal(err.to_string())));
             Ok(())
         }
-        DriveResult::WaitingOnRustFuture(fut) => handle_rust_future(
+        DriveResult::WaitingOnFuture(fut) => handle_rust_future(
             py,
             task,
             fut,
@@ -420,31 +434,57 @@ fn handle_drive_result(
             cached_types,
             call_soon,
             ensure_future,
+            proxy,
         ),
         DriveResult::WaitingOnEvent(_waiter) => {
-            let cb =
-                make_resume_callback(py, task, result_tx, cached_types, call_soon, ensure_future)?;
+            let cb = make_resume_callback(
+                py,
+                task,
+                result_tx,
+                cached_types,
+                call_soon,
+                ensure_future,
+                proxy,
+            )?;
             call_soon.call1(py, (cb,))?;
             Ok(())
         }
         DriveResult::WaitingOnAsyncioFuture(fut) => {
-            let cb =
-                make_resume_callback(py, task, result_tx, cached_types, call_soon, ensure_future)?;
+            let cb = make_resume_callback(
+                py,
+                task,
+                result_tx,
+                cached_types,
+                call_soon,
+                ensure_future,
+                proxy,
+            )?;
             fut.call_method1(py, c"add_done_callback", (cb,))?;
             Ok(())
         }
         DriveResult::FallbackToAsyncio(obj) => {
             let asyncio_task = ensure_future.call1(py, (obj,))?;
-            let cb =
-                make_resume_callback(py, task, result_tx, cached_types, call_soon, ensure_future)?;
+            let cb = make_resume_callback(
+                py,
+                task,
+                result_tx,
+                cached_types,
+                call_soon,
+                ensure_future,
+                proxy,
+            )?;
             asyncio_task.call_method1(py, c"add_done_callback", (cb,))?;
             Ok(())
         }
     }
 }
 
-/// Handle `WaitingOnRustFuture`: if already done, re-drive immediately;
+/// Handle `WaitingOnFuture`: if already done, re-drive immediately;
 /// otherwise attach a done callback.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "proxy added for current_task propagation; all params are co-dependent"
+)]
 fn handle_rust_future(
     py: Python<'_>,
     task: SchedulerTask,
@@ -453,6 +493,7 @@ fn handle_rust_future(
     cached_types: &Arc<CachedTypes>,
     call_soon: &Py<PyAny>,
     ensure_future: &Py<PyAny>,
+    proxy: Option<Py<TaskProxy>>,
 ) -> PyResult<()> {
     let is_done = fut.call_method0(py, c"done")?.is_truthy(py)?;
     if is_done {
@@ -470,9 +511,18 @@ fn handle_rust_future(
             cached_types,
             call_soon,
             ensure_future,
+            proxy,
         );
     }
-    let cb = make_resume_callback(py, task, result_tx, cached_types, call_soon, ensure_future)?;
+    let cb = make_resume_callback(
+        py,
+        task,
+        result_tx,
+        cached_types,
+        call_soon,
+        ensure_future,
+        proxy,
+    )?;
     fut.call_method1(py, c"add_done_callback", (cb,))?;
     Ok(())
 }
@@ -488,6 +538,7 @@ fn make_resume_callback(
     cached_types: &Arc<CachedTypes>,
     call_soon: &Py<PyAny>,
     ensure_future: &Py<PyAny>,
+    proxy: Option<Py<TaskProxy>>,
 ) -> PyResult<Py<ResumeCallback>> {
     Py::new(
         py,
@@ -497,6 +548,7 @@ fn make_resume_callback(
             result_tx: Some(result_tx),
             call_soon: call_soon.clone_ref(py),
             ensure_future: ensure_future.clone_ref(py),
+            proxy,
         },
     )
 }
@@ -532,9 +584,10 @@ pub fn spawn_and_drive(
     // Set our task as asyncio's "current task" so Starlette/FastAPI
     // middleware that calls asyncio.current_task() gets a valid object
     // (needed for weakref support in ServerErrorMiddleware, etc.).
-    let current_tasks = set_current_task(py, &task);
+    let task_ctx = set_current_task(py, &task);
 
     let drive_result = drive_task(py, &mut task, cached_types);
+    let proxy = task_ctx.as_ref().map(|(_, p)| p.clone_ref(py));
     if let Err(e) = handle_drive_result(
         py,
         task,
@@ -543,39 +596,49 @@ pub fn spawn_and_drive(
         cached_types,
         call_soon,
         ensure_future,
+        proxy,
     ) {
         tracing::warn!(error = %e, "scheduler drive result handling failed");
     }
 
-    clear_current_task(py, current_tasks);
+    clear_current_task(py, task_ctx.map(|(ct, _)| ct));
 }
 
-/// Set a task proxy as `asyncio.current_task()` for the running loop.
+/// Install a [`TaskProxy`] as `asyncio.current_task()` for the running loop.
 ///
-/// Creates a lightweight Python object with the attributes Starlette/FastAPI
-/// expect (`_loop`, weakref support) and installs it in
-/// `asyncio.tasks._current_tasks`. Returns the dict for cleanup.
-fn set_current_task(py: Python<'_>, _task: &SchedulerTask) -> Option<Py<PyAny>> {
+/// Returns `(current_tasks_dict, proxy)` for cleanup and for storing in
+/// `ResumeCallback` so that resumed coroutines also see a valid current task.
+fn set_current_task(py: Python<'_>, task: &SchedulerTask) -> Option<(Py<PyAny>, Py<TaskProxy>)> {
     let asyncio = py.import(c"asyncio").ok()?;
     let tasks_mod = py.import(c"asyncio.tasks").ok()?;
     let current_tasks = tasks_mod.getattr(c"_current_tasks").ok()?;
     let loop_obj = asyncio.call_method0(c"get_running_loop").ok()?;
 
-    // Create a lightweight proxy with weakref + _loop support.
-    // Regular Python classes support weakref; __slots__-only types don't.
-    let proxy = py
-        .eval(
-            c"type('_TaskProxy', (), {'_loop': loop})()",
-            None,
-            Some(&{
-                let locals = pyo3::types::PyDict::new(py);
-                let _ = locals.set_item("loop", &loop_obj);
-                locals
-            }),
-        )
-        .ok()?;
+    let proxy = Py::new(
+        py,
+        TaskProxy::new(
+            task.result_future.clone_ref(py),
+            loop_obj.clone().unbind(),
+            task.root_coro(py),
+        ),
+    )
+    .ok()?;
 
     let _ = current_tasks.call_method1(c"__setitem__", (&loop_obj, &proxy));
+    Some((current_tasks.unbind(), proxy))
+}
+
+/// Reinstall an existing [`TaskProxy`] in `asyncio.tasks._current_tasks`.
+///
+/// Used by `ResumeCallback` to restore the current task when re-driving.
+/// Returns the `_current_tasks` dict for cleanup, or `None` if unavailable.
+fn install_proxy(py: Python<'_>, proxy: Option<&Py<TaskProxy>>) -> Option<Py<PyAny>> {
+    let proxy = proxy?;
+    let tasks_mod = py.import(c"asyncio.tasks").ok()?;
+    let current_tasks = tasks_mod.getattr(c"_current_tasks").ok()?;
+    let asyncio = py.import(c"asyncio").ok()?;
+    let loop_obj = asyncio.call_method0(c"get_running_loop").ok()?;
+    let _ = current_tasks.call_method1(c"__setitem__", (&loop_obj, proxy));
     Some(current_tasks.unbind())
 }
 
@@ -612,8 +675,8 @@ mod tests {
             assert!(!types.asyncio_task.bind(py).is_none());
             assert!(!types.coroutine_type.bind(py).is_none());
             assert!(!types.generator_type.bind(py).is_none());
-            assert!(!types.rust_future_type.bind(py).is_none());
-            assert!(!types.rust_event_waiter_type.bind(py).is_none());
+            assert!(!types.future_type.bind(py).is_none());
+            assert!(!types.event_waiter_type.bind(py).is_none());
         });
     }
 
@@ -633,12 +696,12 @@ mod tests {
     fn classify_rust_future() {
         crate::with_py(|py| {
             let types = CachedTypes::resolve(py).unwrap();
-            let future = RustFuture::resolved(py.None());
+            let future = Future::resolved(py.None());
             let py_future = Py::new(py, future).unwrap();
             let bound = py_future.into_bound(py).into_any();
             assert!(matches!(
                 classify(py, &bound, &types),
-                AwaitableKind::RustFuture
+                AwaitableKind::Future
             ));
         });
     }
@@ -749,6 +812,7 @@ async def coro():
                 result_tx: Some(tx),
                 call_soon,
                 ensure_future,
+                proxy: None,
             };
             let dbg = format!("{cb:?}");
             assert!(dbg.contains("ResumeCallback"));

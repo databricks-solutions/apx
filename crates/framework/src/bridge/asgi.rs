@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, mpsc};
 const ASGI_VERSION: &str = "3.0";
 
 /// ASGI spec version string.
-const ASGI_SPEC_VERSION: &str = "2.3";
+const ASGI_SPEC_VERSION: &str = "2.4";
 
 /// Default HTTP scheme (TLS detection is a future extension).
 const DEFAULT_SCHEME: &str = "http";
@@ -221,33 +221,32 @@ impl AsgiReceive {
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("receive mutex poisoned"))?
             .take();
 
-        match taken {
-            Some(bytes) => {
-                let t0 = super::bench_trace_enabled().then(std::time::Instant::now);
-                let event: Bound<'_, PyDict> = self
-                    .receive_template
-                    .bind(py)
-                    .call_method0(pyo3::intern!(py, "copy"))?
-                    .cast_into()?;
-                event.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, &bytes))?;
-                if let Some(t0) = t0 {
-                    tracing::info!(
-                        target: "bench_trace",
-                        phase = "receive_dict_copy",
-                        elapsed_us = t0.elapsed().as_micros(),
-                        body_len = bytes.len(),
-                    );
-                }
-                let event = event.unbind().into_any();
-                Py::new(py, ResolvedAwaitableWithValue { value: Some(event) })
-                    .map(|obj| obj.into_bound(py).into_any())
+        if let Some(bytes) = taken {
+            let t0 = super::bench_trace_enabled().then(std::time::Instant::now);
+            let event: Bound<'_, PyDict> = self
+                .receive_template
+                .bind(py)
+                .call_method0(pyo3::intern!(py, "copy"))?
+                .cast_into()?;
+            event.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, &bytes))?;
+            if let Some(t0) = t0 {
+                tracing::info!(
+                    target: "bench_trace",
+                    phase = "receive_dict_copy",
+                    elapsed_us = t0.elapsed().as_micros(),
+                    body_len = bytes.len(),
+                );
             }
-            None => {
-                // Body already consumed — pend forever for disconnect listener.
-                pyo3_async_runtimes::tokio::future_into_py(py, async {
-                    std::future::pending::<PyResult<Py<PyAny>>>().await
-                })
-            }
+            let event = event.unbind().into_any();
+            Py::new(py, ResolvedAwaitableWithValue { value: Some(event) })
+                .map(|obj| obj.into_bound(py).into_any())
+        } else {
+            // Body already consumed — return a Future that never resolves.
+            // The sender is leaked intentionally: the disconnect listener
+            // awaits this forever until its cancel scope fires.
+            let (future, tx) = crate::scheduler::primitives::Future::with_channel();
+            std::mem::forget(tx);
+            Py::new(py, future).map(|obj| obj.into_bound(py).into_any())
         }
     }
 }
@@ -401,15 +400,31 @@ impl AsgiSend {
             );
         }
         match &self.backend {
-            SendBackend::Channel(tx) => {
-                let tx = tx.clone();
-                pyo3_async_runtimes::tokio::future_into_py(py, async move {
-                    tx.send(parsed).await.map_err(|_| {
-                        pyo3::exceptions::PyRuntimeError::new_err("response channel closed")
+            SendBackend::Channel(tx) => match tx.try_send(parsed) {
+                Ok(()) => Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any()),
+                Err(mpsc::error::TrySendError::Full(event)) => {
+                    let (future, resolve_tx) = crate::scheduler::primitives::Future::with_channel();
+                    let py_future = Py::new(py, future)?;
+                    let tx = tx.clone();
+                    crate::scheduler::with_tokio_handle(|handle| {
+                        handle.spawn(async move {
+                            let _ = tx.send(event).await;
+                            Python::attach(|py| {
+                                let _ = resolve_tx.send(py.None());
+                            });
+                        });
+                    })
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "no tokio runtime for backpressure send",
+                        )
                     })?;
-                    Python::attach(|py| Ok(py.None()))
-                })
-            }
+                    Ok(py_future.into_bound(py).into_any())
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => Err(
+                    pyo3::exceptions::PyRuntimeError::new_err("response channel closed"),
+                ),
+            },
             SendBackend::Buffer(buf) => {
                 buf.lock()
                     .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("send buffer poisoned"))?
@@ -1315,7 +1330,7 @@ mod tests {
                     .unwrap()
                     .extract::<String>()
                     .unwrap(),
-                "2.3"
+                "2.4"
             );
         });
     }
