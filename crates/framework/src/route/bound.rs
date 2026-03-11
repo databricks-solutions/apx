@@ -72,6 +72,35 @@ impl fmt::Debug for App {
     }
 }
 
+// ── DirectContext ───────────────────────────────────────────────────────
+
+/// Pre-resolved Python objects for direct dispatch (no ASGI).
+///
+/// Created once at bind time. Holds everything needed to call the handler
+/// directly from Rust without going through the ASGI scope/receive/send pipeline.
+pub struct DirectContext {
+    /// Pydantic `TypeAdapter` for response_model serialization.
+    /// Calls `adapter.dump_json(adapter.validate_python(result))`.
+    /// `None` for routes without `response_model`.
+    pub response_adapter: Option<Py<PyAny>>,
+    /// Pre-imported Pydantic model classes for body params.
+    /// Each entry is `(param_name, model_class)`.
+    pub body_validators: Vec<(String, Py<PyAny>)>,
+    /// Cached `json.dumps` for routes without response_model.
+    pub json_dumps: Py<PyAny>,
+    /// Cached `fastapi.exceptions.HTTPException` class for error classification.
+    pub http_exception_cls: Py<PyAny>,
+}
+
+impl fmt::Debug for DirectContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirectContext")
+            .field("has_response_adapter", &self.response_adapter.is_some())
+            .field("body_validators", &self.body_validators.len())
+            .finish_non_exhaustive()
+    }
+}
+
 // ── BoundRoute ──────────────────────────────────────────────────────────
 
 /// A route bound to its runtime implementation.
@@ -87,6 +116,8 @@ pub struct BoundRoute {
     pub handler: Handler,
     /// Reference to the live FastAPI app (for ASGI bridge dispatch).
     pub fastapi_app: Option<App>,
+    /// Pre-resolved context for direct dispatch. `None` for ASGI-dispatched routes.
+    pub direct_context: Option<DirectContext>,
 }
 
 impl fmt::Debug for BoundRoute {

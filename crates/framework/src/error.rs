@@ -125,6 +125,18 @@ pub enum AppError {
     /// Request timeout (408) — tower `TimeoutLayer` fires.
     #[error("request timeout")]
     Timeout,
+
+    /// Python `HTTPException` from a direct-dispatched handler.
+    ///
+    /// Status and detail come from the Python exception attributes.
+    /// Used by direct dispatch to forward FastAPI-style HTTP exceptions.
+    #[error("HTTP {status}")]
+    HttpException {
+        /// HTTP status code from `HTTPException.status_code`.
+        status: u16,
+        /// Detail message from `HTTPException.detail`.
+        detail: String,
+    },
 }
 
 impl AppError {
@@ -135,6 +147,9 @@ impl AppError {
             Self::BodyParse(_) => StatusCode::BAD_REQUEST,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Timeout => StatusCode::REQUEST_TIMEOUT,
+            Self::HttpException { status, .. } => {
+                StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+            }
         }
     }
 
@@ -145,6 +160,8 @@ impl AppError {
             Self::BodyParse(_) => "Bad Request",
             Self::Internal(_) => "Internal Server Error",
             Self::Timeout => "Request Timeout",
+            Self::HttpException { status, .. } if *status >= 500 => "Internal Server Error",
+            Self::HttpException { .. } => "HTTP Error",
         }
     }
 
@@ -155,6 +172,10 @@ impl AppError {
             Self::Timeout => Some("The request exceeded the allowed processing time".to_owned()),
             Self::Internal(_) => Some("An unexpected error occurred".to_owned()),
             Self::Validation(_) => Some("Request validation failed".to_owned()),
+            Self::HttpException { status, .. } if *status >= 500 => {
+                Some("An unexpected error occurred".to_owned())
+            }
+            Self::HttpException { detail, .. } => Some(detail.clone()),
         }
     }
 }
@@ -172,6 +193,13 @@ impl IntoResponse for AppError {
         let errors = match self {
             Self::Internal(ref msg) => {
                 tracing::error!(error = %msg, "handler returned internal error");
+                Vec::new()
+            }
+            Self::HttpException {
+                status: s,
+                ref detail,
+            } if s >= 500 => {
+                tracing::error!(status = s, detail = %detail, "handler raised HTTP exception");
                 Vec::new()
             }
             Self::Validation(items) => items,

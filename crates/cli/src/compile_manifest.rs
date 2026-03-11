@@ -131,6 +131,7 @@ mod tests {
                 deprecated: false,
                 operation_id: None,
                 is_async_handler: true,
+                dispatch_strategy: DispatchStrategy::default(),
             }],
             dependency_graph: Vec::new(),
             lifecycle_deps: Vec::new(),
@@ -159,6 +160,7 @@ mod tests {
             deprecated: false,
             operation_id: None,
             is_async_handler: true,
+            dispatch_strategy: DispatchStrategy::default(),
         };
         let manifest = AppManifest {
             meta: None,

@@ -15,4 +15,4 @@ pub use dependency::*;
 pub use manifest::*;
 pub use primitives::*;
 
-pub(crate) use bound::{App, BoundRoute, Handler};
+pub(crate) use bound::{App, BoundRoute, DirectContext, Handler};

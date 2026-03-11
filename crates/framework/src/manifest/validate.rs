@@ -277,6 +277,7 @@ mod tests {
             deprecated: false,
             operation_id: None,
             is_async_handler: true,
+            dispatch_strategy: DispatchStrategy::default(),
         }
     }
 

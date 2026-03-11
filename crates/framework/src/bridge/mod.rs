@@ -8,6 +8,7 @@ pub mod context_pool;
 pub mod dispatch;
 
 pub mod asgi_dispatch;
+pub mod direct_dispatch;
 pub mod streaming;
 
 /// Check whether bench-trace instrumentation is enabled (`APX_BENCH_TRACE=1`).
@@ -19,11 +20,12 @@ pub fn bench_trace_enabled() -> bool {
 }
 
 use crate::event_loop::EventLoopHandle;
-use crate::route::{BoundRoute, HandlerKind, HttpMethod};
+use crate::route::{BoundRoute, DispatchStrategy, HandlerKind, HttpMethod};
 use asgi_dispatch::AsgiBridgeDispatch;
 use axum::extract::ConnectInfo;
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
+use direct_dispatch::DirectDispatch;
 use dispatch::{AppState, HandlerDispatch};
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -100,10 +102,13 @@ fn collect_path_params(raw_params: &axum::extract::RawPathParams) -> Vec<(String
 
 /// Create the dispatch impl for a route.
 ///
-/// All routes use the ASGI bridge — FastAPI handles dependency injection,
-/// response serialization, and error formatting natively.
-fn dispatch_for(_route: &BoundRoute) -> Arc<dyn HandlerDispatch> {
-    Arc::new(AsgiBridgeDispatch)
+/// Routes with `DispatchStrategy::Direct` bypass ASGI entirely.
+/// Routes with `DispatchStrategy::AsgiBridge` use the full ASGI pipeline.
+fn dispatch_for(route: &BoundRoute) -> Arc<dyn HandlerDispatch> {
+    match route.manifest.dispatch_strategy {
+        DispatchStrategy::Direct => Arc::new(DirectDispatch),
+        DispatchStrategy::AsgiBridge => Arc::new(AsgiBridgeDispatch),
+    }
 }
 
 // ── WebSocket handler ────────────────────────────────────────────────────
@@ -409,7 +414,9 @@ mod tests {
     use axum::body::Body;
     use tower::ServiceExt;
 
-    use crate::route::{Handler, HandlerKind, QualName, ResponseType, RouteManifest, RoutePath};
+    use crate::route::{
+        DispatchStrategy, Handler, HandlerKind, QualName, ResponseType, RouteManifest, RoutePath,
+    };
     use crate::with_py;
 
     fn make_route(kind: HandlerKind) -> BoundRoute {
@@ -430,15 +437,39 @@ mod tests {
                 deprecated: false,
                 operation_id: None,
                 is_async_handler: true,
+                dispatch_strategy: DispatchStrategy::default(),
             },
             handler: Handler::stub(py.None()),
             fastapi_app: None,
+            direct_context: None,
         })
     }
 
     #[test]
     fn dispatch_for_asgi_bridge() {
         let route = make_route(HandlerKind::RequestResponse);
+        let d = dispatch_for(&route);
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("AsgiBridgeDispatch"));
+    }
+
+    #[test]
+    fn dispatch_for_direct() {
+        let mut route = make_route(HandlerKind::RequestResponse);
+        route.manifest.dispatch_strategy = DispatchStrategy::Direct;
+        let d = dispatch_for(&route);
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("DirectDispatch"));
+    }
+
+    #[test]
+    fn dispatch_for_default_is_asgi_bridge() {
+        // Routes without explicit dispatch_strategy should default to AsgiBridge.
+        let route = make_route(HandlerKind::RequestResponse);
+        assert_eq!(
+            route.manifest.dispatch_strategy,
+            DispatchStrategy::AsgiBridge
+        );
         let d = dispatch_for(&route);
         let dbg = format!("{d:?}");
         assert!(dbg.contains("AsgiBridgeDispatch"));

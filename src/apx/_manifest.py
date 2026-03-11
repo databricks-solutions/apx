@@ -37,6 +37,10 @@ def _type_qualname(type_obj: Any) -> str:
     """Return qualified name for a type annotation."""
     if type_obj is None:
         return "NoneType"
+    # typing generics (e.g. list[Item]) have __origin__
+    origin = getattr(type_obj, "__origin__", None)
+    if origin is not None:
+        return _qualname(origin)
     return _qualname(type_obj)
 
 
@@ -65,6 +69,23 @@ def _is_streaming_response(type_obj: Any) -> bool:
 def _has_model_validate(type_obj: Any) -> bool:
     """Check if a type has Pydantic's model_validate_json."""
     return hasattr(type_obj, "model_validate_json")
+
+
+def _field_type(field: Any) -> Any:
+    """Extract the type annotation from a FastAPI ModelField.
+
+    In FastAPI 0.100+ (Pydantic v2), the type lives on
+    ``field.field_info.annotation`` rather than ``field.type_``.
+    """
+    type_ = getattr(field, "type_", None)
+    if type_ is not None:
+        return type_
+    fi = getattr(field, "field_info", None)
+    if fi is not None:
+        ann = getattr(fi, "annotation", None)
+        if ann is not None:
+            return ann
+    return getattr(field, "annotation", None)
 
 
 def _default_to_json(field_info: Any) -> Any | None:
@@ -145,7 +166,7 @@ def _extract_params(dependant: Any) -> list[dict]:
             name = getattr(field, "name", "")
             alias = getattr(field, "alias", None)
             required = getattr(field, "required", True)
-            type_ = getattr(field, "type_", None)
+            type_ = _field_type(field) or getattr(field, "annotation", None)
             default_json = _default_to_json(field)
 
             param: dict[str, Any] = {
@@ -188,6 +209,8 @@ def _extract_route(route: Any) -> list[dict]:
 
     dep_plan = _compile_dependency_plan(dependant) if dependant else None
 
+    is_async = inspect.iscoroutinefunction(endpoint) if endpoint else True
+
     manifests = []
     for method_str in sorted(methods):
         manifest: dict[str, Any] = {
@@ -202,6 +225,7 @@ def _extract_route(route: Any) -> list[dict]:
             "status_code": status_code,
             "include_in_schema": include_in_schema,
             "deprecated": deprecated,
+            "is_async_handler": is_async,
         }
         if summary is not None:
             manifest["summary"] = summary
@@ -271,12 +295,12 @@ def _add_param_steps(dependant: Any, steps: list[dict]) -> None:
     for field in getattr(dependant, "path_params", []):
         steps.append({"ExtractPath": {
             "name": getattr(field, "name", ""),
-            "type_qualname": _type_qualname(getattr(field, "type_", None)),
+            "type_qualname": _type_qualname(_field_type(field)),
         }})
     for field in getattr(dependant, "query_params", []):
         step: dict[str, Any] = {
             "name": getattr(field, "name", ""),
-            "type_qualname": _type_qualname(getattr(field, "type_", None)),
+            "type_qualname": _type_qualname(_field_type(field)),
             "required": getattr(field, "required", True),
         }
         default = _default_to_json(field)
@@ -289,19 +313,19 @@ def _add_param_steps(dependant: Any, steps: list[dict]) -> None:
         steps.append({"ExtractHeader": {
             "name": name,
             "alias": alias.lower().replace("_", "-"),
-            "type_qualname": _type_qualname(getattr(field, "type_", None)),
+            "type_qualname": _type_qualname(_field_type(field)),
             "required": getattr(field, "required", True),
         }})
     for field in getattr(dependant, "cookie_params", []):
         steps.append({"ExtractCookie": {
             "name": getattr(field, "name", ""),
-            "type_qualname": _type_qualname(getattr(field, "type_", None)),
+            "type_qualname": _type_qualname(_field_type(field)),
             "required": getattr(field, "required", True),
         }})
     for field in getattr(dependant, "body_params", []):
         steps.append({"ValidateBody": {
             "name": getattr(field, "name", ""),
-            "model_qualname": _type_qualname(getattr(field, "type_", None)),
+            "model_qualname": _type_qualname(_field_type(field)),
         }})
 
 

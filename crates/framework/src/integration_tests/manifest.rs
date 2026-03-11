@@ -310,6 +310,7 @@ fn manifest_serde_preserves_dependency_plan() {
         deprecated: false,
         operation_id: None,
         is_async_handler: true,
+        dispatch_strategy: DispatchStrategy::default(),
     };
 
     let manifest = AppManifest {

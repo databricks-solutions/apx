@@ -19,6 +19,7 @@
 
 mod body;
 mod dependencies;
+mod direct_dispatch;
 mod handlers;
 mod manifest;
 mod middleware;

@@ -246,6 +246,7 @@ fn extract_routes(
                 deprecated: meta.deprecated,
                 operation_id: meta.operation_id.clone(),
                 is_async_handler,
+                dispatch_strategy: crate::route::DispatchStrategy::default(),
             });
         }
     }
@@ -295,6 +296,7 @@ fn extract_ws_route(
         deprecated: false,
         operation_id: None,
         is_async_handler: true,
+        dispatch_strategy: crate::route::DispatchStrategy::default(),
     }))
 }
 

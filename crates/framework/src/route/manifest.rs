@@ -44,6 +44,22 @@ impl fmt::Display for HttpMethod {
     }
 }
 
+// ── Dispatch strategy ──────────────────────────────────────────────────
+
+/// How a route is dispatched at runtime.
+///
+/// `Direct` bypasses ASGI entirely — Rust extracts parameters, calls the
+/// Python handler, and serializes the response. `AsgiBridge` runs through
+/// the full ASGI scope/receive/send pipeline (required for `Depends()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DispatchStrategy {
+    /// Call the handler directly with Rust-extracted parameters.
+    Direct,
+    /// Full ASGI bridge dispatch through FastAPI.
+    #[default]
+    AsgiBridge,
+}
+
 // ── Handler kind ────────────────────────────────────────────────────────
 
 /// What kind of handler this route uses.
@@ -206,6 +222,9 @@ pub struct RouteManifest {
     /// Sync handlers run on the blocking threadpool instead of the event loop.
     #[serde(default = "default_true")]
     pub is_async_handler: bool,
+    /// How this route is dispatched at runtime.
+    #[serde(default)]
+    pub dispatch_strategy: DispatchStrategy,
 }
 
 fn default_true() -> bool {
@@ -247,6 +266,58 @@ pub struct AppManifest {
 mod tests {
     use super::super::primitives::{AppModule, BodyLimit, QualName, RoutePath};
     use super::*;
+
+    #[test]
+    fn dispatch_strategy_serde_roundtrip() {
+        for variant in [DispatchStrategy::Direct, DispatchStrategy::AsgiBridge] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: DispatchStrategy = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, back, "roundtrip failed for {variant:?}");
+        }
+    }
+
+    #[test]
+    fn dispatch_strategy_default_is_asgi_bridge() {
+        assert_eq!(DispatchStrategy::default(), DispatchStrategy::AsgiBridge);
+    }
+
+    #[test]
+    fn dispatch_strategy_missing_field_defaults_to_asgi_bridge() {
+        // A RouteManifest JSON without dispatch_strategy should default to AsgiBridge.
+        let json = serde_json::json!({
+            "kind": "RequestResponse",
+            "method": "Get",
+            "path": "/test",
+            "handler_qualname": "test.handler",
+            "params": [],
+            "response_type": "RawResponse",
+            "tags": [],
+            "status_code": 200,
+            "include_in_schema": true,
+            "deprecated": false
+        });
+        let rm: RouteManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(rm.dispatch_strategy, DispatchStrategy::AsgiBridge);
+    }
+
+    #[test]
+    fn route_manifest_with_dispatch_strategy() {
+        let json = serde_json::json!({
+            "kind": "RequestResponse",
+            "method": "Get",
+            "path": "/echo",
+            "handler_qualname": "app.echo",
+            "params": [],
+            "response_type": "RawResponse",
+            "tags": [],
+            "status_code": 200,
+            "include_in_schema": true,
+            "deprecated": false,
+            "dispatch_strategy": "Direct"
+        });
+        let rm: RouteManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(rm.dispatch_strategy, DispatchStrategy::Direct);
+    }
 
     #[test]
     fn param_source_serde_roundtrip() {
@@ -337,6 +408,7 @@ mod tests {
                 deprecated: false,
                 operation_id: None,
                 is_async_handler: true,
+                dispatch_strategy: DispatchStrategy::default(),
             }],
             dependency_graph: Vec::new(),
             lifecycle_deps: Vec::new(),
