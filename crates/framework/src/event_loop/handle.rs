@@ -7,7 +7,7 @@
 //! with zero GIL acquisition. The event loop thread's [`QueueDrainer`]
 //! processes them in batch.
 
-use super::queue::WorkItem;
+use super::queue::{QueueItem, WorkItem};
 use crate::error::AppError;
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -27,7 +27,7 @@ pub struct EventLoopHandle {
     /// Python reference to the [`QueueDrainer`] singleton — wake target.
     drainer_ref: Py<PyAny>,
     /// Producer side of the work queue (lock-free push).
-    queue_tx: mpsc::UnboundedSender<WorkItem>,
+    queue_tx: mpsc::UnboundedSender<QueueItem>,
     /// Shared flag: `true` means drainer is sleeping and needs a wake.
     needs_wake: Arc<AtomicBool>,
     /// Whether the event loop is still running.
@@ -56,7 +56,7 @@ impl EventLoopHandle {
     pub(crate) fn new(
         event_loop: Py<PyAny>,
         running: Arc<AtomicBool>,
-        queue_tx: mpsc::UnboundedSender<WorkItem>,
+        queue_tx: mpsc::UnboundedSender<QueueItem>,
         needs_wake: Arc<AtomicBool>,
         drainer_ref: Py<PyAny>,
     ) -> Result<Self, String> {
@@ -124,10 +124,10 @@ impl EventLoopHandle {
 
         // Push to queue for task creation on the event loop thread.
         let (tx, rx) = oneshot::channel();
-        let item = WorkItem {
+        let item = QueueItem::Work(WorkItem {
             builder: Box::new(move |_py| Ok(coro)),
             tx,
-        };
+        });
         self.queue_tx
             .send(item)
             .map_err(|_| AppError::Internal("work queue closed".to_owned()))?;
@@ -160,10 +160,10 @@ impl EventLoopHandle {
         let t_push = trace.then(std::time::Instant::now);
 
         let (tx, rx) = oneshot::channel();
-        let item = WorkItem {
+        let item = QueueItem::Work(WorkItem {
             builder: Box::new(f),
             tx,
-        };
+        });
 
         self.queue_tx
             .send(item)
@@ -180,6 +180,31 @@ impl EventLoopHandle {
         self.wake_if_sleeping();
 
         Ok(rx)
+    }
+
+    /// Schedule a fire-and-forget callback on the event loop thread.
+    ///
+    /// The callback runs on the event loop thread with the GIL held.
+    /// No result channel — the caller cannot await a return value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the event loop is stopped or enqueue fails.
+    pub fn schedule_callback<F>(&self, f: F) -> Result<(), AppError>
+    where
+        F: FnOnce(Python<'_>) + Send + 'static,
+    {
+        if !self.running.load(Ordering::Acquire) {
+            return Err(AppError::Internal("event loop is not running".to_owned()));
+        }
+
+        self.queue_tx
+            .send(QueueItem::Callback(Box::new(f)))
+            .map_err(|_| AppError::Internal("work queue closed".to_owned()))?;
+
+        self.wake_if_sleeping();
+
+        Ok(())
     }
 
     /// Wake the drainer if it's sleeping (idle→active transition).

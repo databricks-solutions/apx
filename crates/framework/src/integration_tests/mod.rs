@@ -27,6 +27,7 @@ mod params;
 mod responses;
 mod routing;
 mod scheduler_compat;
+mod telemetry;
 
 use crate::bridge::asgi::lifespan::{LifespanGuard, run_lifespan_startup};
 use crate::bridge::dispatch::AppState;
@@ -255,12 +256,21 @@ impl TestServer {
         let receive_template = pyo3::Python::attach(|py| {
             crate::bridge::context_pool::build_receive_template(py).unwrap()
         });
+        let (create_task, error_logger) = pyo3::Python::attach(|py| {
+            let ct = shared_event_loop_handle()
+                .event_loop()
+                .getattr(py, "create_task")
+                .unwrap();
+            (ct, py.None())
+        });
         let app_state = Arc::new(AppState {
             max_body_limit: BodyLimit::DEFAULT,
             loop_handle,
             scope_interns,
             scope_template: Arc::new(scope_template),
             receive_template: Arc::new(receive_template),
+            create_task,
+            error_logger,
         });
 
         let router = build_router(routes, app_state, addr);
@@ -396,12 +406,21 @@ impl TestServer {
         let receive_template = pyo3::Python::attach(|py| {
             crate::bridge::context_pool::build_receive_template(py).unwrap()
         });
+        let (create_task, error_logger) = pyo3::Python::attach(|py| {
+            let ct = shared_event_loop_handle()
+                .event_loop()
+                .getattr(py, "create_task")
+                .unwrap();
+            (ct, py.None())
+        });
         let app_state = Arc::new(AppState {
             max_body_limit: loaded_manifest.max_body_limit,
             loop_handle,
             scope_interns,
             scope_template: Arc::new(scope_template),
             receive_template: Arc::new(receive_template),
+            create_task,
+            error_logger,
         });
 
         let router = build_router(routes, app_state, addr);
@@ -518,12 +537,21 @@ impl TestServer {
         let receive_template = pyo3::Python::attach(|py| {
             crate::bridge::context_pool::build_receive_template(py).unwrap()
         });
+        let (create_task, error_logger) = pyo3::Python::attach(|py| {
+            let ct = event_loop
+                .event_loop_ref()
+                .getattr(py, "create_task")
+                .unwrap();
+            (ct, py.None())
+        });
         let app_state = Arc::new(AppState {
             max_body_limit: BodyLimit::DEFAULT,
             loop_handle,
             scope_interns,
             scope_template: Arc::new(scope_template),
             receive_template: Arc::new(receive_template),
+            create_task,
+            error_logger,
         });
 
         let router = build_router(routes, app_state, addr);

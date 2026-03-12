@@ -92,6 +92,7 @@ mod tests {
             openapi_schema: None,
             max_body_limit: BodyLimit::DEFAULT,
             validation_results: Vec::new(),
+            has_middleware: false,
         })
         .unwrap()
     }
@@ -138,6 +139,7 @@ mod tests {
             openapi_schema: None,
             max_body_limit: BodyLimit::DEFAULT,
             validation_results: Vec::new(),
+            has_middleware: false,
         };
         assert!(run_validation(&manifest).is_ok());
     }
@@ -170,6 +172,7 @@ mod tests {
             openapi_schema: None,
             max_body_limit: BodyLimit::DEFAULT,
             validation_results: Vec::new(),
+            has_middleware: false,
         };
         let result = run_validation(&manifest);
         assert!(result.is_err());

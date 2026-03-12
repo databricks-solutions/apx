@@ -113,8 +113,10 @@ pub struct WorkerBootstrap {
     pub request_timeout_secs: u64,
     /// One-time nonce — verified against `APX_WORKER_NONCE` env var.
     pub nonce: Nonce,
-    /// Path to the pre-built `AppManifest` JSON file (required for serving).
-    pub manifest_path: PathBuf,
+    /// Path to the pre-built `AppManifest` JSON file.
+    /// `None` when using live-import mode (app module imported at worker startup).
+    #[serde(default)]
+    pub manifest_path: Option<PathBuf>,
 }
 
 // ── Bootstrap errors ────────────────────────────────────────────────────
@@ -197,7 +199,7 @@ mod tests {
                 .unwrap_or_else(|e| unreachable!("hardcoded valid module: {e}")),
             request_timeout_secs: 30,
             nonce: Nonce::generate(),
-            manifest_path: PathBuf::from("/app/manifest.json"),
+            manifest_path: Some(PathBuf::from("/app/manifest.json")),
         };
         let msg = IpcMessage::Bootstrap(bootstrap);
         let encoded = rmp_serde::to_vec(&msg)
@@ -290,13 +292,28 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             request_timeout_secs: 30,
             nonce: Nonce::from_string("abc123".to_owned()),
-            manifest_path: PathBuf::from("/app/manifest.json"),
+            manifest_path: Some(PathBuf::from("/app/manifest.json")),
         };
         let encoded = rmp_serde::to_vec(&bootstrap).unwrap();
         let decoded: WorkerBootstrap = rmp_serde::from_slice(&encoded).unwrap();
         assert_eq!(
             decoded.manifest_path,
-            std::path::Path::new("/app/manifest.json")
+            Some(PathBuf::from("/app/manifest.json"))
         );
+    }
+
+    #[test]
+    fn worker_bootstrap_serde_without_manifest_path() {
+        let bootstrap = WorkerBootstrap {
+            host: "0.0.0.0".to_owned(),
+            port: 8000,
+            app_module: AppModule::new("backend.app").unwrap(),
+            request_timeout_secs: 30,
+            nonce: Nonce::from_string("abc123".to_owned()),
+            manifest_path: None,
+        };
+        let encoded = rmp_serde::to_vec(&bootstrap).unwrap();
+        let decoded: WorkerBootstrap = rmp_serde::from_slice(&encoded).unwrap();
+        assert!(decoded.manifest_path.is_none());
     }
 }

@@ -151,7 +151,7 @@ mod tests {
                 .unwrap_or_else(|e| unreachable!("valid module: {e}")),
             request_timeout_secs: 30,
             nonce,
-            manifest_path: PathBuf::from("/app/manifest.json"),
+            manifest_path: Some(PathBuf::from("/app/manifest.json")),
         };
 
         let supervisor_handle = tokio::spawn(async move {

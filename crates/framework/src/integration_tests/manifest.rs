@@ -235,6 +235,7 @@ fn manifest_missing_meta_rejected() {
         openapi_schema: None,
         max_body_limit: crate::route::BodyLimit::DEFAULT,
         validation_results: Vec::new(),
+        has_middleware: false,
     };
     let err = crate::manifest::validate_for_serving(&manifest).unwrap_err();
     assert!(
@@ -260,6 +261,7 @@ fn manifest_version_check() {
         openapi_schema: None,
         max_body_limit: crate::route::BodyLimit::DEFAULT,
         validation_results: Vec::new(),
+        has_middleware: false,
     };
     let err = crate::manifest::validate_for_serving(&manifest).unwrap_err();
     assert!(
@@ -328,6 +330,7 @@ fn manifest_serde_preserves_dependency_plan() {
         openapi_schema: None,
         max_body_limit: BodyLimit::DEFAULT,
         validation_results: Vec::new(),
+        has_middleware: false,
     };
 
     let json = serde_json::to_string(&manifest).unwrap();

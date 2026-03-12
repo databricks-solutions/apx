@@ -307,6 +307,49 @@ async def forbidden():
     server.stop().await;
 }
 
+/// Middleware must fire even for simple handlers when using manifest-based binding.
+///
+/// `simple_handler()` has no deps, no `Request` param — it gets classified as `Direct`
+/// in the manifest. This test verifies middleware still fires because `has_middleware`
+/// forces all routes to AsgiBridge.
+#[tokio::test]
+async fn starlette_middleware_via_manifest() {
+    let app = r#"
+from fastapi import FastAPI
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+
+app = FastAPI()
+
+class HeaderMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["x-via-manifest"] = "yes"
+        return response
+
+app.add_middleware(HeaderMiddleware)
+
+@app.get("/simple")
+def simple_handler():
+    return {"ok": True}
+"#;
+    let mut server = TestServer::start_from_manifest(app, "_apx_test_mw_manifest").await;
+
+    let (status, headers, body) = server.get_raw("/simple").await;
+    assert_eq!(status, 200);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    assert_eq!(json["ok"], true);
+    assert_eq!(
+        headers
+            .get("x-via-manifest")
+            .map(|v| v.to_str().unwrap_or("")),
+        Some("yes"),
+        "middleware header missing — Direct dispatch bypassed middleware: {headers:?}"
+    );
+
+    server.stop().await;
+}
+
 /// `Depends()` function that raises `RuntimeError` → 500, no detail leak.
 #[tokio::test]
 async fn dependency_raises_returns_500() {

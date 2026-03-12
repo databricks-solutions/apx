@@ -33,7 +33,21 @@ impl AsgiBodyStream {
         }
     }
 
+    /// Create a stream without a handler task (Granian-style dispatch).
+    ///
+    /// When the ASGI handler drops the send callable → channel closes → stream
+    /// ends naturally. When the client disconnects → receiver drops → send()
+    /// fails → handler gets exception → asyncio task terminates naturally.
+    fn without_task(rx: mpsc::Receiver<AsgiEvent>) -> Self {
+        Self {
+            rx,
+            handler_task: None,
+            done: false,
+        }
+    }
+
     /// Wrap a handler task that returns a value, discarding the value.
+    #[cfg(test)]
     fn from_valued_task<T: Send + 'static>(
         rx: mpsc::Receiver<AsgiEvent>,
         task: JoinHandle<Result<T, AppError>>,
@@ -87,6 +101,7 @@ impl Drop for AsgiBodyStream {
 ///
 /// Reads `ResponseStart` for status and headers, then wraps remaining
 /// body chunks in an [`AsgiBodyStream`].
+#[cfg(test)]
 pub async fn stream_asgi_response<T: Send + 'static>(
     mut rx: mpsc::Receiver<AsgiEvent>,
     handler_task: JoinHandle<Result<T, AppError>>,
@@ -96,6 +111,27 @@ pub async fn stream_asgi_response<T: Send + 'static>(
         http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
 
     let stream = AsgiBodyStream::from_valued_task(rx, handler_task);
+
+    Ok(OutboundResponse {
+        status,
+        headers,
+        body: ResponseBody::Stream(Box::pin(stream)),
+    })
+}
+
+/// Build a streaming [`OutboundResponse`] without a handler task (Granian-style).
+///
+/// The ASGI handler's asyncio task is owned by Python's event loop. Cleanup
+/// happens through channel semantics: client disconnect → receiver drops →
+/// send() fails → handler terminates.
+pub async fn stream_asgi_response_no_task(
+    mut rx: mpsc::Receiver<AsgiEvent>,
+) -> Result<OutboundResponse, AppError> {
+    let (status, headers) = recv_response_start(&mut rx).await?;
+    let status =
+        http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+
+    let stream = AsgiBodyStream::without_task(rx);
 
     Ok(OutboundResponse {
         status,

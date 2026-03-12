@@ -6,22 +6,17 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Validate that the manifest file exists (clap value_parser).
-fn validate_manifest_path(s: &str) -> Result<PathBuf, String> {
-    let path = PathBuf::from(s);
-    if path.exists() {
-        Ok(path)
-    } else {
-        Err(format!("manifest file not found: {}", path.display()))
-    }
-}
-
 /// CLI arguments for `apx serve`.
 #[derive(clap::Args, Debug)]
 pub struct ServeArgs {
-    /// Path to pre-built manifest JSON (produced by `apx build`).
-    #[arg(value_parser = validate_manifest_path)]
-    manifest: PathBuf,
+    /// App module (e.g. "backend.app") or path to manifest JSON.
+    ///
+    /// If the target is a file that exists on disk, it is treated as a
+    /// pre-built manifest (produced by `apx build`). Otherwise it is
+    /// interpreted as a Python module path and the app is imported live
+    /// at worker startup.
+    #[arg(value_name = "TARGET")]
+    target: String,
 
     /// Host to bind to.
     #[arg(long, default_value = "0.0.0.0")]
@@ -40,6 +35,30 @@ pub struct ServeArgs {
     timeout: u64,
 }
 
+/// Resolve the CLI target into an `(app_module, manifest_path)` pair.
+///
+/// If the target is an existing file, it's a manifest path — we load it
+/// to extract the app_module. Otherwise it's a Python module string and
+/// we run in live-import mode (no manifest file).
+fn resolve_target(
+    target: &str,
+) -> Result<(apx_framework::route::AppModule, Option<PathBuf>), String> {
+    let path = PathBuf::from(target);
+    if path.exists() {
+        // Manifest-based path.
+        let manifest = apx_framework::manifest::load(&path)
+            .map_err(|e| format!("failed to load manifest '{}': {e}", path.display()))?;
+        let meta = apx_framework::manifest::validate_for_serving(&manifest)
+            .map_err(|e| format!("invalid manifest: {e}"))?;
+        Ok((meta.app_module.clone(), Some(path)))
+    } else {
+        // Live-import path — target is a Python module string.
+        let app_module = apx_framework::route::AppModule::new(target)
+            .map_err(|e| format!("invalid app module '{target}': {e}"))?;
+        Ok((app_module, None))
+    }
+}
+
 /// Run the serve command.
 ///
 /// Returns 0 on success, 1 on error.
@@ -55,18 +74,11 @@ pub async fn run(args: ServeArgs) -> i32 {
             }
         }
         Ok(None) => {
-            // Supervisor mode — load manifest to extract app_module.
-            let manifest = match apx_framework::manifest::load(&args.manifest) {
-                Ok(m) => m,
+            // Supervisor mode — resolve target.
+            let (app_module, manifest_path) = match resolve_target(&args.target) {
+                Ok(pair) => pair,
                 Err(e) => {
-                    eprintln!("Failed to load manifest '{}': {e}", args.manifest.display());
-                    return 1;
-                }
-            };
-            let meta = match apx_framework::manifest::validate_for_serving(&manifest) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("Invalid manifest: {e}");
+                    eprintln!("{e}");
                     return 1;
                 }
             };
@@ -76,10 +88,10 @@ pub async fn run(args: ServeArgs) -> i32 {
                 host: args.host,
                 port: args.port,
                 workers: args.workers,
-                app_module: meta.app_module.clone(),
+                app_module,
                 app_dir,
                 request_timeout: Duration::from_secs(args.timeout),
-                manifest_path: args.manifest,
+                manifest_path,
             };
 
             if let Err(e) = apx_framework::runtime::supervisor::run_supervisor(config).await {

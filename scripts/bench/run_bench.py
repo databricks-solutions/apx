@@ -91,6 +91,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run sweep mode: echo scenario across worker/thread/connection matrix",
     )
+    p.add_argument(
+        "--profile-asgi",
+        action="store_true",
+        help="Run ASGI profiling: measures Python-level per-request timing for both servers",
+    )
+    p.add_argument(
+        "--profile-asgi-duration",
+        default="15s",
+        help="Duration for ASGI profiling load (default: 15s)",
+    )
     return p.parse_args()
 
 
@@ -500,6 +510,85 @@ def _start_sweep_container(
 
 
 # ---------------------------------------------------------------------------
+# ASGI profiling mode
+# ---------------------------------------------------------------------------
+
+PROFILE_SCENARIOS = [
+    {"name": "echo", "method": "GET", "path": "/api/echo"},
+    {"name": "health", "method": "GET", "path": "/api/health"},
+    {"name": "get_item", "method": "GET", "path": "/api/items/1"},
+    {"name": "list_items", "method": "GET", "path": "/api/items"},
+    {"name": "create_item", "method": "POST", "path": "/api/items",
+     "body": {"name": "bench-item", "price": 9.99, "tags": ["test"]}},
+]
+
+
+def run_profile_asgi(args: argparse.Namespace) -> None:
+    """Run ASGI-level profiling for both servers and analyze."""
+    servers = ["uvicorn", "apx"] if args.server == "both" else [args.server]
+
+    if not args.skip_build:
+        for server in servers:
+            cfg = SERVERS[server]
+            build_image(server, cfg["dockerfile"], cfg["context"])
+
+    profile_dir = args.results_dir / "profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    for server in servers:
+        console.print(f"\n[bold magenta]{'=' * 50}[/]")
+        console.print(f"[bold magenta]ASGI Profiling: {server}[/]")
+        console.print(f"[bold magenta]{'=' * 50}[/]")
+
+        container_id = start_container(
+            server, args.port, args.cpus, args.memory,
+            tokio_threads=args.tokio_threads if server == "apx" else None,
+            extra_env={"APX_BENCH_PROFILE": "1"},
+        )
+        try:
+            wait_for_health(args.port)
+            run_warmup(args.port, args.warmup)
+
+            # Run each scenario under load.
+            for scenario in PROFILE_SCENARIOS:
+                name = scenario["name"]
+                console.print(f"  [cyan]Profiling:[/] {name}")
+                run_oha(
+                    scenario, args.port, args.profile_asgi_duration,
+                    args.connections, profile_dir / f"_oha_{server}_{name}.json",
+                )
+
+            # Copy profiling JSONL out of container.
+            jsonl_path = profile_dir / f"{server}.jsonl"
+            cp_cmd = [
+                "docker", "cp",
+                f"bench-{server}:/tmp/bench_profile.jsonl",
+                str(jsonl_path),
+            ]
+            result = subprocess.run(cp_cmd, capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                console.print(f"  [green]Profile data:[/] {jsonl_path}")
+            else:
+                console.print(f"  [red]Error copying profile:[/] {result.stderr[:200]}")
+        except Exception:
+            print_container_logs(server)
+            raise
+        finally:
+            stop_container(server)
+
+    # Run analysis.
+    console.print("\n[bold blue]Analyzing profiling data...[/]")
+    analysis_cmd = ["uv", "run", str(BENCH_DIR / "profile_analysis.py")]
+    apx_jsonl = profile_dir / "apx.jsonl"
+    uvi_jsonl = profile_dir / "uvicorn.jsonl"
+    if apx_jsonl.exists():
+        analysis_cmd.extend(["--apx", str(apx_jsonl)])
+    if uvi_jsonl.exists():
+        analysis_cmd.extend(["--uvicorn", str(uvi_jsonl)])
+    subprocess.run(analysis_cmd, check=False)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -507,6 +596,11 @@ def _start_sweep_container(
 def main() -> None:
     args = parse_args()
     check_prerequisites()
+
+    # ASGI profiling mode — runs its own flow and exits.
+    if args.profile_asgi:
+        run_profile_asgi(args)
+        return
 
     # Sweep mode — runs its own matrix and exits.
     if args.sweep:

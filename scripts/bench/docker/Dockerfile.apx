@@ -97,7 +97,8 @@ RUN uv pip install --system /build/dist/apx-*.whl fastapi
 COPY scripts/bench/app/ /build/bench_app/app/
 WORKDIR /build/bench_app
 
-RUN python -c "\
+ARG APX_ENFORCE_ASGI=
+RUN APX_ENFORCE_ASGI=$APX_ENFORCE_ASGI python -c "\
 import sys; sys.argv = ['_manifest', 'app.main']; \
 import apx._manifest; apx._manifest.main()" > /build/manifest.json
 

@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 use tokio::sync::mpsc;
 
 use super::handle::EventLoopHandle;
-use super::queue::{QueueDrainer, SchedulerState, WorkItem};
+use super::queue::{QueueDrainer, QueueItem, SchedulerState};
 use crate::scheduler::driver::CachedTypes;
 use crate::scheduler::queue::ReadyQueue;
 
@@ -24,13 +24,13 @@ use crate::scheduler::queue::ReadyQueue;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LoopPolicy {
     /// Try uvloop first, fall back to default asyncio.
-    #[default]
     Auto,
     /// Force uvloop (fails if not installed).
     UvLoop,
     /// Force CPython's default asyncio event loop.
     Asyncio,
     /// Rust-driven scheduler with asyncio fallback.
+    #[default]
     RustNative,
 }
 
@@ -48,12 +48,16 @@ impl std::fmt::Display for LoopPolicy {
 impl LoopPolicy {
     /// Create a policy from the `APX_SCHEDULER` environment variable.
     ///
-    /// - `APX_SCHEDULER=rust` -> `RustNative`
-    /// - Anything else -> `Auto` (default)
+    /// - `APX_SCHEDULER=auto` -> `Auto`
+    /// - `APX_SCHEDULER=uvloop` -> `UvLoop`
+    /// - `APX_SCHEDULER=asyncio` -> `Asyncio`
+    /// - Default (unset) -> `RustNative`
     pub fn from_env() -> Self {
         match std::env::var("APX_SCHEDULER").as_deref() {
-            Ok("rust") => Self::RustNative,
-            _ => Self::default(),
+            Ok("auto") => Self::Auto,
+            Ok("uvloop") => Self::UvLoop,
+            Ok("asyncio") => Self::Asyncio,
+            _ => Self::RustNative,
         }
     }
 }
@@ -149,7 +153,7 @@ pub struct EventLoop {
     /// Whether the loop is still running (guards `call_soon_threadsafe`).
     running: Arc<AtomicBool>,
     /// Producer side of the work queue.
-    queue_tx: mpsc::UnboundedSender<WorkItem>,
+    queue_tx: mpsc::UnboundedSender<QueueItem>,
     /// Shared flag: `true` means drainer is sleeping and needs a wake.
     needs_wake: Arc<AtomicBool>,
     /// Python reference to the [`QueueDrainer`] singleton.
@@ -188,17 +192,14 @@ impl EventLoop {
         let running_clone = Arc::clone(&running);
 
         // Create the work queue before spawning — rx moves into the thread.
-        let (queue_tx, queue_rx) = mpsc::unbounded_channel::<WorkItem>();
+        let (queue_tx, queue_rx) = mpsc::unbounded_channel::<QueueItem>();
         let needs_wake = Arc::new(AtomicBool::new(false));
         let needs_wake_clone = Arc::clone(&needs_wake);
 
-        // Capture the tokio runtime handle (if available) for spawning timer/blocking
-        // tasks from the event loop thread. Only meaningful for RustNative mode.
-        let tokio_handle = if policy == LoopPolicy::RustNative {
-            tokio::runtime::Handle::try_current().ok()
-        } else {
-            None
-        };
+        // Capture the tokio runtime handle for scheduler primitives (Timer,
+        // spawn_blocking). Always captured — the anyio backend uses these
+        // regardless of whether the Rust coroutine driver is active.
+        let tokio_handle = tokio::runtime::Handle::try_current().ok();
 
         let thread = std::thread::Builder::new()
             .name("apx-asyncio".to_owned())
@@ -251,7 +252,7 @@ impl EventLoop {
     fn init_event_loop_thread(
         py: Python<'_>,
         policy: LoopPolicy,
-        queue_rx: mpsc::UnboundedReceiver<WorkItem>,
+        queue_rx: mpsc::UnboundedReceiver<QueueItem>,
         needs_wake: Arc<AtomicBool>,
         tokio_handle: Option<tokio::runtime::Handle>,
     ) -> Result<(Py<PyAny>, Py<PyAny>), String> {
@@ -264,12 +265,22 @@ impl EventLoop {
             .call_method1(c"set_event_loop", (&event_loop,))
             .map_err(|e| format!("set_event_loop: {e}"))?;
 
+        // Python 3.12+ eager task factory — runs first coroutine step inline
+        // during create_task, eliminating one event loop round-trip for handlers
+        // that complete synchronously.
+        if let Ok(eager_factory) = asyncio.getattr(c"eager_task_factory") {
+            match event_loop.call_method1(c"set_task_factory", (eager_factory,)) {
+                Ok(_) => tracing::info!("eager task factory enabled (Python 3.12+)"),
+                Err(e) => tracing::debug!("eager task factory not available: {e}"),
+            }
+        }
+
         let drainer_ref = Self::install_drainer(py, &event_loop, queue_rx, needs_wake, policy)?;
 
-        if policy == LoopPolicy::RustNative {
-            install_rust_scheduler(py, tokio_handle)
-                .map_err(|e| format!("scheduler install: {e}"))?;
-        }
+        // Always install the tokio handle for scheduler primitives (Timer,
+        // BlockingTask). The anyio backend uses these even without the Rust
+        // coroutine driver.
+        install_rust_scheduler(py, tokio_handle).map_err(|e| format!("scheduler install: {e}"))?;
 
         Ok((event_loop.unbind(), drainer_ref))
     }
@@ -278,7 +289,7 @@ impl EventLoop {
     fn install_drainer(
         py: Python<'_>,
         event_loop: &Bound<'_, PyAny>,
-        queue_rx: mpsc::UnboundedReceiver<WorkItem>,
+        queue_rx: mpsc::UnboundedReceiver<QueueItem>,
         needs_wake: Arc<AtomicBool>,
         policy: LoopPolicy,
     ) -> Result<Py<PyAny>, String> {
@@ -468,5 +479,19 @@ mod tests {
         let mut event_loop = EventLoop::start().unwrap();
         event_loop.stop();
         event_loop.stop(); // Should not panic.
+    }
+
+    #[test]
+    fn from_env_defaults_to_rust_native() {
+        // Default policy is based on compile-time default; don't mutate env.
+        assert_eq!(LoopPolicy::default(), LoopPolicy::RustNative);
+    }
+
+    #[test]
+    fn loop_policy_display() {
+        assert_eq!(LoopPolicy::Auto.to_string(), "auto");
+        assert_eq!(LoopPolicy::UvLoop.to_string(), "uvloop");
+        assert_eq!(LoopPolicy::Asyncio.to_string(), "asyncio");
+        assert_eq!(LoopPolicy::RustNative.to_string(), "rust-native");
     }
 }

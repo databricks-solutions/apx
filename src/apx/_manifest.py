@@ -133,6 +133,8 @@ def _classify_handler_kind(endpoint: Any) -> str:
 
 def _classify_dispatch(endpoint: Any, dependant: Any) -> str:
     """Classify dispatch strategy to match Rust DispatchStrategy enum."""
+    if os.environ.get("APX_ENFORCE_ASGI", "").lower() in ("1", "true", "yes"):
+        return "AsgiBridge"
     has_deps = len(getattr(dependant, "dependencies", [])) > 0
     kind = _classify_handler_kind(endpoint)
     has_request = bool(
@@ -604,6 +606,8 @@ def compile_manifest(app_module: str) -> dict:
     # Build metadata
     meta = _build_meta(app_module)
 
+    has_middleware = len(getattr(app, "user_middleware", [])) > 0
+
     manifest: dict[str, Any] = {
         "meta": meta,
         "routes": routes,
@@ -611,6 +615,7 @@ def compile_manifest(app_module: str) -> dict:
         "lifecycle_deps": lifecycle_deps,
         "max_body_limit": 1048576,
         "validation_results": [],
+        "has_middleware": has_middleware,
     }
     if openapi_schema is not None:
         manifest["openapi_schema"] = openapi_schema

@@ -257,6 +257,7 @@ mod tests {
             openapi_schema: None,
             max_body_limit: BodyLimit::DEFAULT,
             validation_results: Vec::new(),
+            has_middleware: false,
         }
     }
 

@@ -54,6 +54,69 @@ impl TaskCallback {
     }
 }
 
+/// Fire-and-forget error logger for ASGI handler tasks.
+///
+/// Added as a done callback on asyncio tasks created by Granian-style dispatch.
+/// Only logs — response delivery is handled by `AsgiSend::ResponseDriven`.
+#[pyclass(module = "apx._core", freelist = 64, skip_from_py_object)]
+#[derive(Debug, Clone, Copy)]
+pub struct AsgiErrorLogger;
+
+#[pymethods]
+impl AsgiErrorLogger {
+    #[expect(
+        clippy::unused_self,
+        clippy::trivially_copy_pass_by_ref,
+        reason = "required by Python callback protocol"
+    )]
+    fn __call__(&self, _py: Python<'_>, task: &Bound<'_, PyAny>) -> PyResult<()> {
+        if !task.call_method0(c"cancelled")?.is_truthy()?
+            && let Err(exc) = task.call_method0(c"result")
+        {
+            tracing::error!(error = %exc, "ASGI handler error (uncaught)");
+        }
+        Ok(())
+    }
+}
+
+/// Done callback for WebSocket handler tasks.
+///
+/// Signals connection completion through a oneshot channel and logs exceptions.
+#[pyclass(module = "apx._core", freelist = 64)]
+pub struct WsDoneCallback {
+    tx: Option<oneshot::Sender<()>>,
+}
+
+impl std::fmt::Debug for WsDoneCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsDoneCallback")
+            .field("pending", &self.tx.is_some())
+            .finish()
+    }
+}
+
+impl WsDoneCallback {
+    /// Create a new callback that will send `()` on the given channel.
+    pub fn new(tx: oneshot::Sender<()>) -> Self {
+        Self { tx: Some(tx) }
+    }
+}
+
+#[pymethods]
+impl WsDoneCallback {
+    fn __call__(&mut self, _py: Python<'_>, task: &Bound<'_, PyAny>) -> PyResult<()> {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(());
+        }
+        if !task.call_method0(c"cancelled")?.is_truthy()?
+            && let Err(exc) = task.call_method0(c"result")
+        {
+            tracing::error!(error = %exc, "websocket handler error");
+        }
+        Ok(())
+    }
+}
+
 /// Convert a Python exception to `AppError::Internal`.
 ///
 /// User-facing HTTP errors (404, 400, etc.) are handled by FastAPI's

@@ -253,6 +253,10 @@ pub struct AppManifest {
     pub max_body_limit: BodyLimit,
     /// Build-time validation results.
     pub validation_results: Vec<ValidationCheck>,
+    /// Whether the FastAPI app has user-registered middleware.
+    /// When true, all routes are forced to AsgiBridge at bind time.
+    #[serde(default)]
+    pub has_middleware: bool,
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -391,6 +395,7 @@ mod tests {
     fn app_manifest_serde_roundtrip() {
         let manifest = AppManifest {
             meta: None,
+            has_middleware: false,
             routes: vec![RouteManifest {
                 kind: HandlerKind::RequestResponse,
                 method: HttpMethod::Get,
@@ -425,6 +430,7 @@ mod tests {
             openapi_schema: None,
             max_body_limit: BodyLimit::DEFAULT,
             validation_results: Vec::new(),
+            has_middleware: false,
         });
         assert_eq!(back.routes.len(), 1);
         assert_eq!(back.routes[0].path.as_str(), "/items");

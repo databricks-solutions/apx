@@ -20,12 +20,35 @@ use crate::scheduler::queue::ReadyQueue;
 /// Closure that builds a Python coroutine on the event loop thread.
 pub type CoroutineBuilder = Box<dyn FnOnce(Python<'_>) -> Result<Py<PyAny>, AppError> + Send>;
 
+/// Fire-and-forget closure that runs on the event loop thread.
+pub type Callback = Box<dyn FnOnce(Python<'_>) + Send + 'static>;
+
 /// Work item pushed from tokio threads to the event loop thread.
 pub struct WorkItem {
     /// Builds the coroutine on the event loop thread (deferred execution).
     pub builder: CoroutineBuilder,
     /// Oneshot sender for the coroutine result.
     pub tx: tokio::sync::oneshot::Sender<Result<Py<PyAny>, AppError>>,
+}
+
+/// Item in the event loop work queue.
+///
+/// Supports both coroutine-building work items (with result channel) and
+/// fire-and-forget callbacks (no result channel).
+pub enum QueueItem {
+    /// Builds a coroutine, creates task, sends result via oneshot.
+    Work(WorkItem),
+    /// Runs on event loop thread, no result channel.
+    Callback(Callback),
+}
+
+impl fmt::Debug for QueueItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Work(w) => f.debug_tuple("Work").field(w).finish(),
+            Self::Callback(_) => f.debug_tuple("Callback").finish(),
+        }
+    }
 }
 
 impl fmt::Debug for WorkItem {
@@ -69,7 +92,7 @@ impl fmt::Debug for SchedulerState {
 /// scheduler; otherwise they are dispatched as asyncio tasks.
 #[pyclass(module = "apx._core")]
 pub struct QueueDrainer {
-    rx: mpsc::UnboundedReceiver<WorkItem>,
+    rx: mpsc::UnboundedReceiver<QueueItem>,
     /// Cached `loop.create_task` bound method.
     create_task: Py<PyAny>,
     /// Cached `loop.call_soon` bound method (local, not threadsafe).
@@ -97,7 +120,7 @@ impl fmt::Debug for QueueDrainer {
 impl QueueDrainer {
     /// Create a new drainer. `self_ref` must be set after `Py::new`.
     pub fn new(
-        rx: mpsc::UnboundedReceiver<WorkItem>,
+        rx: mpsc::UnboundedReceiver<QueueItem>,
         create_task: Py<PyAny>,
         call_soon: Py<PyAny>,
         needs_wake: Arc<AtomicBool>,
@@ -136,7 +159,10 @@ impl QueueDrainer {
         let mut count = 0;
         while let Ok(item) = self.rx.try_recv() {
             count += 1;
-            self.dispatch_item(py, item);
+            match item {
+                QueueItem::Work(work) => self.dispatch_item(py, work),
+                QueueItem::Callback(cb) => cb(py),
+            }
         }
         // Drain ready tasks (re-drives from suspended awaitable resolution).
         if let Some(ref sched) = self.scheduler {
@@ -335,10 +361,10 @@ mod tests {
             let coro: Py<PyAny> = locals.get_item("coro").unwrap().unwrap().unbind();
 
             tx_queue
-                .send(WorkItem {
+                .send(QueueItem::Work(WorkItem {
                     builder: Box::new(move |_py| Ok(coro)),
                     tx: result_tx,
-                })
+                }))
                 .unwrap();
 
             let count = drainer.drain_pending(py);
@@ -348,6 +374,27 @@ mod tests {
             assert!(result_rx.try_recv().is_err(), "task not yet completed");
 
             event_loop.call_method0(c"close").unwrap();
+        });
+    }
+
+    #[test]
+    fn queue_drainer_processes_callbacks() {
+        crate::with_py(|py| {
+            let (tx_queue, rx) = mpsc::unbounded_channel();
+            let needs_wake = Arc::new(AtomicBool::new(false));
+            let mut drainer = QueueDrainer::new(rx, py.None(), py.None(), needs_wake, None);
+
+            let called = Arc::new(AtomicBool::new(false));
+            let called_clone = Arc::clone(&called);
+            tx_queue
+                .send(QueueItem::Callback(Box::new(move |_py| {
+                    called_clone.store(true, Ordering::Release);
+                })))
+                .unwrap();
+
+            let count = drainer.drain_pending(py);
+            assert_eq!(count, 1);
+            assert!(called.load(Ordering::Acquire));
         });
     }
 
@@ -367,10 +414,10 @@ mod tests {
             // Item 1: failing builder
             let (tx1, mut rx1) = oneshot::channel();
             tx_queue
-                .send(WorkItem {
+                .send(QueueItem::Work(WorkItem {
                     builder: Box::new(|_py| Err(AppError::Internal("builder failed".to_owned()))),
                     tx: tx1,
-                })
+                }))
                 .unwrap();
 
             // Item 2: succeeding builder
@@ -382,10 +429,10 @@ mod tests {
             let coro2: Py<PyAny> = locals.get_item("coro2").unwrap().unwrap().unbind();
 
             tx_queue
-                .send(WorkItem {
+                .send(QueueItem::Work(WorkItem {
                     builder: Box::new(move |_py| Ok(coro2)),
                     tx: tx2,
-                })
+                }))
                 .unwrap();
 
             let count = drainer.drain_pending(py);

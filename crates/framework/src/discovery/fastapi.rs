@@ -53,21 +53,82 @@ pub fn find_fastapi_app<'py>(
     Err(DiscoveryError::NoApp(app_module.as_str().to_owned()))
 }
 
-// ── Live discovery (test / dev only) ────────────────────────────────────
+// ── Live import via Python manifest ──────────────────────────────────────
+
+/// Import the app and extract a full manifest by calling Python's
+/// `apx._manifest.compile_manifest()` in the embedded interpreter.
+///
+/// This is the live-import path: the app is imported in the current process
+/// and routes are introspected with full dispatch classification and
+/// dependency plan compilation.
+pub fn live_extract_manifest(
+    py: Python<'_>,
+    app_module: &AppModule,
+) -> Result<crate::route::AppManifest, DiscoveryError> {
+    // Ensure cwd and src/ are on sys.path (mirrors what _manifest.py does).
+    let sys = py
+        .import(c"sys")
+        .map_err(|e| DiscoveryError::Python(format!("import sys: {e}")))?;
+    let sys_path = sys
+        .getattr(c"path")
+        .map_err(|e| DiscoveryError::Python(format!("sys.path: {e}")))?;
+    let os = py
+        .import(c"os")
+        .map_err(|e| DiscoveryError::Python(format!("import os: {e}")))?;
+    let cwd: String = os
+        .call_method0(c"getcwd")
+        .and_then(|v| v.extract())
+        .map_err(|e| DiscoveryError::Python(format!("os.getcwd: {e}")))?;
+    let _ = sys_path.call_method1(c"insert", (0i32, &cwd));
+    let src = format!("{cwd}/src");
+    if std::path::Path::new(&src).is_dir() {
+        let _ = sys_path.call_method1(c"insert", (0i32, &src));
+    }
+
+    // Call apx._manifest.compile_manifest(app_module)
+    let manifest_mod = py
+        .import(c"apx._manifest")
+        .map_err(|e| DiscoveryError::Python(format!("import apx._manifest: {e}")))?;
+    let result = manifest_mod
+        .call_method1(c"compile_manifest", (app_module.as_str(),))
+        .map_err(|e| DiscoveryError::Python(format!("compile_manifest: {e}")))?;
+
+    // Serialize to JSON string, then deserialize into Rust struct.
+    let json_mod = py
+        .import(c"json")
+        .map_err(|e| DiscoveryError::Python(format!("import json: {e}")))?;
+    let json_str: String = json_mod
+        .call_method1(c"dumps", (&result,))
+        .and_then(|v| v.extract())
+        .map_err(|e| DiscoveryError::Python(format!("json.dumps: {e}")))?;
+
+    serde_json::from_str(&json_str)
+        .map_err(|e| DiscoveryError::Python(format!("deserialize manifest from Python: {e}")))
+}
+
+// ── Live discovery (Rust-native extraction) ─────────────────────────────
 //
 // The functions below extract route metadata by walking the live FastAPI
 // `app.routes` list. Production serving uses `bind_routes_from_manifest`
-// instead, which re-uses the already-extracted manifest. These functions
-// are gated behind `#[cfg(test)]` and will be un-gated when `apx dev` is
-// added.
+// instead, which re-uses the already-extracted manifest.
+//
+// These functions are un-gated (not `#[cfg(test)]`) so they are available
+// for future `apx dev` live-reload support. They are currently exercised
+// only by integration tests.
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub fn import_and_extract<'py>(
     py: Python<'py>,
     app_module: &AppModule,
 ) -> Result<(Bound<'py, pyo3::PyAny>, crate::route::AppManifest), DiscoveryError> {
     let app = find_fastapi_app(py, app_module)?;
     let routes = extract_routes(py, &app)?;
+
+    let has_middleware: bool = app
+        .getattr(c"user_middleware")
+        .and_then(|mw| mw.len())
+        .map(|n| n > 0)
+        .unwrap_or(false);
 
     let manifest = crate::route::AppManifest {
         meta: None,
@@ -77,12 +138,13 @@ pub fn import_and_extract<'py>(
         openapi_schema: None,
         max_body_limit: crate::route::BodyLimit::DEFAULT,
         validation_results: Vec::new(),
+        has_middleware,
     };
 
     Ok((app, manifest))
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Metadata extracted from a single `APIRoute` Python object.
 struct RouteMetadata {
     path: String,
@@ -96,7 +158,7 @@ struct RouteMetadata {
     operation_id: Option<String>,
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Raw attributes extracted from a Python `APIRoute` via `FromPyObject`.
 #[derive(pyo3::FromPyObject)]
 struct RouteAttrs {
@@ -120,7 +182,7 @@ struct RouteAttrs {
     operation_id: Option<String>,
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Read scalar metadata fields from a Python `APIRoute`.
 fn extract_route_metadata(route: &Bound<'_, pyo3::PyAny>) -> Result<RouteMetadata, DiscoveryError> {
     let raw: RouteAttrs = route
@@ -139,7 +201,7 @@ fn extract_route_metadata(route: &Bound<'_, pyo3::PyAny>) -> Result<RouteMetadat
     })
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Determine handler kind and response type for a route.
 fn classify_route(
     py: Python<'_>,
@@ -152,7 +214,7 @@ fn classify_route(
     Ok((kind, response_type))
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Walk `app.routes`, filter `APIRoute`, extract [`RouteManifest`] for each.
 fn extract_routes(
     py: Python<'_>,
@@ -254,7 +316,7 @@ fn extract_routes(
     Ok(manifests)
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Extract a WebSocket route from an `APIWebSocketRoute`.
 fn extract_ws_route(
     py: Python<'_>,
@@ -300,7 +362,7 @@ fn extract_ws_route(
     }))
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Extract a string attribute from a Python object.
 fn extract_attr(obj: &Bound<'_, pyo3::PyAny>, attr: &str) -> Result<String, DiscoveryError> {
     let val = obj
@@ -310,7 +372,7 @@ fn extract_attr(obj: &Bound<'_, pyo3::PyAny>, attr: &str) -> Result<String, Disc
         .map_err(|e| DiscoveryError::Python(format!("route.{attr} extract: {e}")))
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Read `dependant.{path,query,header,cookie,body}_params` → `Vec<ParamManifest>`.
 fn extract_params_from_dependant(
     py: Python<'_>,
@@ -345,7 +407,7 @@ fn extract_params_from_dependant(
     Ok(params)
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Raw attributes extracted from a Python field info object.
 #[derive(pyo3::FromPyObject)]
 struct FieldAttrs<'py> {
@@ -359,7 +421,7 @@ struct FieldAttrs<'py> {
     type_obj: Bound<'py, pyo3::PyAny>,
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Convert a FastAPI `FieldInfo` / `ModelField` → [`ParamManifest`].
 fn field_to_param_manifest(
     py: Python<'_>,
@@ -396,7 +458,7 @@ fn field_to_param_manifest(
     })
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Extract `__module__.__qualname__` from a Python object.
 fn extract_module_qualname(obj: &Bound<'_, pyo3::PyAny>) -> Option<String> {
     let module: String = obj
@@ -414,7 +476,7 @@ fn extract_module_qualname(obj: &Bound<'_, pyo3::PyAny>) -> Option<String> {
     }
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Get the qualified name of a Python type.
 fn python_type_qualname(
     _py: Python<'_>,
@@ -429,7 +491,7 @@ fn python_type_qualname(
         .map_err(|e| DiscoveryError::Python(format!("type qualname: {e}")))
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Extract default value as JSON if the field has a default.
 fn extract_default_json(
     py: Python<'_>,
@@ -461,7 +523,7 @@ fn extract_default_json(
     Ok(Some(value))
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Get the handler's qualified name.
 fn get_handler_qualname(
     endpoint: &Bound<'_, pyo3::PyAny>,
@@ -473,7 +535,7 @@ fn get_handler_qualname(
         .map_err(|e| DiscoveryError::InvalidRoute(format!("handler qualname '{full}': {e}")))
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Classify the response type from `route.response_model`.
 fn classify_response_type(
     py: Python<'_>,
@@ -506,7 +568,7 @@ fn classify_response_type(
     })
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 /// Classify the handler kind (request-response, SSE, websocket).
 fn classify_handler_kind(
     py: Python<'_>,

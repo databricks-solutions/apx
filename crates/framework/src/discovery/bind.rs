@@ -85,6 +85,16 @@ pub fn bind_routes(
         }
     }
 
+    // Check both the manifest flag AND the live app for middleware.
+    // The manifest captures build-time state, but middleware can be added
+    // at runtime (e.g. profiling middleware enabled by env var).
+    let has_middleware = manifest.has_middleware
+        || app
+            .getattr(c"user_middleware")
+            .and_then(|mw| mw.len())
+            .map(|n| n > 0)
+            .unwrap_or(false);
+
     let app_ref = App::new(app.clone().unbind());
     let mut bound = Vec::with_capacity(manifest.routes.len());
 
@@ -118,27 +128,38 @@ pub fn bind_routes(
         let response_model = endpoint.response_model.as_ref().map(|r| r.clone_ref(py));
         let handler = Handler::new(py, handler_obj);
 
-        let (direct_context, dispatch_override) =
-            if rm.dispatch_strategy == DispatchStrategy::Direct {
-                match build_direct_context(py, rm, response_model.as_ref()) {
-                    Ok(ctx) => (Some(ctx), None),
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %rm.path,
-                            error = %e,
-                            "cannot build DirectContext, falling back to AsgiBridge"
-                        );
-                        (None, Some(DispatchStrategy::AsgiBridge))
-                    }
-                }
+        // Force AsgiBridge when app has middleware — Direct dispatch
+        // bypasses the ASGI pipeline and would skip middleware.
+        let effective_strategy =
+            if has_middleware && rm.dispatch_strategy == DispatchStrategy::Direct {
+                tracing::debug!(
+                    path = %rm.path,
+                    "forcing AsgiBridge: app has middleware"
+                );
+                DispatchStrategy::AsgiBridge
             } else {
-                (None, None)
+                rm.dispatch_strategy
             };
 
+        let (direct_context, dispatch_override) = if effective_strategy == DispatchStrategy::Direct
+        {
+            match build_direct_context(py, rm, response_model.as_ref()) {
+                Ok(ctx) => (Some(ctx), None),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %rm.path,
+                        error = %e,
+                        "cannot build DirectContext, falling back to AsgiBridge"
+                    );
+                    (None, Some(DispatchStrategy::AsgiBridge))
+                }
+            }
+        } else {
+            (None, None)
+        };
+
         let mut manifest = rm.clone();
-        if let Some(strategy) = dispatch_override {
-            manifest.dispatch_strategy = strategy;
-        }
+        manifest.dispatch_strategy = dispatch_override.unwrap_or(effective_strategy);
 
         bound.push(BoundRoute {
             manifest,

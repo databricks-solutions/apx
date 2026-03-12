@@ -26,8 +26,9 @@ pub struct SupervisorConfig {
     pub app_dir: PathBuf,
     /// Per-request timeout passed to workers.
     pub request_timeout: Duration,
-    /// Path to pre-built manifest JSON (required for serving).
-    pub manifest_path: PathBuf,
+    /// Path to pre-built manifest JSON.
+    /// `None` when using live-import mode (workers import the app module directly).
+    pub manifest_path: Option<PathBuf>,
 }
 
 /// What went wrong with supervisor config validation.
@@ -211,9 +212,19 @@ async fn spawn_worker(
         .arg("--port")
         .arg(config.port.to_string())
         .arg("--timeout")
-        .arg(config.request_timeout.as_secs().to_string())
-        .arg(&config.manifest_path)
-        .current_dir(&config.app_dir)
+        .arg(config.request_timeout.as_secs().to_string());
+
+    // Pass the target: manifest path if available, else app module string.
+    match config.manifest_path {
+        Some(ref path) => {
+            cmd.arg(path);
+        }
+        None => {
+            cmd.arg(config.app_module.as_str());
+        }
+    }
+
+    cmd.current_dir(&config.app_dir)
         .env("APX_WORKER_NONCE", nonce.as_str())
         .env("APX_WORKER_SOCK", sock_str)
         .env("PYTHONPATH", &config.app_dir);
@@ -447,7 +458,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
-            manifest_path: PathBuf::from("/app/manifest.json"),
+            manifest_path: Some(PathBuf::from("/app/manifest.json")),
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -461,7 +472,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
-            manifest_path: PathBuf::from("/app/manifest.json"),
+            manifest_path: Some(PathBuf::from("/app/manifest.json")),
         };
         let err = validate_config(&config).unwrap_err();
         assert!(matches!(
@@ -479,7 +490,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
-            manifest_path: PathBuf::from("/app/manifest.json"),
+            manifest_path: Some(PathBuf::from("/app/manifest.json")),
         };
         let err = validate_config(&config).unwrap_err();
         assert!(matches!(

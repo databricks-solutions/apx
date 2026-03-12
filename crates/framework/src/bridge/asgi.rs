@@ -309,12 +309,25 @@ impl ResolvedAwaitableWithValue {
 
 // ── AsgiSend ─────────────────────────────────────────────────────────────
 
-/// Send backend: channel for streaming, buffer for buffered responses.
+/// Send backend: channel for streaming, buffer for buffered, response-driven for Granian-style.
 enum SendBackend {
     /// Streaming: events flow through an mpsc channel to a concurrent reader.
     Channel(mpsc::Sender<AsgiEvent>),
     /// Buffered: events accumulate in a shared Vec, read after coroutine completion.
     Buffer(Arc<std::sync::Mutex<Vec<AsgiEvent>>>),
+    /// Granian-style: collects response and sends it when complete via oneshot.
+    ///
+    /// Python's event loop owns the coroutine lifecycle. The response is
+    /// delivered through `send()` itself, not through coroutine completion.
+    ResponseDriven {
+        start: Option<(u16, HeaderMap)>,
+        body_buf: Vec<u8>,
+        response_tx: Option<
+            tokio::sync::oneshot::Sender<
+                Result<crate::transport::types::OutboundResponse, crate::error::AppError>,
+            >,
+        >,
+    },
 }
 
 /// Shared buffer for buffered ASGI response collection.
@@ -380,13 +393,31 @@ impl AsgiSend {
             backend: SendBackend::Buffer(Arc::clone(&buffer.0)),
         }
     }
+
+    /// Create a response-driven sender for Granian-style dispatch.
+    ///
+    /// The response is delivered through the `send()` callback itself when
+    /// the handler sends `http.response.body` with `more_body=false`.
+    pub fn response_driven(
+        tx: tokio::sync::oneshot::Sender<
+            Result<crate::transport::types::OutboundResponse, crate::error::AppError>,
+        >,
+    ) -> Self {
+        Self {
+            backend: SendBackend::ResponseDriven {
+                start: None,
+                body_buf: Vec::with_capacity(256),
+                response_tx: Some(tx),
+            },
+        }
+    }
 }
 
 #[pymethods]
 impl AsgiSend {
     /// Python: `await send({"type": "http.response.start", ...})`
     fn __call__<'py>(
-        &self,
+        &mut self,
         py: Python<'py>,
         event: Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -399,7 +430,7 @@ impl AsgiSend {
                 elapsed_us = t0.elapsed().as_micros(),
             );
         }
-        match &self.backend {
+        match &mut self.backend {
             SendBackend::Channel(tx) => match tx.try_send(parsed) {
                 Ok(()) => Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any()),
                 Err(mpsc::error::TrySendError::Full(event)) => {
@@ -429,6 +460,37 @@ impl AsgiSend {
                 buf.lock()
                     .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("send buffer poisoned"))?
                     .push(parsed);
+                Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
+            }
+            SendBackend::ResponseDriven {
+                start,
+                body_buf,
+                response_tx,
+            } => {
+                match parsed {
+                    AsgiEvent::ResponseStart { status, headers } => {
+                        *start = Some((status, headers));
+                    }
+                    AsgiEvent::ResponseBody { body, more_body } => {
+                        body_buf.extend_from_slice(&body);
+                        if !more_body {
+                            // Deliver the complete response through the oneshot.
+                            if let Some(tx) = response_tx.take() {
+                                let (status_code, headers) =
+                                    start.take().unwrap_or_else(|| (200, HeaderMap::new()));
+                                let status = http::StatusCode::from_u16(status_code)
+                                    .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+                                let body_bytes = Bytes::from(std::mem::take(body_buf));
+                                let _ = tx.send(Ok(crate::transport::types::OutboundResponse {
+                                    status,
+                                    headers,
+                                    body: crate::transport::types::ResponseBody::Fixed(body_bytes),
+                                }));
+                            }
+                        }
+                    }
+                    _ => {} // Ignore non-HTTP events
+                }
                 Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
             }
         }

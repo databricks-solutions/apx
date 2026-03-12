@@ -14,7 +14,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 /// Lifecycle-scoped state shared across all routes in a single worker.
-#[derive(Clone)]
 pub struct AppState {
     /// Max request body size in bytes.
     pub max_body_limit: crate::route::BodyLimit,
@@ -26,6 +25,24 @@ pub struct AppState {
     pub scope_template: Arc<Py<pyo3::types::PyDict>>,
     /// Pre-built receive-event template dict with fixed ASGI fields.
     pub receive_template: Arc<Py<pyo3::types::PyDict>>,
+    /// Cached `event_loop.create_task` bound method for Granian-style dispatch.
+    pub create_task: Py<pyo3::PyAny>,
+    /// Singleton ASGI error logger (stateless, reused across requests).
+    pub error_logger: Py<pyo3::PyAny>,
+}
+
+impl Clone for AppState {
+    fn clone(&self) -> Self {
+        pyo3::Python::attach(|py| Self {
+            max_body_limit: self.max_body_limit,
+            loop_handle: self.loop_handle.clone(),
+            scope_interns: Arc::clone(&self.scope_interns),
+            scope_template: Arc::clone(&self.scope_template),
+            receive_template: Arc::clone(&self.receive_template),
+            create_task: self.create_task.clone_ref(py),
+            error_logger: self.error_logger.clone_ref(py),
+        })
+    }
 }
 
 impl std::fmt::Debug for AppState {
@@ -72,12 +89,21 @@ mod tests {
         let receive_template = pyo3::Python::attach(|py| {
             crate::bridge::context_pool::build_receive_template(py).unwrap()
         });
+        let (create_task, error_logger) = pyo3::Python::attach(|py| {
+            let ct = event_loop
+                .event_loop_ref()
+                .getattr(py, "create_task")
+                .unwrap();
+            (ct, py.None())
+        });
         let state = AppState {
             max_body_limit: crate::route::BodyLimit::DEFAULT,
             loop_handle: event_loop.handle().unwrap(),
             scope_interns: Arc::new(scope_interns),
             scope_template: Arc::new(scope_template),
             receive_template: Arc::new(receive_template),
+            create_task,
+            error_logger,
         };
         let dbg = format!("{state:?}");
         assert!(dbg.contains("AppState"));
