@@ -70,12 +70,10 @@ impl HandlerDispatch for AsgiBridgeDispatch {
     }
 }
 
-/// Buffered response path: deferred scope building on the event loop.
+/// Buffered response path: Granian-style, Python owns the coroutine lifecycle.
 ///
-/// All Python work (scope construction, ASGI object creation, coroutine
-/// scheduling) runs on the event loop thread. The tokio thread only does
-/// a brief GIL hold to enqueue the deferred callback, reducing GIL
-/// contention from concurrent requests.
+/// All Python work runs on the event loop thread via `schedule_callback`.
+/// Rust only delivers the request and waits for the response through `send()`.
 async fn dispatch_buffered(
     route: Arc<BoundRoute>,
     app_state: Arc<AppState>,
@@ -85,31 +83,96 @@ async fn dispatch_buffered(
     let trace = bench_trace_enabled();
     let t_total = trace.then(std::time::Instant::now);
 
-    let event_buffer = AsgiEventBuffer::new();
-    let eb = event_buffer.clone();
-
-    // Clone the Arc (cheap atomic increment) instead of cloning EventLoopHandle
-    // (which acquires the GIL to bump 3 Py refcounts). We borrow
-    // app_state.loop_handle for the call and move the Arc clone into the closure.
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+    // Only Arc clones (atomic increment) — no GIL needed on the tokio thread.
     let app_state_inner = Arc::clone(&app_state);
 
+    // Extract trace context before crossing to the event loop thread.
+    let trace_ctx = crate::telemetry::context::extract_trace_context();
+
     let t_schedule = trace.then(std::time::Instant::now);
-    let handler_rx = app_state.loop_handle.schedule_deferred(move |py| {
-        call_asgi_app_sync(py, &route, &request, &app_state_inner, body_bytes, &eb)
+    // Capture enqueue time to measure queue latency inside the callback.
+    let t_enqueued = trace.then(std::time::Instant::now);
+    app_state.loop_handle.schedule_callback(move |py| {
+        let result = (|| -> Result<(), AppError> {
+            if let Some(ref ctx) = trace_ctx {
+                let _ = crate::telemetry::context::set_python_context(py, ctx);
+            }
+            let t_cb_start = t_enqueued.map(|t| t.elapsed().as_micros());
+
+            let asgi_callable = route
+                .fastapi_app
+                .as_ref()
+                .map_or_else(|| route.handler.inner(), |a| a.inner());
+
+            let t_scope = trace.then(std::time::Instant::now);
+            let scope = scope_from_template(
+                py,
+                &app_state_inner.scope_template,
+                &request,
+                &app_state_inner.scope_interns,
+            )
+            .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
+            let scope_us = t_scope.map(|t| t.elapsed().as_micros());
+
+            let t_objects = trace.then(std::time::Instant::now);
+            let receive_template_ref = app_state_inner.receive_template.as_ref().clone_ref(py);
+            let receive = AsgiReceive::http(body_bytes, receive_template_ref);
+            let send = AsgiSend::response_driven(response_tx);
+
+            let receive_obj = Py::new(py, receive)
+                .map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
+            let send_obj =
+                Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
+            let objects_us = t_objects.map(|t| t.elapsed().as_micros());
+
+            let t_call = trace.then(std::time::Instant::now);
+            let coro = asgi_callable
+                .call(py, (scope, receive_obj, send_obj), None)
+                .map_err(|e| AppError::Internal(format!("handler call: {e}")))?;
+            let call_us = t_call.map(|t| t.elapsed().as_micros());
+
+            let t_task = trace.then(std::time::Instant::now);
+            // Python owns the coroutine lifecycle — with eager task factory
+            // (Python 3.12+), create_task runs the first step inline,
+            // completing synchronous handlers without scheduling delay.
+            let task = app_state_inner
+                .create_task
+                .call1(py, (coro,))
+                .map_err(|e| AppError::Internal(format!("create_task: {e}")))?;
+
+            let _ = task.call_method1(py, c"add_done_callback", (&app_state_inner.error_logger,));
+            let task_us = t_task.map(|t| t.elapsed().as_micros());
+
+            if trace {
+                tracing::info!(
+                    target: "bench_trace",
+                    phase = "callback_inner",
+                    queue_latency_us = t_cb_start.unwrap_or(0),
+                    scope_us = scope_us.unwrap_or(0),
+                    objects_us = objects_us.unwrap_or(0),
+                    call_us = call_us.unwrap_or(0),
+                    create_task_us = task_us.unwrap_or(0),
+                );
+            }
+
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            tracing::error!(error = %e, "ASGI dispatch setup failed");
+            // response_tx was moved into AsgiSend; if we errored before that,
+            // it's still in scope and will drop, causing RecvError on response_rx.
+        }
     })?;
     let schedule_us = t_schedule.map(|t| t.elapsed().as_micros());
 
+    // Wait for send() to deliver the complete response.
     let t_await = trace.then(std::time::Instant::now);
-    handler_rx
-        .await
-        .map_err(|_| AppError::Internal("event loop closed before coroutine completed".to_owned()))?
-        .map(|_| ())?;
+    let response = response_rx.await.map_err(|_| {
+        AppError::Internal("ASGI handler failed before sending response".to_owned())
+    })??;
     let await_us = t_await.map(|t| t.elapsed().as_micros());
-
-    let t_collect = std::time::Instant::now();
-    let response = collect_buffered_response(event_buffer)?;
-    let collect_us = t_collect.elapsed().as_micros();
-    tracing::trace!(elapsed_us = collect_us, "response_collect");
 
     if let Some(t_total) = t_total {
         tracing::info!(
@@ -118,14 +181,16 @@ async fn dispatch_buffered(
             total_us = t_total.elapsed().as_micros(),
             schedule_us = schedule_us.unwrap_or(0),
             await_us = await_us.unwrap_or(0),
-            collect_us = collect_us,
         );
     }
 
     Ok(response)
 }
 
-/// Streaming response path: uses mpsc channel for concurrent collection.
+/// Streaming response path: Granian-style, Python owns the coroutine lifecycle.
+///
+/// Uses mpsc channel for concurrent body streaming. The event loop thread
+/// creates the task; channel closing handles cleanup when the handler finishes.
 async fn dispatch_streaming(
     route: Arc<BoundRoute>,
     app_state: Arc<AppState>,
@@ -133,27 +198,74 @@ async fn dispatch_streaming(
     body_bytes: Bytes,
 ) -> Result<OutboundResponse, AppError> {
     let (send_tx, send_rx) = mpsc::channel::<AsgiEvent>(ASGI_CHANNEL_SIZE);
+    // Only Arc clone — no GIL needed on the tokio thread.
+    let app_state_inner = Arc::clone(&app_state);
 
-    let handler_rx = app_state.loop_handle.schedule_with(|py| {
-        let _span = tracing::trace_span!("build_scope").entered();
-        call_asgi_app(py, &route, &request, &app_state, body_bytes, |_py| {
-            AsgiSend::channel(send_tx)
-        })
+    // Extract trace context before crossing to the event loop thread.
+    let trace_ctx = crate::telemetry::context::extract_trace_context();
+
+    app_state.loop_handle.schedule_callback(move |py| {
+        let result = (|| -> Result<(), AppError> {
+            if let Some(ref ctx) = trace_ctx {
+                let _ = crate::telemetry::context::set_python_context(py, ctx);
+            }
+            let asgi_callable = route
+                .fastapi_app
+                .as_ref()
+                .map_or_else(|| route.handler.inner(), |a| a.inner());
+
+            let scope = scope_from_template(
+                py,
+                &app_state_inner.scope_template,
+                &request,
+                &app_state_inner.scope_interns,
+            )
+            .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
+
+            let receive_template_ref = app_state_inner.receive_template.as_ref().clone_ref(py);
+            let receive = if body_bytes.is_empty() {
+                AsgiReceive::empty(receive_template_ref)
+            } else {
+                AsgiReceive::http(body_bytes, receive_template_ref)
+            };
+            let send = AsgiSend::channel(send_tx);
+
+            let receive_obj = Py::new(py, receive)
+                .map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
+            let send_obj =
+                Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
+
+            let coro = asgi_callable
+                .call(py, (scope, receive_obj, send_obj), None)
+                .map_err(|e| AppError::Internal(format!("handler call: {e}")))?;
+
+            let task = app_state_inner
+                .create_task
+                .call1(py, (coro,))
+                .map_err(|e| AppError::Internal(format!("create_task: {e}")))?;
+
+            let _ = task.call_method1(py, c"add_done_callback", (&app_state_inner.error_logger,));
+
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            tracing::error!(error = %e, "ASGI streaming dispatch setup failed");
+        }
     })?;
 
-    // Wrap the receiver in a JoinHandle for abort-on-drop semantics.
-    let handler_task = tokio::spawn(async move {
-        handler_rx.await.map_err(|_| {
-            AppError::Internal("event loop closed before coroutine completed".to_owned())
-        })?
-    });
-    super::streaming::stream_asgi_response(send_rx, handler_task).await
+    // No handler_task needed — channel closing handles cleanup.
+    super::streaming::stream_asgi_response_no_task(send_rx).await
 }
 
 /// Build ASGI scope, receive, and send for the buffered dispatch path.
 ///
 /// Uses `AsgiReceive::http` (synchronous first-call body delivery)
 /// and `AsgiSend::buffered` for zero-overhead send collection.
+#[expect(
+    dead_code,
+    reason = "asgi refactor: replaced by inline closure in dispatch_buffered"
+)]
 fn call_asgi_app_sync(
     py: Python<'_>,
     route: &BoundRoute,
@@ -214,6 +326,10 @@ fn call_asgi_app_sync(
 ///
 /// Used by the streaming dispatch path. The `make_send` closure creates
 /// the appropriate `AsgiSend` variant.
+#[expect(
+    dead_code,
+    reason = "asgi refactor: replaced by inline closure in dispatch_streaming"
+)]
 fn call_asgi_app(
     py: Python<'_>,
     route: &BoundRoute,
@@ -255,6 +371,10 @@ fn call_asgi_app(
 /// Collect a buffered response from the event buffer.
 ///
 /// Expects exactly one `ResponseStart` followed by one or more `ResponseBody` events.
+#[expect(
+    dead_code,
+    reason = "asgi refactor: replaced by ResponseDriven send backend"
+)]
 fn collect_buffered_response(buffer: AsgiEventBuffer) -> Result<OutboundResponse, AppError> {
     let events = buffer.take();
     let mut events_iter = events.into_iter();

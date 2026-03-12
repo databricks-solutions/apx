@@ -62,12 +62,28 @@ async fn python_handler(
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, crate::error::AppError> {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let route_path = state.route.manifest.path.as_str().to_owned();
+
     tracing::debug!(
-        method = %request.method(),
-        path = %request.uri().path(),
+        method = %method,
+        path = %path,
         dispatch = ?state.dispatch,
         "python_handler entry"
     );
+
+    // OTEL server span — bridges to trace exporter via tracing-opentelemetry.
+    let span = tracing::info_span!(
+        "http.request",
+        http.method = %method,
+        http.target = %path,
+        http.route = %route_path,
+        http.status_code = tracing::field::Empty,
+        otel.kind = "server",
+    );
+    let _guard = span.enter();
+
     let path_params = collect_path_params(&raw_params);
 
     // Transport boundary: axum → InboundRequest (once, here)
@@ -87,6 +103,9 @@ async fn python_handler(
             inbound,
         )
         .await?;
+
+    // Record status code on the span before returning.
+    span.record("http.status_code", response.status.as_u16());
 
     // Convert back at the boundary
     Ok(crate::transport::convert::to_axum_response(response))
@@ -114,12 +133,24 @@ fn dispatch_for(route: &BoundRoute) -> Arc<dyn HandlerDispatch> {
 // ── WebSocket handler ────────────────────────────────────────────────────
 
 /// Per-route state for WebSocket handlers.
-#[derive(Clone)]
 struct WsHandlerState {
     route: Arc<BoundRoute>,
     server_addr: SocketAddr,
     loop_handle: EventLoopHandle,
     scope_interns: Arc<asgi::ScopeInterns>,
+    create_task: pyo3::Py<pyo3::PyAny>,
+}
+
+impl Clone for WsHandlerState {
+    fn clone(&self) -> Self {
+        pyo3::Python::attach(|py| Self {
+            route: Arc::clone(&self.route),
+            server_addr: self.server_addr,
+            loop_handle: self.loop_handle.clone(),
+            scope_interns: Arc::clone(&self.scope_interns),
+            create_task: self.create_task.clone_ref(py),
+        })
+    }
 }
 
 /// axum handler for WebSocket upgrade.
@@ -144,7 +175,11 @@ async fn ws_handler(
 /// WebSocket send channel buffer size.
 const WS_CHANNEL_SIZE: usize = 32;
 
-/// Bridge an axum WebSocket to a Python ASGI handler.
+/// Bridge an axum WebSocket to a Python ASGI handler (Granian-style).
+///
+/// All Python work runs on the event loop thread via `schedule_callback`.
+/// asyncio owns the coroutine lifecycle. The connection stays alive until
+/// the WS handler completes (signaled through a `WsDoneCallback`).
 async fn handle_ws_connection(
     socket: axum::extract::ws::WebSocket,
     state: WsHandlerState,
@@ -161,38 +196,62 @@ async fn handle_ws_connection(
     let recv_task = tokio::spawn(forward_ws_incoming(ws_rx, incoming_tx));
     let send_task = tokio::spawn(forward_ws_outgoing(outgoing_rx, ws_tx));
 
-    let receive = asgi::AsgiWsReceive::new(incoming_rx);
-    let send = asgi::AsgiSend::channel(outgoing_tx);
+    // Completion signal — keeps axum handler alive for connection lifetime.
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    // Destructure to avoid partial moves — no GIL acquisition on the tokio thread.
+    let WsHandlerState {
+        route,
+        server_addr: _,
+        loop_handle,
+        scope_interns,
+        create_task,
+    } = state;
 
-    // Build ASGI objects and get handler coroutine (brief GIL hold).
-    let coro = pyo3::Python::attach(
-        |py| -> Result<pyo3::Py<pyo3::PyAny>, crate::error::AppError> {
-            let scope = asgi::build_ws_scope(py, &inbound, &state.scope_interns)
+    let schedule_result = loop_handle.schedule_callback(move |py| {
+        let result = (|| -> Result<(), crate::error::AppError> {
+            let scope = asgi::build_ws_scope(py, &inbound, &scope_interns)
                 .map_err(|e| crate::error::AppError::Internal(format!("build ws scope: {e}")))?;
+            let receive = asgi::AsgiWsReceive::new(incoming_rx);
+            let send = asgi::AsgiSend::channel(outgoing_tx);
             let receive_obj = pyo3::Py::new(py, receive)
                 .map_err(|e| crate::error::AppError::Internal(format!("wrap ws receive: {e}")))?;
             let send_obj = pyo3::Py::new(py, send)
                 .map_err(|e| crate::error::AppError::Internal(format!("wrap ws send: {e}")))?;
-            state
-                .route
+            let coro = route
                 .handler
                 .inner()
                 .call(py, (scope, receive_obj, send_obj), None)
-                .map_err(|e| crate::error::AppError::Internal(format!("ws handler call: {e}")))
-        },
-    );
+                .map_err(|e| crate::error::AppError::Internal(format!("ws handler call: {e}")))?;
 
-    // Drive the WS handler coroutine on the persistent event loop.
-    // This runs concurrently with the frame-forwarding tasks above.
-    // BackgroundTasks and contextvars work correctly.
-    match coro {
-        Ok(coro) => match state.loop_handle.drive_coroutine(coro).await {
-            Ok(_) => {}
-            Err(e) => tracing::error!(error = %e, "websocket handler error"),
-        },
-        Err(e) => tracing::error!(error = %e, "websocket handler setup error"),
+            // Python owns the coroutine lifecycle — we're on the event loop
+            // thread where the GIL is already held.
+            let task = create_task
+                .call1(py, (coro,))
+                .map_err(|e| crate::error::AppError::Internal(format!("create_task: {e}")))?;
+
+            // Signal completion when WS handler finishes.
+            let callback = pyo3::Py::new(
+                py,
+                crate::event_loop::scheduling::WsDoneCallback::new(done_tx),
+            )
+            .map_err(|e| crate::error::AppError::Internal(format!("ws done callback: {e}")))?;
+            let _ = task.call_method1(py, c"add_done_callback", (callback,));
+
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            tracing::error!(error = %e, "websocket handler setup error");
+            // done_tx drops → done_rx gets RecvError → handler exits → cleanup
+        }
+    });
+
+    if let Err(e) = schedule_result {
+        tracing::error!(error = %e, "websocket schedule_callback failed");
     }
 
+    // Keep connection alive until WS handler completes.
+    let _ = done_rx.await;
     recv_task.abort();
     send_task.abort();
 }
@@ -317,6 +376,7 @@ fn register_routes(
                 server_addr,
                 loop_handle: app_state.loop_handle.clone(),
                 scope_interns: Arc::clone(&app_state.scope_interns),
+                create_task: pyo3::Python::attach(|py| app_state.create_task.clone_ref(py)),
             };
             router = router.route(&path, get(ws_handler).with_state(ws_state));
             continue;
@@ -541,12 +601,21 @@ mod tests {
         });
         let receive_template =
             pyo3::Python::attach(|py| context_pool::build_receive_template(py).unwrap());
+        let (create_task, error_logger) = pyo3::Python::attach(|py| {
+            let ct = event_loop
+                .event_loop_ref()
+                .getattr(py, "create_task")
+                .unwrap();
+            (ct, py.None())
+        });
         let app_state = Arc::new(AppState {
             max_body_limit: crate::route::BodyLimit::DEFAULT,
             loop_handle: event_loop.handle().unwrap(),
             scope_interns,
             scope_template: Arc::new(scope_template),
             receive_template: Arc::new(receive_template),
+            create_task,
+            error_logger,
         });
 
         let _router = register_routes(Router::new(), vec![ws_route], &app_state, server_addr);

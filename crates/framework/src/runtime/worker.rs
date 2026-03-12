@@ -8,6 +8,7 @@ use crate::bridge::dispatch::AppState;
 use crate::bridge::{build_router, wrap_layers};
 use crate::discovery;
 use crate::event_loop::EventLoop;
+use crate::event_loop::scheduling::AsgiErrorLogger;
 use crate::ipc::channel::WorkerChannel;
 use crate::ipc::protocol::{BootstrapError, IpcMessage, Nonce, WorkerBootstrap};
 use crate::manifest::ManifestError;
@@ -104,8 +105,10 @@ pub async fn init_worker(
 
 /// Phase 2: Load the Python app from the manifest and build the axum router.
 ///
-/// Loads the pre-built manifest, validates it, imports the FastAPI app
-/// via the `app_module` stored in manifest meta, and binds routes.
+/// When `manifest_path` is `Some`, loads the pre-built manifest from disk
+/// and validates it (the `apx build` + `apx serve <manifest>` path).
+/// When `None`, calls `apx._manifest.compile_manifest()` in the embedded
+/// interpreter to extract routes from the live app (the `apx serve <module>` path).
 ///
 /// # Errors
 ///
@@ -118,11 +121,26 @@ pub fn load_app(
     let loop_handle = py_event_loop
         .handle()
         .map_err(|e| WorkerError::PythonInit(format!("event loop handle: {e}")))?;
-    let manifest = crate::manifest::load(&bootstrap.manifest_path)?;
-    let meta = crate::manifest::validate_for_serving(&manifest)?;
-    let app_module = meta.app_module.clone();
+
+    let (manifest, app_module) = if let Some(ref path) = bootstrap.manifest_path {
+        // Manifest-based path (apx build + apx serve <manifest>)
+        let manifest = crate::manifest::load(path)?;
+        let meta = crate::manifest::validate_for_serving(&manifest)?;
+        let app_mod = meta.app_module.clone();
+        (manifest, app_mod)
+    } else {
+        // Live-import path (apx serve <app_module>)
+        let manifest = Python::attach(|py| {
+            discovery::fastapi::live_extract_manifest(py, &bootstrap.app_module)
+        })?;
+        (manifest, bootstrap.app_module.clone())
+    };
 
     let (lifecycle_cache, routes, scope_interns) = Python::attach(|py| {
+        // Bootstrap Python telemetry (log handler + context var) before app code runs.
+        crate::telemetry::bootstrap_python_telemetry(py)
+            .map_err(|e| WorkerError::PythonInit(format!("telemetry bootstrap: {e}")))?;
+
         let cache = LifecycleCache::initialize(py, &manifest.lifecycle_deps)?;
         let routes = discovery::bind::bind_routes_from_manifest(py, &manifest, &app_module)?;
         let interns = crate::bridge::asgi::ScopeInterns::new(py);
@@ -149,12 +167,28 @@ pub fn load_app(
     let receive_template = Python::attach(crate::bridge::context_pool::build_receive_template)
         .map_err(|e| WorkerError::PythonInit(format!("receive template: {e}")))?;
 
+    let (create_task, error_logger) = Python::attach(|py| {
+        let create_task = py_event_loop
+            .event_loop_ref()
+            .getattr(py, "create_task")
+            .map_err(|e| WorkerError::PythonInit(format!("create_task: {e}")))?;
+
+        // Singleton error logger — stateless, reused across all requests.
+        let error_logger = pyo3::Py::new(py, AsgiErrorLogger)
+            .map_err(|e| WorkerError::PythonInit(format!("error logger: {e}")))?
+            .into_any();
+
+        Ok::<_, WorkerError>((create_task, error_logger))
+    })?;
+
     let app_state = Arc::new(AppState {
         max_body_limit: manifest.max_body_limit,
         loop_handle,
         scope_interns,
         scope_template: Arc::new(scope_template),
         receive_template: Arc::new(receive_template),
+        create_task,
+        error_logger,
     });
 
     let router = build_router(routes, Arc::clone(&app_state), server_addr);
@@ -219,6 +253,8 @@ pub async fn run_worker(
     let result = serve(runtime.listener, router, timeout).await;
 
     Python::attach(|py| lifecycle_cache.shutdown(py));
+    // Flush pending OTLP spans, metrics, and logs before the event loop stops.
+    apx_core::tracing_init::shutdown_telemetry();
     // EventLoop::stop() is called by Drop, but we call explicitly for clarity.
     runtime.py_event_loop.stop();
 

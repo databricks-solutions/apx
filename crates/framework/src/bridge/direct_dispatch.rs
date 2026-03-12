@@ -75,7 +75,12 @@ fn dispatch_sync(
         .as_ref()
         .ok_or_else(|| AppError::Internal("missing DirectContext on Direct route".to_owned()))?;
 
+    let trace_ctx = crate::telemetry::context::extract_trace_context();
+
     let (status, json_bytes) = Python::attach(|py| {
+        if let Some(ref ctx) = trace_ctx {
+            let _ = crate::telemetry::context::set_python_context(py, ctx);
+        }
         let kwargs = build_kwargs(py, &request, &route, &body_bytes, ctx)?;
         let result = route
             .handler
@@ -118,11 +123,17 @@ async fn dispatch_async(
     // Build kwargs on the current thread (brief GIL hold).
     let kwargs = Python::attach(|py| build_kwargs(py, &request, &route, &body_bytes, ctx))?;
 
+    // Extract trace context before crossing to the event loop thread.
+    let trace_ctx = crate::telemetry::context::extract_trace_context();
+
     // Clone Arcs for the closure.
     let route_inner = Arc::clone(&route);
 
     // Schedule the handler coroutine on the event loop thread.
     let handler_rx = app_state.loop_handle.schedule_deferred(move |py| {
+        if let Some(ref ctx) = trace_ctx {
+            let _ = crate::telemetry::context::set_python_context(py, ctx);
+        }
         let ctx = route_inner.direct_context.as_ref().ok_or_else(|| {
             AppError::Internal("missing DirectContext on Direct route".to_owned())
         })?;
