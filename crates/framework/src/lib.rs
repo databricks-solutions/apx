@@ -18,6 +18,8 @@ pub mod route;
 pub mod runtime;
 pub mod transport;
 
+pub mod telemetry;
+
 pub(crate) mod bridge;
 pub(crate) mod discovery;
 pub(crate) mod event_loop;
