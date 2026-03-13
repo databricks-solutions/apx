@@ -51,3 +51,4 @@ tower = { version = "0.5", features = ["util"] }
 reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
+tracing-subscriber = { workspace = true }

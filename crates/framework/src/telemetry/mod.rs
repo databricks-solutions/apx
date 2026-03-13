@@ -4,6 +4,7 @@
 //! Python code uses thin PyO3 wrappers — no Python OTEL SDK required.
 
 pub mod context;
+pub mod http;
 pub mod logging;
 pub mod metrics;
 pub mod spans;

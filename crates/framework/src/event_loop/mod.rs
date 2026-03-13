@@ -22,3 +22,41 @@ pub mod thread_local;
 
 pub use core::EventLoop;
 pub use handle::EventLoopHandle;
+
+use std::sync::Arc;
+
+use crate::scheduler::driver::CachedTypes;
+use crate::scheduler::queue::ReadyQueue;
+
+/// Scheduler references for try-sync-first ASGI dispatch.
+///
+/// Cloned from [`queue::SchedulerState`] before it moves into the
+/// [`queue::QueueDrainer`]. Allows ASGI dispatch to drive partially-
+/// advanced coroutines through the Rust scheduler without `asyncio.Task`.
+pub struct SchedulerRefs {
+    /// Pre-resolved Python type references.
+    pub(crate) cached_types: Arc<CachedTypes>,
+    /// `loop.call_soon` bound method.
+    pub(crate) call_soon: pyo3::Py<pyo3::PyAny>,
+    /// `asyncio.ensure_future` function.
+    pub(crate) ensure_future: pyo3::Py<pyo3::PyAny>,
+    /// Shared ready queue for re-driving suspended tasks.
+    pub(crate) ready_queue: Arc<ReadyQueue>,
+}
+
+impl Clone for SchedulerRefs {
+    fn clone(&self) -> Self {
+        pyo3::Python::attach(|py| Self {
+            cached_types: Arc::clone(&self.cached_types),
+            call_soon: self.call_soon.clone_ref(py),
+            ensure_future: self.ensure_future.clone_ref(py),
+            ready_queue: Arc::clone(&self.ready_queue),
+        })
+    }
+}
+
+impl std::fmt::Debug for SchedulerRefs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchedulerRefs").finish_non_exhaustive()
+    }
+}

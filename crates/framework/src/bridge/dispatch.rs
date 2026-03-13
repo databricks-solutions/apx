@@ -5,7 +5,7 @@
 
 use crate::bridge::asgi::ScopeInterns;
 use crate::error::AppError;
-use crate::event_loop::EventLoopHandle;
+use crate::event_loop::{EventLoopHandle, SchedulerRefs};
 use crate::route::BoundRoute;
 use crate::transport::types::{InboundRequest, OutboundResponse};
 use pyo3::Py;
@@ -29,6 +29,8 @@ pub struct AppState {
     pub create_task: Py<pyo3::PyAny>,
     /// Singleton ASGI error logger (stateless, reused across requests).
     pub error_logger: Py<pyo3::PyAny>,
+    /// Scheduler refs for try-sync-first ASGI dispatch (`None` when not `RustNative`).
+    pub scheduler_refs: Option<Arc<SchedulerRefs>>,
 }
 
 impl Clone for AppState {
@@ -41,6 +43,7 @@ impl Clone for AppState {
             receive_template: Arc::clone(&self.receive_template),
             create_task: self.create_task.clone_ref(py),
             error_logger: self.error_logger.clone_ref(py),
+            scheduler_refs: self.scheduler_refs.clone(),
         })
     }
 }
@@ -104,6 +107,7 @@ mod tests {
             receive_template: Arc::new(receive_template),
             create_task,
             error_logger,
+            scheduler_refs: None,
         };
         let dbg = format!("{state:?}");
         assert!(dbg.contains("AppState"));

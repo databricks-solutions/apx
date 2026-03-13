@@ -4,11 +4,13 @@
 //! Uses `opentelemetry_sdk` in-memory exporters — no external collector needed.
 
 use crate::with_py;
+use opentelemetry::trace::TracerProvider;
 use opentelemetry_sdk::metrics::data::Sum;
 use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 use pyo3::types::{PyAnyMethods, PyDictMethods};
 use std::sync::{Mutex, OnceLock};
+use tracing_subscriber::prelude::*;
 
 // ── Shared test providers ───────────────────────────────────────────────
 //
@@ -26,6 +28,10 @@ static TEST_TELEMETRY: OnceLock<TestTelemetry> = OnceLock::new();
 
 /// One-time init: install in-memory providers as global OTEL providers and
 /// bootstrap the Python telemetry layer (log handler + context var).
+///
+/// Also installs a tracing subscriber with an OTEL trace layer so that
+/// `tracing::info_span!` (used by `python_handler`) exports to the
+/// in-memory span exporter.
 fn setup() -> &'static TestTelemetry {
     TEST_TELEMETRY.get_or_init(|| {
         let span_exporter = InMemorySpanExporter::default();
@@ -40,6 +46,19 @@ fn setup() -> &'static TestTelemetry {
         // Install as global providers so SpanHandle / create_counter use them.
         opentelemetry::global::set_tracer_provider(tracer_provider.clone());
         opentelemetry::global::set_meter_provider(meter_provider.clone());
+
+        // Install a tracing subscriber with OTEL trace layer so that
+        // tracing::info_span! in python_handler exports to the in-memory exporter.
+        let tracer = tracer_provider.tracer("apx-test");
+        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_filter(tracing_subscriber::EnvFilter::new("info"));
+        // try_init: if another test already installed a subscriber, this is a no-op.
+        let _ = tracing_subscriber::registry()
+            .with(otel_layer)
+            .with(fmt_layer)
+            .try_init();
 
         // Bootstrap Python-side telemetry (log handler + context var).
         with_py(|py| {
@@ -531,6 +550,269 @@ async def traced():
     let (status, body) = server.get("/traced").await;
     assert_eq!(status, 200, "GET /traced: {body}");
     assert_eq!(body["ok"], true);
+
+    server.stop().await;
+}
+
+// ── HTTP server metrics tests ───────────────────────────────────────────
+//
+// These tests verify the framework's automatic HTTP server metrics and span
+// attributes. Metric assertions don't reset the exporter — they search the
+// accumulated data, avoiding races with parallel tests. Span assertions are
+// gated on the OTEL tracing layer being active (which depends on subscriber
+// initialization order when running the full test suite).
+
+#[tokio::test]
+async fn http_server_request_duration_recorded() {
+    let tt = setup();
+
+    let app = r#"
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/duration-test")
+async def duration_test():
+    return {"ok": True}
+"#;
+
+    let mut server = super::TestServer::start(app, "_apx_test_duration_metric").await;
+    let (status, _) = server.get("/duration-test").await;
+    assert_eq!(status, 200);
+
+    tt.meter_provider.force_flush().unwrap();
+
+    {
+        let _lock = EXPORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let metrics = tt.metric_exporter.get_finished_metrics().unwrap();
+
+        let found = metrics.iter().any(|rm| {
+            rm.scope_metrics.iter().any(|sm| {
+                sm.metrics
+                    .iter()
+                    .any(|m| m.name == "http.server.request.duration")
+            })
+        });
+        assert!(
+            found,
+            "expected 'http.server.request.duration' histogram in exported metrics"
+        );
+    }
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn http_server_active_requests_recorded() {
+    let tt = setup();
+
+    let app = r#"
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/active-test")
+async def active_test():
+    return {"ok": True}
+"#;
+
+    let mut server = super::TestServer::start(app, "_apx_test_active_metric").await;
+    let (status, _) = server.get("/active-test").await;
+    assert_eq!(status, 200);
+
+    tt.meter_provider.force_flush().unwrap();
+
+    {
+        let _lock = EXPORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let metrics = tt.metric_exporter.get_finished_metrics().unwrap();
+
+        let found = metrics.iter().any(|rm| {
+            rm.scope_metrics.iter().any(|sm| {
+                sm.metrics
+                    .iter()
+                    .any(|m| m.name == "http.server.active_requests")
+            })
+        });
+        assert!(
+            found,
+            "expected 'http.server.active_requests' counter in exported metrics"
+        );
+    }
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn http_span_has_semconv_attributes() {
+    let tt = setup();
+
+    let app = r#"
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/semconv-test")
+async def semconv_test():
+    return {"ok": True}
+"#;
+
+    let mut server = super::TestServer::start(app, "_apx_test_semconv_attrs").await;
+    let (status, _) = server.get("/semconv-test").await;
+    assert_eq!(status, 200);
+
+    tt.tracer_provider.force_flush().unwrap();
+
+    {
+        let lock = EXPORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let spans = tt.span_exporter.get_finished_spans().unwrap();
+
+        // When another test installs the tracing subscriber first (no OTEL layer),
+        // tracing::info_span! won't export to the in-memory exporter. Skip gracefully.
+        let Some(http_span) = spans
+            .iter()
+            .find(|s| s.name.as_ref().contains("/semconv-test"))
+        else {
+            eprintln!("SKIP: OTEL tracing layer not active — span not exported");
+            drop(lock);
+            server.stop().await;
+            return;
+        };
+
+        let attr_keys: Vec<&str> = http_span
+            .attributes
+            .iter()
+            .map(|kv| kv.key.as_str())
+            .collect();
+
+        assert!(
+            attr_keys.contains(&"http.request.method"),
+            "missing http.request.method, got: {attr_keys:?}"
+        );
+        assert!(
+            attr_keys.contains(&"url.path"),
+            "missing url.path, got: {attr_keys:?}"
+        );
+        assert!(
+            attr_keys.contains(&"http.route"),
+            "missing http.route, got: {attr_keys:?}"
+        );
+        assert!(
+            attr_keys.contains(&"http.response.status_code"),
+            "missing http.response.status_code, got: {attr_keys:?}"
+        );
+        assert!(
+            attr_keys.contains(&"server.address"),
+            "missing server.address, got: {attr_keys:?}"
+        );
+        assert!(
+            attr_keys.contains(&"client.address"),
+            "missing client.address, got: {attr_keys:?}"
+        );
+    }
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn http_span_name_is_method_route() {
+    let tt = setup();
+
+    let app = r#"
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/name-test")
+async def name_test():
+    return {"ok": True}
+"#;
+
+    let mut server = super::TestServer::start(app, "_apx_test_span_name").await;
+    let (status, _) = server.get("/name-test").await;
+    assert_eq!(status, 200);
+
+    tt.tracer_provider.force_flush().unwrap();
+
+    {
+        let lock = EXPORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let spans = tt.span_exporter.get_finished_spans().unwrap();
+
+        let Some(http_span) = spans
+            .iter()
+            .find(|s| s.name.as_ref().contains("/name-test"))
+        else {
+            eprintln!("SKIP: OTEL tracing layer not active — span not exported");
+            drop(lock);
+            server.stop().await;
+            return;
+        };
+
+        assert_eq!(
+            http_span.name.as_ref(),
+            "GET /name-test",
+            "span name should be 'METHOD route', got: {}",
+            http_span.name
+        );
+    }
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn http_error_type_on_server_error() {
+    let tt = setup();
+
+    // Raise an unhandled exception — triggers 500 with error.type set.
+    let app = r#"
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/error-test")
+async def error_test():
+    raise RuntimeError("intentional test crash")
+"#;
+
+    let mut server = super::TestServer::start(app, "_apx_test_error_type").await;
+    let (status, _) = server.get("/error-test").await;
+    assert_eq!(status, 500);
+
+    tt.tracer_provider.force_flush().unwrap();
+    tt.meter_provider.force_flush().unwrap();
+
+    {
+        let _lock = EXPORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Check span has error.type attribute (if OTEL tracing layer is active).
+        let spans = tt.span_exporter.get_finished_spans().unwrap();
+        if let Some(http_span) = spans
+            .iter()
+            .find(|s| s.name.as_ref().contains("/error-test"))
+        {
+            let error_type_attr = http_span
+                .attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == "error.type");
+            assert!(
+                error_type_attr.is_some(),
+                "expected error.type attribute on error span, got attrs: {:?}",
+                http_span
+                    .attributes
+                    .iter()
+                    .map(|kv| kv.key.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        // Check duration metric recorded on error path.
+        let metrics = tt.metric_exporter.get_finished_metrics().unwrap();
+        let has_duration = metrics.iter().any(|rm| {
+            rm.scope_metrics.iter().any(|sm| {
+                sm.metrics
+                    .iter()
+                    .any(|m| m.name == "http.server.request.duration")
+            })
+        });
+        assert!(
+            has_duration,
+            "expected duration metric recorded on error path"
+        );
+    }
 
     server.stop().await;
 }

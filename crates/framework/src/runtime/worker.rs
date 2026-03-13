@@ -181,6 +181,10 @@ pub fn load_app(
         Ok::<_, WorkerError>((create_task, error_logger))
     })?;
 
+    let scheduler_refs = py_event_loop
+        .scheduler_refs()
+        .map(|refs| Arc::new(refs.clone()));
+
     let app_state = Arc::new(AppState {
         max_body_limit: manifest.max_body_limit,
         loop_handle,
@@ -189,6 +193,7 @@ pub fn load_app(
         receive_template: Arc::new(receive_template),
         create_task,
         error_logger,
+        scheduler_refs,
     });
 
     let router = build_router(routes, Arc::clone(&app_state), server_addr);

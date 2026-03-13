@@ -141,7 +141,7 @@ pub enum AppError {
 
 impl AppError {
     /// Convert to status code.
-    fn status_code(&self) -> StatusCode {
+    pub(crate) fn status_code(&self) -> StatusCode {
         match self {
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::BodyParse(_) => StatusCode::BAD_REQUEST,

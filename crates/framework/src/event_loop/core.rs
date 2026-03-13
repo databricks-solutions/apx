@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use pyo3::prelude::*;
 use tokio::sync::mpsc;
 
+use super::SchedulerRefs;
 use super::handle::EventLoopHandle;
 use super::queue::{QueueDrainer, QueueItem, SchedulerState};
 use crate::scheduler::driver::CachedTypes;
@@ -158,6 +159,8 @@ pub struct EventLoop {
     needs_wake: Arc<AtomicBool>,
     /// Python reference to the [`QueueDrainer`] singleton.
     drainer_ref: Py<PyAny>,
+    /// Scheduler refs for try-sync-first dispatch (present when `RustNative`).
+    scheduler_refs: Option<SchedulerRefs>,
 }
 
 impl std::fmt::Debug for EventLoop {
@@ -214,8 +217,12 @@ impl EventLoop {
                     );
 
                     match result {
-                        Ok((event_loop, drainer_ref)) => {
-                            let _ = startup_tx.send(Ok((event_loop.clone_ref(py), drainer_ref)));
+                        Ok((event_loop, drainer_ref, scheduler_refs)) => {
+                            let _ = startup_tx.send(Ok((
+                                event_loop.clone_ref(py),
+                                drainer_ref,
+                                scheduler_refs,
+                            )));
 
                             let loop_bound = event_loop.bind(py);
                             if let Err(e) = loop_bound.call_method0(c"run_forever") {
@@ -234,7 +241,7 @@ impl EventLoop {
             })
             .map_err(|e| format!("failed to spawn asyncio thread: {e}"))?;
 
-        let (event_loop, drainer_ref) = startup_rx
+        let (event_loop, drainer_ref, scheduler_refs) = startup_rx
             .recv()
             .map_err(|_| "asyncio thread exited before sending loop".to_owned())??;
 
@@ -245,17 +252,19 @@ impl EventLoop {
             queue_tx,
             needs_wake,
             drainer_ref,
+            scheduler_refs,
         })
     }
 
     /// Initialize the event loop, install the [`QueueDrainer`], and return both.
+    #[allow(clippy::type_complexity)]
     fn init_event_loop_thread(
         py: Python<'_>,
         policy: LoopPolicy,
         queue_rx: mpsc::UnboundedReceiver<QueueItem>,
         needs_wake: Arc<AtomicBool>,
         tokio_handle: Option<tokio::runtime::Handle>,
-    ) -> Result<(Py<PyAny>, Py<PyAny>), String> {
+    ) -> Result<(Py<PyAny>, Py<PyAny>, Option<SchedulerRefs>), String> {
         let event_loop =
             create_event_loop(py, policy).map_err(|e| format!("create_event_loop: {e}"))?;
         let asyncio = py
@@ -275,24 +284,30 @@ impl EventLoop {
             }
         }
 
-        let drainer_ref = Self::install_drainer(py, &event_loop, queue_rx, needs_wake, policy)?;
+        let (drainer_ref, scheduler_refs) =
+            Self::install_drainer(py, &event_loop, queue_rx, needs_wake, policy)?;
 
         // Always install the tokio handle for scheduler primitives (Timer,
         // BlockingTask). The anyio backend uses these even without the Rust
         // coroutine driver.
         install_rust_scheduler(py, tokio_handle).map_err(|e| format!("scheduler install: {e}"))?;
 
-        Ok((event_loop.unbind(), drainer_ref))
+        Ok((event_loop.unbind(), drainer_ref, scheduler_refs))
     }
 
     /// Create and install the [`QueueDrainer`] on the event loop.
+    ///
+    /// Returns `(drainer_ref, scheduler_refs)` — the scheduler refs are
+    /// cloned before the [`SchedulerState`] moves into the drainer so that
+    /// [`AppState`](crate::bridge::dispatch::AppState) can use them for
+    /// try-sync-first ASGI dispatch.
     fn install_drainer(
         py: Python<'_>,
         event_loop: &Bound<'_, PyAny>,
         queue_rx: mpsc::UnboundedReceiver<QueueItem>,
         needs_wake: Arc<AtomicBool>,
         policy: LoopPolicy,
-    ) -> Result<Py<PyAny>, String> {
+    ) -> Result<(Py<PyAny>, Option<SchedulerRefs>), String> {
         let create_task = event_loop
             .getattr(c"create_task")
             .map_err(|e| format!("missing create_task: {e}"))?
@@ -323,8 +338,13 @@ impl EventLoop {
             None
         };
 
-        // Clone the ready_queue Arc before scheduler moves into the drainer.
-        let ready_queue_ref = scheduler.as_ref().map(|s| Arc::clone(&s.ready_queue));
+        // Clone scheduler refs before scheduler moves into the drainer.
+        let scheduler_refs = scheduler.as_ref().map(|s| SchedulerRefs {
+            cached_types: Arc::clone(&s.cached_types),
+            call_soon: s.call_soon.clone_ref(py),
+            ensure_future: s.ensure_future.clone_ref(py),
+            ready_queue: Arc::clone(&s.ready_queue),
+        });
 
         let drainer = QueueDrainer::new(
             queue_rx,
@@ -343,8 +363,9 @@ impl EventLoop {
 
         // Set wake state on the ready queue so push() can reschedule
         // the drainer when it is sleeping.
-        if let Some(ref rq) = ready_queue_ref {
-            rq.set_wake(needs_wake, call_soon, drainer_obj.clone_ref(py).into_any());
+        if let Some(ref refs) = scheduler_refs {
+            refs.ready_queue
+                .set_wake(needs_wake, call_soon, drainer_obj.clone_ref(py).into_any());
         }
 
         // Install initial callback so the drainer starts processing.
@@ -352,7 +373,7 @@ impl EventLoop {
             .call_method1(c"call_soon", (&drainer_obj,))
             .map_err(|e| format!("initial call_soon: {e}"))?;
 
-        Ok(drainer_obj.into_any())
+        Ok((drainer_obj.into_any(), scheduler_refs))
     }
 
     /// Get a cloneable handle for submitting work to this event loop.
@@ -375,6 +396,13 @@ impl EventLoop {
     /// Get a reference to the underlying Python event loop object.
     pub fn event_loop_ref(&self) -> &Py<PyAny> {
         &self.event_loop
+    }
+
+    /// Get the scheduler refs for try-sync-first ASGI dispatch.
+    ///
+    /// Returns `Some` when the event loop was started with [`LoopPolicy::RustNative`].
+    pub fn scheduler_refs(&self) -> Option<&SchedulerRefs> {
+        self.scheduler_refs.as_ref()
     }
 
     /// Stop the event loop and join the dedicated thread.

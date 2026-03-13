@@ -96,6 +96,39 @@ async def check_cancel():
     server.stop().await;
 }
 
+/// Prove the try-sync-first optimization: a simple buffered handler
+/// completes without creating any `asyncio.Task`. The handler snapshots
+/// `asyncio.all_tasks()` before and after the request lifecycle —
+/// if the count doesn't grow, no Task was allocated.
+#[tokio::test]
+async fn sched_no_asyncio_task_for_sync_handler() {
+    let app = r#"
+import asyncio
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/no-task")
+async def no_task():
+    # Snapshot task count from inside the handler.
+    # With spawn_and_drive, current_task() is a TaskProxy (not asyncio.Task),
+    # so all_tasks() should not include it.
+    tasks = asyncio.all_tasks()
+    asyncio_task_count = sum(
+        1 for t in tasks if type(t).__module__ == "asyncio.tasks"
+    )
+    return {"asyncio_task_count": asyncio_task_count}
+"#;
+    let mut server = TestServer::start_with_scheduler(app, "_sched_no_task").await;
+    let (status, body) = server.get("/no-task").await;
+    assert_eq!(status, 200, "no-task: {body}");
+    // Zero asyncio.Task objects — the handler was driven by spawn_and_drive.
+    assert_eq!(
+        body["asyncio_task_count"], 0,
+        "expected 0 asyncio.Task objects, got {body}"
+    );
+    server.stop().await;
+}
+
 // ── Category 2: asyncio primitives through the driver ───────────────
 
 #[tokio::test]

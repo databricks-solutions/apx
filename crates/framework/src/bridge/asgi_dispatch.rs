@@ -11,6 +11,7 @@ use crate::bridge::context_pool::scope_from_template;
 use crate::bridge::dispatch::{AppState, HandlerDispatch};
 use crate::error::{AppError, BodyParseKind};
 use crate::route::{BoundRoute, HandlerKind, ResponseType};
+use crate::scheduler::driver::spawn_and_drive;
 use crate::transport::types::{InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
 use http::StatusCode;
@@ -132,17 +133,43 @@ async fn dispatch_buffered(
                 .map_err(|e| AppError::Internal(format!("handler call: {e}")))?;
             let call_us = t_call.map(|t| t.elapsed().as_micros());
 
-            let t_task = trace.then(std::time::Instant::now);
-            // Python owns the coroutine lifecycle — with eager task factory
-            // (Python 3.12+), create_task runs the first step inline,
-            // completing synchronous handlers without scheduling delay.
-            let task = app_state_inner
-                .create_task
-                .call1(py, (coro,))
-                .map_err(|e| AppError::Internal(format!("create_task: {e}")))?;
-
-            let _ = task.call_method1(py, c"add_done_callback", (&app_state_inner.error_logger,));
-            let task_us = t_task.map(|t| t.elapsed().as_micros());
+            let t_drive = trace.then(std::time::Instant::now);
+            // Drive the ASGI coroutine via the Rust scheduler when available.
+            // For sync-completing handlers, spawn_and_drive completes in one
+            // coro.send(None) — no asyncio.Task created. Async handlers get
+            // driven through the scheduler's suspend/resume mechanism.
+            //
+            // Result channel: the ASGI response flows through AsgiSend (the
+            // response_tx oneshot), NOT through the coroutine return value.
+            // The dummy_rx is used only to surface errors from sync-completing
+            // coroutines that fail before calling send().
+            if let Some(ref sched) = app_state_inner.scheduler_refs {
+                let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+                spawn_and_drive(
+                    py,
+                    coro,
+                    result_tx,
+                    &sched.cached_types,
+                    &sched.call_soon,
+                    &sched.ensure_future,
+                    &sched.ready_queue,
+                );
+                // Log errors from sync-completing coroutines. For async
+                // coroutines, the error arrives later and is handled by
+                // the scheduler's resume path (result_rx drops silently).
+                if let Ok(Err(e)) = result_rx.try_recv() {
+                    tracing::error!(error = %e, "ASGI handler error");
+                }
+            } else {
+                // Fallback: create asyncio.Task (non-RustNative policy).
+                let task = app_state_inner
+                    .create_task
+                    .call1(py, (coro,))
+                    .map_err(|e| AppError::Internal(format!("create_task: {e}")))?;
+                let _ =
+                    task.call_method1(py, c"add_done_callback", (&app_state_inner.error_logger,));
+            }
+            let drive_us = t_drive.map(|t| t.elapsed().as_micros());
 
             if trace {
                 tracing::info!(
@@ -152,7 +179,7 @@ async fn dispatch_buffered(
                     scope_us = scope_us.unwrap_or(0),
                     objects_us = objects_us.unwrap_or(0),
                     call_us = call_us.unwrap_or(0),
-                    create_task_us = task_us.unwrap_or(0),
+                    drive_us = drive_us.unwrap_or(0),
                 );
             }
 
@@ -239,12 +266,29 @@ async fn dispatch_streaming(
                 .call(py, (scope, receive_obj, send_obj), None)
                 .map_err(|e| AppError::Internal(format!("handler call: {e}")))?;
 
-            let task = app_state_inner
-                .create_task
-                .call1(py, (coro,))
-                .map_err(|e| AppError::Internal(format!("create_task: {e}")))?;
-
-            let _ = task.call_method1(py, c"add_done_callback", (&app_state_inner.error_logger,));
+            // Same try-sync-first pattern as dispatch_buffered.
+            if let Some(ref sched) = app_state_inner.scheduler_refs {
+                let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+                spawn_and_drive(
+                    py,
+                    coro,
+                    result_tx,
+                    &sched.cached_types,
+                    &sched.call_soon,
+                    &sched.ensure_future,
+                    &sched.ready_queue,
+                );
+                if let Ok(Err(e)) = result_rx.try_recv() {
+                    tracing::error!(error = %e, "ASGI streaming handler error");
+                }
+            } else {
+                let task = app_state_inner
+                    .create_task
+                    .call1(py, (coro,))
+                    .map_err(|e| AppError::Internal(format!("create_task: {e}")))?;
+                let _ =
+                    task.call_method1(py, c"add_done_callback", (&app_state_inner.error_logger,));
+            }
 
             Ok(())
         })();

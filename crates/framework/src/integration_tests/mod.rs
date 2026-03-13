@@ -256,13 +256,18 @@ impl TestServer {
         let receive_template = pyo3::Python::attach(|py| {
             crate::bridge::context_pool::build_receive_template(py).unwrap()
         });
-        let (create_task, error_logger) = pyo3::Python::attach(|py| {
-            let ct = shared_event_loop_handle()
-                .event_loop()
-                .getattr(py, "create_task")
-                .unwrap();
-            (ct, py.None())
-        });
+        let (create_task, error_logger, scheduler_refs) = {
+            let guard = SHARED_EVENT_LOOP.lock().unwrap_or_else(|e| e.into_inner());
+            let event_loop = guard.as_ref().unwrap();
+            let refs = event_loop.scheduler_refs().map(|r| Arc::new(r.clone()));
+            pyo3::Python::attach(|py| {
+                let ct = event_loop
+                    .event_loop_ref()
+                    .getattr(py, "create_task")
+                    .unwrap();
+                (ct, py.None(), refs)
+            })
+        };
         let app_state = Arc::new(AppState {
             max_body_limit: BodyLimit::DEFAULT,
             loop_handle,
@@ -271,6 +276,7 @@ impl TestServer {
             receive_template: Arc::new(receive_template),
             create_task,
             error_logger,
+            scheduler_refs,
         });
 
         let router = build_router(routes, app_state, addr);
@@ -406,13 +412,18 @@ impl TestServer {
         let receive_template = pyo3::Python::attach(|py| {
             crate::bridge::context_pool::build_receive_template(py).unwrap()
         });
-        let (create_task, error_logger) = pyo3::Python::attach(|py| {
-            let ct = shared_event_loop_handle()
-                .event_loop()
-                .getattr(py, "create_task")
-                .unwrap();
-            (ct, py.None())
-        });
+        let (create_task, error_logger, scheduler_refs) = {
+            let guard = SHARED_EVENT_LOOP.lock().unwrap_or_else(|e| e.into_inner());
+            let event_loop = guard.as_ref().unwrap();
+            let refs = event_loop.scheduler_refs().map(|r| Arc::new(r.clone()));
+            pyo3::Python::attach(|py| {
+                let ct = event_loop
+                    .event_loop_ref()
+                    .getattr(py, "create_task")
+                    .unwrap();
+                (ct, py.None(), refs)
+            })
+        };
         let app_state = Arc::new(AppState {
             max_body_limit: loaded_manifest.max_body_limit,
             loop_handle,
@@ -421,6 +432,7 @@ impl TestServer {
             receive_template: Arc::new(receive_template),
             create_task,
             error_logger,
+            scheduler_refs,
         });
 
         let router = build_router(routes, app_state, addr);
@@ -537,6 +549,7 @@ impl TestServer {
         let receive_template = pyo3::Python::attach(|py| {
             crate::bridge::context_pool::build_receive_template(py).unwrap()
         });
+        let scheduler_refs = event_loop.scheduler_refs().map(|r| Arc::new(r.clone()));
         let (create_task, error_logger) = pyo3::Python::attach(|py| {
             let ct = event_loop
                 .event_loop_ref()
@@ -552,6 +565,7 @@ impl TestServer {
             receive_template: Arc::new(receive_template),
             create_task,
             error_logger,
+            scheduler_refs,
         });
 
         let router = build_router(routes, app_state, addr);

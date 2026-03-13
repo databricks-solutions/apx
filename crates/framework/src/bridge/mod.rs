@@ -62,9 +62,17 @@ async fn python_handler(
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, crate::error::AppError> {
+    use crate::telemetry::http as thttp;
+
     let method = request.method().clone();
+    let method_str = method.as_str().to_owned();
     let path = request.uri().path().to_owned();
+    let query = request.uri().query().map(str::to_owned);
     let route_path = state.route.manifest.path.as_str().to_owned();
+    let http_version = thttp::protocol_version(request.version());
+
+    // Scheme is not set in the URI for plain HTTP servers — default to "http".
+    let scheme = request.uri().scheme_str().unwrap_or("http").to_owned();
 
     tracing::debug!(
         method = %method,
@@ -73,16 +81,35 @@ async fn python_handler(
         "python_handler entry"
     );
 
-    // OTEL server span — bridges to trace exporter via tracing-opentelemetry.
+    // Construct the OTEL span name: "{METHOD} {route}" per semconv.
+    let span_name = format!("{method_str} {route_path}");
+
+    // OTEL server span — semconv v1.23+ attribute names.
     let span = tracing::info_span!(
         "http.request",
-        http.method = %method,
-        http.target = %path,
-        http.route = %route_path,
-        http.status_code = tracing::field::Empty,
+        otel.name = %span_name,
         otel.kind = "server",
+        http.request.method = %method_str,
+        http.route = %route_path,
+        url.path = %path,
+        url.query = tracing::field::Empty,
+        url.scheme = %scheme,
+        server.address = %state.server_addr.ip(),
+        server.port = state.server_addr.port(),
+        client.address = %client_addr.ip(),
+        network.protocol.version = %http_version,
+        http.response.status_code = tracing::field::Empty,
+        error.type = tracing::field::Empty,
     );
-    let _guard = span.enter();
+    let _span_guard = span.enter();
+
+    if let Some(ref q) = query {
+        span.record("url.query", q.as_str());
+    }
+
+    // Metrics: active requests (RAII guard decrements on drop).
+    let _active_guard = thttp::ActiveRequestGuard::enter(&method_str, &scheme);
+    let start = std::time::Instant::now();
 
     let path_params = collect_path_params(&raw_params);
 
@@ -94,21 +121,59 @@ async fn python_handler(
         Some(client_addr),
     );
 
-    // Everything below is transport-agnostic
-    let response = state
+    // Everything below is transport-agnostic.
+    // Use match instead of `?` so metrics are always recorded.
+    let result = state
         .dispatch
         .handle(
             Arc::clone(&state.route),
             Arc::clone(&state.app_state),
             inbound,
         )
-        .await?;
+        .await;
 
-    // Record status code on the span before returning.
-    span.record("http.status_code", response.status.as_u16());
+    let elapsed = start.elapsed().as_secs_f64();
 
-    // Convert back at the boundary
-    Ok(crate::transport::convert::to_axum_response(response))
+    match result {
+        Ok(response) => {
+            let status = response.status.as_u16();
+            span.record("http.response.status_code", status);
+
+            // Set error.type for server error responses (semconv: SHOULD for >= 500).
+            let error_type = if status >= 500 {
+                Some(status.to_string())
+            } else {
+                None
+            };
+            if let Some(ref et) = error_type {
+                span.record("error.type", et.as_str());
+            }
+            thttp::record_duration(
+                elapsed,
+                &method_str,
+                &scheme,
+                status,
+                &route_path,
+                error_type.as_deref(),
+            );
+            Ok(crate::transport::convert::to_axum_response(response))
+        }
+        Err(err) => {
+            let status = err.status_code().as_u16();
+            let error_type = thttp::error_type_for(&err);
+            span.record("http.response.status_code", status);
+            span.record("error.type", error_type);
+            thttp::record_duration(
+                elapsed,
+                &method_str,
+                &scheme,
+                status,
+                &route_path,
+                Some(error_type),
+            );
+            Err(err)
+        }
+    }
 }
 
 /// Collect path params from axum's `RawPathParams` extractor.
@@ -616,6 +681,7 @@ mod tests {
             receive_template: Arc::new(receive_template),
             create_task,
             error_logger,
+            scheduler_refs: None,
         });
 
         let _router = register_routes(Router::new(), vec![ws_route], &app_state, server_addr);
