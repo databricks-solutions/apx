@@ -1,7 +1,7 @@
 //! ASGI protocol primitives backed by Rust.
 //!
-//! Provides `AsgiReceive`, `AsgiSend` (Python callables), and `build_http_scope`
-//! for constructing ASGI HTTP scope dicts from [`InboundRequest`].
+//! Provides `AsgiReceive`, `AsgiSend` (Python callables), `build_http_scope`,
+//! and `build_ws_scope` for constructing ASGI scope dicts from [`InboundRequest`].
 //!
 //! These types enable Starlette's `Request`, `StreamingResponse`, and `WebSocket`
 //! to work unmodified against a Rust-backed ASGI server.
@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyDictMethods, PyList, PyString, PyTuple};
 use std::borrow::Cow;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// ASGI protocol version string.
 const ASGI_VERSION: &str = "3.0";
@@ -119,6 +119,19 @@ impl ScopeInterns {
     }
 }
 
+/// Build the ASGI receive template dict: `{"type": "http.request", "body": b"", "more_body": false}`.
+///
+/// Created once at worker startup, stored in `AsgiDispatch`. Each request
+/// copies this dict (inside `AsgiReceive::__call__`) and patches the `body` field.
+pub fn build_receive_template(py: Python<'_>) -> Py<PyDict> {
+    let dict = PyDict::new(py);
+    // These set_item calls are infallible for interned string keys.
+    let _ = dict.set_item(pyo3::intern!(py, "type"), pyo3::intern!(py, "http.request"));
+    let _ = dict.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, b""));
+    let _ = dict.set_item(pyo3::intern!(py, "more_body"), false);
+    dict.unbind()
+}
+
 // ── AsgiEvent ────────────────────────────────────────────────────────────
 
 /// Parsed ASGI send event (Rust-side representation).
@@ -175,6 +188,7 @@ pub enum AsgiEvent {
 pub struct AsgiReceive {
     body: std::sync::Mutex<Option<Bytes>>,
     receive_template: Py<PyDict>,
+    disconnect_rx: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 impl std::fmt::Debug for AsgiReceive {
@@ -185,24 +199,25 @@ impl std::fmt::Debug for AsgiReceive {
 
 impl AsgiReceive {
     /// Create for an HTTP request with a known body.
-    pub fn http(body: Bytes, receive_template: Py<PyDict>) -> Self {
+    pub fn http(
+        body: Bytes,
+        receive_template: Py<PyDict>,
+        disconnect_rx: oneshot::Receiver<()>,
+    ) -> Self {
         Self {
             body: std::sync::Mutex::new(Some(body)),
             receive_template,
+            disconnect_rx: std::sync::Mutex::new(Some(disconnect_rx)),
         }
     }
 
     /// Create for an HTTP request with no body (GET, HEAD, DELETE).
-    pub fn empty(receive_template: Py<PyDict>) -> Self {
+    pub fn empty(receive_template: Py<PyDict>, disconnect_rx: oneshot::Receiver<()>) -> Self {
         Self {
             body: std::sync::Mutex::new(Some(Bytes::new())),
             receive_template,
+            disconnect_rx: std::sync::Mutex::new(Some(disconnect_rx)),
         }
-    }
-
-    /// Reset for reuse with a new request body.
-    pub fn reset(&mut self, body: Bytes) {
-        *self.body.get_mut().unwrap_or_else(|e| e.into_inner()) = Some(body);
     }
 }
 
@@ -241,12 +256,40 @@ impl AsgiReceive {
             Py::new(py, ResolvedAwaitableWithValue { value: Some(event) })
                 .map(|obj| obj.into_bound(py).into_any())
         } else {
-            // Body already consumed — return a Future that never resolves.
-            // The sender is leaked intentionally: the disconnect listener
-            // awaits this forever until its cancel scope fires.
-            let (future, tx) = crate::scheduler::primitives::Future::with_channel();
-            std::mem::forget(tx);
-            Py::new(py, future).map(|obj| obj.into_bound(py).into_any())
+            // Deliver http.disconnect when the response stream ends.
+            let (future, resolve_tx) = crate::scheduler::primitives::Future::with_channel();
+            let py_future = Py::new(py, future)?;
+
+            let maybe_disconnect = self
+                .disconnect_rx
+                .lock()
+                .map_err(|_| {
+                    pyo3::exceptions::PyRuntimeError::new_err("disconnect mutex poisoned")
+                })?
+                .take();
+            if let Some(disconnect_rx) = maybe_disconnect {
+                let disconnect_type = pyo3::intern!(py, "http.disconnect").clone().unbind();
+                let type_key = pyo3::intern!(py, "type").clone().unbind();
+                crate::scheduler::with_tokio_handle(|handle| {
+                    handle.spawn(async move {
+                        let _ = disconnect_rx.await;
+                        Python::attach(|py| {
+                            let event = PyDict::new(py);
+                            event.set_item(&type_key, &disconnect_type).ok();
+                            let _ = resolve_tx.send(event.unbind().into_any());
+                        });
+                    });
+                })
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "no tokio runtime for disconnect watch",
+                    )
+                })?;
+            }
+            // If disconnect_rx already taken (third+ call), the Future's sender drops
+            // → Future raises RuntimeError. Only one receive() should block for disconnect.
+
+            Ok(py_future.into_bound(py).into_any())
         }
     }
 }
@@ -309,69 +352,14 @@ impl ResolvedAwaitableWithValue {
 
 // ── AsgiSend ─────────────────────────────────────────────────────────────
 
-/// Send backend: channel for streaming, buffer for buffered, response-driven for event-loop-driven dispatch.
-enum SendBackend {
-    /// Streaming: events flow through an mpsc channel to a concurrent reader.
-    Channel(mpsc::Sender<AsgiEvent>),
-    /// Buffered: events accumulate in a shared Vec, read after coroutine completion.
-    Buffer(Arc<std::sync::Mutex<Vec<AsgiEvent>>>),
-    /// Event-loop-driven: collects response and sends it when complete via oneshot.
-    ///
-    /// Python's event loop owns the coroutine lifecycle. The response is
-    /// delivered through `send()` itself, not through coroutine completion.
-    /// Builds the axum `Response` directly, eliminating the intermediate
-    /// `OutboundResponse` → `to_axum_response()` conversion.
-    ResponseDriven {
-        status: Option<http::StatusCode>,
-        response_headers: HeaderMap,
-        body_buf: Vec<u8>,
-        response_tx: Option<
-            tokio::sync::oneshot::Sender<Result<axum::response::Response, crate::error::AppError>>,
-        >,
-    },
-}
-
-/// Shared buffer for buffered ASGI response collection.
-///
-/// Created before scheduling the coroutine. After the coroutine completes,
-/// the Tokio side calls [`take`](AsgiEventBuffer::take) to drain the events.
-#[derive(Clone)]
-pub struct AsgiEventBuffer(Arc<std::sync::Mutex<Vec<AsgiEvent>>>);
-
-impl AsgiEventBuffer {
-    /// Create a new empty buffer.
-    pub fn new() -> Self {
-        Self(Arc::new(std::sync::Mutex::new(Vec::with_capacity(2))))
-    }
-
-    /// Drain all accumulated events.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the mutex is poisoned (handler panicked mid-send).
-    #[expect(clippy::unwrap_used, reason = "poisoned mutex indicates handler panic")]
-    pub fn take(&self) -> Vec<AsgiEvent> {
-        std::mem::take(&mut *self.0.lock().unwrap())
-    }
-}
-
-impl std::fmt::Debug for AsgiEventBuffer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AsgiEventBuffer").finish_non_exhaustive()
-    }
-}
-
 /// ASGI `send` callable backed by Rust.
 ///
-/// Supports two modes:
-/// - **Channel** (streaming): pushes events through an mpsc channel for
-///   concurrent response collection.
-/// - **Buffer** (buffered): accumulates events in a shared `Vec` for
-///   synchronous draining after coroutine completion. Avoids mpsc channel
-///   allocation and `future_into_py` overhead.
+/// Pushes events through an mpsc channel for concurrent response collection.
+/// Used for both fixed and streaming responses — the response type is
+/// classified by the first body chunk's `more_body` flag.
 #[pyclass(module = "apx._core", freelist = 64)]
 pub struct AsgiSend {
-    backend: SendBackend,
+    tx: mpsc::Sender<AsgiEvent>,
 }
 
 impl std::fmt::Debug for AsgiSend {
@@ -381,36 +369,9 @@ impl std::fmt::Debug for AsgiSend {
 }
 
 impl AsgiSend {
-    /// Create a channel-backed sender for streaming responses.
-    pub fn channel(tx: mpsc::Sender<AsgiEvent>) -> Self {
-        Self {
-            backend: SendBackend::Channel(tx),
-        }
-    }
-
-    /// Create a buffer-backed sender for buffered responses.
-    pub fn buffered(buffer: &AsgiEventBuffer) -> Self {
-        Self {
-            backend: SendBackend::Buffer(Arc::clone(&buffer.0)),
-        }
-    }
-
-    /// Create a response-driven sender for event-loop-driven dispatch.
-    ///
-    /// The response is delivered through the `send()` callback itself when
-    /// the handler sends `http.response.body` with `more_body=false`.
-    /// Builds the axum `Response` directly — no intermediate `OutboundResponse`.
-    pub fn response_driven(
-        tx: tokio::sync::oneshot::Sender<Result<axum::response::Response, crate::error::AppError>>,
-    ) -> Self {
-        Self {
-            backend: SendBackend::ResponseDriven {
-                status: None,
-                response_headers: HeaderMap::new(),
-                body_buf: Vec::with_capacity(256),
-                response_tx: Some(tx),
-            },
-        }
+    /// Create a channel-backed sender.
+    pub fn new(tx: mpsc::Sender<AsgiEvent>) -> Self {
+        Self { tx }
     }
 }
 
@@ -422,50 +383,6 @@ impl AsgiSend {
         py: Python<'py>,
         event: Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        // ResponseDriven fast path: parse directly into fields and build axum
-        // Response inline, skipping both AsgiEvent enum and OutboundResponse.
-        if let SendBackend::ResponseDriven {
-            status,
-            response_headers,
-            body_buf,
-            response_tx,
-        } = &mut self.backend
-        {
-            let type_obj = event
-                .get_item(pyo3::intern!(py, "type"))?
-                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("type"))?;
-
-            if type_obj.eq(pyo3::intern!(py, "http.response.start"))? {
-                let status_code: u16 = event
-                    .get_item(pyo3::intern!(py, "status"))?
-                    .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("status"))?
-                    .extract()?;
-                *status = Some(
-                    http::StatusCode::from_u16(status_code)
-                        .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR),
-                );
-                *response_headers = parse_header_map(&event)?;
-            } else if type_obj.eq(pyo3::intern!(py, "http.response.body"))? {
-                let body = extract_body_bytes(&event)?;
-                let more_body: bool = event
-                    .get_item(pyo3::intern!(py, "more_body"))?
-                    .map(|b| b.extract())
-                    .transpose()?
-                    .unwrap_or(false);
-                body_buf.extend_from_slice(&body);
-                if !more_body && let Some(tx) = response_tx.take() {
-                    let mut resp = axum::response::Response::new(axum::body::Body::from(
-                        Bytes::from(std::mem::take(body_buf)),
-                    ));
-                    *resp.status_mut() = status.take().unwrap_or(http::StatusCode::OK);
-                    *resp.headers_mut() = std::mem::take(response_headers);
-                    let _ = tx.send(Ok(resp));
-                }
-            }
-            return Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any());
-        }
-
-        // Channel and Buffer: use parse_asgi_send_event for full event support.
         let t0 = super::bench_trace_enabled().then(std::time::Instant::now);
         let parsed = parse_asgi_send_event(&event)?;
         if let Some(t0) = t0 {
@@ -475,41 +392,30 @@ impl AsgiSend {
                 elapsed_us = t0.elapsed().as_micros(),
             );
         }
-        match &mut self.backend {
-            SendBackend::Channel(tx) => match tx.try_send(parsed) {
-                Ok(()) => Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any()),
-                Err(mpsc::error::TrySendError::Full(event)) => {
-                    let (future, resolve_tx) = crate::scheduler::primitives::Future::with_channel();
-                    let py_future = Py::new(py, future)?;
-                    let tx = tx.clone();
-                    crate::scheduler::with_tokio_handle(|handle| {
-                        handle.spawn(async move {
-                            let _ = tx.send(event).await;
-                            Python::attach(|py| {
-                                let _ = resolve_tx.send(py.None());
-                            });
+        match self.tx.try_send(parsed) {
+            Ok(()) => Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any()),
+            Err(mpsc::error::TrySendError::Full(event)) => {
+                let (future, resolve_tx) = crate::scheduler::primitives::Future::with_channel();
+                let py_future = Py::new(py, future)?;
+                let tx = self.tx.clone();
+                crate::scheduler::with_tokio_handle(|handle| {
+                    handle.spawn(async move {
+                        let _ = tx.send(event).await;
+                        Python::attach(|py| {
+                            let _ = resolve_tx.send(py.None());
                         });
-                    })
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyRuntimeError::new_err(
-                            "no tokio runtime for backpressure send",
-                        )
-                    })?;
-                    Ok(py_future.into_bound(py).into_any())
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => Err(
-                    pyo3::exceptions::PyRuntimeError::new_err("response channel closed"),
-                ),
-            },
-            SendBackend::Buffer(buf) => {
-                buf.lock()
-                    .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("send buffer poisoned"))?
-                    .push(parsed);
-                Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
+                    });
+                })
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "no tokio runtime for backpressure send",
+                    )
+                })?;
+                Ok(py_future.into_bound(py).into_any())
             }
-            SendBackend::ResponseDriven { .. } => Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "internal error: ResponseDriven in fallthrough path",
-            )),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(
+                pyo3::exceptions::PyRuntimeError::new_err("response channel closed"),
+            ),
         }
     }
 }
@@ -796,7 +702,6 @@ fn extract_bytes_field(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
 ///
 /// When `fastapi_app` is provided, `scope["app"]` and `scope["router"]` are
 /// set so that FastAPI/Starlette routing and dependency injection work.
-#[cfg(test)]
 pub fn build_http_scope(
     py: Python<'_>,
     request: &InboundRequest,
@@ -885,7 +790,6 @@ fn set_ws_scope_request_fields(
 }
 
 /// Set ASGI scope metadata fields: type, asgi, http_version, scheme, root_path.
-#[cfg(test)]
 fn set_scope_metadata(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
@@ -908,7 +812,6 @@ fn set_scope_metadata(
 }
 
 /// Set request-specific scope fields: http_version, method, path, raw_path, query_string.
-#[cfg(test)]
 fn set_scope_request_fields(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
@@ -1048,7 +951,8 @@ const fn hex_val(b: u8) -> Option<u8> {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    reason = "test-only lifespan helpers use unwrap for infallible PyDict operations"
+    dead_code,
+    reason = "test-only lifespan helpers; not all tests exercise lifespan"
 )]
 pub mod lifespan {
     use super::*;
@@ -1292,19 +1196,9 @@ mod tests {
     }
 
     #[test]
-    fn asgi_receive_debug() {
-        with_py(|py| {
-            let template = super::super::context_pool::build_receive_template(py).unwrap();
-            let recv = AsgiReceive::empty(template);
-            let dbg = format!("{recv:?}");
-            assert!(dbg.contains("AsgiReceive"));
-        });
-    }
-
-    #[test]
     fn asgi_send_debug() {
         let (tx, _rx) = mpsc::channel(1);
-        let send = AsgiSend::channel(tx);
+        let send = AsgiSend::new(tx);
         let dbg = format!("{send:?}");
         assert!(dbg.contains("AsgiSend"));
     }
@@ -1572,36 +1466,6 @@ mod tests {
         });
     }
 
-    // ── AsgiReceive logic tests ─────────────────────────────────────────
-
-    #[test]
-    fn receive_template_copy_sets_body() {
-        with_py(|py| {
-            let template = crate::bridge::context_pool::build_receive_template(py).unwrap();
-            let event: Bound<'_, PyDict> = template
-                .bind(py)
-                .call_method0(pyo3::intern!(py, "copy"))
-                .unwrap()
-                .cast_into()
-                .unwrap();
-            event
-                .set_item(pyo3::intern!(py, "body"), PyBytes::new(py, b"hello"))
-                .unwrap();
-
-            let event_type: String = event.get_item("type").unwrap().unwrap().extract().unwrap();
-            assert_eq!(event_type, "http.request");
-            let body_bytes: Vec<u8> = event.get_item("body").unwrap().unwrap().extract().unwrap();
-            assert_eq!(body_bytes, b"hello");
-            let more: bool = event
-                .get_item("more_body")
-                .unwrap()
-                .unwrap()
-                .extract()
-                .unwrap();
-            assert!(!more);
-        });
-    }
-
     #[test]
     fn receive_disconnect_event() {
         with_py(|py| {
@@ -1614,24 +1478,6 @@ mod tests {
 
             let event_type: String = dict.get_item("type").unwrap().unwrap().extract().unwrap();
             assert_eq!(event_type, "http.disconnect");
-        });
-    }
-
-    #[test]
-    fn receive_empty_body() {
-        with_py(|py| {
-            let template = crate::bridge::context_pool::build_receive_template(py).unwrap();
-            let event: Bound<'_, PyDict> = template
-                .bind(py)
-                .call_method0(pyo3::intern!(py, "copy"))
-                .unwrap()
-                .cast_into()
-                .unwrap();
-
-            let event_type: String = event.get_item("type").unwrap().unwrap().extract().unwrap();
-            assert_eq!(event_type, "http.request");
-            let body_bytes: Vec<u8> = event.get_item("body").unwrap().unwrap().extract().unwrap();
-            assert!(body_bytes.is_empty());
         });
     }
 

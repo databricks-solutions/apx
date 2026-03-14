@@ -1,324 +1,31 @@
-//! ASGI bridge dispatch — runs handlers through scope/receive/send.
+//! ASGI dispatch — calls `app(scope, receive, send)` and collects response.
 //!
-//! This dispatch path is used for routes with `Depends()`, streaming
-//! responses, or `Request`/`Response` parameter injection. It constructs
-//! Rust-backed ASGI objects from [`InboundRequest`] and collects the
-//! response from the ASGI send channel.
+//! Implements the [`Dispatch`] trait for ASGI applications. The hot path
+//! collects the request body on the tokio thread, then pushes all Python
+//! work to the event loop thread via `schedule_deferred`.
 
-use crate::bridge::asgi::{AsgiEvent, AsgiReceive, AsgiSend};
-use crate::bridge::bench_trace_enabled;
-use crate::bridge::context_pool::scope_from_template;
-use crate::bridge::dispatch::{AppState, HandlerDispatch};
-use crate::error::{AppError, BodyParseKind};
-use crate::route::{BoundRoute, HandlerKind, ResponseType};
-use crate::scheduler::driver::spawn_and_drive;
-#[cfg(test)]
-use crate::transport::types::ResponseBody;
-use crate::transport::types::{InboundRequest, OutboundResponse};
+use super::streaming::classify_response;
+use crate::bridge::asgi::{AsgiEvent, AsgiReceive, AsgiSend, ScopeInterns, build_http_scope};
+use crate::dispatch::Dispatch;
+use crate::error::AppError;
+use crate::transport::types::{BodyStream, InboundRequest, OutboundResponse, ResponseBody};
+use crate::worker_context::WorkerContext;
 use bytes::Bytes;
-#[cfg(test)]
-use http::StatusCode;
+use http::header::HeaderMap;
+use hyper::body::Incoming;
+use hyper::{Request, Response};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Channel buffer size for ASGI response events.
-const ASGI_CHANNEL_SIZE: usize = 8;
-
-/// Dispatch via the ASGI bridge (scope/receive/send).
-pub struct AsgiBridgeDispatch;
-
-impl std::fmt::Debug for AsgiBridgeDispatch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AsgiBridgeDispatch").finish()
-    }
-}
-
-impl HandlerDispatch for AsgiBridgeDispatch {
-    fn handle(
-        &self,
-        route: Arc<BoundRoute>,
-        app_state: Arc<AppState>,
-        mut request: InboundRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<axum::response::Response, AppError>> + Send>> {
-        Box::pin(async move {
-            tracing::debug!(
-                path = %request.path,
-                handler = %route.manifest.handler_qualname,
-                "asgi_dispatch: handle entry"
-            );
-
-            // 1. Take body + collect bytes
-            let body_stream = request.take_body();
-            let body_bytes = body_stream
-                .collect(app_state.max_body_limit.0)
-                .await
-                .map_err(|_| AppError::BodyParse(BodyParseKind::BodyTooLarge))?;
-
-            // 2. Branch on streaming vs buffered before creating ASGI objects.
-            //    Buffered path avoids mpsc channel and tokio::spawn entirely.
-            let is_streaming = matches!(route.manifest.kind, HandlerKind::SSE)
-                || matches!(
-                    route.manifest.response_type,
-                    ResponseType::StreamingResponse
-                );
-
-            if is_streaming {
-                dispatch_streaming(route, app_state, request, body_bytes)
-                    .await
-                    .map(crate::transport::convert::to_axum_response)
-            } else {
-                dispatch_buffered(route, app_state, request, body_bytes).await
-            }
-        })
-    }
-}
-
-/// Buffered response path: two-phase dispatch.
-///
-/// **Phase 1 (blocking pool):** Build ASGI scope + Python objects off the event
-/// loop thread, reducing event loop contention.
-///
-/// **Phase 2 (event loop):** Call the ASGI handler and drive the coroutine.
-///
-/// Returns an axum `Response` directly — built inline by `AsgiSend`.
-async fn dispatch_buffered(
-    route: Arc<BoundRoute>,
-    app_state: Arc<AppState>,
-    request: InboundRequest,
-    body_bytes: Bytes,
-) -> Result<axum::response::Response, AppError> {
-    let trace = bench_trace_enabled();
-    let t_total = trace.then(std::time::Instant::now);
-
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    // Extract trace context before crossing threads.
-    let trace_ctx = crate::telemetry::context::extract_trace_context();
-
-    // ── Phase 1: blocking pool — build scope + Python objects ──────────
-    let app_state_p1 = Arc::clone(&app_state);
-    let t_scope_build = trace.then(std::time::Instant::now);
-    let (scope, receive_obj, send_obj) = tokio::task::spawn_blocking(move || {
-        Python::attach(|py| -> Result<_, AppError> {
-            let t_scope = trace.then(std::time::Instant::now);
-            let scope = scope_from_template(
-                py,
-                &app_state_p1.scope_template,
-                &request,
-                &app_state_p1.scope_interns,
-            )
-            .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
-            let scope_us = t_scope.map(|t| t.elapsed().as_micros());
-
-            let t_objects = trace.then(std::time::Instant::now);
-            let receive_template_ref = app_state_p1.receive_template.as_ref().clone_ref(py);
-            let receive = AsgiReceive::http(body_bytes, receive_template_ref);
-            let send = AsgiSend::response_driven(response_tx);
-
-            let receive_obj = Py::new(py, receive)
-                .map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
-            let send_obj =
-                Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
-            let objects_us = t_objects.map(|t| t.elapsed().as_micros());
-
-            if trace {
-                tracing::info!(
-                    target: "bench_trace",
-                    phase = "scope_build_blocking",
-                    scope_us = scope_us.unwrap_or(0),
-                    objects_us = objects_us.unwrap_or(0),
-                );
-            }
-
-            Ok((scope, receive_obj, send_obj))
-        })
-    })
-    .await
-    .map_err(|e| AppError::Internal(format!("spawn_blocking: {e}")))??;
-    let scope_build_us = t_scope_build.map(|t| t.elapsed().as_micros());
-
-    // ── Phase 2: event loop — call handler + drive coroutine ───────────
-    let app_state_inner = Arc::clone(&app_state);
-    let t_schedule = trace.then(std::time::Instant::now);
-    let t_enqueued = trace.then(std::time::Instant::now);
-    app_state.loop_handle.schedule_callback(move |py| {
-        let result = (|| -> Result<(), AppError> {
-            if let Some(ref ctx) = trace_ctx {
-                let _ = crate::telemetry::context::set_python_context(py, ctx);
-            }
-            let t_cb_start = t_enqueued.map(|t| t.elapsed().as_micros());
-
-            let asgi_callable = route
-                .fastapi_app
-                .as_ref()
-                .map_or_else(|| route.handler.inner(), |a| a.inner());
-
-            let t_call = trace.then(std::time::Instant::now);
-            let coro = asgi_callable
-                .call(py, (scope, receive_obj, send_obj), None)
-                .map_err(|e| AppError::Internal(format!("handler call: {e}")))?;
-            let call_us = t_call.map(|t| t.elapsed().as_micros());
-
-            let t_drive = trace.then(std::time::Instant::now);
-            if let Some(ref sched) = app_state_inner.scheduler_refs {
-                let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
-                spawn_and_drive(
-                    py,
-                    coro,
-                    result_tx,
-                    &sched.cached_types,
-                    &sched.call_soon,
-                    &sched.ensure_future,
-                    &sched.ready_queue,
-                );
-                if let Ok(Err(e)) = result_rx.try_recv() {
-                    tracing::error!(error = %e, "ASGI handler error");
-                }
-            } else {
-                let task = app_state_inner
-                    .create_task
-                    .call1(py, (coro,))
-                    .map_err(|e| AppError::Internal(format!("create_task: {e}")))?;
-                let _ =
-                    task.call_method1(py, c"add_done_callback", (&app_state_inner.error_logger,));
-            }
-            let drive_us = t_drive.map(|t| t.elapsed().as_micros());
-
-            if trace {
-                tracing::info!(
-                    target: "bench_trace",
-                    phase = "callback_inner",
-                    queue_latency_us = t_cb_start.unwrap_or(0),
-                    call_us = call_us.unwrap_or(0),
-                    drive_us = drive_us.unwrap_or(0),
-                );
-            }
-
-            Ok(())
-        })();
-
-        if let Err(e) = result {
-            tracing::error!(error = %e, "ASGI dispatch setup failed");
-        }
-    })?;
-    let schedule_us = t_schedule.map(|t| t.elapsed().as_micros());
-
-    // Wait for send() to deliver the complete response.
-    let t_await = trace.then(std::time::Instant::now);
-    let response = response_rx.await.map_err(|_| {
-        AppError::Internal("ASGI handler failed before sending response".to_owned())
-    })??;
-    let await_us = t_await.map(|t| t.elapsed().as_micros());
-
-    if let Some(t_total) = t_total {
-        tracing::info!(
-            target: "bench_trace",
-            phase = "dispatch_buffered",
-            total_us = t_total.elapsed().as_micros(),
-            scope_build_us = scope_build_us.unwrap_or(0),
-            schedule_us = schedule_us.unwrap_or(0),
-            await_us = await_us.unwrap_or(0),
-        );
-    }
-
-    Ok(response)
-}
-
-/// Streaming response path: Python owns the coroutine lifecycle.
-///
-/// Uses mpsc channel for concurrent body streaming. The event loop thread
-/// creates the task; channel closing handles cleanup when the handler finishes.
-async fn dispatch_streaming(
-    route: Arc<BoundRoute>,
-    app_state: Arc<AppState>,
-    request: InboundRequest,
-    body_bytes: Bytes,
-) -> Result<OutboundResponse, AppError> {
-    let (send_tx, send_rx) = mpsc::channel::<AsgiEvent>(ASGI_CHANNEL_SIZE);
-    // Only Arc clone — no GIL needed on the tokio thread.
-    let app_state_inner = Arc::clone(&app_state);
-
-    // Extract trace context before crossing to the event loop thread.
-    let trace_ctx = crate::telemetry::context::extract_trace_context();
-
-    app_state.loop_handle.schedule_callback(move |py| {
-        let result = (|| -> Result<(), AppError> {
-            if let Some(ref ctx) = trace_ctx {
-                let _ = crate::telemetry::context::set_python_context(py, ctx);
-            }
-            let asgi_callable = route
-                .fastapi_app
-                .as_ref()
-                .map_or_else(|| route.handler.inner(), |a| a.inner());
-
-            let scope = scope_from_template(
-                py,
-                &app_state_inner.scope_template,
-                &request,
-                &app_state_inner.scope_interns,
-            )
-            .map_err(|e| AppError::Internal(format!("build scope: {e}")))?;
-
-            let receive_template_ref = app_state_inner.receive_template.as_ref().clone_ref(py);
-            let receive = if body_bytes.is_empty() {
-                AsgiReceive::empty(receive_template_ref)
-            } else {
-                AsgiReceive::http(body_bytes, receive_template_ref)
-            };
-            let send = AsgiSend::channel(send_tx);
-
-            let receive_obj = Py::new(py, receive)
-                .map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
-            let send_obj =
-                Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
-
-            let coro = asgi_callable
-                .call(py, (scope, receive_obj, send_obj), None)
-                .map_err(|e| AppError::Internal(format!("handler call: {e}")))?;
-
-            // Same try-sync-first pattern as dispatch_buffered.
-            if let Some(ref sched) = app_state_inner.scheduler_refs {
-                let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
-                spawn_and_drive(
-                    py,
-                    coro,
-                    result_tx,
-                    &sched.cached_types,
-                    &sched.call_soon,
-                    &sched.ensure_future,
-                    &sched.ready_queue,
-                );
-                if let Ok(Err(e)) = result_rx.try_recv() {
-                    tracing::error!(error = %e, "ASGI streaming handler error");
-                }
-            } else {
-                let task = app_state_inner
-                    .create_task
-                    .call1(py, (coro,))
-                    .map_err(|e| AppError::Internal(format!("create_task: {e}")))?;
-                let _ =
-                    task.call_method1(py, c"add_done_callback", (&app_state_inner.error_logger,));
-            }
-
-            Ok(())
-        })();
-
-        if let Err(e) = result {
-            tracing::error!(error = %e, "ASGI streaming dispatch setup failed");
-        }
-    })?;
-
-    // No handler_task needed — channel closing handles cleanup.
-    super::streaming::stream_asgi_response_no_task(send_rx).await
-}
-
 /// Receive the `ResponseStart` event from the channel.
 pub(super) async fn recv_response_start(
     rx: &mut mpsc::Receiver<AsgiEvent>,
-) -> Result<(u16, http::header::HeaderMap), AppError> {
+) -> Result<(u16, HeaderMap), AppError> {
     match rx.recv().await {
         Some(AsgiEvent::ResponseStart { status, headers }) => Ok((status, headers)),
         Some(AsgiEvent::ResponseBody { .. }) => Err(AppError::Internal(
@@ -333,55 +40,202 @@ pub(super) async fn recv_response_start(
     }
 }
 
-/// Channel-based response collection — used by tests.
-#[cfg(test)]
-async fn collect_asgi_response(
-    rx: &mut mpsc::Receiver<AsgiEvent>,
-) -> Result<OutboundResponse, AppError> {
-    let (status, headers) = recv_response_start(rx).await?;
-    let body = recv_response_body(rx).await?;
-    Ok(OutboundResponse {
-        status: StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-        headers,
-        body: ResponseBody::Fixed(body),
-    })
+// ── AsgiDispatch ─────────────────────────────────────────────────────────
+
+/// ASGI dispatch: calls `app(scope, receive, send)` with channel-based response.
+///
+/// The response flows through an mpsc channel. The first body chunk's
+/// `more_body` flag classifies the response as fixed or streaming.
+pub struct AsgiDispatch {
+    /// The Python ASGI callable.
+    app: Py<PyAny>,
+    /// Pre-interned scope strings, shared across all requests.
+    scope_interns: Arc<ScopeInterns>,
+    /// Template dict for `AsgiReceive` (`{"type": "http.request", ...}`).
+    receive_template: Py<PyDict>,
+    /// Shared worker infrastructure (event loop, scheduler).
+    ctx: Arc<WorkerContext>,
+    /// Maximum request body size in bytes.
+    body_limit: usize,
 }
 
-#[cfg(test)]
-async fn recv_response_body(rx: &mut mpsc::Receiver<AsgiEvent>) -> Result<Bytes, AppError> {
-    let (first_chunk, more) = recv_body_chunk(rx).await?;
-    if !more {
-        return Ok(first_chunk);
-    }
-    accumulate_remaining_chunks(rx, first_chunk).await
-}
-
-#[cfg(test)]
-async fn recv_body_chunk(rx: &mut mpsc::Receiver<AsgiEvent>) -> Result<(Bytes, bool), AppError> {
-    match rx.recv().await {
-        Some(AsgiEvent::ResponseBody { body, more_body }) => Ok((body, more_body)),
-        Some(AsgiEvent::ResponseStart { .. }) => Err(AppError::Internal(
-            "ASGI protocol error: duplicate response start".to_owned(),
-        )),
-        Some(_) => Err(AppError::Internal(
-            "ASGI protocol error: unexpected event during body collection".to_owned(),
-        )),
-        None => Ok((Bytes::new(), false)),
-    }
-}
-
-#[cfg(test)]
-async fn accumulate_remaining_chunks(
-    rx: &mut mpsc::Receiver<AsgiEvent>,
-    first: Bytes,
-) -> Result<Bytes, AppError> {
-    let mut buf = Vec::from(first.as_ref());
-    loop {
-        let (chunk, more) = recv_body_chunk(rx).await?;
-        buf.extend_from_slice(&chunk);
-        if !more {
-            return Ok(Bytes::from(buf));
+impl AsgiDispatch {
+    /// Create a new `AsgiDispatch`.
+    pub fn new(
+        app: Py<PyAny>,
+        scope_interns: Arc<ScopeInterns>,
+        receive_template: Py<PyDict>,
+        ctx: Arc<WorkerContext>,
+        body_limit: usize,
+    ) -> Self {
+        Self {
+            app,
+            scope_interns,
+            receive_template,
+            ctx,
+            body_limit,
         }
+    }
+}
+
+impl std::fmt::Debug for AsgiDispatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsgiDispatch")
+            .field("body_limit", &self.body_limit)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Dispatch for AsgiDispatch {
+    fn dispatch(
+        &self,
+        mut request: InboundRequest,
+    ) -> Pin<Box<dyn Future<Output = OutboundResponse> + Send>> {
+        // Take body before moving request into the async block.
+        let body_stream = request.take_body();
+        let body_limit = self.body_limit;
+
+        // Clone Py refs under GIL, Arc refs without.
+        let (app, template) =
+            Python::attach(|py| (self.app.clone_ref(py), self.receive_template.clone_ref(py)));
+        let interns = Arc::clone(&self.scope_interns);
+        let ctx = Arc::clone(&self.ctx);
+
+        Box::pin(async move {
+            match dispatch_inner(
+                request,
+                body_stream,
+                body_limit,
+                app,
+                interns,
+                template,
+                ctx,
+            )
+            .await
+            {
+                Ok(resp) => resp,
+                Err(err) => error_response(err),
+            }
+        })
+    }
+
+    fn dispatch_ws(
+        &self,
+        request: Request<Incoming>,
+        server_addr: SocketAddr,
+        client_addr: Option<SocketAddr>,
+    ) -> Pin<Box<dyn Future<Output = Response<ResponseBody>> + Send>> {
+        let app = Python::attach(|py| self.app.clone_ref(py));
+        let interns = Arc::clone(&self.scope_interns);
+        let ctx = Arc::clone(&self.ctx);
+
+        Box::pin(async move {
+            match crate::websocket::handle_upgrade(
+                request,
+                server_addr,
+                client_addr,
+                app,
+                interns,
+                ctx,
+            ) {
+                Ok(response) => response,
+                Err(err) => {
+                    tracing::error!(error = %err, "websocket upgrade error");
+                    Response::builder()
+                        .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                        .header(http::header::CONTENT_TYPE, "text/plain")
+                        .body(ResponseBody::Fixed(Bytes::from_static(
+                            b"Internal Server Error",
+                        )))
+                        .unwrap_or_else(|_| unreachable!())
+                }
+            }
+        })
+    }
+}
+
+// ── Dispatch internals ───────────────────────────────────────────────────
+
+/// Channel capacity for ASGI response events.
+///
+/// 8 slots accommodates ResponseStart + several body chunks without
+/// backpressure, while bounding memory for misbehaving handlers.
+const RESPONSE_CHANNEL_CAPACITY: usize = 8;
+
+/// Full dispatch pipeline: collect body → schedule ASGI call → classify response.
+async fn dispatch_inner(
+    request: InboundRequest,
+    body_stream: BodyStream,
+    body_limit: usize,
+    app: Py<PyAny>,
+    interns: Arc<ScopeInterns>,
+    template: Py<PyDict>,
+    ctx: Arc<WorkerContext>,
+) -> Result<OutboundResponse, AppError> {
+    // Step 1: Collect body on tokio thread.
+    let body_bytes = body_stream
+        .collect(body_limit)
+        .await
+        .map_err(|e| AppError::Internal(format!("body collect: {e}")))?;
+
+    // Step 2: Create channels.
+    let (send_tx, send_rx) = mpsc::channel(RESPONSE_CHANNEL_CAPACITY);
+    let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Step 3: Schedule ASGI coroutine on the event loop.
+    let coro_rx = ctx.loop_handle.schedule_deferred(move |py| {
+        let scope = build_http_scope(py, &request, None, &interns)
+            .map_err(|e| AppError::Internal(format!("scope build: {e}")))?;
+        let receive = if body_bytes.is_empty() {
+            AsgiReceive::empty(template, disconnect_rx)
+        } else {
+            AsgiReceive::http(body_bytes, template, disconnect_rx)
+        };
+        let receive_obj =
+            Py::new(py, receive).map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
+        let send = AsgiSend::new(send_tx);
+        let send_obj =
+            Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
+        let coro = app
+            .call1(py, (scope, receive_obj, send_obj))
+            .map_err(|e| AppError::Internal(format!("ASGI app call: {e}")))?;
+        Ok(coro)
+    })?;
+
+    // Step 4: Log coroutine errors (response flows through channel, not oneshot).
+    tokio::spawn(async move {
+        if let Ok(Err(e)) = coro_rx.await {
+            tracing::warn!(error = %e, "ASGI coroutine failed");
+        }
+    });
+
+    // Step 5: Classify response from channel events.
+    classify_response(send_rx, disconnect_tx).await
+}
+
+/// Map an [`AppError`] to a generic HTTP error response.
+///
+/// The error detail is logged but NOT leaked to the client.
+fn error_response(err: AppError) -> OutboundResponse {
+    let status = err.status_code();
+    let body = match &err {
+        AppError::Timeout => "request timeout",
+        AppError::Internal(msg) => {
+            tracing::error!(error = %msg, "internal dispatch error");
+            "Internal Server Error"
+        }
+    };
+    OutboundResponse {
+        status,
+        headers: {
+            let mut h = HeaderMap::new();
+            h.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/plain"),
+            );
+            h
+        },
+        body: ResponseBody::Fixed(Bytes::copy_from_slice(body.as_bytes())),
     }
 }
 
@@ -395,266 +249,80 @@ async fn accumulate_remaining_chunks(
 )]
 mod tests {
     use super::*;
-    use http::header::HeaderMap;
 
-    /// Build a `HeaderMap` from byte pair slices (test convenience).
-    fn headers(pairs: &[(&[u8], &[u8])]) -> HeaderMap {
-        let mut map = HeaderMap::with_capacity(pairs.len());
-        for (name, value) in pairs {
+    // ── Helper ──────────────────────────────────────────────────────────
+
+    fn response_start(status: u16, headers: &[(&[u8], &[u8])]) -> AsgiEvent {
+        let mut map = HeaderMap::with_capacity(headers.len());
+        for (name, value) in headers {
             map.insert(
                 http::HeaderName::from_bytes(name).unwrap(),
                 http::HeaderValue::from_bytes(value).unwrap(),
             );
         }
-        map
-    }
-
-    #[tokio::test]
-    async fn collect_asgi_response_simple() {
-        let (tx, mut rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::ResponseStart {
-            status: 200,
-            headers: headers(&[(b"content-type", b"text/plain")]),
-        })
-        .await
-        .unwrap();
-        tx.send(AsgiEvent::ResponseBody {
-            body: Bytes::from("hello"),
-            more_body: false,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-
-        let resp = collect_asgi_response(&mut rx).await.unwrap();
-        assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(resp.headers.get("content-type").unwrap(), "text/plain");
-        match &resp.body {
-            ResponseBody::Fixed(b) => assert_eq!(b.as_ref(), b"hello"),
-            ResponseBody::Stream(_) => panic!("expected Fixed body"),
+        AsgiEvent::ResponseStart {
+            status,
+            headers: map,
         }
     }
 
-    #[tokio::test]
-    async fn collect_asgi_response_chunked() {
-        let (tx, mut rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::ResponseStart {
-            status: 200,
-            headers: HeaderMap::new(),
-        })
-        .await
-        .unwrap();
-        tx.send(AsgiEvent::ResponseBody {
-            body: Bytes::from("hel"),
-            more_body: true,
-        })
-        .await
-        .unwrap();
-        tx.send(AsgiEvent::ResponseBody {
-            body: Bytes::from("lo"),
-            more_body: false,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-
-        let resp = collect_asgi_response(&mut rx).await.unwrap();
-        assert_eq!(resp.status, StatusCode::OK);
-        match &resp.body {
-            ResponseBody::Fixed(b) => assert_eq!(b.as_ref(), b"hello"),
-            ResponseBody::Stream(_) => panic!("expected Fixed body"),
+    fn response_body(body: &[u8], more_body: bool) -> AsgiEvent {
+        AsgiEvent::ResponseBody {
+            body: Bytes::copy_from_slice(body),
+            more_body,
         }
     }
 
-    #[tokio::test]
-    async fn collect_asgi_response_missing_start() {
-        let (tx, mut rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::ResponseBody {
-            body: Bytes::from("oops"),
-            more_body: false,
-        })
-        .await
-        .unwrap();
-        drop(tx);
+    // ── error_response tests ────────────────────────────────────────────
 
-        let result = collect_asgi_response(&mut rx).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, AppError::Internal(_)));
-    }
-
-    #[tokio::test]
-    async fn collect_asgi_response_empty_body() {
-        let (tx, mut rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::ResponseStart {
-            status: 204,
-            headers: HeaderMap::new(),
-        })
-        .await
-        .unwrap();
-        tx.send(AsgiEvent::ResponseBody {
-            body: Bytes::new(),
-            more_body: false,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-
-        let resp = collect_asgi_response(&mut rx).await.unwrap();
-        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+    #[test]
+    fn error_response_internal() {
+        let err = AppError::Internal("db connection failed".to_owned());
+        let resp = error_response(err);
+        assert_eq!(resp.status, http::StatusCode::INTERNAL_SERVER_ERROR);
         match &resp.body {
-            ResponseBody::Fixed(b) => assert!(b.is_empty()),
+            ResponseBody::Fixed(b) => assert_eq!(b.as_ref(), b"Internal Server Error"),
             ResponseBody::Stream(_) => panic!("expected Fixed body"),
         }
-    }
-
-    #[tokio::test]
-    async fn collect_asgi_response_channel_closed_before_start() {
-        let (tx, mut rx) = mpsc::channel::<AsgiEvent>(4);
-        drop(tx);
-
-        let result = collect_asgi_response(&mut rx).await;
-        assert!(result.is_err());
     }
 
     #[test]
-    fn asgi_bridge_dispatch_debug() {
-        let d = AsgiBridgeDispatch;
-        let dbg = format!("{d:?}");
-        assert!(dbg.contains("AsgiBridgeDispatch"));
-    }
-
-    #[tokio::test]
-    async fn collect_asgi_response_buffered_unchanged() {
-        let (tx, mut rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::ResponseStart {
-            status: 200,
-            headers: headers(&[(b"content-type", b"application/json")]),
-        })
-        .await
-        .unwrap();
-        tx.send(AsgiEvent::ResponseBody {
-            body: Bytes::from(r#"{"ok":true}"#),
-            more_body: false,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-
-        let resp = collect_asgi_response(&mut rx).await.unwrap();
-        assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(
-            resp.headers.get("content-type").unwrap(),
-            "application/json"
-        );
+    fn error_response_timeout() {
+        let err = AppError::Timeout;
+        let resp = error_response(err);
+        assert_eq!(resp.status, http::StatusCode::REQUEST_TIMEOUT);
         match &resp.body {
-            ResponseBody::Fixed(b) => assert_eq!(b.as_ref(), br#"{"ok":true}"#),
+            ResponseBody::Fixed(b) => assert_eq!(b.as_ref(), b"request timeout"),
             ResponseBody::Stream(_) => panic!("expected Fixed body"),
         }
     }
 
-    #[tokio::test]
-    async fn recv_response_start_pub_super_accessible() {
-        let (tx, mut rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::ResponseStart {
-            status: 201,
-            headers: headers(&[(b"x-test", b"yes")]),
-        })
-        .await
-        .unwrap();
+    // ── recv_response_start tests ───────────────────────────────────────
 
+    #[tokio::test]
+    async fn recv_response_start_success() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(response_start(201, &[(b"x-custom", b"val")]))
+            .await
+            .unwrap();
         let (status, headers) = recv_response_start(&mut rx).await.unwrap();
         assert_eq!(status, 201);
-        assert_eq!(headers.len(), 1);
-    }
-
-    // ── recv_response_body error branches ────────────────────────────────
-
-    #[tokio::test]
-    async fn recv_response_body_duplicate_start() {
-        let (tx, mut rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::ResponseStart {
-            status: 200,
-            headers: HeaderMap::new(),
-        })
-        .await
-        .unwrap();
-        // Send another start where a body chunk is expected
-        tx.send(AsgiEvent::ResponseStart {
-            status: 200,
-            headers: HeaderMap::new(),
-        })
-        .await
-        .unwrap();
-        drop(tx);
-
-        let _ = recv_response_start(&mut rx).await.unwrap();
-        let result = recv_response_body(&mut rx).await;
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), AppError::Internal(msg) if msg.contains("duplicate"))
-        );
+        assert_eq!(headers.get("x-custom").unwrap(), "val");
     }
 
     #[tokio::test]
-    async fn recv_response_body_unexpected_event() {
+    async fn recv_response_start_body_before_start() {
         let (tx, mut rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::ResponseStart {
-            status: 200,
-            headers: HeaderMap::new(),
-        })
-        .await
-        .unwrap();
-        // Send a WS event during body collection
-        tx.send(AsgiEvent::WsClose { code: 1000 }).await.unwrap();
-        drop(tx);
-
-        let _ = recv_response_start(&mut rx).await.unwrap();
-        let result = recv_response_body(&mut rx).await;
-        assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), AppError::Internal(msg) if msg.contains("unexpected"))
-        );
-    }
-
-    #[tokio::test]
-    async fn recv_response_body_channel_close_partial() {
-        let (tx, mut rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::ResponseStart {
-            status: 200,
-            headers: HeaderMap::new(),
-        })
-        .await
-        .unwrap();
-        tx.send(AsgiEvent::ResponseBody {
-            body: Bytes::from("partial"),
-            more_body: true,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-
-        let _ = recv_response_start(&mut rx).await.unwrap();
-        // Channel closes mid-stream — returns whatever was collected
-        let result = recv_response_body(&mut rx).await.unwrap();
-        assert_eq!(result.as_ref(), b"partial");
-    }
-
-    #[tokio::test]
-    async fn recv_response_start_unexpected_ws_event() {
-        let (tx, mut rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::WsSend {
-            text: Some("hello".to_owned()),
-            bytes: None,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-
+        tx.send(response_body(b"oops", false)).await.unwrap();
         let result = recv_response_start(&mut rx).await;
         assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), AppError::Internal(msg) if msg.contains("unexpected"))
-        );
+    }
+
+    #[tokio::test]
+    async fn recv_response_start_channel_closed() {
+        let (tx, mut rx) = mpsc::channel::<AsgiEvent>(4);
+        drop(tx);
+        let result = recv_response_start(&mut rx).await;
+        assert!(result.is_err());
     }
 }
