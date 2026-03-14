@@ -25,7 +25,7 @@ pub struct AppState {
     pub scope_template: Arc<Py<pyo3::types::PyDict>>,
     /// Pre-built receive-event template dict with fixed ASGI fields.
     pub receive_template: Arc<Py<pyo3::types::PyDict>>,
-    /// Cached `event_loop.create_task` bound method for Granian-style dispatch.
+    /// Cached `event_loop.create_task` bound method for event-loop-driven dispatch.
     pub create_task: Py<pyo3::PyAny>,
     /// Singleton ASGI error logger (stateless, reused across requests).
     pub error_logger: Py<pyo3::PyAny>,

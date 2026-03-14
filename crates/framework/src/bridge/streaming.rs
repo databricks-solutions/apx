@@ -33,7 +33,7 @@ impl AsgiBodyStream {
         }
     }
 
-    /// Create a stream without a handler task (Granian-style dispatch).
+    /// Create a stream without a handler task (event-loop-driven dispatch).
     ///
     /// When the ASGI handler drops the send callable → channel closes → stream
     /// ends naturally. When the client disconnects → receiver drops → send()
@@ -119,7 +119,7 @@ pub async fn stream_asgi_response<T: Send + 'static>(
     })
 }
 
-/// Build a streaming [`OutboundResponse`] without a handler task (Granian-style).
+/// Build a streaming [`OutboundResponse`] without a handler task (event-loop-driven).
 ///
 /// The ASGI handler's asyncio task is owned by Python's event loop. Cleanup
 /// happens through channel semantics: client disconnect → receiver drops →

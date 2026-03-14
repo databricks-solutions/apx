@@ -76,7 +76,7 @@ impl HandlerDispatch for AsgiBridgeDispatch {
     }
 }
 
-/// Buffered response path: Granian-style, two-phase dispatch.
+/// Buffered response path: two-phase dispatch.
 ///
 /// **Phase 1 (blocking pool):** Build ASGI scope + Python objects off the event
 /// loop thread, reducing event loop contention.
@@ -227,7 +227,7 @@ async fn dispatch_buffered(
     Ok(response)
 }
 
-/// Streaming response path: Granian-style, Python owns the coroutine lifecycle.
+/// Streaming response path: Python owns the coroutine lifecycle.
 ///
 /// Uses mpsc channel for concurrent body streaming. The event loop thread
 /// creates the task; channel closing handles cleanup when the handler finishes.

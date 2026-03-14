@@ -309,13 +309,13 @@ impl ResolvedAwaitableWithValue {
 
 // ── AsgiSend ─────────────────────────────────────────────────────────────
 
-/// Send backend: channel for streaming, buffer for buffered, response-driven for Granian-style.
+/// Send backend: channel for streaming, buffer for buffered, response-driven for event-loop-driven dispatch.
 enum SendBackend {
     /// Streaming: events flow through an mpsc channel to a concurrent reader.
     Channel(mpsc::Sender<AsgiEvent>),
     /// Buffered: events accumulate in a shared Vec, read after coroutine completion.
     Buffer(Arc<std::sync::Mutex<Vec<AsgiEvent>>>),
-    /// Granian-style: collects response and sends it when complete via oneshot.
+    /// Event-loop-driven: collects response and sends it when complete via oneshot.
     ///
     /// Python's event loop owns the coroutine lifecycle. The response is
     /// delivered through `send()` itself, not through coroutine completion.
@@ -395,7 +395,7 @@ impl AsgiSend {
         }
     }
 
-    /// Create a response-driven sender for Granian-style dispatch.
+    /// Create a response-driven sender for event-loop-driven dispatch.
     ///
     /// The response is delivered through the `send()` callback itself when
     /// the handler sends `http.response.body` with `more_body=false`.

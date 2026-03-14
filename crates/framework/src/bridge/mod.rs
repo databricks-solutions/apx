@@ -240,7 +240,7 @@ async fn ws_handler(
 /// WebSocket send channel buffer size.
 const WS_CHANNEL_SIZE: usize = 32;
 
-/// Bridge an axum WebSocket to a Python ASGI handler (Granian-style).
+/// Bridge an axum WebSocket to a Python ASGI handler.
 ///
 /// All Python work runs on the event loop thread via `schedule_callback`.
 /// asyncio owns the coroutine lifecycle. The connection stays alive until

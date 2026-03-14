@@ -56,7 +56,7 @@ impl TaskCallback {
 
 /// Fire-and-forget error logger for ASGI handler tasks.
 ///
-/// Added as a done callback on asyncio tasks created by Granian-style dispatch.
+/// Added as a done callback on asyncio tasks created by event-loop-driven dispatch.
 /// Only logs — response delivery is handled by `AsgiSend::ResponseDriven`.
 #[pyclass(module = "apx._core", freelist = 64, skip_from_py_object)]
 #[derive(Debug, Clone, Copy)]

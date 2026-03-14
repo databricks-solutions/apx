@@ -1,4 +1,4 @@
-//! Persistent asyncio event loop (Granian-style architecture).
+//! Persistent asyncio event loop for event-loop-driven ASGI dispatch.
 //!
 //! One persistent event loop per worker, running `run_forever()` on a
 //! dedicated Python thread. Handler coroutines are submitted via

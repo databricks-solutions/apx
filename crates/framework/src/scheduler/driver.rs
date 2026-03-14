@@ -87,7 +87,7 @@ pub struct CachedTypes {
     /// Raw `ob_type` pointer for `types.CoroutineType`.
     coroutine_type_ptr: *mut pyo3::ffi::PyObject,
     /// Interned `"_asyncio_future_blocking"` attribute name for duck-type
-    /// asyncio.Future detection (Granian-style).
+    /// asyncio.Future detection via `_asyncio_future_blocking` attribute.
     asyncio_future_blocking_attr: Py<PyAny>,
     /// Cached `Py_None` pointer for yield-None fast path.
     py_none_ptr: *mut pyo3::ffi::PyObject,
@@ -301,7 +301,7 @@ pub enum AwaitableKind {
 ///
 /// Uses direct `ob_type` pointer comparisons for our own pyclass types (no
 /// subclassing) and `Py_None` singleton comparison. Falls back to duck-type
-/// attribute check for asyncio futures (Granian-style `_asyncio_future_blocking`).
+/// attribute check for asyncio futures (`_asyncio_future_blocking`).
 #[expect(
     unsafe_code,
     reason = "ob_type pointer read under GIL for hot-path classification"
@@ -331,7 +331,7 @@ pub fn classify(_py: Python<'_>, yielded: &Py<PyAny>, types: &CachedTypes) -> Aw
     }
 
     // asyncio.Future detection via _asyncio_future_blocking attribute.
-    // This is how Granian detects asyncio futures — checking for the duck-type
+    // Duck-type asyncio.Future detection — checking for the
     // attribute is faster than isinstance on the full MRO.
     let blocking_attr = unsafe {
         pyo3::ffi::PyObject_GetAttr(obj_ptr, types.asyncio_future_blocking_attr.as_ptr())
