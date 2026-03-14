@@ -319,13 +319,14 @@ enum SendBackend {
     ///
     /// Python's event loop owns the coroutine lifecycle. The response is
     /// delivered through `send()` itself, not through coroutine completion.
+    /// Builds the axum `Response` directly, eliminating the intermediate
+    /// `OutboundResponse` → `to_axum_response()` conversion.
     ResponseDriven {
-        start: Option<(u16, HeaderMap)>,
+        status: Option<http::StatusCode>,
+        response_headers: HeaderMap,
         body_buf: Vec<u8>,
         response_tx: Option<
-            tokio::sync::oneshot::Sender<
-                Result<crate::transport::types::OutboundResponse, crate::error::AppError>,
-            >,
+            tokio::sync::oneshot::Sender<Result<axum::response::Response, crate::error::AppError>>,
         >,
     },
 }
@@ -398,14 +399,14 @@ impl AsgiSend {
     ///
     /// The response is delivered through the `send()` callback itself when
     /// the handler sends `http.response.body` with `more_body=false`.
+    /// Builds the axum `Response` directly — no intermediate `OutboundResponse`.
     pub fn response_driven(
-        tx: tokio::sync::oneshot::Sender<
-            Result<crate::transport::types::OutboundResponse, crate::error::AppError>,
-        >,
+        tx: tokio::sync::oneshot::Sender<Result<axum::response::Response, crate::error::AppError>>,
     ) -> Self {
         Self {
             backend: SendBackend::ResponseDriven {
-                start: None,
+                status: None,
+                response_headers: HeaderMap::new(),
                 body_buf: Vec::with_capacity(256),
                 response_tx: Some(tx),
             },
@@ -421,6 +422,50 @@ impl AsgiSend {
         py: Python<'py>,
         event: Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        // ResponseDriven fast path: parse directly into fields and build axum
+        // Response inline, skipping both AsgiEvent enum and OutboundResponse.
+        if let SendBackend::ResponseDriven {
+            status,
+            response_headers,
+            body_buf,
+            response_tx,
+        } = &mut self.backend
+        {
+            let type_obj = event
+                .get_item(pyo3::intern!(py, "type"))?
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("type"))?;
+
+            if type_obj.eq(pyo3::intern!(py, "http.response.start"))? {
+                let status_code: u16 = event
+                    .get_item(pyo3::intern!(py, "status"))?
+                    .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("status"))?
+                    .extract()?;
+                *status = Some(
+                    http::StatusCode::from_u16(status_code)
+                        .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR),
+                );
+                *response_headers = parse_header_map(&event)?;
+            } else if type_obj.eq(pyo3::intern!(py, "http.response.body"))? {
+                let body = extract_body_bytes(&event)?;
+                let more_body: bool = event
+                    .get_item(pyo3::intern!(py, "more_body"))?
+                    .map(|b| b.extract())
+                    .transpose()?
+                    .unwrap_or(false);
+                body_buf.extend_from_slice(&body);
+                if !more_body && let Some(tx) = response_tx.take() {
+                    let mut resp = axum::response::Response::new(axum::body::Body::from(
+                        Bytes::from(std::mem::take(body_buf)),
+                    ));
+                    *resp.status_mut() = status.take().unwrap_or(http::StatusCode::OK);
+                    *resp.headers_mut() = std::mem::take(response_headers);
+                    let _ = tx.send(Ok(resp));
+                }
+            }
+            return Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any());
+        }
+
+        // Channel and Buffer: use parse_asgi_send_event for full event support.
         let t0 = super::bench_trace_enabled().then(std::time::Instant::now);
         let parsed = parse_asgi_send_event(&event)?;
         if let Some(t0) = t0 {
@@ -462,37 +507,9 @@ impl AsgiSend {
                     .push(parsed);
                 Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
             }
-            SendBackend::ResponseDriven {
-                start,
-                body_buf,
-                response_tx,
-            } => {
-                match parsed {
-                    AsgiEvent::ResponseStart { status, headers } => {
-                        *start = Some((status, headers));
-                    }
-                    AsgiEvent::ResponseBody { body, more_body } => {
-                        body_buf.extend_from_slice(&body);
-                        if !more_body {
-                            // Deliver the complete response through the oneshot.
-                            if let Some(tx) = response_tx.take() {
-                                let (status_code, headers) =
-                                    start.take().unwrap_or_else(|| (200, HeaderMap::new()));
-                                let status = http::StatusCode::from_u16(status_code)
-                                    .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-                                let body_bytes = Bytes::from(std::mem::take(body_buf));
-                                let _ = tx.send(Ok(crate::transport::types::OutboundResponse {
-                                    status,
-                                    headers,
-                                    body: crate::transport::types::ResponseBody::Fixed(body_bytes),
-                                }));
-                            }
-                        }
-                    }
-                    _ => {} // Ignore non-HTTP events
-                }
-                Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
-            }
+            SendBackend::ResponseDriven { .. } => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "internal error: ResponseDriven in fallthrough path",
+            )),
         }
     }
 }

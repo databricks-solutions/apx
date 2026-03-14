@@ -26,7 +26,11 @@ use crate::error::AppError;
 /// Pre-resolved Python type references, cached at startup to avoid repeated
 /// `import` / `getattr` calls in the hot path.
 pub struct CachedTypes {
-    /// `asyncio.Future`
+    /// `asyncio.Future` — kept for isinstance fallback (e.g. Task detection).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "retained for isinstance fallback paths")
+    )]
     pub asyncio_future: Py<PyType>,
     /// `asyncio.Task`
     #[cfg_attr(
@@ -37,7 +41,11 @@ pub struct CachedTypes {
         )
     )]
     pub asyncio_task: Py<PyType>,
-    /// `types.CoroutineType`
+    /// `types.CoroutineType` — retained for pointer extraction + isinstance fallback.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "pointer extracted; Py<PyType> keeps type alive")
+    )]
     pub coroutine_type: Py<PyType>,
     /// `types.GeneratorType`
     #[cfg_attr(
@@ -48,9 +56,17 @@ pub struct CachedTypes {
         )
     )]
     pub generator_type: Py<PyType>,
-    /// Our `Future` type object.
+    /// Our `Future` type object — retained for pointer extraction.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "pointer extracted; Py<PyType> keeps type alive")
+    )]
     pub future_type: Py<PyType>,
-    /// Our `EventWaiter` type object.
+    /// Our `EventWaiter` type object — retained for pointer extraction.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "pointer extracted; Py<PyType> keeps type alive")
+    )]
     pub event_waiter_type: Py<PyType>,
     /// `asyncio.CancelledError` — cached for error creation.
     pub cancelled_error_cls: Py<PyType>,
@@ -59,7 +75,38 @@ pub struct CachedTypes {
     /// Called at `YieldNone` checkpoints to implement anyio's level-cancellation.
     /// `None` when cancel scope glue has not been initialized.
     pub cancel_scope_checker: Option<Py<PyAny>>,
+
+    // -- Raw type pointers for hot-path ob_type comparison ------------------
+    //
+    // Borrowed from the Py<PyType> fields above — valid as long as CachedTypes
+    // lives (the Py handles prevent the type objects from being deallocated).
+    /// Raw `ob_type` pointer for our `Future` pyclass.
+    future_type_ptr: *mut pyo3::ffi::PyObject,
+    /// Raw `ob_type` pointer for our `EventWaiter` pyclass.
+    event_waiter_type_ptr: *mut pyo3::ffi::PyObject,
+    /// Raw `ob_type` pointer for `types.CoroutineType`.
+    coroutine_type_ptr: *mut pyo3::ffi::PyObject,
+    /// Interned `"_asyncio_future_blocking"` attribute name for duck-type
+    /// asyncio.Future detection (Granian-style).
+    asyncio_future_blocking_attr: Py<PyAny>,
+    /// Cached `Py_None` pointer for yield-None fast path.
+    py_none_ptr: *mut pyo3::ffi::PyObject,
 }
+
+// Safety: The raw pointers in CachedTypes are borrowed from Py<PyType> handles
+// that are kept alive for the struct's entire lifetime. The pointers are only
+// dereferenced under the GIL (which Python<'_> proves), so they are safe to
+// send across threads.
+#[expect(
+    unsafe_code,
+    reason = "raw pointers borrowed from GIL-protected Py handles"
+)]
+unsafe impl Send for CachedTypes {}
+#[expect(
+    unsafe_code,
+    reason = "raw pointers borrowed from GIL-protected Py handles"
+)]
+unsafe impl Sync for CachedTypes {}
 
 impl std::fmt::Debug for CachedTypes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -73,24 +120,45 @@ impl CachedTypes {
         let asyncio = py.import(c"asyncio")?;
         let types = py.import(c"types")?;
 
+        let future_type = Future::type_object(py).unbind();
+        let event_waiter_type = EventWaiter::type_object(py).unbind();
+        let coroutine_type = types
+            .getattr(c"CoroutineType")?
+            .cast_into::<PyType>()?
+            .unbind();
+
+        // Cache raw type pointers for hot-path ob_type comparison.
+        let future_type_ptr = future_type.as_ptr();
+        let event_waiter_type_ptr = event_waiter_type.as_ptr();
+        let coroutine_type_ptr = coroutine_type.as_ptr();
+        let py_none_ptr = py.None().as_ptr();
+
+        // Intern "_asyncio_future_blocking" for duck-type asyncio.Future detection.
+        let asyncio_future_blocking_attr: Py<PyAny> = pyo3::intern!(py, "_asyncio_future_blocking")
+            .clone()
+            .unbind()
+            .into();
+
         Ok(Self {
             asyncio_future: asyncio.getattr(c"Future")?.cast_into::<PyType>()?.unbind(),
             asyncio_task: asyncio.getattr(c"Task")?.cast_into::<PyType>()?.unbind(),
-            coroutine_type: types
-                .getattr(c"CoroutineType")?
-                .cast_into::<PyType>()?
-                .unbind(),
+            coroutine_type,
             generator_type: types
                 .getattr(c"GeneratorType")?
                 .cast_into::<PyType>()?
                 .unbind(),
-            future_type: Future::type_object(py).unbind(),
-            event_waiter_type: EventWaiter::type_object(py).unbind(),
+            future_type,
+            event_waiter_type,
             cancelled_error_cls: asyncio
                 .getattr(c"CancelledError")?
                 .cast_into::<PyType>()?
                 .unbind(),
             cancel_scope_checker: None,
+            future_type_ptr,
+            event_waiter_type_ptr,
+            coroutine_type_ptr,
+            asyncio_future_blocking_attr,
+            py_none_ptr,
         })
     }
 
@@ -109,6 +177,7 @@ impl CachedTypes {
 // ---------------------------------------------------------------------------
 
 /// Outcome of a single `send` / `throw` cycle on a coroutine.
+#[derive(Debug)]
 pub enum StepResult {
     /// Coroutine yielded a value (needs classification).
     Yielded(Py<PyAny>),
@@ -122,32 +191,73 @@ pub enum StepResult {
 // step / step_throw — single send/throw cycle
 // ---------------------------------------------------------------------------
 
-/// Advance a coroutine one step by calling `coro.send(value)`.
-pub fn step(
-    py: Python<'_>,
-    coro: &Bound<'_, PyAny>,
-    value: Option<&Bound<'_, PyAny>>,
-) -> StepResult {
-    let send_val = value.map_or_else(|| py.None().into_bound(py), |v| v.clone());
-    match coro.call_method1(c"send", (&send_val,)) {
-        Ok(yielded) => StepResult::Yielded(yielded.unbind()),
-        Err(e) if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) => {
-            let value = e
-                .value(py)
-                .getattr(c"value")
-                .map_or_else(|_| py.None(), |v| v.unbind());
+/// Advance a coroutine one step via C-level `PyIter_Send`.
+///
+/// # Safety invariants (upheld by callers)
+/// - `coro` is a valid Python coroutine/iterator
+/// - `py` proves the GIL is held
+///
+/// `PyIter_Send` handles `StopIteration` internally — no Python exception on
+/// `PYGEN_RETURN`.
+#[expect(
+    unsafe_code,
+    reason = "FFI call to PyIter_Send for hot-path performance"
+)]
+pub fn step(py: Python<'_>, coro: &Py<PyAny>, value: Option<&Py<PyAny>>) -> StepResult {
+    let send_arg = value.map_or(std::ptr::null_mut(), |v| v.as_ptr());
+    let mut result_ptr: *mut pyo3::ffi::PyObject = std::ptr::null_mut();
+
+    // Safety: coro is a valid Python coroutine, py proves GIL is held.
+    // PyIter_Send handles StopIteration internally — no Python exception on PYGEN_RETURN.
+    let status = unsafe { pyo3::ffi::PyIter_Send(coro.as_ptr(), send_arg, &raw mut result_ptr) };
+
+    match status {
+        pyo3::ffi::PySendResult::PYGEN_NEXT => {
+            // Safety: PYGEN_NEXT guarantees result_ptr is a new reference.
+            let obj = unsafe { Bound::from_owned_ptr(py, result_ptr) }.unbind();
+            StepResult::Yielded(obj)
+        }
+        pyo3::ffi::PySendResult::PYGEN_RETURN => {
+            let value = if result_ptr.is_null() {
+                py.None()
+            } else {
+                // Safety: PYGEN_RETURN with non-null is a new reference to the return value.
+                unsafe { Bound::from_owned_ptr(py, result_ptr) }.unbind()
+            };
             StepResult::Completed(value)
         }
-        Err(e) => StepResult::Error(e),
+        pyo3::ffi::PySendResult::PYGEN_ERROR => {
+            // PYGEN_ERROR means a Python exception should be set.
+            // Guard against edge cases where no exception is actually set
+            // (e.g. generator already exhausted).
+            if unsafe { !pyo3::ffi::PyErr_Occurred().is_null() } {
+                let err = PyErr::fetch(py);
+                // Check if it's a StopIteration — treat as completion.
+                if err.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
+                    let value = err
+                        .value(py)
+                        .getattr(c"value")
+                        .map_or_else(|_| py.None(), |v| v.unbind());
+                    StepResult::Completed(value)
+                } else {
+                    StepResult::Error(err)
+                }
+            } else {
+                // No exception set — treat as completion with None.
+                StepResult::Completed(py.None())
+            }
+        }
     }
 }
 
 /// Advance a coroutine one step by calling `coro.throw(exc)`.
 ///
-/// Python 3.12+ accepts just the exception instance.
-pub fn step_throw(py: Python<'_>, coro: &Bound<'_, PyAny>, err: PyErr) -> StepResult {
-    match coro.call_method1(c"throw", (err.value(py),)) {
-        Ok(yielded) => StepResult::Yielded(yielded.unbind()),
+/// Python 3.12+ accepts just the exception instance. No C-level equivalent
+/// of `throw()` with the same simplicity — `throw` is the cold path (only
+/// on exceptions), so the overhead is negligible.
+pub fn step_throw(py: Python<'_>, coro: &Py<PyAny>, err: PyErr) -> StepResult {
+    match coro.call_method1(py, c"throw", (err.value(py),)) {
+        Ok(yielded) => StepResult::Yielded(yielded),
         Err(e) if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) => {
             let value = e
                 .value(py)
@@ -187,41 +297,51 @@ pub enum AwaitableKind {
 ///
 /// Check order is optimised for the common case: `yield None` first (36% of
 /// all calls), then our own types, then coroutines, then asyncio futures.
-pub fn classify(py: Python<'_>, yielded: &Bound<'_, PyAny>, types: &CachedTypes) -> AwaitableKind {
-    // Fast path: yield None is the most common case.
-    if yielded.is_none() {
+/// Classify a yielded value to determine what the driver should do next.
+///
+/// Uses direct `ob_type` pointer comparisons for our own pyclass types (no
+/// subclassing) and `Py_None` singleton comparison. Falls back to duck-type
+/// attribute check for asyncio futures (Granian-style `_asyncio_future_blocking`).
+#[expect(
+    unsafe_code,
+    reason = "ob_type pointer read under GIL for hot-path classification"
+)]
+pub fn classify(_py: Python<'_>, yielded: &Py<PyAny>, types: &CachedTypes) -> AwaitableKind {
+    let obj_ptr = yielded.as_ptr();
+
+    // Fast path: yield None (36% of all calls) — pointer comparison against singleton.
+    if obj_ptr == types.py_none_ptr {
         return AwaitableKind::YieldNone;
     }
 
-    // Check our own types first (fast isinstance checks).
-    if yielded
-        .is_instance(types.future_type.bind(py).as_any())
-        .unwrap_or(false)
-    {
+    // Safety: ob_type is always valid for a live Python object while GIL is held.
+    let ob_type = unsafe { (*obj_ptr).ob_type.cast::<pyo3::ffi::PyObject>() };
+
+    // Exact type match for our own pyclass types (no subclassing allowed).
+    if ob_type == types.future_type_ptr {
         return AwaitableKind::Future;
     }
-    if yielded
-        .is_instance(types.event_waiter_type.bind(py).as_any())
-        .unwrap_or(false)
-    {
+    if ob_type == types.event_waiter_type_ptr {
         return AwaitableKind::EventWaiter;
     }
 
-    // Check for coroutine (sub-coroutine yield).
-    if yielded
-        .is_instance(types.coroutine_type.bind(py).as_any())
-        .unwrap_or(false)
-    {
+    // Coroutine: exact type match (native coroutines have a fixed type).
+    if ob_type == types.coroutine_type_ptr {
         return AwaitableKind::Coroutine;
     }
 
-    // Check for asyncio.Future (includes asyncio.Task since Task extends Future).
-    if yielded
-        .is_instance(types.asyncio_future.bind(py).as_any())
-        .unwrap_or(false)
-    {
+    // asyncio.Future detection via _asyncio_future_blocking attribute.
+    // This is how Granian detects asyncio futures — checking for the duck-type
+    // attribute is faster than isinstance on the full MRO.
+    let blocking_attr = unsafe {
+        pyo3::ffi::PyObject_GetAttr(obj_ptr, types.asyncio_future_blocking_attr.as_ptr())
+    };
+    if !blocking_attr.is_null() {
+        unsafe { pyo3::ffi::Py_DECREF(blocking_attr) };
         return AwaitableKind::AsyncioFuture;
     }
+    // Clear the AttributeError from the failed GetAttr.
+    unsafe { pyo3::ffi::PyErr_Clear() };
 
     AwaitableKind::Unknown
 }
@@ -300,24 +420,22 @@ pub fn drive_task(
 ) -> DriveResult {
     let mut steps: usize = 0;
     loop {
-        // Obtain step result, dropping the `coro` borrow before we mutate `task`.
-        let step_result = {
-            let coro = match task.active_coro(py) {
-                Ok(c) => c,
-                Err(e) => return DriveResult::Error(e),
-            };
-            if let Some(err) = task.take_throw_error() {
-                step_throw(py, &coro, err)
-            } else {
-                let send_val = task.take_send_value(py);
-                step(py, &coro, send_val.as_ref())
-            }
+        // Clone the coro ref so the immutable borrow on `task` is released
+        // before we mutate it (take_throw_error / take_send_value).
+        let coro = match task.active_coro() {
+            Ok(c) => c.clone_ref(py),
+            Err(e) => return DriveResult::Error(e),
         };
-        // `coro` is dropped — safe to mutate `task` below.
+        let step_result = if let Some(err) = task.take_throw_error() {
+            step_throw(py, &coro, err)
+        } else {
+            let send_val = task.take_send_value();
+            step(py, &coro, send_val.as_ref())
+        };
 
         match step_result {
             StepResult::Yielded(obj) => {
-                let kind = classify(py, obj.bind(py), types);
+                let kind = classify(py, &obj, types);
                 match kind {
                     AwaitableKind::YieldNone => {
                         // Check cancel scope BEFORE re-entering the loop.
@@ -640,12 +758,14 @@ fn set_current_task(py: Python<'_>, task: &SchedulerTask) -> Option<(Py<PyAny>, 
     let current_tasks = tasks_mod.getattr(c"_current_tasks").ok()?;
     let loop_obj = asyncio.call_method0(c"get_running_loop").ok()?;
 
+    let ctx = task.ctx.as_ref().map(|c| c.clone_ref(py));
     let proxy = Py::new(
         py,
         TaskProxy::new(
             task.result_future.clone_ref(py),
             loop_obj.clone().unbind(),
             task.root_coro(py),
+            ctx,
         ),
     )
     .ok()?;
@@ -710,7 +830,7 @@ mod tests {
     fn classify_none_is_yield_none() {
         crate::with_py(|py| {
             let types = CachedTypes::resolve(py).unwrap();
-            let none = py.None().into_bound(py);
+            let none = py.None();
             assert!(matches!(
                 classify(py, &none, &types),
                 AwaitableKind::YieldNone
@@ -723,12 +843,41 @@ mod tests {
         crate::with_py(|py| {
             let types = CachedTypes::resolve(py).unwrap();
             let future = Future::resolved(py.None());
-            let py_future = Py::new(py, future).unwrap();
-            let bound = py_future.into_bound(py).into_any();
+            let py_future = Py::new(py, future).unwrap().into_any();
             assert!(matches!(
-                classify(py, &bound, &types),
+                classify(py, &py_future, &types),
                 AwaitableKind::Future
             ));
+        });
+    }
+
+    #[test]
+    fn classify_coroutine() {
+        crate::with_py(|py| {
+            let types = CachedTypes::resolve(py).unwrap();
+            py.run(c"async def _c(): pass", None, None).unwrap();
+            let coro = py.eval(c"_c()", None, None).unwrap().unbind();
+            assert!(matches!(
+                classify(py, &coro, &types),
+                AwaitableKind::Coroutine
+            ));
+        });
+    }
+
+    #[test]
+    fn classify_asyncio_future() {
+        crate::with_py(|py| {
+            let types = CachedTypes::resolve(py).unwrap();
+            // Create a real asyncio.Future (requires a running loop).
+            let asyncio = py.import(c"asyncio").unwrap();
+            let loop_obj = asyncio.call_method0(c"new_event_loop").unwrap();
+            let fut = loop_obj.call_method0(c"create_future").unwrap();
+            let fut_py = fut.unbind();
+            assert!(
+                matches!(classify(py, &fut_py, &types), AwaitableKind::AsyncioFuture),
+                "asyncio.Future should be classified as AsyncioFuture"
+            );
+            let _ = loop_obj.call_method0(c"close");
         });
     }
 
@@ -745,7 +894,7 @@ async def coro():
                 None,
             )
             .unwrap();
-            let coro = py.eval(c"coro()", None, None).unwrap();
+            let coro = py.eval(c"coro()", None, None).unwrap().unbind();
             let result = step(py, &coro, None);
             assert!(matches!(result, StepResult::Completed(_)));
             if let StepResult::Completed(val) = result {
@@ -767,10 +916,80 @@ async def coro():
                 None,
             )
             .unwrap();
-            let coro = py.eval(c"coro()", None, None).unwrap();
+            let coro = py.eval(c"coro()", None, None).unwrap().unbind();
             let err = pyo3::exceptions::PyValueError::new_err("test error");
             let result = step_throw(py, &coro, err);
             assert!(matches!(result, StepResult::Error(_)));
+        });
+    }
+
+    #[test]
+    fn step_yielding_coroutine() {
+        crate::with_py(|py| {
+            // Coroutine that yields None once, then returns "done".
+            py.run(
+                c"
+import asyncio
+async def yielding():
+    await asyncio.sleep(0)  # yields None
+    return 'done'
+",
+                None,
+                None,
+            )
+            .unwrap();
+            let coro = py.eval(c"yielding()", None, None).unwrap().unbind();
+            // First step: should yield (asyncio.sleep yields a future, but
+            // the inner coroutine yields None).
+            let result = step(py, &coro, None);
+            assert!(
+                matches!(result, StepResult::Yielded(_)),
+                "expected Yielded, got {result:?}",
+            );
+            // Second step: send None back, should complete.
+            let result = step(py, &coro, None);
+            assert!(matches!(result, StepResult::Completed(_)));
+            if let StepResult::Completed(val) = result {
+                let s: String = val.extract(py).unwrap();
+                assert_eq!(s, "done");
+            }
+        });
+    }
+
+    #[test]
+    fn step_sub_coroutine() {
+        crate::with_py(|py| {
+            // Inner coroutine yields (via asyncio.sleep(0)), then returns.
+            // outer awaits inner, so the first step yields through the chain.
+            py.run(
+                c"
+import asyncio
+async def inner():
+    await asyncio.sleep(0)
+    return 99
+
+async def outer():
+    val = await inner()
+    return val + 1
+",
+                None,
+                None,
+            )
+            .unwrap();
+            let coro = py.eval(c"outer()", None, None).unwrap().unbind();
+            // First step: inner yields (via sleep(0)), propagated to outer.
+            let result = step(py, &coro, None);
+            assert!(
+                matches!(result, StepResult::Yielded(_)),
+                "expected Yielded, got {result:?}",
+            );
+            // Second step: send None back, inner completes, outer completes.
+            let result = step(py, &coro, None);
+            assert!(matches!(result, StepResult::Completed(_)));
+            if let StepResult::Completed(val) = result {
+                let num: i64 = val.extract(py).unwrap();
+                assert_eq!(num, 100);
+            }
         });
     }
 
@@ -857,6 +1076,47 @@ async def coro():
             let dbg = format!("{cb:?}");
             assert!(dbg.contains("ResumeCallback"));
             assert!(dbg.contains("has_task: true"));
+        });
+    }
+
+    #[test]
+    fn test_contextvars_propagation() {
+        crate::with_py(|py| {
+            let types = Arc::new(CachedTypes::resolve(py).unwrap());
+            let (call_soon, ensure_future) = dummy_loop_fns(py);
+            let ready_queue = Arc::new(ReadyQueue::new());
+
+            // Set a contextvar before spawn_and_drive, verify it's visible
+            // inside the coroutine.
+            py.run(
+                c"
+import contextvars
+test_var = contextvars.ContextVar('test_var', default='unset')
+test_var.set('hello_from_middleware')
+
+async def _check_ctx():
+    return test_var.get()
+",
+                None,
+                None,
+            )
+            .unwrap();
+            let coro = py.eval(c"_check_ctx()", None, None).unwrap().unbind();
+
+            let (tx, mut rx) = oneshot::channel();
+            spawn_and_drive(
+                py,
+                coro,
+                tx,
+                &types,
+                &call_soon,
+                &ensure_future,
+                &ready_queue,
+            );
+
+            let result = rx.try_recv().unwrap().unwrap();
+            let val: String = result.extract(py).unwrap();
+            assert_eq!(val, "hello_from_middleware");
         });
     }
 }

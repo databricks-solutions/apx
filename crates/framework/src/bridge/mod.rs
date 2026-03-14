@@ -136,7 +136,7 @@ async fn python_handler(
 
     match result {
         Ok(response) => {
-            let status = response.status.as_u16();
+            let status = response.status().as_u16();
             span.record("http.response.status_code", status);
 
             // Set error.type for server error responses (semconv: SHOULD for >= 500).
@@ -156,7 +156,7 @@ async fn python_handler(
                 &route_path,
                 error_type.as_deref(),
             );
-            Ok(crate::transport::convert::to_axum_response(response))
+            Ok(response)
         }
         Err(err) => {
             let status = err.status_code().as_u16();

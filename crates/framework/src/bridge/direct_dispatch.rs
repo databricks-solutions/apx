@@ -34,7 +34,7 @@ impl HandlerDispatch for DirectDispatch {
         route: Arc<BoundRoute>,
         app_state: Arc<AppState>,
         mut request: InboundRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<OutboundResponse, AppError>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<axum::response::Response, AppError>> + Send>> {
         Box::pin(async move {
             tracing::debug!(
                 path = %request.path,
@@ -50,11 +50,12 @@ impl HandlerDispatch for DirectDispatch {
                 .map_err(|_| AppError::BodyParse(crate::error::BodyParseKind::BodyTooLarge))?;
 
             // 2. Branch on sync vs async handler.
-            if route.manifest.is_async_handler {
-                dispatch_async(route, app_state, request, body_bytes).await
+            let response = if route.manifest.is_async_handler {
+                dispatch_async(route, app_state, request, body_bytes).await?
             } else {
-                dispatch_sync(route, request, body_bytes)
-            }
+                dispatch_sync(route, request, body_bytes)?
+            };
+            Ok(crate::transport::convert::to_axum_response(response))
         })
     }
 }

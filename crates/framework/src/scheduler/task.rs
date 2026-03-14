@@ -36,10 +36,16 @@ pub struct SchedulerTask {
     throw_error: Option<PyErr>,
     /// Cancellation state.
     cancelled: AtomicBool,
+    /// Contextvars context — copied at task creation, entered before each
+    /// drive cycle so that contextvars set in middleware propagate correctly.
+    pub ctx: Option<Py<PyAny>>,
 }
 
 impl SchedulerTask {
     /// Wrap a coroutine and create a [`Future`] for its result.
+    ///
+    /// Copies the current contextvars context so that variables set in
+    /// middleware propagate correctly into the handler coroutine.
     pub fn new(
         py: Python<'_>,
         coro: Py<PyAny>,
@@ -47,6 +53,7 @@ impl SchedulerTask {
     ) -> PyResult<Self> {
         let (fresh_future, _tx) = Future::with_channel();
         let result_future = Py::new(py, fresh_future)?;
+        let ctx = copy_context(py);
 
         Ok(Self {
             coro_stack: vec![coro],
@@ -55,6 +62,7 @@ impl SchedulerTask {
             send_value: None,
             throw_error: None,
             cancelled: AtomicBool::new(false),
+            ctx,
         })
     }
 
@@ -72,13 +80,10 @@ impl SchedulerTask {
     ///
     /// Returns `PyRuntimeError` if the coroutine stack is empty (should never
     /// happen during normal driving).
-    pub fn active_coro<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.coro_stack
-            .last()
-            .map(|c| c.bind(py).clone())
-            .ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("SchedulerTask: coroutine stack is empty")
-            })
+    pub fn active_coro(&self) -> Result<&Py<PyAny>, PyErr> {
+        self.coro_stack.last().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("SchedulerTask: coroutine stack is empty")
+        })
     }
 
     /// Push a sub-coroutine onto the stack.
@@ -104,8 +109,8 @@ impl SchedulerTask {
     }
 
     /// Take and return the pending send value (consumed on use).
-    pub fn take_send_value<'py>(&mut self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
-        self.send_value.take().map(|v| v.into_bound(py))
+    pub fn take_send_value(&mut self) -> Option<Py<PyAny>> {
+        self.send_value.take()
     }
 
     /// Take and return the pending throw error (consumed on use).
@@ -143,6 +148,22 @@ impl SchedulerTask {
     /// Check whether the task has been cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+/// Copy the current contextvars context via C-level `PyContext_CopyCurrent`.
+///
+/// Returns `None` if the copy fails (should not happen in practice).
+#[expect(unsafe_code, reason = "FFI call to PyContext_CopyCurrent")]
+fn copy_context(py: Python<'_>) -> Option<Py<PyAny>> {
+    let ctx_ptr = unsafe { pyo3::ffi::PyContext_CopyCurrent() };
+    if ctx_ptr.is_null() {
+        // Clear any pending exception and return None.
+        unsafe { pyo3::ffi::PyErr_Clear() };
+        None
+    } else {
+        // Safety: PyContext_CopyCurrent returns a new reference on success.
+        Some(unsafe { Bound::from_owned_ptr(py, ctx_ptr) }.unbind())
     }
 }
 
@@ -200,17 +221,25 @@ pub struct TaskProxy {
     coro: Py<PyAny>,
     cancelled: bool,
     name: String,
+    /// The contextvars context copied at task creation.
+    ctx: Option<Py<PyAny>>,
 }
 
 impl TaskProxy {
     /// Create a new proxy wrapping the given result future and event loop.
-    pub fn new(result_future: Py<Future>, loop_ref: Py<PyAny>, coro: Py<PyAny>) -> Self {
+    pub fn new(
+        result_future: Py<Future>,
+        loop_ref: Py<PyAny>,
+        coro: Py<PyAny>,
+        ctx: Option<Py<PyAny>>,
+    ) -> Self {
         Self {
             result_future,
             loop_ref,
             coro,
             cancelled: false,
             name: "TaskProxy".to_owned(),
+            ctx,
         }
     }
 }
@@ -328,12 +357,16 @@ impl TaskProxy {
         self.coro.clone_ref(py)
     }
 
-    /// Return the task's context (returns current context).
-    #[allow(clippy::unused_self, reason = "Python method protocol requires &self")]
+    /// Return the task's contextvars context (copied at task creation).
     fn get_context(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let contextvars = py.import(c"contextvars")?;
-        let ctx = contextvars.call_method0(c"copy_context")?;
-        Ok(ctx.unbind())
+        if let Some(ref ctx) = self.ctx {
+            Ok(ctx.clone_ref(py))
+        } else {
+            // Fallback: copy current context if none was stored.
+            let contextvars = py.import(c"contextvars")?;
+            let ctx = contextvars.call_method0(c"copy_context")?;
+            Ok(ctx.unbind())
+        }
     }
 }
 
@@ -389,17 +422,17 @@ mod tests {
             let coro = py.None();
             let mut task = SchedulerTask::new(py, coro, dummy_tx()).unwrap();
 
-            assert!(task.take_send_value(py).is_none());
+            assert!(task.take_send_value().is_none());
 
             let val = 42_i32.into_pyobject(py).unwrap().unbind().into_any();
             task.set_send_value(val);
-            let taken = task.take_send_value(py);
+            let taken = task.take_send_value();
             assert!(taken.is_some());
-            let num: i32 = taken.unwrap().extract().unwrap();
+            let num: i32 = taken.unwrap().extract(py).unwrap();
             assert_eq!(num, 42);
 
             // Second take returns None.
-            assert!(task.take_send_value(py).is_none());
+            assert!(task.take_send_value().is_none());
         });
     }
 

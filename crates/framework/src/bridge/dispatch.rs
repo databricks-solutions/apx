@@ -7,7 +7,7 @@ use crate::bridge::asgi::ScopeInterns;
 use crate::error::AppError;
 use crate::event_loop::{EventLoopHandle, SchedulerRefs};
 use crate::route::BoundRoute;
-use crate::transport::types::{InboundRequest, OutboundResponse};
+use crate::transport::types::InboundRequest;
 use pyo3::Py;
 use std::future::Future;
 use std::pin::Pin;
@@ -59,16 +59,17 @@ impl std::fmt::Debug for AppState {
 
 /// Handles the full request lifecycle for a specific handler kind.
 ///
-/// Implementations work entirely on transport-neutral types. The axum
-/// boundary lives in `bridge/mod.rs::python_handler` only.
+/// Returns an axum `Response` directly. The buffered ASGI path builds the
+/// response inline (zero-copy headers), while streaming and direct paths
+/// convert via `to_axum_response()`.
 pub trait HandlerDispatch: Send + Sync + std::fmt::Debug {
-    /// Process a request and return a transport-neutral response.
+    /// Process a request and return an axum response.
     fn handle(
         &self,
         route: Arc<BoundRoute>,
         app_state: Arc<AppState>,
         request: InboundRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<OutboundResponse, AppError>> + Send>>;
+    ) -> Pin<Box<dyn Future<Output = Result<axum::response::Response, AppError>> + Send>>;
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
