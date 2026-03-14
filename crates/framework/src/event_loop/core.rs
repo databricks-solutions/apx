@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use pyo3::prelude::*;
 use tokio::sync::mpsc;
 
-use super::SchedulerRefs;
 use super::handle::EventLoopHandle;
 use super::queue::{QueueDrainer, QueueItem, SchedulerState};
 use crate::scheduler::driver::CachedTypes;
@@ -91,8 +90,6 @@ pub struct EventLoop {
     needs_wake: Arc<AtomicBool>,
     /// Python reference to the [`QueueDrainer`] singleton.
     drainer_ref: Py<PyAny>,
-    /// Scheduler refs for try-sync-first dispatch.
-    scheduler_refs: SchedulerRefs,
 }
 
 impl std::fmt::Debug for EventLoop {
@@ -133,12 +130,8 @@ impl EventLoop {
                         Self::init_event_loop_thread(py, queue_rx, needs_wake_clone, tokio_handle);
 
                     match result {
-                        Ok((event_loop, drainer_ref, scheduler_refs)) => {
-                            let _ = startup_tx.send(Ok((
-                                event_loop.clone_ref(py),
-                                drainer_ref,
-                                scheduler_refs,
-                            )));
+                        Ok((event_loop, drainer_ref)) => {
+                            let _ = startup_tx.send(Ok((event_loop.clone_ref(py), drainer_ref)));
 
                             let loop_bound = event_loop.bind(py);
                             if let Err(e) = loop_bound.call_method0(c"run_forever") {
@@ -157,7 +150,7 @@ impl EventLoop {
             })
             .map_err(|e| format!("failed to spawn asyncio thread: {e}"))?;
 
-        let (event_loop, drainer_ref, scheduler_refs) = startup_rx
+        let (event_loop, drainer_ref) = startup_rx
             .recv()
             .map_err(|_| "asyncio thread exited before sending loop".to_owned())??;
 
@@ -168,18 +161,16 @@ impl EventLoop {
             queue_tx,
             needs_wake,
             drainer_ref,
-            scheduler_refs,
         })
     }
 
     /// Initialize the event loop, install the [`QueueDrainer`], and return both.
-    #[allow(clippy::type_complexity)]
     fn init_event_loop_thread(
         py: Python<'_>,
         queue_rx: mpsc::UnboundedReceiver<QueueItem>,
         needs_wake: Arc<AtomicBool>,
         tokio_handle: Option<tokio::runtime::Handle>,
-    ) -> Result<(Py<PyAny>, Py<PyAny>, SchedulerRefs), String> {
+    ) -> Result<(Py<PyAny>, Py<PyAny>), String> {
         let event_loop = create_event_loop(py).map_err(|e| format!("create_event_loop: {e}"))?;
         let asyncio = py
             .import(c"asyncio")
@@ -198,26 +189,21 @@ impl EventLoop {
             }
         }
 
-        let (drainer_ref, scheduler_refs) =
-            Self::install_drainer(py, &event_loop, queue_rx, needs_wake)?;
+        let drainer_ref = Self::install_drainer(py, &event_loop, queue_rx, needs_wake)?;
 
         // Install the tokio handle for scheduler primitives.
         install_rust_scheduler(py, tokio_handle).map_err(|e| format!("scheduler install: {e}"))?;
 
-        Ok((event_loop.unbind(), drainer_ref, scheduler_refs))
+        Ok((event_loop.unbind(), drainer_ref))
     }
 
     /// Create and install the [`QueueDrainer`] on the event loop.
-    ///
-    /// Returns `(drainer_ref, scheduler_refs)` — the scheduler refs are
-    /// cloned before the [`SchedulerState`] moves into the drainer so that
-    /// the dispatch implementation can use them for try-sync-first ASGI dispatch.
     fn install_drainer(
         py: Python<'_>,
         event_loop: &Bound<'_, PyAny>,
         queue_rx: mpsc::UnboundedReceiver<QueueItem>,
         needs_wake: Arc<AtomicBool>,
-    ) -> Result<(Py<PyAny>, SchedulerRefs), String> {
+    ) -> Result<Py<PyAny>, String> {
         let call_soon = event_loop
             .getattr(c"call_soon")
             .map_err(|e| format!("missing call_soon: {e}"))?
@@ -229,13 +215,6 @@ impl EventLoop {
 
         let scheduler = SchedulerState {
             cached_types: Arc::clone(&cached_types),
-            call_soon: call_soon.clone_ref(py),
-            ready_queue: Arc::clone(&ready_queue),
-        };
-
-        // Clone scheduler refs before scheduler moves into the drainer.
-        let scheduler_refs = SchedulerRefs {
-            cached_types,
             call_soon: call_soon.clone_ref(py),
             ready_queue: Arc::clone(&ready_queue),
         };
@@ -256,18 +235,14 @@ impl EventLoop {
 
         // Set wake state on the ready queue so push() can reschedule
         // the drainer when it is sleeping.
-        scheduler_refs.ready_queue.set_wake(
-            needs_wake,
-            call_soon,
-            drainer_obj.clone_ref(py).into_any(),
-        );
+        ready_queue.set_wake(needs_wake, call_soon, drainer_obj.clone_ref(py).into_any());
 
         // Install initial callback so the drainer starts processing.
         event_loop
             .call_method1(c"call_soon", (&drainer_obj,))
             .map_err(|e| format!("initial call_soon: {e}"))?;
 
-        Ok((drainer_obj.into_any(), scheduler_refs))
+        Ok(drainer_obj.into_any())
     }
 
     /// Get a cloneable handle for submitting work to this event loop.
@@ -290,11 +265,6 @@ impl EventLoop {
     /// Get a reference to the underlying Python event loop object.
     pub fn event_loop_ref(&self) -> &Py<PyAny> {
         &self.event_loop
-    }
-
-    /// Get the scheduler refs for try-sync-first ASGI dispatch.
-    pub fn scheduler_refs(&self) -> &SchedulerRefs {
-        &self.scheduler_refs
     }
 
     /// Stop the event loop and join the dedicated thread.

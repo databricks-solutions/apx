@@ -5,7 +5,7 @@
 //! `SO_REUSEPORT`.
 
 use crate::app_loader::{AppSource, ModuleImport};
-use crate::event_loop::{EventLoop, SchedulerRefs};
+use crate::event_loop::EventLoop;
 use crate::ipc::channel::WorkerChannel;
 use crate::ipc::protocol::{BootstrapError, IpcMessage, Nonce, WorkerBootstrap};
 use crate::service::{ApxService, ServiceConfig, serve_tcp};
@@ -121,16 +121,9 @@ pub async fn run_worker(
         .handle()
         .map_err(|e| WorkerError::PythonInit(format!("event loop handle: {e}")))?;
     let event_loop_ref = Python::attach(|py| runtime.py_event_loop.event_loop_ref().clone_ref(py));
-    let refs = runtime.py_event_loop.scheduler_refs();
-    let scheduler_refs = Arc::new(Python::attach(|py| SchedulerRefs {
-        cached_types: Arc::clone(&refs.cached_types),
-        call_soon: refs.call_soon.clone_ref(py),
-        ready_queue: Arc::clone(&refs.ready_queue),
-    }));
     let ctx = Arc::new(WorkerContext {
         loop_handle,
         event_loop_ref,
-        scheduler_refs,
     });
 
     // Load app and build dispatch pipeline.

@@ -697,21 +697,13 @@ fn set_current_task(py: Python<'_>, task: &SchedulerTask) -> Option<(Py<PyAny>, 
     .ok()?;
 
     let _ = current_tasks.call_method1(c"__setitem__", (&loop_obj, &proxy));
-    // Also set thread-local for the current_task monkeypatch (Python 3.11 race fix).
-    crate::event_loop::thread_local::set_thread_current_task(py, proxy.as_any());
     Some((current_tasks.unbind(), proxy))
 }
 
 /// Reinstall an existing [`TaskProxy`] in `asyncio.tasks._current_tasks`.
 ///
 /// Used by [`resume_task`] to restore the current task when re-driving.
-/// Saves the previous entry so it can be restored after driving — this
-/// prevents the event loop thread from clobbering a blocking thread's entry.
-///
-/// The save + restore is best-effort under GIL interleaving: `dict.get()`
-/// and `dict.__setitem__()` are individually atomic under the GIL but not
-/// transactional together. In practice this is safe because `resume_task`
-/// runs on the event loop thread, which serializes with blocking threads.
+/// Saves the previous entry so it can be restored after driving.
 ///
 /// Returns `(current_tasks_dict, loop_obj, previous_entry)` for restoration.
 fn install_proxy(
@@ -729,8 +721,6 @@ fn install_proxy(
         .ok()?
         .unbind();
     let _ = current_tasks.call_method1(c"__setitem__", (&loop_obj, proxy));
-    // Also set thread-local for the current_task monkeypatch.
-    crate::event_loop::thread_local::set_thread_current_task(py, proxy.as_any());
     Some((current_tasks.unbind(), loop_obj.unbind(), prev))
 }
 
@@ -739,8 +729,6 @@ fn install_proxy(
 /// If the previous entry was `None`, removes the dict entry.
 /// This preserves any entry set by a concurrent blocking thread.
 fn restore_proxy(py: Python<'_>, saved: Option<(Py<PyAny>, Py<PyAny>, Py<PyAny>)>) {
-    // Clear our thread-local task (event loop thread doesn't need it).
-    crate::event_loop::thread_local::clear_thread_current_task(py);
     let Some((ct, loop_obj, prev)) = saved else {
         return;
     };
@@ -752,18 +740,12 @@ fn restore_proxy(py: Python<'_>, saved: Option<(Py<PyAny>, Py<PyAny>, Py<PyAny>)
 }
 
 /// Remove our task from `asyncio._current_tasks`, but ONLY if it still
-/// matches our proxy. Under concurrent inline dispatch, multiple blocking
-/// threads share the same `_current_tasks[loop]` entry — unconditional
-/// removal would clear another thread's proxy mid-flight.
+/// matches our proxy.
 fn clear_current_task(
     py: Python<'_>,
     current_tasks: Option<Py<PyAny>>,
     our_proxy: Option<&Py<TaskProxy>>,
 ) {
-    // Clear the thread-local unconditionally first — it's per-thread and
-    // always safe, even if the shared dict cleanup below bails out early.
-    crate::event_loop::thread_local::clear_thread_current_task(py);
-
     let Some(ct) = current_tasks else { return };
     let Ok(asyncio) = py.import(c"asyncio") else {
         return;

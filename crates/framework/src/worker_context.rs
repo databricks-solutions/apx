@@ -1,12 +1,11 @@
 //! Shared worker infrastructure passed to every dispatch strategy.
 //!
-//! `WorkerContext` holds the event loop handle, Python event loop reference,
-//! and optional scheduler refs. It is created once per worker and shared
-//! via `Arc` with the dispatch implementation.
+//! `WorkerContext` holds the event loop handle and Python event loop reference.
+//! It is created once per worker and shared via `Arc` with the dispatch
+//! implementation.
 
-use crate::event_loop::{EventLoopHandle, SchedulerRefs};
+use crate::event_loop::EventLoopHandle;
 use pyo3::Py;
-use std::sync::Arc;
 
 /// Shared infrastructure available to all dispatch strategies.
 ///
@@ -16,11 +15,8 @@ pub struct WorkerContext {
     /// Handle for submitting coroutines to the persistent event loop.
     pub loop_handle: EventLoopHandle,
     /// Python reference to the asyncio event loop (diagnostics, lifespan).
-    #[expect(dead_code, reason = "read by lifespan and try-sync-first dispatch")]
+    #[expect(dead_code, reason = "read by lifespan protocol")]
     pub event_loop_ref: Py<pyo3::PyAny>,
-    /// Scheduler refs for Rust-native coroutine driving.
-    #[expect(dead_code, reason = "read by try-sync-first inline dispatch path")]
-    pub scheduler_refs: Arc<SchedulerRefs>,
 }
 
 impl std::fmt::Debug for WorkerContext {
