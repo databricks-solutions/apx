@@ -6,7 +6,6 @@
 
 use super::types::TransportKind;
 use super::{Listener, TransportConfig, TransportError};
-use std::future::Future;
 use std::net::SocketAddr;
 
 /// TCP listener with `SO_REUSEPORT` for multi-worker sharing.
@@ -22,6 +21,18 @@ impl std::fmt::Debug for TcpListener {
         f.debug_struct("TcpListener")
             .field("addr", &self.addr)
             .finish()
+    }
+}
+
+impl TcpListener {
+    /// Accept a new TCP connection.
+    pub async fn accept(&self) -> std::io::Result<(tokio::net::TcpStream, SocketAddr)> {
+        self.inner.accept().await
+    }
+
+    /// Expose the inner tokio listener for the hyper service layer (Step 2).
+    pub fn into_inner(self) -> tokio::net::TcpListener {
+        self.inner
     }
 }
 
@@ -41,20 +52,6 @@ impl Listener for TcpListener {
             inner: listener,
             addr,
         })
-    }
-
-    async fn serve(
-        self,
-        router: axum::Router,
-        shutdown: impl Future<Output = ()> + Send + 'static,
-    ) -> Result<(), TransportError> {
-        axum::serve(
-            self.inner,
-            router.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown)
-        .await
-        .map_err(TransportError::Serve)
     }
 
     fn local_addr(&self) -> SocketAddr {
@@ -157,5 +154,20 @@ mod tests {
         let dbg = format!("{listener:?}");
         assert!(dbg.contains("TcpListener"));
         assert!(dbg.contains("addr"));
+    }
+
+    #[tokio::test]
+    async fn tcp_listener_accept_returns_connection() {
+        let config = TransportConfig::tcp(IpAddr::from([127, 0, 0, 1]), 0);
+        let listener = TcpListener::bind(&config).await.unwrap();
+        let addr = listener.local_addr();
+
+        // Connect from a client
+        let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+        // Accept should succeed
+        let (stream, client_addr) = listener.accept().await.unwrap();
+        assert!(stream.peer_addr().is_ok());
+        assert_eq!(client_addr.ip(), IpAddr::from([127, 0, 0, 1]));
     }
 }

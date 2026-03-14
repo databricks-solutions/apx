@@ -126,8 +126,8 @@ compile_error!("Windows IPC (Named Pipes) is not yet implemented. See extensions
 )]
 mod tests {
     use super::*;
+    use crate::ipc::protocol::AppModule;
     use crate::ipc::protocol::{Nonce, WorkerBootstrap};
-    use crate::route::AppModule;
     use std::path::PathBuf;
 
     #[tokio::test]

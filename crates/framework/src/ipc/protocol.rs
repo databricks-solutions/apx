@@ -3,10 +3,102 @@
 //! All messages are serialized as msgpack and framed with a 4-byte big-endian
 //! length prefix. Python never touches these — they are Rust-internal.
 
-use crate::route::AppModule;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
+
+// ── AppModule ───────────────────────────────────────────────────────────
+
+/// Validation errors for Python dotted paths ([`AppModule`]).
+#[derive(Debug, thiserror::Error)]
+pub enum DottedPathError {
+    /// The path was empty.
+    #[error("{context} must not be empty")]
+    Empty {
+        /// What kind of path failed validation.
+        context: &'static str,
+    },
+    /// A segment between dots was empty (e.g. `"foo..bar"`).
+    #[error("{context} has empty segment: {value}")]
+    EmptySegment {
+        /// What kind of path failed validation.
+        context: &'static str,
+        /// The original input.
+        value: String,
+    },
+    /// A segment is not a valid Python identifier.
+    #[error("invalid {context} segment: {segment}")]
+    InvalidSegment {
+        /// What kind of path failed validation.
+        context: &'static str,
+        /// The invalid segment.
+        segment: String,
+    },
+}
+
+/// Validate a single segment of a Python dotted path.
+fn is_valid_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && !segment.starts_with(|c: char| c.is_ascii_digit())
+        && segment.chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Validate a Python dotted path (e.g. `"backend.app.handler"`).
+fn validate_dotted_path(path: &str, context: &'static str) -> Result<(), DottedPathError> {
+    if path.is_empty() {
+        return Err(DottedPathError::Empty { context });
+    }
+    for segment in path.split('.') {
+        if segment.is_empty() {
+            return Err(DottedPathError::EmptySegment {
+                context,
+                value: path.to_owned(),
+            });
+        }
+        if !is_valid_segment(segment) {
+            return Err(DottedPathError::InvalidSegment {
+                context,
+                segment: segment.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Python module path: `"backend.app"`, `"mypackage.api"`.
+///
+/// Must be a valid Python dotted path. Format validation only — runtime
+/// validation (module importable, contains App instance) happens during
+/// worker discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AppModule(String);
+
+impl AppModule {
+    /// Error context for validation messages.
+    const CONTEXT: &str = "app module";
+
+    /// Create a new module path, validating all segments.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path is empty or any segment is invalid.
+    pub fn new(module: impl Into<String>) -> Result<Self, DottedPathError> {
+        let module = module.into();
+        validate_dotted_path(&module, Self::CONTEXT)?;
+        Ok(Self(module))
+    }
+
+    /// Return the inner string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for AppModule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 // ── Nonce ───────────────────────────────────────────────────────────────
 

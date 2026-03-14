@@ -13,11 +13,7 @@ pub mod core;
 pub mod handle;
 pub mod queue;
 pub mod scheduling;
-// Thread-local event loop cache — available for future optimizations.
-#[allow(
-    dead_code,
-    reason = "reserved for future spawn_blocking dispatch paths"
-)]
+// Thread-local event loop cache + running-loop helpers for inline dispatch.
 pub mod thread_local;
 
 pub use core::EventLoop;
@@ -38,8 +34,6 @@ pub struct SchedulerRefs {
     pub(crate) cached_types: Arc<CachedTypes>,
     /// `loop.call_soon` bound method.
     pub(crate) call_soon: pyo3::Py<pyo3::PyAny>,
-    /// `asyncio.ensure_future` function.
-    pub(crate) ensure_future: pyo3::Py<pyo3::PyAny>,
     /// Shared ready queue for re-driving suspended tasks.
     pub(crate) ready_queue: Arc<ReadyQueue>,
 }
@@ -49,7 +43,6 @@ impl Clone for SchedulerRefs {
         pyo3::Python::attach(|py| Self {
             cached_types: Arc::clone(&self.cached_types),
             call_soon: self.call_soon.clone_ref(py),
-            ensure_future: self.ensure_future.clone_ref(py),
             ready_queue: Arc::clone(&self.ready_queue),
         })
     }

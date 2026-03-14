@@ -180,15 +180,10 @@ async fn compile_manifest_step(
     let start_time = Instant::now();
     let sp = spinner("Compiling framework manifest...");
 
-    let manifest =
-        crate::compile_manifest::compile_manifest(app_path, build_dir, app_module).await?;
+    crate::compile_manifest::compile_manifest(app_path, build_dir, app_module).await?;
 
     sp.finish_and_clear();
-    println!(
-        "Manifest compiled in {} ({} routes)",
-        format_elapsed_ms(start_time),
-        manifest.routes.len(),
-    );
+    println!("Manifest compiled in {}", format_elapsed_ms(start_time),);
     Ok(())
 }
 

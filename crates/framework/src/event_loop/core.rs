@@ -16,88 +16,20 @@ use super::queue::{QueueDrainer, QueueItem, SchedulerState};
 use crate::scheduler::driver::CachedTypes;
 use crate::scheduler::queue::ReadyQueue;
 
-// ── LoopPolicy ───────────────────────────────────────────────────────────
-
-/// Event loop implementation policy.
+/// Create an asyncio event loop as the I/O reactor (socket ops, DNS).
 ///
-/// Determines which Python event loop implementation to use for the
-/// persistent worker loop.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum LoopPolicy {
-    /// Try uvloop first, fall back to default asyncio.
-    Auto,
-    /// Force uvloop (fails if not installed).
-    UvLoop,
-    /// Force CPython's default asyncio event loop.
-    Asyncio,
-    /// Rust-driven scheduler with asyncio fallback.
-    #[default]
-    RustNative,
-}
-
-impl std::fmt::Display for LoopPolicy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Auto => f.write_str("auto"),
-            Self::UvLoop => f.write_str("uvloop"),
-            Self::Asyncio => f.write_str("asyncio"),
-            Self::RustNative => f.write_str("rust-native"),
-        }
-    }
-}
-
-impl LoopPolicy {
-    /// Create a policy from the `APX_SCHEDULER` environment variable.
-    ///
-    /// - `APX_SCHEDULER=auto` -> `Auto`
-    /// - `APX_SCHEDULER=uvloop` -> `UvLoop`
-    /// - `APX_SCHEDULER=asyncio` -> `Asyncio`
-    /// - Default (unset) -> `RustNative`
-    pub fn from_env() -> Self {
-        match std::env::var("APX_SCHEDULER").as_deref() {
-            Ok("auto") => Self::Auto,
-            Ok("uvloop") => Self::UvLoop,
-            Ok("asyncio") => Self::Asyncio,
-            _ => Self::RustNative,
-        }
-    }
-}
-
-/// Create a Python event loop according to the given policy.
-fn create_event_loop(py: Python<'_>, policy: LoopPolicy) -> PyResult<Bound<'_, PyAny>> {
-    match policy {
-        LoopPolicy::Auto => {
-            if let Ok(uvloop) = py.import(c"uvloop") {
-                tracing::info!("using uvloop event loop");
-                return uvloop.call_method0(c"new_event_loop");
-            }
-            tracing::info!("uvloop not available, using default asyncio");
-            py.import(c"asyncio")?.call_method0(c"new_event_loop")
-        }
-        LoopPolicy::UvLoop => {
-            let uvloop = py.import(c"uvloop")?;
-            tracing::info!("using uvloop event loop");
-            uvloop.call_method0(c"new_event_loop")
-        }
-        LoopPolicy::Asyncio => {
-            tracing::info!("using default asyncio event loop");
-            py.import(c"asyncio")?.call_method0(c"new_event_loop")
-        }
-        LoopPolicy::RustNative => {
-            // RustNative still needs an asyncio event loop as fallback.
-            // Use the default asyncio loop (not uvloop) for predictability.
-            tracing::info!("using rust-native scheduler with asyncio fallback");
-            py.import(c"asyncio")?.call_method0(c"new_event_loop")
-        }
-    }
+/// The Rust scheduler drives all coroutine scheduling; asyncio only
+/// resolves `asyncio.Future`s from network I/O libraries.
+fn create_event_loop(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    tracing::info!("creating asyncio I/O reactor");
+    py.import(c"asyncio")?.call_method0(c"new_event_loop")
 }
 
 /// Initialize Rust scheduler state on the current event loop thread.
 ///
-/// Stores the tokio runtime handle in a thread-local for use by
-/// scheduler primitives (Timer, spawn_blocking). Does NOT monkeypatch
+/// Stores the tokio runtime handle in a thread-local. Does NOT monkeypatch
 /// asyncio — native asyncio coroutines are handled by the driver's
-/// `WaitingOnAsyncioFuture` / `FallbackToAsyncio` paths.
+/// `WaitingOnAsyncioFuture` path.
 fn install_rust_scheduler(
     _py: Python<'_>,
     tokio_handle: Option<tokio::runtime::Handle>,
@@ -159,8 +91,8 @@ pub struct EventLoop {
     needs_wake: Arc<AtomicBool>,
     /// Python reference to the [`QueueDrainer`] singleton.
     drainer_ref: Py<PyAny>,
-    /// Scheduler refs for try-sync-first dispatch (present when `RustNative`).
-    scheduler_refs: Option<SchedulerRefs>,
+    /// Scheduler refs for try-sync-first dispatch.
+    scheduler_refs: SchedulerRefs,
 }
 
 impl std::fmt::Debug for EventLoop {
@@ -172,16 +104,7 @@ impl std::fmt::Debug for EventLoop {
 }
 
 impl EventLoop {
-    /// Start with [`LoopPolicy::Auto`] (uvloop if available, else asyncio).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if Python initialization or event loop creation fails.
-    pub fn start() -> Result<Self, String> {
-        Self::start_with(LoopPolicy::from_env())
-    }
-
-    /// Start a persistent event loop with an explicit [`LoopPolicy`].
+    /// Start a persistent event loop with the Rust scheduler.
     ///
     /// Returns the `EventLoop` with the loop running `run_forever()`.
     /// The caller must call [`stop`] before dropping to cleanly shut down.
@@ -189,7 +112,7 @@ impl EventLoop {
     /// # Errors
     ///
     /// Returns an error if Python initialization or event loop creation fails.
-    pub fn start_with(policy: LoopPolicy) -> Result<Self, String> {
+    pub fn start() -> Result<Self, String> {
         let (startup_tx, startup_rx) = std::sync::mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = Arc::clone(&running);
@@ -199,22 +122,15 @@ impl EventLoop {
         let needs_wake = Arc::new(AtomicBool::new(false));
         let needs_wake_clone = Arc::clone(&needs_wake);
 
-        // Capture the tokio runtime handle for scheduler primitives (Timer,
-        // spawn_blocking). Always captured — the anyio backend uses these
-        // regardless of whether the Rust coroutine driver is active.
+        // Capture the tokio runtime handle for scheduler primitives.
         let tokio_handle = tokio::runtime::Handle::try_current().ok();
 
         let thread = std::thread::Builder::new()
             .name("apx-asyncio".to_owned())
             .spawn(move || {
                 Python::attach(|py| {
-                    let result = Self::init_event_loop_thread(
-                        py,
-                        policy,
-                        queue_rx,
-                        needs_wake_clone,
-                        tokio_handle,
-                    );
+                    let result =
+                        Self::init_event_loop_thread(py, queue_rx, needs_wake_clone, tokio_handle);
 
                     match result {
                         Ok((event_loop, drainer_ref, scheduler_refs)) => {
@@ -260,13 +176,11 @@ impl EventLoop {
     #[allow(clippy::type_complexity)]
     fn init_event_loop_thread(
         py: Python<'_>,
-        policy: LoopPolicy,
         queue_rx: mpsc::UnboundedReceiver<QueueItem>,
         needs_wake: Arc<AtomicBool>,
         tokio_handle: Option<tokio::runtime::Handle>,
-    ) -> Result<(Py<PyAny>, Py<PyAny>, Option<SchedulerRefs>), String> {
-        let event_loop =
-            create_event_loop(py, policy).map_err(|e| format!("create_event_loop: {e}"))?;
+    ) -> Result<(Py<PyAny>, Py<PyAny>, SchedulerRefs), String> {
+        let event_loop = create_event_loop(py).map_err(|e| format!("create_event_loop: {e}"))?;
         let asyncio = py
             .import(c"asyncio")
             .map_err(|e| format!("import asyncio: {e}"))?;
@@ -285,11 +199,9 @@ impl EventLoop {
         }
 
         let (drainer_ref, scheduler_refs) =
-            Self::install_drainer(py, &event_loop, queue_rx, needs_wake, policy)?;
+            Self::install_drainer(py, &event_loop, queue_rx, needs_wake)?;
 
-        // Always install the tokio handle for scheduler primitives (Timer,
-        // BlockingTask). The anyio backend uses these even without the Rust
-        // coroutine driver.
+        // Install the tokio handle for scheduler primitives.
         install_rust_scheduler(py, tokio_handle).map_err(|e| format!("scheduler install: {e}"))?;
 
         Ok((event_loop.unbind(), drainer_ref, scheduler_refs))
@@ -299,56 +211,37 @@ impl EventLoop {
     ///
     /// Returns `(drainer_ref, scheduler_refs)` — the scheduler refs are
     /// cloned before the [`SchedulerState`] moves into the drainer so that
-    /// [`AppState`](crate::bridge::dispatch::AppState) can use them for
-    /// try-sync-first ASGI dispatch.
+    /// the dispatch implementation can use them for try-sync-first ASGI dispatch.
     fn install_drainer(
         py: Python<'_>,
         event_loop: &Bound<'_, PyAny>,
         queue_rx: mpsc::UnboundedReceiver<QueueItem>,
         needs_wake: Arc<AtomicBool>,
-        policy: LoopPolicy,
-    ) -> Result<(Py<PyAny>, Option<SchedulerRefs>), String> {
-        let create_task = event_loop
-            .getattr(c"create_task")
-            .map_err(|e| format!("missing create_task: {e}"))?
-            .unbind();
+    ) -> Result<(Py<PyAny>, SchedulerRefs), String> {
         let call_soon = event_loop
             .getattr(c"call_soon")
             .map_err(|e| format!("missing call_soon: {e}"))?
             .unbind();
 
-        let scheduler = if policy == LoopPolicy::RustNative {
-            let cached_types = Arc::new(
-                CachedTypes::resolve(py).map_err(|e| format!("CachedTypes::resolve: {e}"))?,
-            );
-            let asyncio = py
-                .import(c"asyncio")
-                .map_err(|e| format!("import asyncio: {e}"))?;
-            let ensure_future = asyncio
-                .getattr(c"ensure_future")
-                .map_err(|e| format!("missing ensure_future: {e}"))?
-                .unbind();
-            Some(SchedulerState {
-                cached_types,
-                call_soon: call_soon.clone_ref(py),
-                ensure_future,
-                ready_queue: Arc::new(ReadyQueue::new()),
-            })
-        } else {
-            None
+        let cached_types =
+            Arc::new(CachedTypes::resolve(py).map_err(|e| format!("CachedTypes::resolve: {e}"))?);
+        let ready_queue = Arc::new(ReadyQueue::new());
+
+        let scheduler = SchedulerState {
+            cached_types: Arc::clone(&cached_types),
+            call_soon: call_soon.clone_ref(py),
+            ready_queue: Arc::clone(&ready_queue),
         };
 
         // Clone scheduler refs before scheduler moves into the drainer.
-        let scheduler_refs = scheduler.as_ref().map(|s| SchedulerRefs {
-            cached_types: Arc::clone(&s.cached_types),
-            call_soon: s.call_soon.clone_ref(py),
-            ensure_future: s.ensure_future.clone_ref(py),
-            ready_queue: Arc::clone(&s.ready_queue),
-        });
+        let scheduler_refs = SchedulerRefs {
+            cached_types,
+            call_soon: call_soon.clone_ref(py),
+            ready_queue: Arc::clone(&ready_queue),
+        };
 
         let drainer = QueueDrainer::new(
             queue_rx,
-            create_task,
             call_soon.clone_ref(py),
             Arc::clone(&needs_wake),
             scheduler,
@@ -363,10 +256,11 @@ impl EventLoop {
 
         // Set wake state on the ready queue so push() can reschedule
         // the drainer when it is sleeping.
-        if let Some(ref refs) = scheduler_refs {
-            refs.ready_queue
-                .set_wake(needs_wake, call_soon, drainer_obj.clone_ref(py).into_any());
-        }
+        scheduler_refs.ready_queue.set_wake(
+            needs_wake,
+            call_soon,
+            drainer_obj.clone_ref(py).into_any(),
+        );
 
         // Install initial callback so the drainer starts processing.
         event_loop
@@ -399,10 +293,8 @@ impl EventLoop {
     }
 
     /// Get the scheduler refs for try-sync-first ASGI dispatch.
-    ///
-    /// Returns `Some` when the event loop was started with [`LoopPolicy::RustNative`].
-    pub fn scheduler_refs(&self) -> Option<&SchedulerRefs> {
-        self.scheduler_refs.as_ref()
+    pub fn scheduler_refs(&self) -> &SchedulerRefs {
+        &self.scheduler_refs
     }
 
     /// Stop the event loop and join the dedicated thread.
@@ -507,19 +399,5 @@ mod tests {
         let mut event_loop = EventLoop::start().unwrap();
         event_loop.stop();
         event_loop.stop(); // Should not panic.
-    }
-
-    #[test]
-    fn from_env_defaults_to_rust_native() {
-        // Default policy is based on compile-time default; don't mutate env.
-        assert_eq!(LoopPolicy::default(), LoopPolicy::RustNative);
-    }
-
-    #[test]
-    fn loop_policy_display() {
-        assert_eq!(LoopPolicy::Auto.to_string(), "auto");
-        assert_eq!(LoopPolicy::UvLoop.to_string(), "uvloop");
-        assert_eq!(LoopPolicy::Asyncio.to_string(), "asyncio");
-        assert_eq!(LoopPolicy::RustNative.to_string(), "rust-native");
     }
 }

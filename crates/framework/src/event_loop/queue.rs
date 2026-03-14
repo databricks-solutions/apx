@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use pyo3::prelude::*;
 use tokio::sync::mpsc;
 
-use super::scheduling::TaskCallback;
 use crate::error::AppError;
 use crate::scheduler::driver::{CachedTypes, spawn_and_drive};
 use crate::scheduler::queue::ReadyQueue;
@@ -65,12 +64,10 @@ impl fmt::Debug for WorkItem {
 
 /// Pre-resolved Python references for Rust-driven coroutine scheduling.
 ///
-/// Constructed once during event loop initialization when
-/// [`LoopPolicy::RustNative`](super::core::LoopPolicy::RustNative) is active.
+/// Constructed once during event loop initialization.
 pub struct SchedulerState {
     pub(crate) cached_types: Arc<CachedTypes>,
     pub(crate) call_soon: Py<PyAny>,
-    pub(crate) ensure_future: Py<PyAny>,
     pub(crate) ready_queue: Arc<ReadyQueue>,
 }
 
@@ -87,14 +84,11 @@ impl fmt::Debug for SchedulerState {
 /// Singleton drainer that runs on the event loop thread.
 ///
 /// Installed as a recurring callback via `loop.call_soon(drainer)`. When
-/// invoked, drains all pending [`WorkItem`]s from the channel. If a
-/// [`SchedulerState`] is present, coroutines are driven by the Rust
-/// scheduler; otherwise they are dispatched as asyncio tasks.
+/// invoked, drains all pending [`WorkItem`]s from the channel and drives
+/// coroutines through the Rust scheduler.
 #[pyclass(module = "apx._core")]
 pub struct QueueDrainer {
     rx: mpsc::UnboundedReceiver<QueueItem>,
-    /// Cached `loop.create_task` bound method.
-    create_task: Py<PyAny>,
     /// Cached `loop.call_soon` bound method (local, not threadsafe).
     call_soon: Py<PyAny>,
     /// Python reference to `self` for `call_soon(self)` rescheduling.
@@ -105,8 +99,8 @@ pub struct QueueDrainer {
     /// Shared flag: `true` means the drainer is sleeping and producers
     /// must call `call_soon_threadsafe` to wake it.
     needs_wake: Arc<AtomicBool>,
-    /// Rust scheduler state (present when `LoopPolicy::RustNative`).
-    scheduler: Option<SchedulerState>,
+    /// Rust scheduler state — always present (Rust scheduler is sole scheduler).
+    scheduler: SchedulerState,
 }
 
 impl fmt::Debug for QueueDrainer {
@@ -121,14 +115,12 @@ impl QueueDrainer {
     /// Create a new drainer. `self_ref` must be set after `Py::new`.
     pub fn new(
         rx: mpsc::UnboundedReceiver<QueueItem>,
-        create_task: Py<PyAny>,
         call_soon: Py<PyAny>,
         needs_wake: Arc<AtomicBool>,
-        scheduler: Option<SchedulerState>,
+        scheduler: SchedulerState,
     ) -> Self {
         Self {
             rx,
-            create_task,
             call_soon,
             self_ref: None,
             needs_wake,
@@ -165,29 +157,19 @@ impl QueueDrainer {
             }
         }
         // Drain ready tasks (re-drives from suspended awaitable resolution).
-        if let Some(ref sched) = self.scheduler {
-            count += sched.ready_queue.drain(
-                py,
-                &sched.cached_types,
-                &sched.call_soon,
-                &sched.ensure_future,
-                &sched.ready_queue,
-            );
-        }
+        let sched = &self.scheduler;
+        count += sched.ready_queue.drain(
+            py,
+            &sched.cached_types,
+            &sched.call_soon,
+            &sched.ready_queue,
+        );
         count
     }
 
-    /// Dispatch one work item — either via the Rust scheduler or asyncio.
+    /// Dispatch one work item via the Rust scheduler.
     fn dispatch_item(&self, py: Python<'_>, item: WorkItem) {
-        if let Some(ref sched) = self.scheduler {
-            QueueDrainer::dispatch_via_scheduler(py, item, sched);
-        } else {
-            self.dispatch_via_asyncio(py, item);
-        }
-    }
-
-    /// Drive the coroutine through the Rust scheduler.
-    fn dispatch_via_scheduler(py: Python<'_>, item: WorkItem, sched: &SchedulerState) {
+        let sched = &self.scheduler;
         let coro = match (item.builder)(py) {
             Ok(coro) => coro,
             Err(e) => {
@@ -201,32 +183,8 @@ impl QueueDrainer {
             item.tx,
             &sched.cached_types,
             &sched.call_soon,
-            &sched.ensure_future,
             &sched.ready_queue,
         );
-    }
-
-    /// Create an asyncio task from one work item (original path).
-    fn dispatch_via_asyncio(&self, py: Python<'_>, item: WorkItem) {
-        let result = self.try_create_task(py, item.builder);
-        match result {
-            Ok(task) => attach_done_callback(py, task, item.tx),
-            Err(e) => {
-                let _ = item.tx.send(Err(e));
-            }
-        }
-    }
-
-    /// Build coroutine + create asyncio task.
-    fn try_create_task(
-        &self,
-        py: Python<'_>,
-        builder: CoroutineBuilder,
-    ) -> Result<Py<PyAny>, AppError> {
-        let coro = builder(py)?;
-        self.create_task
-            .call1(py, (coro,))
-            .map_err(|e| AppError::Internal(format!("create_task: {e}")))
     }
 
     /// Set `needs_wake`, double-check for race, reschedule if items arrived.
@@ -255,23 +213,6 @@ impl QueueDrainer {
     }
 }
 
-/// Add a [`TaskCallback`] as the done callback on an asyncio task.
-fn attach_done_callback(
-    py: Python<'_>,
-    task: Py<PyAny>,
-    tx: tokio::sync::oneshot::Sender<Result<Py<PyAny>, AppError>>,
-) {
-    let cb_result = Py::new(py, TaskCallback::new(tx));
-    match cb_result {
-        Ok(callback) => {
-            let _ = task.call_method1(py, c"add_done_callback", (callback,));
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to create TaskCallback");
-        }
-    }
-}
-
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -279,7 +220,22 @@ fn attach_done_callback(
 )]
 mod tests {
     use super::*;
+    use crate::scheduler::queue::ReadyQueue;
     use tokio::sync::oneshot;
+
+    /// Create a minimal `SchedulerState` for tests.
+    fn test_scheduler_state(py: Python<'_>) -> SchedulerState {
+        let cached_types = Arc::new(CachedTypes::resolve(py).unwrap());
+        let noop = py
+            .eval(c"lambda *a, **kw: None", None, None)
+            .unwrap()
+            .unbind();
+        SchedulerState {
+            cached_types,
+            call_soon: noop,
+            ready_queue: Arc::new(ReadyQueue::new()),
+        }
+    }
 
     #[test]
     fn work_item_is_send() {
@@ -316,7 +272,8 @@ mod tests {
         crate::with_py(|py| {
             let (_tx, rx) = mpsc::unbounded_channel();
             let needs_wake = Arc::new(AtomicBool::new(false));
-            let drainer = QueueDrainer::new(rx, py.None(), py.None(), needs_wake, None);
+            let sched = test_scheduler_state(py);
+            let drainer = QueueDrainer::new(rx, py.None(), needs_wake, sched);
             let dbg = format!("{drainer:?}");
             assert!(dbg.contains("QueueDrainer"));
             assert!(dbg.contains("needs_wake: false"));
@@ -328,9 +285,8 @@ mod tests {
         crate::with_py(|py| {
             let (_tx, rx) = mpsc::unbounded_channel();
             let needs_wake = Arc::new(AtomicBool::new(false));
-            // We can't call __call__ directly without call_soon/self_ref setup,
-            // but we can test the state transition logic.
-            let mut drainer = QueueDrainer::new(rx, py.None(), py.None(), needs_wake.clone(), None);
+            let sched = test_scheduler_state(py);
+            let mut drainer = QueueDrainer::new(rx, py.None(), needs_wake.clone(), sched);
             let count = drainer.drain_pending(py);
             assert_eq!(count, 0);
             // Simulate transition_to_sleep (without reschedule since no self_ref)
@@ -344,14 +300,10 @@ mod tests {
         crate::with_py(|py| {
             let (tx_queue, rx) = mpsc::unbounded_channel();
             let needs_wake = Arc::new(AtomicBool::new(false));
+            let sched = test_scheduler_state(py);
+            let call_soon = sched.call_soon.clone_ref(py);
 
-            // Resolve a real create_task from an event loop
-            let asyncio = py.import(c"asyncio").unwrap();
-            let event_loop = asyncio.call_method0(c"new_event_loop").unwrap();
-            let create_task = event_loop.getattr(c"create_task").unwrap().unbind();
-            let call_soon = event_loop.getattr(c"call_soon").unwrap().unbind();
-
-            let mut drainer = QueueDrainer::new(rx, create_task, call_soon, needs_wake, None);
+            let mut drainer = QueueDrainer::new(rx, call_soon, needs_wake, sched);
 
             // Push a work item with a trivial coroutine builder
             let (result_tx, mut result_rx) = oneshot::channel();
@@ -369,11 +321,10 @@ mod tests {
 
             let count = drainer.drain_pending(py);
             assert_eq!(count, 1);
-            // The task was created; result_rx should not be immediately resolved
-            // (task needs event loop to run), but the channel should still be open.
-            assert!(result_rx.try_recv().is_err(), "task not yet completed");
-
-            event_loop.call_method0(c"close").unwrap();
+            // Trivial coroutines complete inline via the Rust scheduler.
+            let result = result_rx.try_recv().unwrap().unwrap();
+            let val: i64 = result.extract(py).unwrap();
+            assert_eq!(val, 42);
         });
     }
 
@@ -382,7 +333,8 @@ mod tests {
         crate::with_py(|py| {
             let (tx_queue, rx) = mpsc::unbounded_channel();
             let needs_wake = Arc::new(AtomicBool::new(false));
-            let mut drainer = QueueDrainer::new(rx, py.None(), py.None(), needs_wake, None);
+            let sched = test_scheduler_state(py);
+            let mut drainer = QueueDrainer::new(rx, py.None(), needs_wake, sched);
 
             let called = Arc::new(AtomicBool::new(false));
             let called_clone = Arc::clone(&called);
@@ -403,13 +355,10 @@ mod tests {
         crate::with_py(|py| {
             let (tx_queue, rx) = mpsc::unbounded_channel();
             let needs_wake = Arc::new(AtomicBool::new(false));
+            let sched = test_scheduler_state(py);
+            let call_soon = sched.call_soon.clone_ref(py);
 
-            let asyncio = py.import(c"asyncio").unwrap();
-            let event_loop = asyncio.call_method0(c"new_event_loop").unwrap();
-            let create_task = event_loop.getattr(c"create_task").unwrap().unbind();
-            let call_soon = event_loop.getattr(c"call_soon").unwrap().unbind();
-
-            let mut drainer = QueueDrainer::new(rx, create_task, call_soon, needs_wake, None);
+            let mut drainer = QueueDrainer::new(rx, call_soon, needs_wake, sched);
 
             // Item 1: failing builder
             let (tx1, mut rx1) = oneshot::channel();
@@ -420,7 +369,7 @@ mod tests {
                 }))
                 .unwrap();
 
-            // Item 2: succeeding builder
+            // Item 2: succeeding builder (trivial coro completes inline)
             let (tx2, mut rx2) = oneshot::channel();
             let code =
                 std::ffi::CString::new("async def _t2(): return 99\ncoro2 = _t2()\n").unwrap();
@@ -447,10 +396,10 @@ mod tests {
                 "expected Internal with 'builder failed', got {err:?}"
             );
 
-            // Second item should have created a task (channel still open)
-            assert!(rx2.try_recv().is_err(), "task not yet completed");
-
-            event_loop.call_method0(c"close").unwrap();
+            // Second item completed inline via Rust scheduler
+            let res2 = rx2.try_recv().unwrap().unwrap();
+            let val: i64 = res2.extract(py).unwrap();
+            assert_eq!(val, 99);
         });
     }
 

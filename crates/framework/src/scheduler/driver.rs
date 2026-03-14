@@ -68,14 +68,6 @@ pub struct CachedTypes {
         expect(dead_code, reason = "pointer extracted; Py<PyType> keeps type alive")
     )]
     pub event_waiter_type: Py<PyType>,
-    /// `asyncio.CancelledError` — cached for error creation.
-    pub cancelled_error_cls: Py<PyType>,
-    /// Cancel scope glue: `_check_cancel_scope_for_task(task_id) -> bool`.
-    ///
-    /// Called at `YieldNone` checkpoints to implement anyio's level-cancellation.
-    /// `None` when cancel scope glue has not been initialized.
-    pub cancel_scope_checker: Option<Py<PyAny>>,
-
     // -- Raw type pointers for hot-path ob_type comparison ------------------
     //
     // Borrowed from the Py<PyType> fields above — valid as long as CachedTypes
@@ -149,26 +141,12 @@ impl CachedTypes {
                 .unbind(),
             future_type,
             event_waiter_type,
-            cancelled_error_cls: asyncio
-                .getattr(c"CancelledError")?
-                .cast_into::<PyType>()?
-                .unbind(),
-            cancel_scope_checker: None,
             future_type_ptr,
             event_waiter_type_ptr,
             coroutine_type_ptr,
             asyncio_future_blocking_attr,
             py_none_ptr,
         })
-    }
-
-    /// Install the cancel scope checker function from the evaluated glue dict.
-    ///
-    /// Called after the cancel scope Python glue has been evaluated.
-    /// The `checker` should be the `_check_cancel_scope_for_task` function.
-    #[expect(dead_code, reason = "wired in Phase 5 via anyio_backend rewrite")]
-    pub fn set_cancel_scope_checker(&mut self, checker: Py<PyAny>) {
-        self.cancel_scope_checker = Some(checker);
     }
 }
 
@@ -285,7 +263,7 @@ pub enum AwaitableKind {
     Coroutine,
     /// `yield None` — reschedule immediately (like `call_soon`).
     YieldNone,
-    /// Unknown awaitable — fall back to `asyncio.ensure_future`.
+    /// Unknown awaitable — unsupported, returns error.
     Unknown,
 }
 
@@ -297,7 +275,6 @@ pub enum AwaitableKind {
 ///
 /// Check order is optimised for the common case: `yield None` first (36% of
 /// all calls), then our own types, then coroutines, then asyncio futures.
-/// Classify a yielded value to determine what the driver should do next.
 ///
 /// Uses direct `ob_type` pointer comparisons for our own pyclass types (no
 /// subclassing) and `Py_None` singleton comparison. Falls back to duck-type
@@ -362,8 +339,6 @@ pub enum DriveResult {
     WaitingOnEvent(Py<PyAny>),
     /// Waiting on an `asyncio.Future` — attach done callback.
     WaitingOnAsyncioFuture(Py<PyAny>),
-    /// Unknown awaitable — fall back to `asyncio.ensure_future`.
-    FallbackToAsyncio(Py<PyAny>),
     /// Step budget exhausted — re-enqueue for fairness.
     BudgetExhausted,
 }
@@ -375,38 +350,11 @@ const DEFAULT_STEP_BUDGET: usize = 128;
 // drive_task — the main drive loop
 // ---------------------------------------------------------------------------
 
-/// Check if the current task's cancel scope is effectively cancelled.
-///
-/// Called at `YieldNone` checkpoints to implement anyio's level-cancellation:
-/// cancelled scopes re-throw `CancelledError` at every yield point.
-fn check_cancel_scope(
-    py: Python<'_>,
-    types: &CachedTypes,
-    proxy_id: Option<isize>,
-) -> Option<PyErr> {
-    let checker = types.cancel_scope_checker.as_ref()?;
-    let task_id = proxy_id?;
-    let should_cancel = checker
-        .call1(py, (task_id,))
-        .ok()?
-        .is_truthy(py)
-        .unwrap_or(false);
-    if should_cancel {
-        let err = types.cancelled_error_cls.call0(py).ok()?;
-        Some(PyErr::from_value(err.into_bound(py)))
-    } else {
-        None
-    }
-}
-
 /// Drive a [`SchedulerTask`] until it suspends or completes.
 ///
 /// This is the hot loop. When the yielded object is `None` (most common case),
 /// it immediately loops without suspending. Sub-coroutines are pushed onto the
 /// task's coroutine stack and driven inline.
-///
-/// `proxy_id` is the Python `id()` of the `TaskProxy` installed as
-/// `asyncio.current_task()` — used for cancel scope checking at yield points.
 #[expect(
     clippy::needless_continue,
     reason = "explicit `continue` documents intent to re-enter the drive loop"
@@ -415,7 +363,7 @@ pub fn drive_task(
     py: Python<'_>,
     task: &mut SchedulerTask,
     types: &CachedTypes,
-    proxy_id: Option<isize>,
+    _proxy_id: Option<isize>,
     step_budget: usize,
 ) -> DriveResult {
     let mut steps: usize = 0;
@@ -438,12 +386,6 @@ pub fn drive_task(
                 let kind = classify(py, &obj, types);
                 match kind {
                     AwaitableKind::YieldNone => {
-                        // Check cancel scope BEFORE re-entering the loop.
-                        // Implements anyio's level-cancellation: cancelled scopes
-                        // re-throw CancelledError at every yield point (checkpoint).
-                        if let Some(cancel_err) = check_cancel_scope(py, types, proxy_id) {
-                            task.set_throw_error(cancel_err);
-                        }
                         steps += 1;
                         if steps >= step_budget {
                             return DriveResult::BudgetExhausted;
@@ -464,7 +406,14 @@ pub fn drive_task(
                         return DriveResult::WaitingOnAsyncioFuture(obj);
                     }
                     AwaitableKind::Unknown => {
-                        return DriveResult::FallbackToAsyncio(obj);
+                        let type_name = obj
+                            .bind(py)
+                            .get_type()
+                            .name()
+                            .map_or_else(|_| "<unknown>".to_owned(), |n| n.to_string());
+                        return DriveResult::Error(pyo3::exceptions::PyTypeError::new_err(
+                            format!("unsupported awaitable type yielded: {type_name}"),
+                        ));
                     }
                 }
             }
@@ -575,7 +524,6 @@ fn handle_drive_result(
     mut task: SchedulerTask,
     drive_result: DriveResult,
     call_soon: &Py<PyAny>,
-    ensure_future: &Py<PyAny>,
     ready_queue: &Arc<ReadyQueue>,
     proxy: Option<Py<TaskProxy>>,
 ) -> PyResult<()> {
@@ -601,12 +549,6 @@ fn handle_drive_result(
         DriveResult::WaitingOnAsyncioFuture(fut) => {
             let cb = make_resume_callback(py, task, ready_queue, proxy)?;
             fut.call_method1(py, c"add_done_callback", (cb,))?;
-            Ok(())
-        }
-        DriveResult::FallbackToAsyncio(obj) => {
-            let asyncio_task = ensure_future.call1(py, (obj,))?;
-            let cb = make_resume_callback(py, task, ready_queue, proxy)?;
-            asyncio_task.call_method1(py, c"add_done_callback", (cb,))?;
             Ok(())
         }
         DriveResult::BudgetExhausted => {
@@ -653,26 +595,17 @@ pub fn resume_task(
     ready: ReadyTask,
     cached_types: &Arc<CachedTypes>,
     call_soon: &Py<PyAny>,
-    ensure_future: &Py<PyAny>,
     ready_queue: &Arc<ReadyQueue>,
 ) -> PyResult<()> {
     let ReadyTask { mut task, proxy } = ready;
 
-    let current_tasks = install_proxy(py, proxy.as_ref());
+    let saved = install_proxy(py, proxy.as_ref());
     let proxy_id = proxy.as_ref().map(|p| p.as_ptr() as isize);
 
     let drive_result = drive_task(py, &mut task, cached_types, proxy_id, DEFAULT_STEP_BUDGET);
-    let result = handle_drive_result(
-        py,
-        task,
-        drive_result,
-        call_soon,
-        ensure_future,
-        ready_queue,
-        proxy,
-    );
+    let result = handle_drive_result(py, task, drive_result, call_soon, ready_queue, proxy);
 
-    clear_current_task(py, current_tasks);
+    restore_proxy(py, saved);
     result
 }
 
@@ -714,7 +647,6 @@ pub fn spawn_and_drive(
     result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
     cached_types: &Arc<CachedTypes>,
     call_soon: &Py<PyAny>,
-    ensure_future: &Py<PyAny>,
     ready_queue: &Arc<ReadyQueue>,
 ) {
     let mut task = match SchedulerTask::new(py, coro, result_tx) {
@@ -733,19 +665,13 @@ pub fn spawn_and_drive(
 
     let drive_result = drive_task(py, &mut task, cached_types, proxy_id, DEFAULT_STEP_BUDGET);
     let proxy = task_ctx.as_ref().map(|(_, p)| p.clone_ref(py));
-    if let Err(e) = handle_drive_result(
-        py,
-        task,
-        drive_result,
-        call_soon,
-        ensure_future,
-        ready_queue,
-        proxy,
-    ) {
+    // Keep a reference for ownership check in clear_current_task.
+    let proxy_for_clear = proxy.as_ref().map(|p| p.clone_ref(py));
+    if let Err(e) = handle_drive_result(py, task, drive_result, call_soon, ready_queue, proxy) {
         tracing::warn!(error = %e, "scheduler drive result handling failed");
     }
 
-    clear_current_task(py, task_ctx.map(|(ct, _)| ct));
+    clear_current_task(py, task_ctx.map(|(ct, _)| ct), proxy_for_clear.as_ref());
 }
 
 /// Install a [`TaskProxy`] as `asyncio.current_task()` for the running loop.
@@ -771,25 +697,73 @@ fn set_current_task(py: Python<'_>, task: &SchedulerTask) -> Option<(Py<PyAny>, 
     .ok()?;
 
     let _ = current_tasks.call_method1(c"__setitem__", (&loop_obj, &proxy));
+    // Also set thread-local for the current_task monkeypatch (Python 3.11 race fix).
+    crate::event_loop::thread_local::set_thread_current_task(py, proxy.as_any());
     Some((current_tasks.unbind(), proxy))
 }
 
 /// Reinstall an existing [`TaskProxy`] in `asyncio.tasks._current_tasks`.
 ///
-/// Used by `ResumeCallback` to restore the current task when re-driving.
-/// Returns the `_current_tasks` dict for cleanup, or `None` if unavailable.
-fn install_proxy(py: Python<'_>, proxy: Option<&Py<TaskProxy>>) -> Option<Py<PyAny>> {
+/// Used by [`resume_task`] to restore the current task when re-driving.
+/// Saves the previous entry so it can be restored after driving — this
+/// prevents the event loop thread from clobbering a blocking thread's entry.
+///
+/// The save + restore is best-effort under GIL interleaving: `dict.get()`
+/// and `dict.__setitem__()` are individually atomic under the GIL but not
+/// transactional together. In practice this is safe because `resume_task`
+/// runs on the event loop thread, which serializes with blocking threads.
+///
+/// Returns `(current_tasks_dict, loop_obj, previous_entry)` for restoration.
+fn install_proxy(
+    py: Python<'_>,
+    proxy: Option<&Py<TaskProxy>>,
+) -> Option<(Py<PyAny>, Py<PyAny>, Py<PyAny>)> {
     let proxy = proxy?;
     let tasks_mod = py.import(c"asyncio.tasks").ok()?;
     let current_tasks = tasks_mod.getattr(c"_current_tasks").ok()?;
     let asyncio = py.import(c"asyncio").ok()?;
     let loop_obj = asyncio.call_method0(c"get_running_loop").ok()?;
+    // Save previous entry before overwriting.
+    let prev = current_tasks
+        .call_method1(c"get", (&loop_obj, py.None()))
+        .ok()?
+        .unbind();
     let _ = current_tasks.call_method1(c"__setitem__", (&loop_obj, proxy));
-    Some(current_tasks.unbind())
+    // Also set thread-local for the current_task monkeypatch.
+    crate::event_loop::thread_local::set_thread_current_task(py, proxy.as_any());
+    Some((current_tasks.unbind(), loop_obj.unbind(), prev))
 }
 
-/// Remove our task from `asyncio._current_tasks`.
-fn clear_current_task(py: Python<'_>, current_tasks: Option<Py<PyAny>>) {
+/// Restore the previous `_current_tasks` entry after [`resume_task`].
+///
+/// If the previous entry was `None`, removes the dict entry.
+/// This preserves any entry set by a concurrent blocking thread.
+fn restore_proxy(py: Python<'_>, saved: Option<(Py<PyAny>, Py<PyAny>, Py<PyAny>)>) {
+    // Clear our thread-local task (event loop thread doesn't need it).
+    crate::event_loop::thread_local::clear_thread_current_task(py);
+    let Some((ct, loop_obj, prev)) = saved else {
+        return;
+    };
+    if prev.bind(py).is_none() {
+        let _ = ct.call_method1(py, c"pop", (&loop_obj, py.None()));
+    } else {
+        let _ = ct.call_method1(py, c"__setitem__", (&loop_obj, &prev));
+    }
+}
+
+/// Remove our task from `asyncio._current_tasks`, but ONLY if it still
+/// matches our proxy. Under concurrent inline dispatch, multiple blocking
+/// threads share the same `_current_tasks[loop]` entry — unconditional
+/// removal would clear another thread's proxy mid-flight.
+fn clear_current_task(
+    py: Python<'_>,
+    current_tasks: Option<Py<PyAny>>,
+    our_proxy: Option<&Py<TaskProxy>>,
+) {
+    // Clear the thread-local unconditionally first — it's per-thread and
+    // always safe, even if the shared dict cleanup below bails out early.
+    crate::event_loop::thread_local::clear_thread_current_task(py);
+
     let Some(ct) = current_tasks else { return };
     let Ok(asyncio) = py.import(c"asyncio") else {
         return;
@@ -797,7 +771,20 @@ fn clear_current_task(py: Python<'_>, current_tasks: Option<Py<PyAny>>) {
     let Ok(loop_obj) = asyncio.call_method0(c"get_running_loop") else {
         return;
     };
-    let _ = ct.call_method1(py, c"pop", (&loop_obj, py.None()));
+    // Only clear the shared dict if the entry is still our proxy.
+    match our_proxy {
+        Some(proxy) => {
+            if ct
+                .call_method1(py, c"get", (&loop_obj,))
+                .is_ok_and(|current| current.bind(py).is(proxy.bind(py)))
+            {
+                let _ = ct.call_method1(py, c"pop", (&loop_obj, py.None()));
+            }
+        }
+        None => {
+            let _ = ct.call_method1(py, c"pop", (&loop_obj, py.None()));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -995,33 +982,26 @@ async def outer():
 
     // -- spawn_and_drive tests -----------------------------------------------
 
-    /// Helper: create dummy `call_soon` and `ensure_future` refs for tests
-    /// where they won't actually be called (trivial coroutines).
-    fn dummy_loop_fns(py: Python<'_>) -> (Py<PyAny>, Py<PyAny>) {
-        let noop = py.eval(c"lambda *a, **kw: None", None, None).unwrap();
-        (noop.clone().unbind(), noop.unbind())
+    /// Helper: create a dummy `call_soon` ref for tests where it won't
+    /// actually be called (trivial coroutines).
+    fn dummy_call_soon(py: Python<'_>) -> Py<PyAny> {
+        py.eval(c"lambda *a, **kw: None", None, None)
+            .unwrap()
+            .unbind()
     }
 
     #[test]
     fn spawn_and_drive_trivial_coroutine() {
         crate::with_py(|py| {
             let types = Arc::new(CachedTypes::resolve(py).unwrap());
-            let (call_soon, ensure_future) = dummy_loop_fns(py);
+            let call_soon = dummy_call_soon(py);
             let ready_queue = Arc::new(ReadyQueue::new());
 
             py.run(c"async def _f(): return 42", None, None).unwrap();
             let coro = py.eval(c"_f()", None, None).unwrap().unbind();
 
             let (tx, mut rx) = oneshot::channel();
-            spawn_and_drive(
-                py,
-                coro,
-                tx,
-                &types,
-                &call_soon,
-                &ensure_future,
-                &ready_queue,
-            );
+            spawn_and_drive(py, coro, tx, &types, &call_soon, &ready_queue);
 
             let result = rx.try_recv().unwrap().unwrap();
             let num: i64 = result.extract(py).unwrap();
@@ -1033,7 +1013,7 @@ async def outer():
     fn spawn_and_drive_coroutine_error() {
         crate::with_py(|py| {
             let types = Arc::new(CachedTypes::resolve(py).unwrap());
-            let (call_soon, ensure_future) = dummy_loop_fns(py);
+            let call_soon = dummy_call_soon(py);
             let ready_queue = Arc::new(ReadyQueue::new());
 
             py.run(c"async def _err(): raise ValueError('boom')", None, None)
@@ -1041,15 +1021,7 @@ async def outer():
             let coro = py.eval(c"_err()", None, None).unwrap().unbind();
 
             let (tx, mut rx) = oneshot::channel();
-            spawn_and_drive(
-                py,
-                coro,
-                tx,
-                &types,
-                &call_soon,
-                &ensure_future,
-                &ready_queue,
-            );
+            spawn_and_drive(py, coro, tx, &types, &call_soon, &ready_queue);
 
             let result = rx.try_recv().unwrap();
             assert!(result.is_err());
@@ -1083,7 +1055,7 @@ async def outer():
     fn test_contextvars_propagation() {
         crate::with_py(|py| {
             let types = Arc::new(CachedTypes::resolve(py).unwrap());
-            let (call_soon, ensure_future) = dummy_loop_fns(py);
+            let call_soon = dummy_call_soon(py);
             let ready_queue = Arc::new(ReadyQueue::new());
 
             // Set a contextvar before spawn_and_drive, verify it's visible
@@ -1104,15 +1076,7 @@ async def _check_ctx():
             let coro = py.eval(c"_check_ctx()", None, None).unwrap().unbind();
 
             let (tx, mut rx) = oneshot::channel();
-            spawn_and_drive(
-                py,
-                coro,
-                tx,
-                &types,
-                &call_soon,
-                &ensure_future,
-                &ready_queue,
-            );
+            spawn_and_drive(py, coro, tx, &types, &call_soon, &ready_queue);
 
             let result = rx.try_recv().unwrap().unwrap();
             let val: String = result.extract(py).unwrap();

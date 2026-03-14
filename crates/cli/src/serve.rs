@@ -37,26 +37,15 @@ pub struct ServeArgs {
 
 /// Resolve the CLI target into an `(app_module, manifest_path)` pair.
 ///
-/// If the target is an existing file, it's a manifest path — we load it
-/// to extract the app_module. Otherwise it's a Python module string and
-/// we run in live-import mode (no manifest file).
+/// Currently only supports live-import mode (Python module string).
+/// Manifest-based serving will be restored in a future step.
 fn resolve_target(
     target: &str,
-) -> Result<(apx_framework::route::AppModule, Option<PathBuf>), String> {
-    let path = PathBuf::from(target);
-    if path.exists() {
-        // Manifest-based path.
-        let manifest = apx_framework::manifest::load(&path)
-            .map_err(|e| format!("failed to load manifest '{}': {e}", path.display()))?;
-        let meta = apx_framework::manifest::validate_for_serving(&manifest)
-            .map_err(|e| format!("invalid manifest: {e}"))?;
-        Ok((meta.app_module.clone(), Some(path)))
-    } else {
-        // Live-import path — target is a Python module string.
-        let app_module = apx_framework::route::AppModule::new(target)
-            .map_err(|e| format!("invalid app module '{target}': {e}"))?;
-        Ok((app_module, None))
-    }
+) -> Result<(apx_framework::ipc::protocol::AppModule, Option<PathBuf>), String> {
+    // Live-import path — target is a Python module string.
+    let app_module = apx_framework::ipc::protocol::AppModule::new(target)
+        .map_err(|e| format!("invalid app module '{target}': {e}"))?;
+    Ok((app_module, None))
 }
 
 /// Run the serve command.

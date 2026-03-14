@@ -10,10 +10,9 @@
 //! Transport (TCP today, QUIC later)
 //!   → Protocol (hyper for h1/h2, quinn for h3)
 //!     → InboundRequest (neutral pivot)
-//!       → Application (routing → dispatch → ASGI adapter → Python)
+//!       → Application (dispatch → ASGI adapter → Python)
 //! ```
 
-pub(crate) mod convert;
 pub mod tcp;
 pub mod types;
 
@@ -92,22 +91,13 @@ impl TransportConfig {
 /// v1: `TcpListener` (hyper for HTTP/1 + HTTP/2).
 /// Future: `QuicListener` (quinn for HTTP/3), `UnixListener`, `InMemoryListener`.
 ///
-/// This is an open abstraction (trait, not enum) because new transport
-/// implementations may come from external crates.
+/// The `serve()` method is intentionally absent — it moves to the hyper service
+/// layer (Step 2 of moonshot plan).
 pub trait Listener: Send + Sync + 'static {
     /// Bind to the configured address.
     fn bind(config: &TransportConfig) -> impl Future<Output = Result<Self, TransportError>> + Send
     where
         Self: Sized;
-
-    /// Serve requests using the provided axum router.
-    ///
-    /// Runs until the shutdown signal fires.
-    fn serve(
-        self,
-        router: axum::Router,
-        shutdown: impl Future<Output = ()> + Send + 'static,
-    ) -> impl Future<Output = Result<(), TransportError>> + Send;
 
     /// Return the locally bound socket address.
     fn local_addr(&self) -> SocketAddr;

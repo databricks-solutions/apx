@@ -81,17 +81,8 @@ pub fn record_duration(
 /// Map an `AppError` variant to an OTEL semconv `error.type` value.
 pub fn error_type_for(err: &AppError) -> &'static str {
     match err {
-        AppError::Validation(_) => "422",
-        AppError::BodyParse(_) => "400",
         AppError::Internal(_) => "500",
         AppError::Timeout => "408",
-        AppError::HttpException { status, .. } => {
-            if *status >= 500 {
-                "500"
-            } else {
-                "400"
-            }
-        }
     }
 }
 

@@ -1,20 +1,17 @@
-//! Single worker: initialize Python, build router, serve requests.
+//! Single worker: initialize Python, bind TCP, serve requests.
 //!
 //! A worker is a child process spawned by the supervisor. It owns one Python
 //! interpreter, one asyncio event loop, and one TCP listener bound via
 //! `SO_REUSEPORT`.
 
-use crate::bridge::dispatch::AppState;
-use crate::bridge::{build_router, wrap_layers};
-use crate::discovery;
-use crate::event_loop::EventLoop;
-use crate::event_loop::scheduling::AsgiErrorLogger;
+use crate::app_loader::{AppSource, ModuleImport};
+use crate::event_loop::{EventLoop, SchedulerRefs};
 use crate::ipc::channel::WorkerChannel;
 use crate::ipc::protocol::{BootstrapError, IpcMessage, Nonce, WorkerBootstrap};
-use crate::manifest::ManifestError;
-use crate::runtime::lifecycle::{LifecycleCache, LifecycleError};
+use crate::service::{ApxService, ServiceConfig, serve_tcp};
+use crate::signal::shutdown_signal;
 use crate::transport::{Listener, TransportConfig, TransportError};
-use axum::Router;
+use crate::worker_context::WorkerContext;
 use pyo3::Python;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -31,21 +28,13 @@ pub enum WorkerError {
     #[error("python init failed: {0}")]
     PythonInit(String),
 
-    /// App discovery (import module, extract routes) failed.
-    #[error("app discovery failed: {0}")]
-    Discovery(#[from] discovery::DiscoveryError),
+    /// App loading failed (import, missing attribute, not callable).
+    #[error("app load failed: {0}")]
+    AppLoad(#[from] crate::app_loader::AppLoadError),
 
     /// IPC communication error.
     #[error("ipc: {0}")]
     Ipc(#[from] crate::ipc::protocol::IpcError),
-
-    /// Manifest loading failed.
-    #[error("manifest load: {0}")]
-    ManifestLoad(#[from] ManifestError),
-
-    /// Lifecycle dependency initialization failed.
-    #[error("lifecycle init: {0}")]
-    Lifecycle(#[from] LifecycleError),
 
     /// Serving requests failed.
     #[error("serve failed: {0}")]
@@ -92,7 +81,6 @@ pub async fn init_worker(
     Python::initialize();
 
     // Start a persistent asyncio event loop on a dedicated thread.
-    // Handler coroutines are submitted via call_soon_threadsafe.
     let py_event_loop =
         EventLoop::start().map_err(|e| WorkerError::PythonInit(format!("event loop: {e}")))?;
 
@@ -101,123 +89,6 @@ pub async fn init_worker(
         channel,
         py_event_loop,
     })
-}
-
-/// Phase 2: Load the Python app from the manifest and build the axum router.
-///
-/// When `manifest_path` is `Some`, loads the pre-built manifest from disk
-/// and validates it (the `apx build` + `apx serve <manifest>` path).
-/// When `None`, calls `apx._manifest.compile_manifest()` in the embedded
-/// interpreter to extract routes from the live app (the `apx serve <module>` path).
-///
-/// # Errors
-///
-/// Returns an error if manifest loading/validation fails or the router can't be built.
-pub fn load_app(
-    bootstrap: &WorkerBootstrap,
-    server_addr: std::net::SocketAddr,
-    py_event_loop: &EventLoop,
-) -> Result<(Router, Arc<AppState>, Arc<LifecycleCache>), WorkerError> {
-    let loop_handle = py_event_loop
-        .handle()
-        .map_err(|e| WorkerError::PythonInit(format!("event loop handle: {e}")))?;
-
-    let (manifest, app_module) = if let Some(ref path) = bootstrap.manifest_path {
-        // Manifest-based path (apx build + apx serve <manifest>)
-        let manifest = crate::manifest::load(path)?;
-        let meta = crate::manifest::validate_for_serving(&manifest)?;
-        let app_mod = meta.app_module.clone();
-        (manifest, app_mod)
-    } else {
-        // Live-import path (apx serve <app_module>)
-        let manifest = Python::attach(|py| {
-            discovery::fastapi::live_extract_manifest(py, &bootstrap.app_module)
-        })?;
-        (manifest, bootstrap.app_module.clone())
-    };
-
-    let (lifecycle_cache, routes, scope_interns) = Python::attach(|py| {
-        // Bootstrap Python telemetry (log handler + context var) before app code runs.
-        crate::telemetry::bootstrap_python_telemetry(py)
-            .map_err(|e| WorkerError::PythonInit(format!("telemetry bootstrap: {e}")))?;
-
-        let cache = LifecycleCache::initialize(py, &manifest.lifecycle_deps)?;
-        let routes = discovery::bind::bind_routes_from_manifest(py, &manifest, &app_module)?;
-        let interns = crate::bridge::asgi::ScopeInterns::new(py);
-        Ok::<_, WorkerError>((cache, routes, interns))
-    })?;
-    let lifecycle_cache = Arc::new(lifecycle_cache);
-
-    let scope_interns = Arc::new(scope_interns);
-
-    // Build scope template with fixed ASGI fields.
-    // Use the FastAPI app from the first route (all routes share the same app).
-    let scope_template = Python::attach(|py| {
-        let fastapi_app = routes.iter().find_map(|r| r.fastapi_app.as_ref());
-        crate::bridge::context_pool::build_scope_template(
-            py,
-            &scope_interns,
-            fastapi_app.map(|a| a.inner()),
-            server_addr,
-        )
-    })
-    .map_err(|e| WorkerError::PythonInit(format!("scope template: {e}")))?;
-
-    // Build receive template with fixed ASGI fields.
-    let receive_template = Python::attach(crate::bridge::context_pool::build_receive_template)
-        .map_err(|e| WorkerError::PythonInit(format!("receive template: {e}")))?;
-
-    let (create_task, error_logger) = Python::attach(|py| {
-        let create_task = py_event_loop
-            .event_loop_ref()
-            .getattr(py, "create_task")
-            .map_err(|e| WorkerError::PythonInit(format!("create_task: {e}")))?;
-
-        // Singleton error logger — stateless, reused across all requests.
-        let error_logger = pyo3::Py::new(py, AsgiErrorLogger)
-            .map_err(|e| WorkerError::PythonInit(format!("error logger: {e}")))?
-            .into_any();
-
-        Ok::<_, WorkerError>((create_task, error_logger))
-    })?;
-
-    let scheduler_refs = py_event_loop
-        .scheduler_refs()
-        .map(|refs| Arc::new(refs.clone()));
-
-    let app_state = Arc::new(AppState {
-        max_body_limit: manifest.max_body_limit,
-        loop_handle,
-        scope_interns,
-        scope_template: Arc::new(scope_template),
-        receive_template: Arc::new(receive_template),
-        create_task,
-        error_logger,
-        scheduler_refs,
-    });
-
-    let router = build_router(routes, Arc::clone(&app_state), server_addr);
-    Ok((router, app_state, lifecycle_cache))
-}
-
-/// Phase 3: Serve requests until shutdown.
-///
-/// Applies tower layers (trace, timeout, concurrency limit) and
-/// serves with graceful shutdown via the `Listener` trait.
-///
-/// # Errors
-///
-/// Returns an error if the server fails to start.
-pub async fn serve(
-    listener: crate::transport::TcpListener,
-    router: Router,
-    request_timeout: Option<Duration>,
-) -> Result<(), WorkerError> {
-    let router = wrap_layers(router, request_timeout);
-    listener
-        .serve(router, shutdown_signal())
-        .await
-        .map_err(WorkerError::from)
 }
 
 /// Signal readiness to supervisor over the IPC channel.
@@ -232,7 +103,7 @@ async fn signal_readiness(channel: &mut WorkerChannel) -> Result<(), WorkerError
         .map_err(WorkerError::from)
 }
 
-/// Convenience: connect → init → load → signal readiness → serve → shutdown.
+/// Convenience: connect → init → signal readiness → load app → serve.
 ///
 /// # Errors
 ///
@@ -242,28 +113,48 @@ pub async fn run_worker(
     bootstrap: WorkerBootstrap,
 ) -> Result<(), WorkerError> {
     let mut runtime = init_worker(&bootstrap, channel).await?;
-
-    let server_addr = runtime.listener.local_addr();
-    let (router, _app_state, lifecycle_cache) =
-        load_app(&bootstrap, server_addr, &runtime.py_event_loop)?;
-
     signal_readiness(&mut runtime.channel).await?;
 
-    let timeout = if bootstrap.request_timeout_secs > 0 {
-        Some(Duration::from_secs(bootstrap.request_timeout_secs))
-    } else {
-        None
+    // Build WorkerContext from the event loop.
+    let loop_handle = runtime
+        .py_event_loop
+        .handle()
+        .map_err(|e| WorkerError::PythonInit(format!("event loop handle: {e}")))?;
+    let event_loop_ref = Python::attach(|py| runtime.py_event_loop.event_loop_ref().clone_ref(py));
+    let refs = runtime.py_event_loop.scheduler_refs();
+    let scheduler_refs = Arc::new(Python::attach(|py| SchedulerRefs {
+        cached_types: Arc::clone(&refs.cached_types),
+        call_soon: refs.call_soon.clone_ref(py),
+        ready_queue: Arc::clone(&refs.ready_queue),
+    }));
+    let ctx = Arc::new(WorkerContext {
+        loop_handle,
+        event_loop_ref,
+        scheduler_refs,
+    });
+
+    // Load app and build dispatch pipeline.
+    let dispatch =
+        Python::attach(|py| ModuleImport::new(bootstrap.app_module.as_str()).build(py, ctx))?;
+
+    // Build HTTP service.
+    let config = ServiceConfig {
+        timeout: Duration::from_secs(bootstrap.request_timeout_secs),
+        ..ServiceConfig::default()
     };
+    let server_addr = runtime.listener.local_addr();
+    let service = ApxService::new(dispatch, server_addr, &config);
 
-    let result = serve(runtime.listener, router, timeout).await;
+    // Serve requests until shutdown.
+    serve_tcp(runtime.listener, service, shutdown_signal())
+        .await
+        .map_err(WorkerError::Serve)?;
 
-    Python::attach(|py| lifecycle_cache.shutdown(py));
     // Flush pending OTLP spans, metrics, and logs before the event loop stops.
     apx_core::tracing_init::shutdown_telemetry();
-    // EventLoop::stop() is called by Drop, but we call explicitly for clarity.
     runtime.py_event_loop.stop();
 
-    result
+    Ok(())
 }
 
 /// Detect worker mode and connect to the supervisor's IPC channel.
@@ -307,9 +198,6 @@ pub async fn connect_to_supervisor()
     Ok(Some((channel, bootstrap)))
 }
 
-/// Re-export shared shutdown signal for worker use.
-use crate::signal::shutdown_signal;
-
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -317,29 +205,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worker_error_display_manifest_load() {
-        let err = WorkerError::ManifestLoad(ManifestError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "file not found",
-        )));
-        let msg = format!("{err}");
-        assert!(msg.contains("manifest load"));
-        assert!(msg.contains("file not found"));
-    }
-
-    #[test]
-    fn worker_error_display_discovery() {
-        let err =
-            WorkerError::Discovery(discovery::DiscoveryError::NoApp("backend.app".to_owned()));
-        let msg = format!("{err}");
-        assert!(msg.contains("discovery"));
-    }
-
-    #[test]
     fn worker_error_display_python_init() {
         let err = WorkerError::PythonInit("failed".to_owned());
         let msg = format!("{err}");
         assert!(msg.contains("python init"));
+    }
+
+    #[test]
+    fn worker_error_display_app_load() {
+        let err = WorkerError::AppLoad(crate::app_loader::AppLoadError::MissingAttribute {
+            module: "myapp".to_owned(),
+            attr: "handler".to_owned(),
+        });
+        let msg = format!("{err}");
+        assert!(msg.contains("app load"));
+        assert!(msg.contains("no attribute"));
     }
 
     #[test]
@@ -351,25 +231,5 @@ mod tests {
         });
         let msg = format!("{err}");
         assert!(msg.contains("transport"));
-    }
-
-    #[test]
-    fn worker_error_manifest_load_version_mismatch() {
-        let err = WorkerError::ManifestLoad(ManifestError::VersionMismatch {
-            manifest: "0.1.0".to_owned(),
-            running: "0.2.0".to_owned(),
-        });
-        let msg = format!("{err}");
-        assert!(msg.contains("version mismatch"));
-    }
-
-    #[test]
-    fn worker_error_display_lifecycle() {
-        let err = WorkerError::Lifecycle(LifecycleError::Init {
-            qualname: "db.engine".to_owned(),
-            message: "connection refused".to_owned(),
-        });
-        let msg = format!("{err}");
-        assert!(msg.contains("lifecycle init"));
     }
 }

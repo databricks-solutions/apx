@@ -3,7 +3,6 @@
 //! Replaces asyncio task scheduling for hot-path primitives while keeping
 //! asyncio alive as a fallback for unhandled awaitables.
 
-pub mod adapters;
 pub mod driver;
 pub mod primitives;
 pub mod queue;
@@ -19,9 +18,7 @@ thread_local! {
     /// Tokio runtime handle cached on the event loop thread.
     ///
     /// Set once during [`EventLoop::init_event_loop_thread`] when
-    /// `LoopPolicy::RustNative` is active. Used by [`Timer`] and
-    /// [`ApxSchedulerCore::run_sync_in_worker_thread`] to spawn async
-    /// tasks from the event loop thread.
+    /// `LoopPolicy::RustNative` is active.
     static TOKIO_HANDLE: RefCell<Option<tokio::runtime::Handle>> = const { RefCell::new(None) };
 }
 

@@ -4,8 +4,8 @@
 //! in worker processes. See the architectural boundary note in the plan.
 
 use crate::ipc::channel::{self, WorkerChannel};
+use crate::ipc::protocol::AppModule;
 use crate::ipc::protocol::{IpcMessage, Nonce, WorkerBootstrap};
-use crate::route::AppModule;
 use std::path::PathBuf;
 use std::time::Duration;
 use sysinfo::{Pid, Signal, System};

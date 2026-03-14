@@ -300,15 +300,17 @@ version = "0.3.8"
 dependencies = [
  "apx-common",
  "apx-core",
- "axum",
  "bytes",
  "crossbeam-queue",
- "form_urlencoded",
  "futures-core",
  "futures-util",
  "hex",
  "http",
+ "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-tungstenite",
+ "hyper-util",
  "opentelemetry 0.29.1",
  "opentelemetry_sdk 0.29.0",
  "pyo3",
@@ -325,8 +327,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite",
- "tower",
- "tower-http",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -2701,6 +2701,21 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tower-service",
+]
+
+[[package]]
+name = "hyper-tungstenite"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc778da281a749ed28d2be73a9f2cd13030680a1574bc729debd1195e44f00e9"
+dependencies = [
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "pin-project-lite",
+ "tokio",
+ "tokio-tungstenite",
+ "tungstenite",
 ]
 
 [[package]]
@@ -7050,8 +7065,6 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
- "uuid",
 ]
 
 [[package]]

@@ -112,20 +112,12 @@ impl ReadyQueue {
         py: Python<'_>,
         cached_types: &Arc<CachedTypes>,
         call_soon: &Py<PyAny>,
-        ensure_future: &Py<PyAny>,
         ready_queue: &Arc<ReadyQueue>,
     ) -> usize {
         let mut count = 0;
         while let Some(ready) = self.pop() {
             count += 1;
-            if let Err(e) = resume_task(
-                py,
-                ready,
-                cached_types,
-                call_soon,
-                ensure_future,
-                ready_queue,
-            ) {
+            if let Err(e) = resume_task(py, ready, cached_types, call_soon, ready_queue) {
                 tracing::warn!(error = %e, "ready queue drain: resume failed");
             }
         }

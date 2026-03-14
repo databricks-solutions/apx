@@ -9,9 +9,11 @@
 
 use bytes::Bytes;
 use http::header::HeaderMap;
+use http_body::Frame;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 
 /// Which transport carried this request.
 ///
@@ -279,6 +281,50 @@ impl std::fmt::Debug for ResponseBody {
     }
 }
 
+impl http_body::Body for ResponseBody {
+    type Data = Bytes;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        match this {
+            Self::Fixed(bytes) => {
+                if bytes.is_empty() {
+                    return Poll::Ready(None);
+                }
+                let data = std::mem::replace(bytes, Bytes::new());
+                Poll::Ready(Some(Ok(Frame::data(data))))
+            }
+            Self::Stream(stream) => match Pin::as_mut(stream).poll_next(cx) {
+                Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(Frame::data(chunk)))),
+                Poll::Ready(Some(Err(e))) => {
+                    let err: Box<dyn std::error::Error + Send + Sync> = Box::new(e);
+                    Poll::Ready(Some(Err(err)))
+                }
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        match self {
+            Self::Fixed(bytes) => bytes.is_empty(),
+            Self::Stream(_) => false,
+        }
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        match self {
+            Self::Fixed(bytes) => http_body::SizeHint::with_exact(bytes.len() as u64),
+            Self::Stream(_) => http_body::SizeHint::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -503,5 +549,62 @@ mod tests {
         let stream_body = ResponseBody::Stream(Box::pin(stream));
         let dbg = format!("{stream_body:?}");
         assert!(dbg.contains("Stream"));
+    }
+
+    // ── http_body::Body impl tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn response_body_fixed_yields_data_then_none() {
+        use http_body::Body;
+        let mut body = ResponseBody::Fixed(Bytes::from_static(b"hello"));
+        let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.into_data().unwrap(), Bytes::from_static(b"hello"));
+        let end = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await;
+        assert!(end.is_none());
+    }
+
+    #[test]
+    fn response_body_empty_fixed_is_end_stream() {
+        use http_body::Body;
+        let body = ResponseBody::Fixed(Bytes::new());
+        assert!(body.is_end_stream());
+
+        let non_empty = ResponseBody::Fixed(Bytes::from_static(b"x"));
+        assert!(!non_empty.is_end_stream());
+    }
+
+    #[test]
+    fn response_body_fixed_size_hint_exact() {
+        use http_body::Body;
+        let body = ResponseBody::Fixed(Bytes::from_static(b"hello"));
+        let hint = body.size_hint();
+        assert_eq!(hint.lower(), 5);
+        assert_eq!(hint.upper(), Some(5));
+    }
+
+    #[tokio::test]
+    async fn response_body_stream_yields_chunks() {
+        use http_body::Body;
+        let chunks = vec![Ok(Bytes::from("hel")), Ok(Bytes::from("lo"))];
+        let stream = tokio_stream::iter(chunks);
+        let mut body = ResponseBody::Stream(Box::pin(stream));
+
+        let f1 = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(f1.into_data().unwrap(), Bytes::from("hel"));
+
+        let f2 = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(f2.into_data().unwrap(), Bytes::from("lo"));
+
+        let end = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await;
+        assert!(end.is_none());
     }
 }

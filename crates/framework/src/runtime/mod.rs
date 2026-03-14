@@ -1,5 +1,4 @@
-//! Multi-worker runtime: supervisor, worker, and lifecycle cache.
+//! Multi-worker runtime: supervisor and worker.
 
-pub mod lifecycle;
 pub mod supervisor;
 pub mod worker;
