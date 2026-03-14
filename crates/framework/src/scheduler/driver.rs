@@ -26,48 +26,24 @@ use crate::error::AppError;
 /// Pre-resolved Python type references, cached at startup to avoid repeated
 /// `import` / `getattr` calls in the hot path.
 pub struct CachedTypes {
-    /// `asyncio.Future` — kept for isinstance fallback (e.g. Task detection).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "retained for isinstance fallback paths")
-    )]
-    pub asyncio_future: Py<PyType>,
-    /// `asyncio.Task`
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reserved for Task-vs-Future distinction in classify"
-        )
-    )]
-    pub asyncio_task: Py<PyType>,
-    /// `types.CoroutineType` — retained for pointer extraction + isinstance fallback.
+    /// `types.CoroutineType` — retained for pointer extraction.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "pointer extracted; Py<PyType> keeps type alive")
     )]
-    pub coroutine_type: Py<PyType>,
-    /// `types.GeneratorType`
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "reserved for generator-based coroutine detection in classify"
-        )
-    )]
-    pub generator_type: Py<PyType>,
+    coroutine_type: Py<PyType>,
     /// Our `Future` type object — retained for pointer extraction.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "pointer extracted; Py<PyType> keeps type alive")
     )]
-    pub future_type: Py<PyType>,
+    future_type: Py<PyType>,
     /// Our `EventWaiter` type object — retained for pointer extraction.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "pointer extracted; Py<PyType> keeps type alive")
     )]
-    pub event_waiter_type: Py<PyType>,
+    event_waiter_type: Py<PyType>,
     // -- Raw type pointers for hot-path ob_type comparison ------------------
     //
     // Borrowed from the Py<PyType> fields above — valid as long as CachedTypes
@@ -109,7 +85,6 @@ impl std::fmt::Debug for CachedTypes {
 impl CachedTypes {
     /// Resolve all Python types once at startup.
     pub fn resolve(py: Python<'_>) -> PyResult<Self> {
-        let asyncio = py.import(c"asyncio")?;
         let types = py.import(c"types")?;
 
         let future_type = Future::type_object(py).unbind();
@@ -132,13 +107,7 @@ impl CachedTypes {
             .into();
 
         Ok(Self {
-            asyncio_future: asyncio.getattr(c"Future")?.cast_into::<PyType>()?.unbind(),
-            asyncio_task: asyncio.getattr(c"Task")?.cast_into::<PyType>()?.unbind(),
             coroutine_type,
-            generator_type: types
-                .getattr(c"GeneratorType")?
-                .cast_into::<PyType>()?
-                .unbind(),
             future_type,
             event_waiter_type,
             future_type_ptr,
@@ -363,7 +332,6 @@ pub fn drive_task(
     py: Python<'_>,
     task: &mut SchedulerTask,
     types: &CachedTypes,
-    _proxy_id: Option<isize>,
     step_budget: usize,
 ) -> DriveResult {
     let mut steps: usize = 0;
@@ -600,9 +568,8 @@ pub fn resume_task(
     let ReadyTask { mut task, proxy } = ready;
 
     let saved = install_proxy(py, proxy.as_ref());
-    let proxy_id = proxy.as_ref().map(|p| p.as_ptr() as isize);
 
-    let drive_result = drive_task(py, &mut task, cached_types, proxy_id, DEFAULT_STEP_BUDGET);
+    let drive_result = drive_task(py, &mut task, cached_types, DEFAULT_STEP_BUDGET);
     let result = handle_drive_result(py, task, drive_result, call_soon, ready_queue, proxy);
 
     restore_proxy(py, saved);
@@ -661,9 +628,8 @@ pub fn spawn_and_drive(
     // middleware that calls asyncio.current_task() gets a valid object
     // (needed for weakref support in ServerErrorMiddleware, etc.).
     let task_ctx = set_current_task(py, &task);
-    let proxy_id = task_ctx.as_ref().map(|(_, p)| p.as_ptr() as isize);
 
-    let drive_result = drive_task(py, &mut task, cached_types, proxy_id, DEFAULT_STEP_BUDGET);
+    let drive_result = drive_task(py, &mut task, cached_types, DEFAULT_STEP_BUDGET);
     let proxy = task_ctx.as_ref().map(|(_, p)| p.clone_ref(py));
     // Keep a reference for ownership check in clear_current_task.
     let proxy_for_clear = proxy.as_ref().map(|p| p.clone_ref(py));
@@ -786,10 +752,7 @@ mod tests {
         crate::with_py(|py| {
             let types = CachedTypes::resolve(py).unwrap();
             // Verify each type object is non-null and callable.
-            assert!(!types.asyncio_future.bind(py).is_none());
-            assert!(!types.asyncio_task.bind(py).is_none());
             assert!(!types.coroutine_type.bind(py).is_none());
-            assert!(!types.generator_type.bind(py).is_none());
             assert!(!types.future_type.bind(py).is_none());
             assert!(!types.event_waiter_type.bind(py).is_none());
         });
