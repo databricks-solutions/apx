@@ -98,44 +98,6 @@ impl EventLoopHandle {
         result
     }
 
-    /// Build a coroutine on the calling thread and schedule it via the queue.
-    ///
-    /// The closure executes on the calling (tokio) thread under GIL to build
-    /// the coroutine. The resulting `Py<PyAny>` is then pushed through the
-    /// lock-free queue for task creation on the event loop thread.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the event loop is stopped, the closure fails,
-    /// or enqueue fails.
-    pub fn schedule_with<F>(
-        &self,
-        f: F,
-    ) -> Result<oneshot::Receiver<Result<Py<PyAny>, AppError>>, AppError>
-    where
-        F: FnOnce(Python<'_>) -> Result<Py<PyAny>, AppError>,
-    {
-        if !self.running.load(Ordering::Acquire) {
-            return Err(AppError::Internal("event loop is not running".to_owned()));
-        }
-
-        // Build the coroutine on the calling thread under GIL.
-        let coro = Python::attach(f)?;
-
-        // Push to queue for task creation on the event loop thread.
-        let (tx, rx) = oneshot::channel();
-        let item = QueueItem::Work(WorkItem {
-            builder: Box::new(move |_py| Ok(coro)),
-            tx,
-        });
-        self.queue_tx
-            .send(item)
-            .map_err(|_| AppError::Internal("work queue closed".to_owned()))?;
-        self.wake_if_sleeping();
-
-        Ok(rx)
-    }
-
     /// Defer all Python work to the event loop thread via the MPSC queue.
     ///
     /// Hot path: no GIL acquisition. The builder closure is boxed and pushed
@@ -180,31 +142,6 @@ impl EventLoopHandle {
         self.wake_if_sleeping();
 
         Ok(rx)
-    }
-
-    /// Schedule a fire-and-forget callback on the event loop thread.
-    ///
-    /// The callback runs on the event loop thread with the GIL held.
-    /// No result channel — the caller cannot await a return value.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the event loop is stopped or enqueue fails.
-    pub fn schedule_callback<F>(&self, f: F) -> Result<(), AppError>
-    where
-        F: FnOnce(Python<'_>) + Send + 'static,
-    {
-        if !self.running.load(Ordering::Acquire) {
-            return Err(AppError::Internal("event loop is not running".to_owned()));
-        }
-
-        self.queue_tx
-            .send(QueueItem::Callback(Box::new(f)))
-            .map_err(|_| AppError::Internal("work queue closed".to_owned()))?;
-
-        self.wake_if_sleeping();
-
-        Ok(())
     }
 
     /// Wake the drainer if it's sleeping (idle→active transition).

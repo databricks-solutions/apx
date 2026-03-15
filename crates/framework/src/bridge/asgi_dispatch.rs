@@ -47,12 +47,12 @@ pub(super) async fn recv_response_start(
 /// The response flows through an mpsc channel. The first body chunk's
 /// `more_body` flag classifies the response as fixed or streaming.
 pub struct AsgiDispatch {
-    /// The Python ASGI callable.
-    app: Py<PyAny>,
+    /// The Python ASGI callable (Arc-wrapped to avoid per-request GIL).
+    app: Arc<Py<PyAny>>,
     /// Pre-interned scope strings, shared across all requests.
     scope_interns: Arc<ScopeInterns>,
-    /// Template dict for `AsgiReceive` (`{"type": "http.request", ...}`).
-    receive_template: Py<PyDict>,
+    /// Template dict for `AsgiReceive` (Arc-wrapped to avoid per-request GIL).
+    receive_template: Arc<Py<PyDict>>,
     /// Shared worker infrastructure (event loop, scheduler).
     ctx: Arc<WorkerContext>,
     /// Maximum request body size in bytes.
@@ -69,9 +69,9 @@ impl AsgiDispatch {
         body_limit: usize,
     ) -> Self {
         Self {
-            app,
+            app: Arc::new(app),
             scope_interns,
-            receive_template,
+            receive_template: Arc::new(receive_template),
             ctx,
             body_limit,
         }
@@ -95,9 +95,9 @@ impl Dispatch for AsgiDispatch {
         let body_stream = request.take_body();
         let body_limit = self.body_limit;
 
-        // Clone Py refs under GIL, Arc refs without.
-        let (app, template) =
-            Python::attach(|py| (self.app.clone_ref(py), self.receive_template.clone_ref(py)));
+        // Arc clones — no GIL needed on the tokio thread.
+        let app = Arc::clone(&self.app);
+        let template = Arc::clone(&self.receive_template);
         let interns = Arc::clone(&self.scope_interns);
         let ctx = Arc::clone(&self.ctx);
 
@@ -125,7 +125,7 @@ impl Dispatch for AsgiDispatch {
         server_addr: SocketAddr,
         client_addr: Option<SocketAddr>,
     ) -> Pin<Box<dyn Future<Output = Response<ResponseBody>> + Send>> {
-        let app = Python::attach(|py| self.app.clone_ref(py));
+        let app = Arc::clone(&self.app);
         let interns = Arc::clone(&self.scope_interns);
         let ctx = Arc::clone(&self.ctx);
 
@@ -167,9 +167,9 @@ async fn dispatch_inner(
     request: InboundRequest,
     body_stream: BodyStream,
     body_limit: usize,
-    app: Py<PyAny>,
+    app: Arc<Py<PyAny>>,
     interns: Arc<ScopeInterns>,
-    template: Py<PyDict>,
+    template: Arc<Py<PyDict>>,
     ctx: Arc<WorkerContext>,
 ) -> Result<OutboundResponse, AppError> {
     // Step 1: Collect body on tokio thread.
@@ -186,10 +186,11 @@ async fn dispatch_inner(
     let coro_rx = ctx.loop_handle.schedule_deferred(move |py| {
         let scope = build_http_scope(py, &request, None, &interns)
             .map_err(|e| AppError::Internal(format!("scope build: {e}")))?;
+        let tmpl = (*template).clone_ref(py);
         let receive = if body_bytes.is_empty() {
-            AsgiReceive::empty(template, disconnect_rx)
+            AsgiReceive::empty(tmpl, disconnect_rx)
         } else {
-            AsgiReceive::http(body_bytes, template, disconnect_rx)
+            AsgiReceive::http(body_bytes, tmpl, disconnect_rx)
         };
         let receive_obj =
             Py::new(py, receive).map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;

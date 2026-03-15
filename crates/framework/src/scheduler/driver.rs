@@ -693,7 +693,8 @@ fn install_proxy(
 /// Restore the previous `_current_tasks` entry after [`resume_task`].
 ///
 /// If the previous entry was `None`, removes the dict entry.
-/// This preserves any entry set by a concurrent blocking thread.
+/// Restores the previous entry so interleaved task drives don't clobber
+/// each other's current_task.
 fn restore_proxy(py: Python<'_>, saved: Option<(Py<PyAny>, Py<PyAny>, Py<PyAny>)>) {
     let Some((ct, loop_obj, prev)) = saved else {
         return;

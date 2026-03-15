@@ -56,7 +56,7 @@ pub fn handle_upgrade(
     mut request: Request<Incoming>,
     server_addr: SocketAddr,
     client_addr: Option<SocketAddr>,
-    app: Py<PyAny>,
+    app: Arc<Py<PyAny>>,
     interns: Arc<ScopeInterns>,
     ctx: Arc<WorkerContext>,
 ) -> Result<Response<ResponseBody>, AppError> {
@@ -128,7 +128,7 @@ fn extract_request_info<B>(
 async fn ws_session(
     ws_future: hyper_tungstenite::HyperWebsocket,
     request: InboundRequest,
-    app: Py<PyAny>,
+    app: Arc<Py<PyAny>>,
     interns: Arc<ScopeInterns>,
     ctx: Arc<WorkerContext>,
 ) {
