@@ -116,10 +116,7 @@ pub async fn run_worker(
     signal_readiness(&mut runtime.channel).await?;
 
     // Build WorkerContext from the event loop.
-    let loop_handle = runtime
-        .py_event_loop
-        .handle()
-        .map_err(|e| WorkerError::PythonInit(format!("event loop handle: {e}")))?;
+    let loop_handle = runtime.py_event_loop.handle();
     let event_loop_ref = Python::attach(|py| runtime.py_event_loop.event_loop_ref().clone_ref(py));
     let ctx = Arc::new(WorkerContext {
         loop_handle,

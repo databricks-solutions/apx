@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use super::handle::EventLoopHandle;
 use super::queue::{QueueDrainer, QueueItem, SchedulerState};
+use super::wake::{WakeStrategy, create_wake_strategy};
 use crate::scheduler::driver::CachedTypes;
 use crate::scheduler::queue::ReadyQueue;
 
@@ -119,8 +120,8 @@ pub struct EventLoop {
     queue_tx: mpsc::UnboundedSender<QueueItem>,
     /// Shared flag: `true` means drainer is sleeping and needs a wake.
     needs_wake: Arc<AtomicBool>,
-    /// Python reference to the [`QueueDrainer`] singleton.
-    drainer_ref: Py<PyAny>,
+    /// Wake strategy (pipe on Unix, GIL fallback on Windows).
+    wake: Arc<WakeStrategy>,
 }
 
 impl std::fmt::Debug for EventLoop {
@@ -165,8 +166,9 @@ impl EventLoop {
                         Self::init_event_loop_thread(py, queue_rx, needs_wake_clone, tokio_handle);
 
                     match result {
-                        Ok((event_loop, drainer_ref)) => {
-                            let _ = startup_tx.send(Ok((event_loop.clone_ref(py), drainer_ref)));
+                        Ok((event_loop, wake)) => {
+                            let _ =
+                                startup_tx.send(Ok((event_loop.clone_ref(py), Arc::clone(&wake))));
 
                             let loop_bound = event_loop.bind(py);
                             if let Err(e) = loop_bound.call_method0(c"run_forever") {
@@ -174,7 +176,7 @@ impl EventLoop {
                             }
                             running_clone.store(false, Ordering::Release);
 
-                            let _ = Self::close_loop(py, loop_bound);
+                            let _ = Self::close_loop(py, loop_bound, &wake);
                         }
                         Err(e) => {
                             let _ =
@@ -185,7 +187,7 @@ impl EventLoop {
             })
             .map_err(|e| format!("failed to spawn asyncio thread: {e}"))?;
 
-        let (event_loop, drainer_ref) = startup_rx
+        let (event_loop, wake) = startup_rx
             .recv()
             .map_err(|_| "asyncio thread exited before sending loop".to_owned())??;
 
@@ -195,17 +197,18 @@ impl EventLoop {
             running,
             queue_tx,
             needs_wake,
-            drainer_ref,
+            wake,
         })
     }
 
-    /// Initialize the event loop, install the [`QueueDrainer`], and return both.
+    /// Initialize the event loop, install the [`QueueDrainer`], and return
+    /// the event loop ref + wake strategy.
     fn init_event_loop_thread(
         py: Python<'_>,
         queue_rx: mpsc::UnboundedReceiver<QueueItem>,
         needs_wake: Arc<AtomicBool>,
         tokio_handle: Option<tokio::runtime::Handle>,
-    ) -> Result<(Py<PyAny>, Py<PyAny>), String> {
+    ) -> Result<(Py<PyAny>, Arc<WakeStrategy>), String> {
         let event_loop = create_event_loop(py).map_err(|e| format!("create_event_loop: {e}"))?;
         let asyncio = py
             .import(c"asyncio")
@@ -224,21 +227,23 @@ impl EventLoop {
             }
         }
 
-        let drainer_ref = Self::install_drainer(py, &event_loop, queue_rx, needs_wake)?;
+        let wake = Self::install_drainer(py, &event_loop, queue_rx, needs_wake)?;
 
         // Install the tokio handle for scheduler primitives.
         install_rust_scheduler(py, tokio_handle).map_err(|e| format!("scheduler install: {e}"))?;
 
-        Ok((event_loop.unbind(), drainer_ref))
+        Ok((event_loop.unbind(), wake))
     }
 
     /// Create and install the [`QueueDrainer`] on the event loop.
+    ///
+    /// Returns the `Arc<WakeStrategy>` for cross-thread wake signals.
     fn install_drainer(
         py: Python<'_>,
         event_loop: &Bound<'_, PyAny>,
         queue_rx: mpsc::UnboundedReceiver<QueueItem>,
         needs_wake: Arc<AtomicBool>,
-    ) -> Result<Py<PyAny>, String> {
+    ) -> Result<Arc<WakeStrategy>, String> {
         let call_soon = event_loop
             .getattr(c"call_soon")
             .map_err(|e| format!("missing call_soon: {e}"))?
@@ -268,6 +273,16 @@ impl EventLoop {
             .borrow_mut(py)
             .set_self_ref(drainer_obj.clone_ref(py).into_any());
 
+        // Create wake strategy (pipe on Unix, GIL fallback on Windows).
+        let wake = create_wake_strategy(py, event_loop, &drainer_obj.clone_ref(py).into_any())?;
+
+        // If using pipe wake, configure the drainer to drain pipe bytes.
+        #[cfg(unix)]
+        if let Some(read_fd) = wake.read_fd() {
+            let drain_fn = Self::create_pipe_drain_fn(py)?;
+            drainer_obj.borrow_mut(py).set_pipe_drain(drain_fn, read_fd);
+        }
+
         // Set wake state on the ready queue so push() can reschedule
         // the drainer when it is sleeping.
         ready_queue.set_wake(needs_wake, call_soon, drainer_obj.clone_ref(py).into_any());
@@ -277,22 +292,52 @@ impl EventLoop {
             .call_method1(c"call_soon", (&drainer_obj,))
             .map_err(|e| format!("initial call_soon: {e}"))?;
 
-        Ok(drainer_obj.into_any())
+        Ok(wake)
+    }
+
+    /// Create a Python callable that drains bytes from the wake pipe fd.
+    ///
+    /// ```python
+    /// def _drain_wake(fd):
+    ///     import os
+    ///     while True:
+    ///         try:
+    ///             if not os.read(fd, 64):
+    ///                 break
+    ///         except (BlockingIOError, OSError):
+    ///             break
+    /// ```
+    #[cfg(unix)]
+    fn create_pipe_drain_fn(py: Python<'_>) -> Result<Py<PyAny>, String> {
+        let code = c"
+def _drain_wake(fd):
+    import os
+    while True:
+        try:
+            if not os.read(fd, 64):
+                break
+        except (BlockingIOError, OSError):
+            break
+";
+        let locals = pyo3::types::PyDict::new(py);
+        py.run(code, None, Some(&locals))
+            .map_err(|e| format!("create drain fn: {e}"))?;
+        locals
+            .get_item("_drain_wake")
+            .map_err(|e| format!("get drain fn: {e}"))?
+            .ok_or_else(|| "drain fn not found".to_owned())
+            .map(|f| f.unbind())
     }
 
     /// Get a cloneable handle for submitting work to this event loop.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if event loop method caching fails.
-    pub fn handle(&self) -> Result<EventLoopHandle, String> {
+    pub fn handle(&self) -> EventLoopHandle {
         Python::attach(|py| {
             EventLoopHandle::new(
                 self.event_loop.clone_ref(py),
                 Arc::clone(&self.running),
                 self.queue_tx.clone(),
                 Arc::clone(&self.needs_wake),
-                self.drainer_ref.clone_ref(py),
+                Arc::clone(&self.wake),
             )
         })
     }
@@ -344,7 +389,17 @@ impl EventLoop {
     /// 2. Shut down async generators.
     /// 3. Shut down the default executor.
     /// 4. Close the loop.
-    fn close_loop(py: Python<'_>, event_loop: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn close_loop(
+        py: Python<'_>,
+        event_loop: &Bound<'_, PyAny>,
+        #[allow(unused_variables)] wake: &WakeStrategy,
+    ) -> PyResult<()> {
+        // Deregister pipe fd from the selector before closing the loop.
+        #[cfg(unix)]
+        if let Some(read_fd) = wake.read_fd() {
+            let _ = event_loop.call_method1(c"remove_reader", (read_fd,));
+        }
+
         cancel_pending_tasks(py, event_loop);
 
         let shutdown_gens = event_loop.call_method0(c"shutdown_asyncgens")?;
@@ -387,7 +442,7 @@ mod tests {
         let mut event_loop = EventLoop::start("asyncio").unwrap();
         assert!(event_loop.running.load(Ordering::Acquire));
 
-        let handle = event_loop.handle().unwrap();
+        let handle = event_loop.handle();
         // Verify handle is valid (loop ref is not None).
         Python::attach(|py| {
             assert!(!handle.event_loop().bind(py).is_none());

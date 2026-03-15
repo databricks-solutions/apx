@@ -8,6 +8,7 @@
 //! processes them in batch.
 
 use super::queue::{QueueItem, WorkItem};
+use super::wake::WakeStrategy;
 use crate::error::AppError;
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -17,15 +18,14 @@ use tokio::sync::oneshot;
 
 /// Cloneable handle to the persistent asyncio event loop.
 ///
-/// Caches `call_soon_threadsafe` for rare wake signals. Hot-path scheduling
-/// goes through the lock-free MPSC queue — no GIL, no Python object allocation.
+/// Hot-path scheduling goes through the lock-free MPSC queue — no GIL,
+/// no Python object allocation. Wake uses pipe on Unix (GIL-free) or
+/// `call_soon_threadsafe` fallback on Windows.
 pub struct EventLoopHandle {
     /// Python event loop reference (diagnostics/tests).
     event_loop: Py<PyAny>,
-    /// Cached `loop.call_soon_threadsafe` — used only to wake the drainer.
-    call_soon_threadsafe: Py<PyAny>,
-    /// Python reference to the [`QueueDrainer`] singleton — wake target.
-    drainer_ref: Py<PyAny>,
+    /// Wake strategy (pipe on Unix, GIL fallback on Windows).
+    wake: Arc<WakeStrategy>,
     /// Producer side of the work queue (lock-free push).
     queue_tx: mpsc::UnboundedSender<QueueItem>,
     /// Shared flag: `true` means drainer is sleeping and needs a wake.
@@ -38,8 +38,7 @@ impl Clone for EventLoopHandle {
     fn clone(&self) -> Self {
         Python::attach(|py| Self {
             event_loop: self.event_loop.clone_ref(py),
-            call_soon_threadsafe: self.call_soon_threadsafe.clone_ref(py),
-            drainer_ref: self.drainer_ref.clone_ref(py),
+            wake: Arc::clone(&self.wake),
             queue_tx: self.queue_tx.clone(),
             needs_wake: Arc::clone(&self.needs_wake),
             running: Arc::clone(&self.running),
@@ -49,32 +48,20 @@ impl Clone for EventLoopHandle {
 
 impl EventLoopHandle {
     /// Create a new handle with queue and wake infrastructure.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the event loop is missing expected methods.
     pub(crate) fn new(
         event_loop: Py<PyAny>,
         running: Arc<AtomicBool>,
         queue_tx: mpsc::UnboundedSender<QueueItem>,
         needs_wake: Arc<AtomicBool>,
-        drainer_ref: Py<PyAny>,
-    ) -> Result<Self, String> {
-        Python::attach(|py| {
-            let call_soon_threadsafe = event_loop
-                .bind(py)
-                .getattr(c"call_soon_threadsafe")
-                .map_err(|e| format!("event loop missing call_soon_threadsafe: {e}"))?
-                .unbind();
-            Ok(Self {
-                event_loop,
-                call_soon_threadsafe,
-                drainer_ref,
-                queue_tx,
-                needs_wake,
-                running,
-            })
-        })
+        wake: Arc<WakeStrategy>,
+    ) -> Self {
+        Self {
+            event_loop,
+            wake,
+            queue_tx,
+            needs_wake,
+            running,
+        }
     }
 
     /// Submit a Python coroutine to the running event loop.
@@ -148,14 +135,14 @@ impl EventLoopHandle {
     ///
     /// Uses `swap(false, AcqRel)` — the Acquire synchronizes with the
     /// drainer's Release store, ensuring our queue push is visible.
+    ///
+    /// Pipe: pure Rust write, no GIL. Gil fallback: acquires GIL.
     fn wake_if_sleeping(&self) {
         let was_sleeping = self.needs_wake.swap(false, Ordering::AcqRel);
         if !was_sleeping {
             return;
         }
-        Python::attach(|py| {
-            let _ = self.call_soon_threadsafe.call1(py, (&self.drainer_ref,));
-        });
+        self.wake.wake();
     }
 
     /// Get a reference to the event loop Python object (for tests/diagnostics).
@@ -187,7 +174,7 @@ mod tests {
         crate::with_py(|_py| {});
 
         let mut event_loop = EventLoop::start("asyncio").unwrap();
-        let handle = event_loop.handle().unwrap();
+        let handle = event_loop.handle();
 
         // Create a trivial coroutine: `async def _t(): return 42`
         let coro = Python::attach(|py| {
@@ -212,7 +199,7 @@ mod tests {
         crate::with_py(|_py| {});
 
         let mut event_loop = EventLoop::start("asyncio").unwrap();
-        let handle = event_loop.handle().unwrap();
+        let handle = event_loop.handle();
 
         // Coroutine that uses asyncio.sleep (requires running event loop).
         let coro = Python::attach(|py| {
@@ -239,7 +226,7 @@ mod tests {
         crate::with_py(|_py| {});
 
         let mut event_loop = EventLoop::start("asyncio").unwrap();
-        let handle = event_loop.handle().unwrap();
+        let handle = event_loop.handle();
 
         let coro = Python::attach(|py| {
             let code = std::ffi::CString::new(
@@ -264,7 +251,7 @@ mod tests {
         crate::with_py(|_py| {});
 
         let mut event_loop = EventLoop::start("asyncio").unwrap();
-        let handle = event_loop.handle().unwrap();
+        let handle = event_loop.handle();
         event_loop.stop();
 
         let coro = Python::attach(|py| {
@@ -283,7 +270,7 @@ mod tests {
     fn handle_debug() {
         crate::with_py(|_py| {});
         let mut event_loop = EventLoop::start("asyncio").unwrap();
-        let handle = event_loop.handle().unwrap();
+        let handle = event_loop.handle();
         let dbg = format!("{handle:?}");
         assert!(dbg.contains("EventLoopHandle"));
         event_loop.stop();

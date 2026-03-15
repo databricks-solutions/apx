@@ -101,6 +101,11 @@ pub struct QueueDrainer {
     needs_wake: Arc<AtomicBool>,
     /// Rust scheduler state — always present (Rust scheduler is sole scheduler).
     scheduler: SchedulerState,
+    /// Cached Python callable that drains pipe bytes (pipe wake only).
+    /// When `None`, pipe wake is not active (GIL fallback path).
+    drain_wake_fn: Option<Py<PyAny>>,
+    /// Read-end fd of the wake pipe (pipe wake only, -1 if unused).
+    wake_read_fd: i32,
 }
 
 impl fmt::Debug for QueueDrainer {
@@ -125,6 +130,8 @@ impl QueueDrainer {
             self_ref: None,
             needs_wake,
             scheduler,
+            drain_wake_fn: None,
+            wake_read_fd: -1,
         }
     }
 
@@ -132,11 +139,24 @@ impl QueueDrainer {
     pub fn set_self_ref(&mut self, self_ref: Py<PyAny>) {
         self.self_ref = Some(self_ref);
     }
+
+    /// Configure pipe-based wake drain (called during init when pipe wake is active).
+    ///
+    /// `drain_fn` is a Python callable that reads and discards bytes from `read_fd`.
+    /// Called at the start of each `__call__` to consume pipe wake bytes (level-triggered).
+    pub fn set_pipe_drain(&mut self, drain_fn: Py<PyAny>, read_fd: i32) {
+        self.drain_wake_fn = Some(drain_fn);
+        self.wake_read_fd = read_fd;
+    }
 }
 
 #[pymethods]
 impl QueueDrainer {
     fn __call__(&mut self, py: Python<'_>) -> PyResult<()> {
+        // Drain wake pipe bytes (level-triggered — must consume to avoid re-fire).
+        if let Some(ref drain_fn) = self.drain_wake_fn {
+            let _ = drain_fn.call1(py, (self.wake_read_fd,));
+        }
         let count = self.drain_pending(py);
         if count > 0 {
             return self.reschedule(py);

@@ -13,6 +13,7 @@ pub mod core;
 pub mod handle;
 pub mod queue;
 pub mod scheduling;
+mod wake;
 
 pub use core::EventLoop;
 pub use handle::EventLoopHandle;
