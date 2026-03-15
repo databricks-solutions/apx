@@ -297,6 +297,7 @@ pub fn classify(_py: Python<'_>, yielded: &Py<PyAny>, types: &CachedTypes) -> Aw
 // ---------------------------------------------------------------------------
 
 /// Outcome of driving a [`SchedulerTask`] until it suspends or completes.
+#[derive(Debug)]
 pub enum DriveResult {
     /// Task completed with a value.
     Completed(Py<PyAny>),
@@ -487,7 +488,7 @@ fn extract_future_result(py: Python<'_>, future: &Bound<'_, PyAny>) -> Result<Py
 /// Either completes the task (sending through `result_tx`), or creates a
 /// [`ResumeCallback`] and attaches it to the awaitable so the task is
 /// re-driven when the awaitable resolves.
-fn handle_drive_result(
+pub fn handle_drive_result(
     py: Python<'_>,
     mut task: SchedulerTask,
     drive_result: DriveResult,
@@ -596,50 +597,6 @@ fn make_resume_callback(
     )
 }
 
-// ---------------------------------------------------------------------------
-// spawn_and_drive — entry point for the scheduler
-// ---------------------------------------------------------------------------
-
-/// Create a [`SchedulerTask`] from a coroutine and drive it.
-///
-/// Synchronous: either completes immediately (for trivial coroutines) or
-/// suspends by attaching a [`ResumeCallback`] to the first awaitable.
-/// The final result is sent through `result_tx`.
-///
-/// Sets the task as `asyncio.current_task()` for the duration of driving
-/// so that Starlette/FastAPI middleware can create weak references to it.
-pub fn spawn_and_drive(
-    py: Python<'_>,
-    coro: Py<PyAny>,
-    result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
-    cached_types: &Arc<CachedTypes>,
-    call_soon: &Py<PyAny>,
-    ready_queue: &Arc<ReadyQueue>,
-) {
-    let mut task = match SchedulerTask::new(py, coro, result_tx) {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(error = %e, "scheduler task creation failed");
-            return;
-        }
-    };
-
-    // Set our task as asyncio's "current task" so Starlette/FastAPI
-    // middleware that calls asyncio.current_task() gets a valid object
-    // (needed for weakref support in ServerErrorMiddleware, etc.).
-    let task_ctx = set_current_task(py, &task);
-
-    let drive_result = drive_task(py, &mut task, cached_types, DEFAULT_STEP_BUDGET);
-    let proxy = task_ctx.as_ref().map(|(_, p)| p.clone_ref(py));
-    // Keep a reference for ownership check in clear_current_task.
-    let proxy_for_clear = proxy.as_ref().map(|p| p.clone_ref(py));
-    if let Err(e) = handle_drive_result(py, task, drive_result, call_soon, ready_queue, proxy) {
-        tracing::warn!(error = %e, "scheduler drive result handling failed");
-    }
-
-    clear_current_task(py, task_ctx.map(|(ct, _)| ct), proxy_for_clear.as_ref());
-}
-
 /// Install a [`TaskProxy`] as `asyncio.current_task()` for the running loop.
 ///
 /// Returns `(current_tasks_dict, proxy)` for cleanup and for storing in
@@ -733,6 +690,132 @@ fn clear_current_task(
         None => {
             let _ = ct.call_method1(py, c"pop", (&loop_obj, py.None()));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// spawn_and_drive — entry point for the scheduler
+// ---------------------------------------------------------------------------
+
+/// Create a [`SchedulerTask`] from a coroutine and drive it.
+///
+/// Synchronous: either completes immediately (for trivial coroutines) or
+/// suspends by attaching a [`ResumeCallback`] to the first awaitable.
+/// The final result is sent through `result_tx`.
+///
+/// Sets the task as `asyncio.current_task()` for the duration of driving
+/// so that Starlette/FastAPI middleware can create weak references to it.
+pub fn spawn_and_drive(
+    py: Python<'_>,
+    coro: Py<PyAny>,
+    result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
+    cached_types: &Arc<CachedTypes>,
+    call_soon: &Py<PyAny>,
+    ready_queue: &Arc<ReadyQueue>,
+) {
+    let mut task = match SchedulerTask::new(py, coro, result_tx) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "scheduler task creation failed");
+            return;
+        }
+    };
+
+    // Set our task as asyncio's "current task" so Starlette/FastAPI
+    // middleware that calls asyncio.current_task() gets a valid object
+    // (needed for weakref support in ServerErrorMiddleware, etc.).
+    let task_ctx = set_current_task(py, &task);
+
+    let drive_result = drive_task(py, &mut task, cached_types, DEFAULT_STEP_BUDGET);
+    let proxy = task_ctx.as_ref().map(|(_, p)| p.clone_ref(py));
+    // Keep a reference for ownership check in clear_current_task.
+    let proxy_for_clear = proxy.as_ref().map(|p| p.clone_ref(py));
+    if let Err(e) = handle_drive_result(py, task, drive_result, call_soon, ready_queue, proxy) {
+        tracing::warn!(error = %e, "scheduler drive result handling failed");
+    }
+
+    clear_current_task(py, task_ctx.map(|(ct, _)| ct), proxy_for_clear.as_ref());
+}
+
+// ---------------------------------------------------------------------------
+// first_drive — inline completion (test-only, kept for scheduler unit tests)
+// ---------------------------------------------------------------------------
+
+/// Outcome of driving a coroutine's first cycle on the driver thread.
+#[cfg(test)]
+#[derive(Debug)]
+#[expect(
+    dead_code,
+    reason = "fields used for pattern matching and Debug output in tests"
+)]
+pub enum FirstDriveOutcome {
+    /// Completed or errored inline — result already sent via `result_tx`.
+    Inline,
+    /// Suspended on an awaitable — event loop thread must attach continuation.
+    Suspended {
+        task: Box<SchedulerTask>,
+        proxy: Option<Py<TaskProxy>>,
+        drive_result: DriveResult,
+    },
+}
+
+/// Drive a coroutine's first cycle. Completes trivial coros inline;
+/// returns suspended state for the event loop to handle.
+#[cfg(test)]
+pub fn first_drive(
+    py: Python<'_>,
+    coro: Py<PyAny>,
+    result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
+    cached_types: &Arc<CachedTypes>,
+) -> FirstDriveOutcome {
+    let mut task = match SchedulerTask::new(py, coro, result_tx) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "first_drive: task creation failed");
+            return FirstDriveOutcome::Inline;
+        }
+    };
+    let task_ctx = set_current_task(py, &task);
+    let drive_result = drive_task(py, &mut task, cached_types, DEFAULT_STEP_BUDGET);
+    route_first_drive(py, task, task_ctx, drive_result)
+}
+
+/// Route the drive result: complete inline or return suspended state.
+#[cfg(test)]
+fn route_first_drive(
+    py: Python<'_>,
+    mut task: SchedulerTask,
+    task_ctx: Option<(Py<PyAny>, Py<TaskProxy>)>,
+    drive_result: DriveResult,
+) -> FirstDriveOutcome {
+    let proxy = task_ctx.as_ref().map(|(_, p)| p.clone_ref(py));
+    let proxy_for_clear = proxy.as_ref().map(|p| p.clone_ref(py));
+    let current_tasks = task_ctx.map(|(ct, _)| ct);
+
+    let outcome = match drive_result {
+        DriveResult::Completed(value) => {
+            complete_inline(&mut task, Ok(value));
+            FirstDriveOutcome::Inline
+        }
+        DriveResult::Error(err) => {
+            complete_inline(&mut task, Err(AppError::Internal(err.to_string())));
+            FirstDriveOutcome::Inline
+        }
+        result => FirstDriveOutcome::Suspended {
+            task: Box::new(task),
+            proxy,
+            drive_result: result,
+        },
+    };
+    clear_current_task(py, current_tasks, proxy_for_clear.as_ref());
+    outcome
+}
+
+/// Send result through the oneshot channel for inline completion.
+#[cfg(test)]
+fn complete_inline(task: &mut SchedulerTask, result: Result<Py<PyAny>, AppError>) {
+    if let Some(tx) = task.take_result_tx() {
+        let _ = tx.send(result);
     }
 }
 
@@ -926,28 +1009,19 @@ async def outer():
         });
     }
 
-    // -- spawn_and_drive tests -----------------------------------------------
-
-    /// Helper: create a dummy `call_soon` ref for tests where it won't
-    /// actually be called (trivial coroutines).
-    fn dummy_call_soon(py: Python<'_>) -> Py<PyAny> {
-        py.eval(c"lambda *a, **kw: None", None, None)
-            .unwrap()
-            .unbind()
-    }
+    // -- first_drive tests -----------------------------------------------
 
     #[test]
-    fn spawn_and_drive_trivial_coroutine() {
+    fn first_drive_trivial_coroutine() {
         crate::with_py(|py| {
             let types = Arc::new(CachedTypes::resolve(py).unwrap());
-            let call_soon = dummy_call_soon(py);
-            let ready_queue = Arc::new(ReadyQueue::new());
 
             py.run(c"async def _f(): return 42", None, None).unwrap();
             let coro = py.eval(c"_f()", None, None).unwrap().unbind();
 
             let (tx, mut rx) = oneshot::channel();
-            spawn_and_drive(py, coro, tx, &types, &call_soon, &ready_queue);
+            let outcome = first_drive(py, coro, tx, &types);
+            assert!(matches!(outcome, FirstDriveOutcome::Inline));
 
             let result = rx.try_recv().unwrap().unwrap();
             let num: i64 = result.extract(py).unwrap();
@@ -956,18 +1030,17 @@ async def outer():
     }
 
     #[test]
-    fn spawn_and_drive_coroutine_error() {
+    fn first_drive_coroutine_error() {
         crate::with_py(|py| {
             let types = Arc::new(CachedTypes::resolve(py).unwrap());
-            let call_soon = dummy_call_soon(py);
-            let ready_queue = Arc::new(ReadyQueue::new());
 
             py.run(c"async def _err(): raise ValueError('boom')", None, None)
                 .unwrap();
             let coro = py.eval(c"_err()", None, None).unwrap().unbind();
 
             let (tx, mut rx) = oneshot::channel();
-            spawn_and_drive(py, coro, tx, &types, &call_soon, &ready_queue);
+            let outcome = first_drive(py, coro, tx, &types);
+            assert!(matches!(outcome, FirstDriveOutcome::Inline));
 
             let result = rx.try_recv().unwrap();
             assert!(result.is_err());
@@ -976,6 +1049,43 @@ async def outer():
                 matches!(err, AppError::Internal(ref s) if s.contains("boom")),
                 "expected Internal('boom'), got {err:?}"
             );
+        });
+    }
+
+    #[test]
+    fn first_drive_suspended_coroutine() {
+        crate::with_py(|py| {
+            let types = Arc::new(CachedTypes::resolve(py).unwrap());
+
+            // Create a coroutine that suspends on an asyncio.Future.
+            let asyncio = py.import(c"asyncio").unwrap();
+            let loop_obj = asyncio.call_method0(c"new_event_loop").unwrap();
+            let events = py.import(c"asyncio.events").unwrap();
+            let _ = events.call_method1(c"_set_running_loop", (&loop_obj,));
+
+            py.run(
+                c"
+import asyncio
+async def _suspend():
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    await fut
+",
+                None,
+                None,
+            )
+            .unwrap();
+            let coro = py.eval(c"_suspend()", None, None).unwrap().unbind();
+
+            let (tx, _rx) = oneshot::channel();
+            let outcome = first_drive(py, coro, tx, &types);
+            assert!(
+                matches!(outcome, FirstDriveOutcome::Suspended { .. }),
+                "expected Suspended, got {outcome:?}"
+            );
+
+            let _ = events.call_method1(c"_set_running_loop", (py.None(),));
+            let _ = loop_obj.call_method0(c"close");
         });
     }
 
@@ -1001,10 +1111,8 @@ async def outer():
     fn test_contextvars_propagation() {
         crate::with_py(|py| {
             let types = Arc::new(CachedTypes::resolve(py).unwrap());
-            let call_soon = dummy_call_soon(py);
-            let ready_queue = Arc::new(ReadyQueue::new());
 
-            // Set a contextvar before spawn_and_drive, verify it's visible
+            // Set a contextvar before first_drive, verify it's visible
             // inside the coroutine.
             py.run(
                 c"
@@ -1022,7 +1130,8 @@ async def _check_ctx():
             let coro = py.eval(c"_check_ctx()", None, None).unwrap().unbind();
 
             let (tx, mut rx) = oneshot::channel();
-            spawn_and_drive(py, coro, tx, &types, &call_soon, &ready_queue);
+            let outcome = first_drive(py, coro, tx, &types);
+            assert!(matches!(outcome, FirstDriveOutcome::Inline));
 
             let result = rx.try_recv().unwrap().unwrap();
             let val: String = result.extract(py).unwrap();

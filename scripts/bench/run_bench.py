@@ -36,6 +36,7 @@ console = Console()
 class ServerType(str, Enum):
     UVICORN = "uvicorn"
     APX = "apx"
+    GRANIAN = "granian"
 
 
 class Scheduler(str, Enum):
@@ -69,6 +70,15 @@ class Environment(BaseModel):
                 "--host", "0.0.0.0", "--port", "8000",
                 "--workers", str(self.workers),
                 "--loop", "uvloop", "--http", "httptools",
+            ]
+        elif self.server == ServerType.GRANIAN:
+            loop = "uvloop" if self.scheduler == Scheduler.UVLOOP else "asyncio"
+            return [
+                "granian", "--interface", "asgi",
+                "--loop", loop,
+                "app.main:app",
+                "--host", "0.0.0.0", "--port", "8000",
+                "--workers", str(self.workers),
             ]
         return [
             "apx", "serve", "app.main",
@@ -187,6 +197,28 @@ ENV_APX_UVLOOP = Environment(
     description="APX + uvloop",
 )
 
+ENV_GRANIAN = Environment(
+    name="granian",
+    server=ServerType.GRANIAN,
+    scheduler=Scheduler.ASYNCIO,
+    workers=2,
+    dockerfile=DOCKER_DIR / "Dockerfile.granian",
+    context=BENCH_DIR,
+    image_tag="bench-granian",
+    description="Granian + ASGI interface",
+)
+
+ENV_GRANIAN_UVLOOP = Environment(
+    name="granian-uvloop",
+    server=ServerType.GRANIAN,
+    scheduler=Scheduler.UVLOOP,
+    workers=2,
+    dockerfile=DOCKER_DIR / "Dockerfile.granian",
+    context=BENCH_DIR,
+    image_tag="bench-granian",
+    description="Granian + ASGI + uvloop",
+)
+
 PROFILE_SCENARIOS = [
     Scenario(name="echo", method="GET", path="/api/echo"),
     Scenario(name="health", method="GET", path="/api/health"),
@@ -218,7 +250,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip-build", action="store_true", help="Skip docker build")
     p.add_argument(
         "--server",
-        choices=["uvicorn", "apx", "both"],
+        choices=["uvicorn", "apx", "granian", "both"],
         default="both",
         help="Which server to benchmark (for default and profile modes)",
     )
@@ -253,7 +285,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--compare",
         action="store_true",
-        help="Run 3-way comparison (uvicorn vs APX+asyncio vs APX+uvloop)",
+        help="Run 3-way comparison (uvicorn vs granian vs APX+asyncio)",
     )
     return p.parse_args()
 
@@ -1006,6 +1038,8 @@ def run_default(args: argparse.Namespace) -> None:
         envs = [ENV_UVICORN, ENV_APX_ASYNCIO]
     elif args.server == "uvicorn":
         envs = [ENV_UVICORN]
+    elif args.server == "granian":
+        envs = [ENV_GRANIAN]
     else:
         envs = [ENV_APX_ASYNCIO]
 
@@ -1031,8 +1065,8 @@ def run_default(args: argparse.Namespace) -> None:
 
 
 def run_compare(args: argparse.Namespace) -> None:
-    """Run 3-way comparison: uvicorn vs APX+asyncio vs APX+uvloop."""
-    envs = [ENV_UVICORN, ENV_APX_ASYNCIO, ENV_APX_UVLOOP]
+    """Run 3-way comparison: uvicorn vs granian vs APX (all uvloop)."""
+    envs = [ENV_UVICORN, ENV_GRANIAN_UVLOOP, ENV_APX_UVLOOP]
     scenarios = [Scenario(**s) for s in json.loads(args.scenarios.read_text())]
     run_dir, meta = setup_run(args, "compare", envs)
 

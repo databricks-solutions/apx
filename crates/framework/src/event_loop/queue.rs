@@ -1,18 +1,62 @@
-//! Lock-free queue drained by a single recurring callback on the event loop.
+//! Lock-free MPSC queue drained by a single recurring callback on the event loop.
 //!
-//! Two-stage pipeline: driver threads build scope dicts and push [`ReadyCoro`]s
-//! to a crossbeam channel. [`QueueDrainer`] runs on the event loop thread,
-//! consuming ready coroutines and driving them via the Rust scheduler.
+//! Replaces the per-request `call_soon_threadsafe` pattern with a batched
+//! drain: tokio threads push [`WorkItem`]s into an unbounded channel, and
+//! [`QueueDrainer`] processes them all in one Python frame.
 
 use std::fmt;
+use std::ops::Not;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pyo3::prelude::*;
+use tokio::sync::mpsc;
 
-use crate::driver_pool::ReadyCoroReceiver;
+use crate::error::AppError;
 use crate::scheduler::driver::{CachedTypes, spawn_and_drive};
 use crate::scheduler::queue::ReadyQueue;
+
+/// Closure that builds a Python coroutine on the event loop thread.
+pub type CoroutineBuilder = Box<dyn FnOnce(Python<'_>) -> Result<Py<PyAny>, AppError> + Send>;
+
+/// Fire-and-forget closure that runs on the event loop thread.
+pub type Callback = Box<dyn FnOnce(Python<'_>) + Send + 'static>;
+
+/// Work item pushed from tokio threads to the event loop thread.
+pub struct WorkItem {
+    /// Builds the coroutine on the event loop thread (deferred execution).
+    pub builder: CoroutineBuilder,
+    /// Oneshot sender for the coroutine result.
+    pub tx: tokio::sync::oneshot::Sender<Result<Py<PyAny>, AppError>>,
+}
+
+/// Item in the event loop work queue.
+///
+/// Supports both coroutine-building work items (with result channel) and
+/// fire-and-forget callbacks (no result channel).
+pub enum QueueItem {
+    /// Builds a coroutine, creates task, sends result via oneshot.
+    Work(WorkItem),
+    /// Runs on event loop thread, no result channel.
+    Callback(Callback),
+}
+
+impl fmt::Debug for QueueItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Work(w) => f.debug_tuple("Work").field(w).finish(),
+            Self::Callback(_) => f.debug_tuple("Callback").finish(),
+        }
+    }
+}
+
+impl fmt::Debug for WorkItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WorkItem")
+            .field("pending", &self.tx.is_closed().not())
+            .finish_non_exhaustive()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // SchedulerState — cached refs for Rust-driven scheduling
@@ -40,12 +84,11 @@ impl fmt::Debug for SchedulerState {
 /// Singleton drainer that runs on the event loop thread.
 ///
 /// Installed as a recurring callback via `loop.call_soon(drainer)`. When
-/// invoked, drains all pending [`ReadyCoro`]s from the stage-2 channel and
-/// drives coroutines through the Rust scheduler.
+/// invoked, drains all pending [`WorkItem`]s from the channel and drives
+/// coroutines through the Rust scheduler.
 #[pyclass(module = "apx._core")]
 pub struct QueueDrainer {
-    /// Stage-2 channel receiver (driver → event loop).
-    rx: ReadyCoroReceiver,
+    rx: mpsc::UnboundedReceiver<QueueItem>,
     /// Cached `loop.call_soon` bound method (local, not threadsafe).
     call_soon: Py<PyAny>,
     /// Python reference to `self` for `call_soon(self)` rescheduling.
@@ -76,7 +119,7 @@ impl fmt::Debug for QueueDrainer {
 impl QueueDrainer {
     /// Create a new drainer. `self_ref` must be set after `Py::new`.
     pub fn new(
-        rx: ReadyCoroReceiver,
+        rx: mpsc::UnboundedReceiver<QueueItem>,
         call_soon: Py<PyAny>,
         needs_wake: Arc<AtomicBool>,
         scheduler: SchedulerState,
@@ -123,21 +166,15 @@ impl QueueDrainer {
 }
 
 impl QueueDrainer {
-    /// Pop all pending ready coroutines, drive each, then drain ready tasks.
-    fn drain_pending(&self, py: Python<'_>) -> usize {
+    /// Pop all pending items, dispatch each, then drain ready tasks.
+    fn drain_pending(&mut self, py: Python<'_>) -> usize {
         let mut count = 0;
-        // Drain stage-2 channel: pre-built coroutines from driver threads.
-        while let Ok(ready) = self.rx.try_recv() {
+        while let Ok(item) = self.rx.try_recv() {
             count += 1;
-            let sched = &self.scheduler;
-            spawn_and_drive(
-                py,
-                ready.coro,
-                ready.tx,
-                &sched.cached_types,
-                &sched.call_soon,
-                &sched.ready_queue,
-            );
+            match item {
+                QueueItem::Work(work) => self.dispatch_item(py, work),
+                QueueItem::Callback(cb) => cb(py),
+            }
         }
         // Drain ready tasks (re-drives from suspended awaitable resolution).
         let sched = &self.scheduler;
@@ -150,8 +187,28 @@ impl QueueDrainer {
         count
     }
 
+    /// Dispatch one work item via the Rust scheduler.
+    fn dispatch_item(&self, py: Python<'_>, item: WorkItem) {
+        let sched = &self.scheduler;
+        let coro = match (item.builder)(py) {
+            Ok(coro) => coro,
+            Err(e) => {
+                let _ = item.tx.send(Err(e));
+                return;
+            }
+        };
+        spawn_and_drive(
+            py,
+            coro,
+            item.tx,
+            &sched.cached_types,
+            &sched.call_soon,
+            &sched.ready_queue,
+        );
+    }
+
     /// Set `needs_wake`, double-check for race, reschedule if items arrived.
-    fn transition_to_sleep(&self, py: Python<'_>) -> PyResult<()> {
+    fn transition_to_sleep(&mut self, py: Python<'_>) -> PyResult<()> {
         self.needs_wake.store(true, Ordering::Release);
         // Double-check: items may have arrived between drain_pending and
         // the store above. Release on store + Acquire on producer's swap
@@ -183,7 +240,6 @@ impl QueueDrainer {
 )]
 mod tests {
     use super::*;
-    use crate::driver_pool::{ReadyCoro, create_ready_coro_channel};
     use crate::scheduler::queue::ReadyQueue;
     use tokio::sync::oneshot;
 
@@ -202,9 +258,39 @@ mod tests {
     }
 
     #[test]
+    fn work_item_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<WorkItem>();
+    }
+
+    #[test]
+    fn work_item_debug_pending() {
+        let (tx, _rx) = oneshot::channel::<Result<Py<PyAny>, AppError>>();
+        let item = WorkItem {
+            builder: Box::new(|py| Ok(py.None())),
+            tx,
+        };
+        let dbg = format!("{item:?}");
+        assert!(dbg.contains("WorkItem"));
+        assert!(dbg.contains("pending: true"));
+    }
+
+    #[test]
+    fn work_item_debug_closed() {
+        let (tx, rx) = oneshot::channel::<Result<Py<PyAny>, AppError>>();
+        drop(rx);
+        let item = WorkItem {
+            builder: Box::new(|py| Ok(py.None())),
+            tx,
+        };
+        let dbg = format!("{item:?}");
+        assert!(dbg.contains("pending: false"));
+    }
+
+    #[test]
     fn queue_drainer_debug() {
         crate::with_py(|py| {
-            let (_tx, rx) = create_ready_coro_channel();
+            let (_tx, rx) = mpsc::unbounded_channel();
             let needs_wake = Arc::new(AtomicBool::new(false));
             let sched = test_scheduler_state(py);
             let drainer = QueueDrainer::new(rx, py.None(), needs_wake, sched);
@@ -217,10 +303,10 @@ mod tests {
     #[test]
     fn queue_drainer_drain_empty_sets_needs_wake() {
         crate::with_py(|py| {
-            let (_tx, rx) = create_ready_coro_channel();
+            let (_tx, rx) = mpsc::unbounded_channel();
             let needs_wake = Arc::new(AtomicBool::new(false));
             let sched = test_scheduler_state(py);
-            let drainer = QueueDrainer::new(rx, py.None(), needs_wake.clone(), sched);
+            let mut drainer = QueueDrainer::new(rx, py.None(), needs_wake.clone(), sched);
             let count = drainer.drain_pending(py);
             assert_eq!(count, 0);
             // Simulate transition_to_sleep (without reschedule since no self_ref)
@@ -230,27 +316,27 @@ mod tests {
     }
 
     #[test]
-    fn queue_drainer_processes_ready_coros() {
+    fn queue_drainer_processes_items() {
         crate::with_py(|py| {
-            let (tx_ch, rx) = create_ready_coro_channel();
+            let (tx_queue, rx) = mpsc::unbounded_channel();
             let needs_wake = Arc::new(AtomicBool::new(false));
             let sched = test_scheduler_state(py);
             let call_soon = sched.call_soon.clone_ref(py);
 
-            let drainer = QueueDrainer::new(rx, call_soon, needs_wake, sched);
+            let mut drainer = QueueDrainer::new(rx, call_soon, needs_wake, sched);
 
-            // Push a ready coro with a trivial coroutine
+            // Push a work item with a trivial coroutine builder
             let (result_tx, mut result_rx) = oneshot::channel();
             let code = std::ffi::CString::new("async def _t(): return 42\ncoro = _t()\n").unwrap();
             let locals = pyo3::types::PyDict::new(py);
             py.run(&code, None, Some(&locals)).unwrap();
             let coro: Py<PyAny> = locals.get_item("coro").unwrap().unwrap().unbind();
 
-            tx_ch
-                .send(ReadyCoro {
-                    coro,
+            tx_queue
+                .send(QueueItem::Work(WorkItem {
+                    builder: Box::new(move |_py| Ok(coro)),
                     tx: result_tx,
-                })
+                }))
                 .unwrap();
 
             let count = drainer.drain_pending(py);
@@ -263,53 +349,77 @@ mod tests {
     }
 
     #[test]
+    fn queue_drainer_processes_callbacks() {
+        crate::with_py(|py| {
+            let (tx_queue, rx) = mpsc::unbounded_channel();
+            let needs_wake = Arc::new(AtomicBool::new(false));
+            let sched = test_scheduler_state(py);
+            let mut drainer = QueueDrainer::new(rx, py.None(), needs_wake, sched);
+
+            let called = Arc::new(AtomicBool::new(false));
+            let called_clone = Arc::clone(&called);
+            tx_queue
+                .send(QueueItem::Callback(Box::new(move |_py| {
+                    called_clone.store(true, Ordering::Release);
+                })))
+                .unwrap();
+
+            let count = drainer.drain_pending(py);
+            assert_eq!(count, 1);
+            assert!(called.load(Ordering::Acquire));
+        });
+    }
+
+    #[test]
     fn queue_drainer_error_isolation() {
         crate::with_py(|py| {
-            let (tx_ch, rx) = create_ready_coro_channel();
+            let (tx_queue, rx) = mpsc::unbounded_channel();
             let needs_wake = Arc::new(AtomicBool::new(false));
             let sched = test_scheduler_state(py);
             let call_soon = sched.call_soon.clone_ref(py);
 
-            let drainer = QueueDrainer::new(rx, call_soon, needs_wake, sched);
+            let mut drainer = QueueDrainer::new(rx, call_soon, needs_wake, sched);
 
-            // Item 1: trivial coro that completes inline
+            // Item 1: failing builder
             let (tx1, mut rx1) = oneshot::channel();
-            let code =
-                std::ffi::CString::new("async def _t1(): return 42\ncoro1 = _t1()\n").unwrap();
-            let locals = pyo3::types::PyDict::new(py);
-            py.run(&code, None, Some(&locals)).unwrap();
-            let coro1: Py<PyAny> = locals.get_item("coro1").unwrap().unwrap().unbind();
-            tx_ch
-                .send(ReadyCoro {
-                    coro: coro1,
+            tx_queue
+                .send(QueueItem::Work(WorkItem {
+                    builder: Box::new(|_py| Err(AppError::Internal("builder failed".to_owned()))),
                     tx: tx1,
-                })
+                }))
                 .unwrap();
 
-            // Item 2: another trivial coro
+            // Item 2: succeeding builder (trivial coro completes inline)
             let (tx2, mut rx2) = oneshot::channel();
             let code =
                 std::ffi::CString::new("async def _t2(): return 99\ncoro2 = _t2()\n").unwrap();
             let locals = pyo3::types::PyDict::new(py);
             py.run(&code, None, Some(&locals)).unwrap();
             let coro2: Py<PyAny> = locals.get_item("coro2").unwrap().unwrap().unbind();
-            tx_ch
-                .send(ReadyCoro {
-                    coro: coro2,
+
+            tx_queue
+                .send(QueueItem::Work(WorkItem {
+                    builder: Box::new(move |_py| Ok(coro2)),
                     tx: tx2,
-                })
+                }))
                 .unwrap();
 
             let count = drainer.drain_pending(py);
             assert_eq!(count, 2);
 
-            let res1 = rx1.try_recv().unwrap().unwrap();
-            let val1: i64 = res1.extract(py).unwrap();
-            assert_eq!(val1, 42);
+            // First item should have received an error
+            let res1 = rx1.try_recv().unwrap();
+            assert!(res1.is_err());
+            let err = res1.unwrap_err();
+            assert!(
+                matches!(err, AppError::Internal(ref s) if s.contains("builder failed")),
+                "expected Internal with 'builder failed', got {err:?}"
+            );
 
+            // Second item completed inline via Rust scheduler
             let res2 = rx2.try_recv().unwrap().unwrap();
-            let val2: i64 = res2.extract(py).unwrap();
-            assert_eq!(val2, 99);
+            let val: i64 = res2.extract(py).unwrap();
+            assert_eq!(val, 99);
         });
     }
 
