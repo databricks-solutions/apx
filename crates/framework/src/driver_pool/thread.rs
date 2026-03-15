@@ -1,28 +1,26 @@
-//! Driver thread loop — the core execution unit of the driver pool.
+//! Driver thread loop — builds scope dicts and forwards ready coroutines.
 //!
 //! Each driver thread blocks with `py.detach(|| receiver.recv())`,
-//! releasing the GIL while idle. When a [`DriverItem`] arrives, the thread
-//! reacquires the GIL and drives the coroutine via `spawn_and_drive` or
-//! `resume_task`.
+//! releasing the GIL while idle. When a [`DriverItem::NewWork`] arrives,
+//! the thread reacquires the GIL, calls the builder to construct the
+//! coroutine, then pushes the ready coroutine to the event loop thread
+//! via the stage-2 channel. **No coroutine driving happens here.**
 
 use std::sync::Arc;
 
 use pyo3::prelude::*;
 
-use super::channel::{DriverItem, DriverReceiver, WorkItem};
-use crate::scheduler::driver::{CachedTypes, resume_task, spawn_and_drive};
-use crate::scheduler::queue::{ReadyQueue, ReadyTask};
+use super::channel::{DriverItem, DriverReceiver, ReadyCoro, ReadyCoroSender};
+use crate::event_loop::wake::WakeStrategy;
 
 /// Immutable state shared across all driver threads.
 pub struct SharedDriverState {
-    /// Pre-resolved Python type references.
-    pub cached_types: Arc<CachedTypes>,
     /// Python event loop reference (for `_set_running_loop`).
     pub event_loop_ref: Py<PyAny>,
-    /// `loop.call_soon_threadsafe` bound method.
-    pub call_soon_threadsafe: Py<PyAny>,
-    /// Shared ready queue.
-    pub ready_queue: Arc<ReadyQueue>,
+    /// Stage-2 channel sender (driver → event loop).
+    pub event_loop_sender: ReadyCoroSender,
+    /// Wake strategy for notifying the event loop after pushing a coro.
+    pub wake: Arc<WakeStrategy>,
     /// Tokio runtime handle (for scheduler primitives).
     pub tokio_handle: Option<tokio::runtime::Handle>,
 }
@@ -37,9 +35,9 @@ impl std::fmt::Debug for SharedDriverState {
 pub struct DriverConfig {
     /// Thread identifier (monotonically increasing).
     pub id: usize,
-    /// Receive side of the shared channel.
+    /// Receive side of the shared channel (stage 1).
     pub receiver: DriverReceiver,
-    /// Shared state (types, event loop ref, etc.).
+    /// Shared state (event loop ref, stage-2 sender, wake, etc.).
     pub shared: Arc<SharedDriverState>,
 }
 
@@ -54,7 +52,14 @@ impl std::fmt::Debug for DriverConfig {
 /// Run a driver thread's main loop.
 ///
 /// Attaches to the Python interpreter, sets up asyncio's running loop
-/// reference, and processes items from the channel until `Shutdown`.
+/// reference, and processes items from the stage-1 channel until `Shutdown`.
+///
+/// For each `NewWork` item:
+/// 1. Acquire GIL (via `py.detach` return)
+/// 2. Call builder to construct the Python coroutine (~2-5µs)
+/// 3. Push `ReadyCoro` to the stage-2 channel
+/// 4. Wake the event loop thread (pipe write or call_soon_threadsafe)
+/// 5. Release GIL and wait for next item
 pub fn run(config: DriverConfig) {
     Python::attach(|py| {
         setup_asyncio(py, &config.shared);
@@ -68,18 +73,23 @@ pub fn run(config: DriverConfig) {
             // Release GIL while waiting for work.
             let item = py.detach(|| config.receiver.recv());
             match item {
-                Ok(DriverItem::NewWork(work)) => drive_new(py, work, &config.shared),
-                Ok(DriverItem::Resume(ready)) => drive_resume(py, ready, &config.shared),
+                Ok(DriverItem::NewWork(work)) => {
+                    let coro = match (work.builder)(py) {
+                        Ok(coro) => coro,
+                        Err(e) => {
+                            let _ = work.tx.send(Err(e));
+                            continue;
+                        }
+                    };
+                    let ready = ReadyCoro { coro, tx: work.tx };
+                    let _ = config.shared.event_loop_sender.send(ready);
+                    config.shared.wake.wake();
+                }
                 Ok(DriverItem::Shutdown) | Err(_) => {
                     tracing::debug!(thread_id = config.id, "driver thread shutting down");
                     break;
                 }
             }
-            // Yield GIL so the event loop thread can process I/O callbacks.
-            // Without this, a continuous stream of channel items starves the
-            // event loop — asyncio.Futures never resolve and coroutines deadlock.
-            // Cost: one PyEval_SaveThread/RestoreThread cycle (~100-200ns).
-            py.detach(|| {});
         }
     });
 }
@@ -96,37 +106,5 @@ fn setup_asyncio(py: Python<'_>, shared: &SharedDriverState) {
     };
     if let Err(e) = events.call_method1(c"_set_running_loop", (&shared.event_loop_ref,)) {
         tracing::warn!(error = %e, "_set_running_loop failed");
-    }
-}
-
-/// Drive a new coroutine from a `WorkItem`.
-fn drive_new(py: Python<'_>, work: WorkItem, shared: &SharedDriverState) {
-    let coro = match (work.builder)(py) {
-        Ok(coro) => coro,
-        Err(e) => {
-            let _ = work.tx.send(Err(e));
-            return;
-        }
-    };
-    spawn_and_drive(
-        py,
-        coro,
-        work.tx,
-        &shared.cached_types,
-        &shared.call_soon_threadsafe,
-        &shared.ready_queue,
-    );
-}
-
-/// Drive a resumed task from a `ReadyTask`.
-fn drive_resume(py: Python<'_>, ready: ReadyTask, shared: &SharedDriverState) {
-    if let Err(e) = resume_task(
-        py,
-        ready,
-        &shared.cached_types,
-        &shared.call_soon_threadsafe,
-        &shared.ready_queue,
-    ) {
-        tracing::warn!(error = %e, "driver thread: resume failed");
     }
 }

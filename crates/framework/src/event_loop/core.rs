@@ -1,9 +1,8 @@
 //! Persistent asyncio event loop on a dedicated Python thread.
 //!
 //! One `EventLoop` per worker. The dedicated thread runs `run_forever()`,
-//! serving as a background I/O reactor (socket ops, DNS, asyncio.Future
-//! resolution). Coroutine driving is distributed across N driver threads
-//! in the [`DriverPool`].
+//! driving coroutines via the [`QueueDrainer`]. Driver threads only build
+//! scope dicts — all coroutine stepping happens on the event loop thread.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use pyo3::prelude::*;
 
 use super::handle::EventLoopHandle;
-use crate::driver_pool::{DriverPool, SharedDriverState};
+use super::queue::{QueueDrainer, SchedulerState};
+use super::wake::{WakeStrategy, create_wake_strategy};
+use crate::driver_pool::{DriverPool, SharedDriverState, create_ready_coro_channel};
 use crate::scheduler::driver::CachedTypes;
 use crate::scheduler::queue::ReadyQueue;
 
@@ -109,8 +110,8 @@ const DEFAULT_DRIVER_THREADS: usize = 1;
 /// Persistent asyncio event loop running on a dedicated OS thread.
 ///
 /// Created once per worker via [`EventLoop::start`]. The event loop thread
-/// runs `run_forever()` as a background I/O reactor. Coroutine driving is
-/// handled by the [`DriverPool`].
+/// runs `run_forever()` and drives coroutines via the [`QueueDrainer`].
+/// Driver threads only build scope dicts (stage 1).
 pub struct EventLoop {
     /// Reference to the Python asyncio event loop object.
     event_loop: Py<PyAny>,
@@ -118,7 +119,7 @@ pub struct EventLoop {
     thread: Option<std::thread::JoinHandle<()>>,
     /// Whether the loop is still running (guards `call_soon_threadsafe`).
     running: Arc<AtomicBool>,
-    /// Pool of driver threads for coroutine execution.
+    /// Pool of driver threads for scope construction.
     driver_pool: DriverPool,
 }
 
@@ -141,7 +142,8 @@ impl EventLoop {
     ///
     /// Returns an error if Python initialization or event loop creation fails.
     pub fn start(loop_policy: &str) -> Result<Self, String> {
-        let (startup_tx, startup_rx) = std::sync::mpsc::channel();
+        let (startup_tx, startup_rx) =
+            std::sync::mpsc::channel::<Result<(Py<PyAny>, DriverPool), String>>();
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = Arc::clone(&running);
 
@@ -159,7 +161,7 @@ impl EventLoop {
                     let result = Self::init_event_loop_thread(py, tokio_handle);
 
                     match result {
-                        Ok((event_loop, driver_pool)) => {
+                        Ok((event_loop, driver_pool, wake)) => {
                             let _ = startup_tx.send(Ok((event_loop.clone_ref(py), driver_pool)));
 
                             let loop_bound = event_loop.bind(py);
@@ -168,7 +170,7 @@ impl EventLoop {
                             }
                             running_clone.store(false, Ordering::Release);
 
-                            let _ = Self::close_loop(py, loop_bound);
+                            let _ = Self::close_loop(py, loop_bound, &wake);
                         }
                         Err(e) => {
                             let _ =
@@ -191,12 +193,12 @@ impl EventLoop {
         })
     }
 
-    /// Initialize the event loop, create the [`DriverPool`], and return
-    /// the event loop ref + pool.
+    /// Initialize the event loop, install the [`QueueDrainer`], create the
+    /// [`DriverPool`], and return (event loop, pool, wake strategy).
     fn init_event_loop_thread(
         py: Python<'_>,
         tokio_handle: Option<tokio::runtime::Handle>,
-    ) -> Result<(Py<PyAny>, DriverPool), String> {
+    ) -> Result<(Py<PyAny>, DriverPool, Arc<WakeStrategy>), String> {
         let event_loop = create_event_loop(py).map_err(|e| format!("create_event_loop: {e}"))?;
         let asyncio = py
             .import(c"asyncio")
@@ -215,35 +217,114 @@ impl EventLoop {
             }
         }
 
-        // Resolve cached types and create shared state.
+        // Resolve cached types and create ready queue.
         let cached_types =
             Arc::new(CachedTypes::resolve(py).map_err(|e| format!("CachedTypes::resolve: {e}"))?);
         let ready_queue = Arc::new(ReadyQueue::new());
 
-        // Resolve call_soon_threadsafe for driver threads.
-        let call_soon_threadsafe = event_loop
-            .getattr(c"call_soon_threadsafe")
-            .map_err(|e| format!("missing call_soon_threadsafe: {e}"))?
+        // Resolve LOCAL call_soon (event loop thread only — not threadsafe).
+        let call_soon = event_loop
+            .getattr(c"call_soon")
+            .map_err(|e| format!("missing call_soon: {e}"))?
             .unbind();
+
+        // Create stage-2 channel (driver → event loop).
+        let (ready_coro_tx, ready_coro_rx) = create_ready_coro_channel();
+
+        // Create scheduler state for the QueueDrainer.
+        let needs_wake = Arc::new(AtomicBool::new(false));
+        let scheduler = SchedulerState {
+            cached_types: Arc::clone(&cached_types),
+            call_soon: call_soon.clone_ref(py),
+            ready_queue: Arc::clone(&ready_queue),
+        };
+
+        // Create the QueueDrainer.
+        let drainer = QueueDrainer::new(
+            ready_coro_rx,
+            call_soon.clone_ref(py),
+            Arc::clone(&needs_wake),
+            scheduler,
+        );
+        let drainer_obj =
+            Py::new(py, drainer).map_err(|e| format!("QueueDrainer allocation: {e}"))?;
+
+        // Set self_ref for call_soon(self) rescheduling.
+        drainer_obj
+            .borrow_mut(py)
+            .set_self_ref(drainer_obj.clone_ref(py).into_any());
+
+        // Create wake strategy (pipe on Unix, GIL fallback on Windows).
+        let wake = create_wake_strategy(py, &event_loop, &drainer_obj.clone_ref(py).into_any())?;
+
+        // If using pipe wake, configure the drainer to drain pipe bytes.
+        #[cfg(unix)]
+        if let Some(read_fd) = wake.read_fd() {
+            let drain_fn = Self::create_pipe_drain_fn(py)?;
+            drainer_obj.borrow_mut(py).set_pipe_drain(drain_fn, read_fd);
+        }
+
+        // Set wake state on the ready queue so push() can reschedule
+        // the drainer when it is sleeping (for resumed tasks).
+        ready_queue.set_wake(
+            Arc::clone(&needs_wake),
+            call_soon,
+            drainer_obj.clone_ref(py).into_any(),
+        );
+
+        // Install initial callback so the drainer starts processing.
+        event_loop
+            .call_method1(c"call_soon", (&drainer_obj,))
+            .map_err(|e| format!("initial call_soon: {e}"))?;
 
         // Install the tokio handle for scheduler primitives.
         install_rust_scheduler(py, tokio_handle.clone())
             .map_err(|e| format!("scheduler install: {e}"))?;
 
-        // Create the driver pool.
+        // Create the driver pool with stage-2 sender + wake.
         let shared = SharedDriverState {
-            cached_types: Arc::clone(&cached_types),
             event_loop_ref: event_loop.clone().unbind(),
-            call_soon_threadsafe,
-            ready_queue: Arc::clone(&ready_queue),
+            event_loop_sender: ready_coro_tx,
+            wake: Arc::clone(&wake),
             tokio_handle,
         };
         let driver_pool = DriverPool::start(DEFAULT_DRIVER_THREADS, shared);
 
-        // Wire up the ready queue to send resumed tasks to the driver pool.
-        ready_queue.set_wake(driver_pool.sender());
+        Ok((event_loop.unbind(), driver_pool, wake))
+    }
 
-        Ok((event_loop.unbind(), driver_pool))
+    /// Create a Python callable that drains bytes from the wake pipe fd.
+    ///
+    /// ```python
+    /// def _drain_wake(fd):
+    ///     import os
+    ///     while True:
+    ///         try:
+    ///             if not os.read(fd, 64):
+    ///                 break
+    ///         except (BlockingIOError, OSError):
+    ///             break
+    /// ```
+    #[cfg(unix)]
+    fn create_pipe_drain_fn(py: Python<'_>) -> Result<Py<PyAny>, String> {
+        let code = c"
+def _drain_wake(fd):
+    import os
+    while True:
+        try:
+            if not os.read(fd, 64):
+                break
+        except (BlockingIOError, OSError):
+            break
+";
+        let locals = pyo3::types::PyDict::new(py);
+        py.run(code, None, Some(&locals))
+            .map_err(|e| format!("create drain fn: {e}"))?;
+        locals
+            .get_item("_drain_wake")
+            .map_err(|e| format!("get drain fn: {e}"))?
+            .ok_or_else(|| "drain fn not found".to_owned())
+            .map(|f| f.unbind())
     }
 
     /// Get a cloneable handle for submitting work to this event loop.
@@ -291,7 +372,7 @@ impl EventLoop {
             return;
         }
 
-        // Stop the driver pool first so in-flight coroutines drain.
+        // Stop the driver pool first so in-flight scope builds drain.
         self.driver_pool.stop();
 
         self.running.store(false, Ordering::Release);
@@ -323,7 +404,17 @@ impl EventLoop {
     /// 2. Shut down async generators.
     /// 3. Shut down the default executor.
     /// 4. Close the loop.
-    fn close_loop(py: Python<'_>, event_loop: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn close_loop(
+        py: Python<'_>,
+        event_loop: &Bound<'_, PyAny>,
+        #[allow(unused_variables)] wake: &WakeStrategy,
+    ) -> PyResult<()> {
+        // Deregister pipe fd from the selector before closing the loop.
+        #[cfg(unix)]
+        if let Some(read_fd) = wake.read_fd() {
+            let _ = event_loop.call_method1(c"remove_reader", (read_fd,));
+        }
+
         cancel_pending_tasks(py, event_loop);
 
         let shutdown_gens = event_loop.call_method0(c"shutdown_asyncgens")?;

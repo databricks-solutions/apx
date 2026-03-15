@@ -1,18 +1,21 @@
-//! Multi-worker driver pool for coroutine execution.
+//! Two-stage driver pool for coroutine scope construction.
 //!
-//! Replaces the single-thread [`QueueDrainer`] with N driver threads that
-//! consume work from a shared `crossbeam::channel`. Each thread acquires
-//! the GIL only when actively stepping a coroutine and releases it while
-//! blocking on the work channel via `py.detach(|| receiver.recv())`.
+//! **Stage 1**: N driver threads consume [`WorkItem`]s from a shared
+//! `crossbeam::channel`, acquire the GIL briefly to build scope dicts
+//! (Python coroutine objects), then push [`ReadyCoro`]s to stage 2.
 //!
-//! The asyncio event loop thread becomes a background I/O reactor only —
-//! `ResumeCallback` fires there when asyncio.Futures resolve, pushing
-//! tasks through the channel to driver threads.
+//! **Stage 2**: The event loop thread's [`QueueDrainer`](super::event_loop::queue::QueueDrainer)
+//! consumes ready coroutines and drives them via the Rust scheduler.
+//! This avoids GIL starvation — only the event loop thread steps coroutines.
 
 mod channel;
 mod pool;
 mod thread;
 
-pub use channel::{DriverSender, WorkItem};
+pub use channel::{DriverSender, ReadyCoroReceiver, WorkItem, create_ready_coro_channel};
+
+// Re-exported for test modules in other crates/modules.
+#[cfg(test)]
+pub use channel::ReadyCoro;
 pub use pool::DriverPool;
 pub use thread::SharedDriverState;
