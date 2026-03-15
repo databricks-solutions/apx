@@ -8,7 +8,7 @@
 
 use crate::transport::types::InboundRequest;
 use bytes::Bytes;
-use http::header::HeaderMap;
+use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyDictMethods, PyList, PyString, PyTuple};
 use std::borrow::Cow;
@@ -44,6 +44,8 @@ pub struct ScopeInterns {
     pub(crate) keys: ScopeKeys,
     /// Fixed values (type strings, version strings, empty root_path).
     pub(crate) vals: ScopeValues,
+    /// Cached `PyBytes` for common HTTP header names.
+    pub(crate) headers: HeaderInterns,
 }
 
 /// Fixed dict keys used in ASGI scope construction.
@@ -77,10 +79,59 @@ pub struct ScopeValues {
     pub(crate) asgi_dict: Py<PyDict>,
 }
 
+/// Common HTTP header names, ordered by frequency in typical HTTP/1.1 traffic.
+const COMMON_HEADERS: &[HeaderName] = &[
+    header::HOST,
+    header::CONTENT_TYPE,
+    header::CONTENT_LENGTH,
+    header::ACCEPT,
+    header::USER_AGENT,
+    header::ACCEPT_ENCODING,
+    header::ACCEPT_LANGUAGE,
+    header::CONNECTION,
+    header::CACHE_CONTROL,
+    header::COOKIE,
+    header::AUTHORIZATION,
+    header::TRANSFER_ENCODING,
+    header::CONTENT_ENCODING,
+    header::IF_NONE_MATCH,
+    header::IF_MODIFIED_SINCE,
+    header::ORIGIN,
+    header::REFERER,
+];
+
+/// Pre-built `PyBytes` for common HTTP header names.
+///
+/// `http::HeaderName` standard constants compare by pointer, so the
+/// lookup is a pointer match — not a string hash.
+pub struct HeaderInterns {
+    map: Vec<(HeaderName, Py<PyBytes>)>,
+}
+
+impl HeaderInterns {
+    /// Create cached `PyBytes` for common header names. Call once at worker startup.
+    pub fn new(py: Python<'_>) -> Self {
+        let map = COMMON_HEADERS
+            .iter()
+            .map(|h| (h.clone(), PyBytes::new(py, h.as_str().as_bytes()).unbind()))
+            .collect();
+        Self { map }
+    }
+
+    /// Look up a cached `PyBytes` for this header name.
+    /// Returns `None` for non-standard headers (fallback to `PyBytes::new`).
+    pub fn get<'py>(&self, py: Python<'py>, name: &HeaderName) -> Option<Bound<'py, PyBytes>> {
+        self.map
+            .iter()
+            .find(|(h, _)| h == name)
+            .map(|(_, cached)| cached.bind(py).clone())
+    }
+}
+
 impl ScopeInterns {
     /// Create all interned strings. Call once at worker startup with GIL held.
     pub(crate) fn new(py: Python<'_>) -> Self {
-        let s = |v: &str| PyString::new(py, v).unbind();
+        let s = |v: &str| PyString::intern(py, v).clone().unbind();
 
         // Pre-build the ASGI inner dict once instead of per-request.
         let asgi_dict = PyDict::new(py);
@@ -115,6 +166,7 @@ impl ScopeInterns {
                 root_path_empty: s(""),
                 asgi_dict: asgi_dict.unbind(),
             },
+            headers: HeaderInterns::new(py),
         }
     }
 }
@@ -637,36 +689,36 @@ fn parse_header_map(event: &Bound<'_, PyDict>) -> PyResult<HeaderMap> {
 }
 
 /// Build a `HeaderName` from a Python bytes-like object.
-fn header_name_from_py(obj: &Bound<'_, PyAny>) -> PyResult<http::HeaderName> {
+fn header_name_from_py(obj: &Bound<'_, PyAny>) -> PyResult<HeaderName> {
     let bytes = match obj.cast::<PyBytes>() {
         Ok(py_bytes) => py_bytes.as_bytes(),
         Err(_) => return header_name_from_extracted(obj),
     };
-    http::HeaderName::from_bytes(bytes)
+    HeaderName::from_bytes(bytes)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid header name: {e}")))
 }
 
 /// Fallback: extract bytes then parse header name.
-fn header_name_from_extracted(obj: &Bound<'_, PyAny>) -> PyResult<http::HeaderName> {
+fn header_name_from_extracted(obj: &Bound<'_, PyAny>) -> PyResult<HeaderName> {
     let bytes: Vec<u8> = obj.extract()?;
-    http::HeaderName::from_bytes(&bytes)
+    HeaderName::from_bytes(&bytes)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid header name: {e}")))
 }
 
 /// Build a `HeaderValue` from a Python bytes-like object.
-fn header_value_from_py(obj: &Bound<'_, PyAny>) -> PyResult<http::HeaderValue> {
+fn header_value_from_py(obj: &Bound<'_, PyAny>) -> PyResult<HeaderValue> {
     let bytes = match obj.cast::<PyBytes>() {
         Ok(py_bytes) => py_bytes.as_bytes(),
         Err(_) => return header_value_from_extracted(obj),
     };
-    http::HeaderValue::from_bytes(bytes)
+    HeaderValue::from_bytes(bytes)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid header value: {e}")))
 }
 
 /// Fallback: extract bytes then parse header value.
-fn header_value_from_extracted(obj: &Bound<'_, PyAny>) -> PyResult<http::HeaderValue> {
+fn header_value_from_extracted(obj: &Bound<'_, PyAny>) -> PyResult<HeaderValue> {
     let bytes: Vec<u8> = obj.extract()?;
-    http::HeaderValue::from_bytes(&bytes)
+    HeaderValue::from_bytes(&bytes)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid header value: {e}")))
 }
 
@@ -695,6 +747,34 @@ fn extract_bytes_field(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
 
 // ── build_http_scope ─────────────────────────────────────────────────────
 
+// CPython internal: create a dict pre-sized for `minused` keys.
+// Stable across CPython 3.8-3.13. Not exposed by pyo3-ffi (marked private),
+// so we declare it manually.
+#[expect(unsafe_code, reason = "CPython FFI declaration for dict pre-sizing")]
+unsafe extern "C" {
+    fn _PyDict_NewPresized(minused: pyo3::ffi::Py_ssize_t) -> *mut pyo3::ffi::PyObject;
+}
+
+/// Create a `PyDict` with pre-allocated capacity.
+///
+/// Avoids internal rehashing for dicts with a known number of keys.
+#[expect(unsafe_code, reason = "CPython FFI for dict pre-sizing")]
+fn new_presized_dict(py: Python<'_>, capacity: isize) -> Bound<'_, PyDict> {
+    let ptr = unsafe { _PyDict_NewPresized(capacity) };
+    if ptr.is_null() {
+        return PyDict::new(py);
+    }
+    unsafe { Bound::from_owned_ptr(py, ptr).cast_into_unchecked() }
+}
+
+/// Expected key count for HTTP scope dicts (type, asgi, http_version, method,
+/// path, raw_path, query_string, headers, server, client, scheme, root_path,
+/// state, path_params + optional app, router).
+const HTTP_SCOPE_KEY_COUNT: isize = 14;
+
+/// Expected key count for WebSocket scope dicts.
+const WS_SCOPE_KEY_COUNT: isize = 12;
+
 /// Construct an ASGI HTTP scope dict from an [`InboundRequest`].
 ///
 /// This is the bridge between the transport-neutral request abstraction
@@ -708,7 +788,7 @@ pub fn build_http_scope(
     fastapi_app: Option<&Py<PyAny>>,
     interns: &ScopeInterns,
 ) -> PyResult<Py<PyDict>> {
-    let dict = PyDict::new(py);
+    let dict = new_presized_dict(py, HTTP_SCOPE_KEY_COUNT);
     set_scope_metadata(py, &dict, interns)?;
     set_scope_request_fields(py, &dict, request, interns)?;
     set_scope_headers(py, &dict, request, interns)?;
@@ -734,7 +814,7 @@ pub fn build_ws_scope(
     request: &InboundRequest,
     interns: &ScopeInterns,
 ) -> PyResult<Py<PyDict>> {
-    let dict = PyDict::new(py);
+    let dict = new_presized_dict(py, WS_SCOPE_KEY_COUNT);
     set_ws_scope_metadata(py, &dict, interns)?;
     set_ws_scope_request_fields(py, &dict, request, interns)?;
     set_scope_headers(py, &dict, request, interns)?;
@@ -837,19 +917,26 @@ fn set_scope_request_fields(
 }
 
 /// Set ASGI headers as a list of `(bytes, bytes)` tuples.
+///
+/// Uses cached `PyBytes` for common header names (cache hit = zero allocation)
+/// and constructs the list from a presized `Vec` (zero list resizes).
 fn set_scope_headers(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
     request: &InboundRequest,
     interns: &ScopeInterns,
 ) -> PyResult<()> {
-    let headers_list = PyList::empty(py);
+    let mut pairs: Vec<Bound<'_, PyAny>> = Vec::with_capacity(request.headers.len());
     for (name, value) in &request.headers {
-        let n = PyBytes::new(py, name.as_str().as_bytes());
+        let n = interns
+            .headers
+            .get(py, name)
+            .unwrap_or_else(|| PyBytes::new(py, name.as_str().as_bytes()));
         let v = PyBytes::new(py, value.as_bytes());
         let pair = PyTuple::new(py, [n.into_any(), v.into_any()])?;
-        headers_list.append(pair)?;
+        pairs.push(pair.into_any());
     }
+    let headers_list = PyList::new(py, &pairs)?;
     dict.set_item(interns.keys.headers.bind(py), headers_list)?;
     Ok(())
 }

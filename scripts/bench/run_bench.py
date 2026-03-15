@@ -240,7 +240,7 @@ SWEEP_CONNECTIONS = [10, 50, 100, 200]
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="APX benchmark orchestrator")
     p.add_argument("--name", required=True, help="Run name (results stored under results/<name>/)")
-    p.add_argument("-d", "--duration", default="30s", help="Duration per scenario (oha -z)")
+    p.add_argument("-d", "--duration", default="10s", help="Duration per scenario (oha -z)")
     p.add_argument("-c", "--connections", type=int, default=100, help="Concurrent connections")
     p.add_argument("--cpus", default="2", help="CPU limit for containers")
     p.add_argument("--memory", default="4g", help="Memory limit for containers")
@@ -279,8 +279,8 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--profile-duration",
-        default="15s",
-        help="Duration for profiling load (default: 15s)",
+        default="10s",
+        help="Duration for profiling load (default: 10s)",
     )
     p.add_argument(
         "--compare",
@@ -1066,7 +1066,7 @@ def run_default(args: argparse.Namespace) -> None:
 
 def run_compare(args: argparse.Namespace) -> None:
     """Run 3-way comparison: uvicorn vs granian vs APX (all uvloop)."""
-    envs = [ENV_UVICORN, ENV_GRANIAN_UVLOOP, ENV_APX_UVLOOP]
+    envs = [ENV_UVICORN, ENV_GRANIAN_UVLOOP, ENV_APX_ASYNCIO]
     scenarios = [Scenario(**s) for s in json.loads(args.scenarios.read_text())]
     run_dir, meta = setup_run(args, "compare", envs)
 
