@@ -39,6 +39,7 @@ tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "sync", "pr
 tokio-stream = "0.1.17"
 futures-core = "0.3.31"
 futures-util = "0.3.31"
+crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
 rmcp = { version = "0.15", features = ["server", "transport-io", "schemars"] }
 

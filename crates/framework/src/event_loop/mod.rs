@@ -1,8 +1,8 @@
 //! Persistent asyncio event loop for event-loop-driven ASGI dispatch.
 //!
 //! One persistent event loop per worker, running `run_forever()` on a
-//! dedicated Python thread. Handler coroutines are submitted via
-//! `call_soon_threadsafe` and driven natively by asyncio.
+//! dedicated Python thread as a background I/O reactor. Coroutine driving
+//! is handled by the [`crate::driver_pool::DriverPool`].
 //!
 //! This fixes correctness issues with per-request event loops:
 //! - `BackgroundTasks` persist after handler returns
@@ -11,9 +11,7 @@
 
 pub mod core;
 pub mod handle;
-pub mod queue;
 pub mod scheduling;
-mod wake;
 
 pub use core::EventLoop;
 pub use handle::EventLoopHandle;

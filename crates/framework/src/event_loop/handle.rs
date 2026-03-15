@@ -1,35 +1,29 @@
 //! Cloneable handle for submitting coroutines to the persistent event loop.
 //!
 //! [`EventLoopHandle`] is the main interface used by dispatch code. It's
-//! cheaply cloneable (`Arc`-backed) and safe to use from any Tokio task.
+//! cheaply cloneable and safe to use from any Tokio task.
 //!
-//! The hot path (`schedule_deferred`) pushes work items to an MPSC queue
-//! with zero GIL acquisition. The event loop thread's [`QueueDrainer`]
-//! processes them in batch.
+//! The hot path (`schedule_deferred`) pushes work items to a crossbeam
+//! channel with zero GIL acquisition. Driver threads consume items and
+//! drive coroutines concurrently.
 
-use super::queue::{QueueItem, WorkItem};
-use super::wake::WakeStrategy;
+use crate::driver_pool::{DriverSender, WorkItem};
 use crate::error::AppError;
 use pyo3::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 /// Cloneable handle to the persistent asyncio event loop.
 ///
-/// Hot-path scheduling goes through the lock-free MPSC queue — no GIL,
-/// no Python object allocation. Wake uses pipe on Unix (GIL-free) or
-/// `call_soon_threadsafe` fallback on Windows.
+/// Hot-path scheduling goes through the crossbeam channel — no GIL,
+/// no Python object allocation. Driver threads consume items and
+/// drive coroutines concurrently via `spawn_and_drive` / `resume_task`.
 pub struct EventLoopHandle {
     /// Python event loop reference (diagnostics/tests).
     event_loop: Py<PyAny>,
-    /// Wake strategy (pipe on Unix, GIL fallback on Windows).
-    wake: Arc<WakeStrategy>,
-    /// Producer side of the work queue (lock-free push).
-    queue_tx: mpsc::UnboundedSender<QueueItem>,
-    /// Shared flag: `true` means drainer is sleeping and needs a wake.
-    needs_wake: Arc<AtomicBool>,
+    /// Sender side of the driver channel.
+    driver_sender: DriverSender,
     /// Whether the event loop is still running.
     running: Arc<AtomicBool>,
 }
@@ -38,35 +32,29 @@ impl Clone for EventLoopHandle {
     fn clone(&self) -> Self {
         Python::attach(|py| Self {
             event_loop: self.event_loop.clone_ref(py),
-            wake: Arc::clone(&self.wake),
-            queue_tx: self.queue_tx.clone(),
-            needs_wake: Arc::clone(&self.needs_wake),
+            driver_sender: self.driver_sender.clone(),
             running: Arc::clone(&self.running),
         })
     }
 }
 
 impl EventLoopHandle {
-    /// Create a new handle with queue and wake infrastructure.
+    /// Create a new handle with driver channel infrastructure.
     pub(crate) fn new(
         event_loop: Py<PyAny>,
         running: Arc<AtomicBool>,
-        queue_tx: mpsc::UnboundedSender<QueueItem>,
-        needs_wake: Arc<AtomicBool>,
-        wake: Arc<WakeStrategy>,
+        driver_sender: DriverSender,
     ) -> Self {
         Self {
             event_loop,
-            wake,
-            queue_tx,
-            needs_wake,
+            driver_sender,
             running,
         }
     }
 
     /// Submit a Python coroutine to the running event loop.
     ///
-    /// The coroutine runs on the event loop thread with full asyncio context
+    /// The coroutine runs on a driver thread with full asyncio context
     /// (BackgroundTasks, contextvars, get_running_loop).
     ///
     /// # Errors
@@ -85,11 +73,10 @@ impl EventLoopHandle {
         result
     }
 
-    /// Defer all Python work to the event loop thread via the MPSC queue.
+    /// Defer all Python work to driver threads via the crossbeam channel.
     ///
     /// Hot path: no GIL acquisition. The builder closure is boxed and pushed
-    /// to the queue. If the drainer is sleeping, a single
-    /// `call_soon_threadsafe` wakes it.
+    /// to the channel. A driver thread picks it up and drives the coroutine.
     ///
     /// # Errors
     ///
@@ -109,13 +96,13 @@ impl EventLoopHandle {
         let t_push = trace.then(std::time::Instant::now);
 
         let (tx, rx) = oneshot::channel();
-        let item = QueueItem::Work(WorkItem {
+        let item = WorkItem {
             builder: Box::new(f),
             tx,
-        });
+        };
 
-        self.queue_tx
-            .send(item)
+        self.driver_sender
+            .send_work(item)
             .map_err(|_| AppError::Internal("work queue closed".to_owned()))?;
 
         if let Some(t_push) = t_push {
@@ -126,23 +113,7 @@ impl EventLoopHandle {
             );
         }
 
-        self.wake_if_sleeping();
-
         Ok(rx)
-    }
-
-    /// Wake the drainer if it's sleeping (idle→active transition).
-    ///
-    /// Uses `swap(false, AcqRel)` — the Acquire synchronizes with the
-    /// drainer's Release store, ensuring our queue push is visible.
-    ///
-    /// Pipe: pure Rust write, no GIL. Gil fallback: acquires GIL.
-    fn wake_if_sleeping(&self) {
-        let was_sleeping = self.needs_wake.swap(false, Ordering::AcqRel);
-        if !was_sleeping {
-            return;
-        }
-        self.wake.wake();
     }
 
     /// Get a reference to the event loop Python object (for tests/diagnostics).
@@ -264,6 +235,52 @@ mod tests {
 
         let result = handle.drive_coroutine(coro).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn drive_concurrent_async_coroutines() {
+        // Schedule N coroutines that REQUIRE event loop I/O (asyncio.sleep).
+        // Without GIL yielding, these deadlock — the event loop can't resolve
+        // the sleep futures because the driver thread holds the GIL.
+        crate::with_py(|_py| {});
+
+        let mut event_loop = EventLoop::start("asyncio").unwrap();
+        let handle = event_loop.handle();
+
+        let n = 50;
+        let mut handles = Vec::with_capacity(n);
+        for _ in 0..n {
+            let h = handle.clone();
+            handles.push(tokio::spawn(async move {
+                let coro = Python::attach(|py| {
+                    let code = std::ffi::CString::new(
+                        "async def _t():\n    import asyncio\n    await asyncio.sleep(0)\n    return 'ok'\ncoro = _t()\n",
+                    )
+                    .unwrap();
+                    let locals = PyDict::new(py);
+                    py.run(&code, None, Some(&locals)).unwrap();
+                    locals.get_item("coro").unwrap().unwrap().unbind()
+                });
+                // Timeout: if GIL starvation occurs, this hangs forever.
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    h.drive_coroutine(coro),
+                )
+                .await
+                .unwrap() // timeout → GIL starvation
+                .unwrap()
+            }));
+        }
+
+        for jh in handles {
+            let result = jh.await.unwrap();
+            Python::attach(|py| {
+                let val: String = result.extract(py).unwrap();
+                assert_eq!(val, "ok");
+            });
+        }
+
+        event_loop.stop();
     }
 
     #[test]

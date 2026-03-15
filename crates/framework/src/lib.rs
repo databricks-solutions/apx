@@ -20,6 +20,7 @@ pub mod telemetry;
 pub(crate) mod app_loader;
 pub(crate) mod bridge;
 pub(crate) mod dispatch;
+pub(crate) mod driver_pool;
 pub(crate) mod event_loop;
 pub mod ipc;
 pub(crate) mod scheduler;

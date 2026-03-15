@@ -39,6 +39,7 @@ sysinfo.workspace = true
 which.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
+crossbeam-channel.workspace = true
 crossbeam-queue.workspace = true
 tokio-stream.workspace = true
 hyper = { version = "1", features = ["http1", "http2", "server"] }

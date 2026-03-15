@@ -301,6 +301,7 @@ dependencies = [
  "apx-common",
  "apx-core",
  "bytes",
+ "crossbeam-channel",
  "crossbeam-queue",
  "futures-core",
  "futures-util",
