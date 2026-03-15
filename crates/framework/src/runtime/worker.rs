@@ -81,8 +81,8 @@ pub async fn init_worker(
     Python::initialize();
 
     // Start a persistent asyncio event loop on a dedicated thread.
-    let py_event_loop =
-        EventLoop::start().map_err(|e| WorkerError::PythonInit(format!("event loop: {e}")))?;
+    let py_event_loop = EventLoop::start(&bootstrap.loop_policy)
+        .map_err(|e| WorkerError::PythonInit(format!("event loop: {e}")))?;
 
     Ok(WorkerRuntime {
         listener,

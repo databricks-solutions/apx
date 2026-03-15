@@ -91,17 +91,6 @@ RUN --mount=type=cache,target=/root/.cache/sccache \
     --mount=type=cache,target=/root/.cargo/git \
     maturin build --release --out /build/dist/
 
-# ── Build manifest ────────────────────────────────────────────────
-RUN uv pip install --system /build/dist/apx-*.whl fastapi
-
-COPY scripts/bench/app/ /build/bench_app/app/
-WORKDIR /build/bench_app
-
-ARG APX_ENFORCE_ASGI=
-RUN APX_ENFORCE_ASGI=$APX_ENFORCE_ASGI python -c "\
-import sys; sys.argv = ['_manifest', 'app.main']; \
-import apx._manifest; apx._manifest.main()" > /build/manifest.json
-
 # ── Stage 3: Runtime ──────────────────────────────────────────────
 FROM python:3.11-slim
 
@@ -112,7 +101,6 @@ RUN uv pip install --system /tmp/apx-*.whl fastapi uvloop py-spy \
     && rm -f /tmp/apx-*.whl
 
 WORKDIR /app
-COPY --from=builder /build/manifest.json ./manifest.json
 COPY scripts/bench/app/ ./app/
 
 EXPOSE 8000
@@ -122,4 +110,4 @@ EXPOSE 8000
 # defaults to the host's CPU count, creating unnecessary contention.
 ENV TOKIO_WORKER_THREADS=2
 
-CMD ["apx", "serve", "manifest.json", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+CMD ["apx", "serve", "app.main", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

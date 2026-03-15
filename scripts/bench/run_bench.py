@@ -43,18 +43,12 @@ class Scheduler(str, Enum):
     UVLOOP = "uvloop"
 
 
-class Dispatch(str, Enum):
-    ASGI = "asgi"
-    NATIVE = "native"
-
-
 class Environment(BaseModel):
     """A server configuration to benchmark."""
 
     name: str
     server: ServerType
     scheduler: Scheduler
-    dispatch: Dispatch
     workers: int = 2
 
     # Build config.
@@ -77,7 +71,7 @@ class Environment(BaseModel):
                 "--loop", "uvloop", "--http", "httptools",
             ]
         return [
-            "apx", "serve", "manifest.json",
+            "apx", "serve", "app.main",
             "--host", "0.0.0.0", "--port", "8000",
             "--workers", str(self.workers),
         ]
@@ -163,7 +157,6 @@ ENV_UVICORN = Environment(
     name="uvicorn",
     server=ServerType.UVICORN,
     scheduler=Scheduler.UVLOOP,
-    dispatch=Dispatch.ASGI,
     workers=2,
     dockerfile=DOCKER_DIR / "Dockerfile.uvicorn",
     context=BENCH_DIR,
@@ -171,43 +164,27 @@ ENV_UVICORN = Environment(
     description="Uvicorn + uvloop + httptools",
 )
 
-ENV_APX = Environment(
-    name="apx",
+ENV_APX_ASYNCIO = Environment(
+    name="apx-asyncio",
     server=ServerType.APX,
     scheduler=Scheduler.ASYNCIO,
-    dispatch=Dispatch.NATIVE,
     workers=2,
     dockerfile=DOCKER_DIR / "Dockerfile.apx",
     context=PROJECT_ROOT,
     image_tag="bench-apx",
-    description="APX native dispatch, asyncio",
+    description="APX + asyncio",
 )
 
-ENV_APX_ASGI_ASYNCIO = Environment(
-    name="apx-asgi-asyncio",
-    server=ServerType.APX,
-    scheduler=Scheduler.ASYNCIO,
-    dispatch=Dispatch.ASGI,
-    workers=2,
-    dockerfile=DOCKER_DIR / "Dockerfile.apx",
-    context=PROJECT_ROOT,
-    build_args={"APX_ENFORCE_ASGI": "true"},
-    image_tag="bench-apx-asgi",
-    description="APX ASGI bridge, asyncio",
-)
-
-ENV_APX_ASGI_UVLOOP = Environment(
-    name="apx-asgi-uvloop",
+ENV_APX_UVLOOP = Environment(
+    name="apx-uvloop",
     server=ServerType.APX,
     scheduler=Scheduler.UVLOOP,
-    dispatch=Dispatch.ASGI,
     workers=2,
     dockerfile=DOCKER_DIR / "Dockerfile.apx",
     context=PROJECT_ROOT,
-    build_args={"APX_ENFORCE_ASGI": "true"},
     runtime_env={"APX_SCHEDULER": "uvloop"},
-    image_tag="bench-apx-asgi",
-    description="APX ASGI bridge, uvloop",
+    image_tag="bench-apx",
+    description="APX + uvloop",
 )
 
 PROFILE_SCENARIOS = [
@@ -243,7 +220,7 @@ def parse_args() -> argparse.Namespace:
         "--server",
         choices=["uvicorn", "apx", "both"],
         default="both",
-        help="Which server to benchmark (for default and profile-asgi modes)",
+        help="Which server to benchmark (for default and profile modes)",
     )
     p.add_argument("--no-report", action="store_true", help="Skip report generation")
     p.add_argument(
@@ -264,19 +241,19 @@ def parse_args() -> argparse.Namespace:
         help="Run sweep mode: echo scenario across worker/thread/connection matrix",
     )
     p.add_argument(
-        "--profile-asgi",
+        "--profile",
         action="store_true",
-        help="Run ASGI profiling: measures Python-level per-request timing",
+        help="Run profiling: measures Python-level per-request timing",
     )
     p.add_argument(
-        "--profile-asgi-duration",
+        "--profile-duration",
         default="15s",
-        help="Duration for ASGI profiling load (default: 15s)",
+        help="Duration for profiling load (default: 15s)",
     )
     p.add_argument(
-        "--compare-asgi",
+        "--compare",
         action="store_true",
-        help="Run 3-way ASGI comparison (uvicorn vs APX+asyncio vs APX+uvloop)",
+        help="Run 3-way comparison (uvicorn vs APX+asyncio vs APX+uvloop)",
     )
     return p.parse_args()
 
@@ -325,7 +302,7 @@ def setup_run(
         commit_hash=commit_hash,
         commit_message=commit_message,
         duration=args.duration,
-        profiling_duration=args.profile_asgi_duration,
+        profiling_duration=args.profile_duration,
         connections=args.connections,
         warmup_requests=args.warmup,
         container_limits={"cpus": args.cpus, "memory": args.memory},
@@ -614,7 +591,7 @@ def run_profiling_pass(
         for scenario in PROFILE_SCENARIOS:
             console.print(f"  [cyan]Profiling:[/] {scenario.name}")
             run_oha(
-                scenario, args.port, args.profile_asgi_duration,
+                scenario, args.port, args.profile_duration,
                 args.connections, profile_dir / f"_oha_{env.name}_{scenario.name}.json",
             )
 
@@ -1026,11 +1003,11 @@ def _with_tokio_threads(env: Environment, threads: int) -> Environment:
 def run_default(args: argparse.Namespace) -> None:
     """Run standard benchmark: throughput for selected servers."""
     if args.server == "both":
-        envs = [ENV_UVICORN, ENV_APX]
+        envs = [ENV_UVICORN, ENV_APX_ASYNCIO]
     elif args.server == "uvicorn":
         envs = [ENV_UVICORN]
     else:
-        envs = [ENV_APX]
+        envs = [ENV_APX_ASYNCIO]
 
     if args.tokio_threads is not None:
         envs = [_with_tokio_threads(e, args.tokio_threads) for e in envs]
@@ -1049,15 +1026,15 @@ def run_default(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mode: --compare-asgi
+# Mode: --compare
 # ---------------------------------------------------------------------------
 
 
-def run_compare_asgi(args: argparse.Namespace) -> None:
-    """Run 3-way ASGI comparison: uvicorn vs APX+asyncio vs APX+uvloop."""
-    envs = [ENV_UVICORN, ENV_APX_ASGI_ASYNCIO, ENV_APX_ASGI_UVLOOP]
+def run_compare(args: argparse.Namespace) -> None:
+    """Run 3-way comparison: uvicorn vs APX+asyncio vs APX+uvloop."""
+    envs = [ENV_UVICORN, ENV_APX_ASYNCIO, ENV_APX_UVLOOP]
     scenarios = [Scenario(**s) for s in json.loads(args.scenarios.read_text())]
-    run_dir, meta = setup_run(args, "compare-asgi", envs)
+    run_dir, meta = setup_run(args, "compare", envs)
 
     if not args.skip_build:
         build_images(envs)
@@ -1071,23 +1048,23 @@ def run_compare_asgi(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mode: --profile-asgi
+# Mode: --profile
 # ---------------------------------------------------------------------------
 
 
-def run_profile_asgi(args: argparse.Namespace) -> None:
-    """Run ASGI profiling for selected servers."""
+def run_profile(args: argparse.Namespace) -> None:
+    """Run profiling for selected servers."""
     if args.server == "both":
-        envs = [ENV_UVICORN, ENV_APX]
+        envs = [ENV_UVICORN, ENV_APX_ASYNCIO]
     elif args.server == "uvicorn":
         envs = [ENV_UVICORN]
     else:
-        envs = [ENV_APX]
+        envs = [ENV_APX_ASYNCIO]
 
     if args.tokio_threads is not None:
         envs = [_with_tokio_threads(e, args.tokio_threads) for e in envs]
 
-    run_dir, meta = setup_run(args, "profile-asgi", envs)
+    run_dir, meta = setup_run(args, "profile", envs)
 
     if not args.skip_build:
         build_images(envs)
@@ -1113,7 +1090,7 @@ def run_sweep(args: argparse.Namespace) -> None:
     # Generate environments from the sweep matrix.
     envs: list[Environment] = []
     for server_name in server_names:
-        base = ENV_APX if server_name == "apx" else ENV_UVICORN
+        base = ENV_APX_ASYNCIO if server_name == "apx" else ENV_UVICORN
         thread_values: list[int | None] = (
             SWEEP_TOKIO_THREADS if server_name == "apx" else [None]
         )
@@ -1184,10 +1161,10 @@ def main() -> None:
     args = parse_args()
     check_prerequisites()
 
-    if args.compare_asgi:
-        run_compare_asgi(args)
-    elif args.profile_asgi:
-        run_profile_asgi(args)
+    if args.compare:
+        run_compare(args)
+    elif args.profile:
+        run_profile(args)
     elif args.sweep:
         run_sweep(args)
     else:

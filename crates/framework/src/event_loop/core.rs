@@ -15,6 +15,37 @@ use super::queue::{QueueDrainer, QueueItem, SchedulerState};
 use crate::scheduler::driver::CachedTypes;
 use crate::scheduler::queue::ReadyQueue;
 
+/// Install the event loop policy (uvloop or asyncio) before creating the loop.
+///
+/// Must be called before `asyncio.new_event_loop()` so the factory picks up
+/// the right policy.
+fn install_loop_policy(py: Python<'_>, policy: &str) {
+    if policy == "uvloop" {
+        match py.import(c"uvloop") {
+            Ok(uvloop) => {
+                let Ok(asyncio) = py.import(c"asyncio") else {
+                    tracing::error!("failed to import asyncio for uvloop policy install");
+                    return;
+                };
+                let Ok(policy_obj) = uvloop.call_method0(c"EventLoopPolicy") else {
+                    tracing::error!("uvloop.EventLoopPolicy() call failed");
+                    return;
+                };
+                if let Err(e) = asyncio.call_method1(c"set_event_loop_policy", (policy_obj,)) {
+                    tracing::error!(error = %e, "asyncio.set_event_loop_policy() failed");
+                    return;
+                }
+                tracing::info!("installed uvloop event loop policy");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "uvloop not available, falling back to asyncio");
+            }
+        }
+    } else {
+        tracing::info!(policy, "using asyncio event loop policy");
+    }
+}
+
 /// Create an asyncio event loop as the I/O reactor (socket ops, DNS).
 ///
 /// The Rust scheduler drives all coroutine scheduling; asyncio only
@@ -103,13 +134,13 @@ impl std::fmt::Debug for EventLoop {
 impl EventLoop {
     /// Start a persistent event loop with the Rust scheduler.
     ///
-    /// Returns the `EventLoop` with the loop running `run_forever()`.
-    /// The caller must call [`stop`] before dropping to cleanly shut down.
+    /// `loop_policy` is `"uvloop"` or `"asyncio"`. When `"uvloop"`, the uvloop
+    /// event loop policy is installed before creating the asyncio loop.
     ///
     /// # Errors
     ///
     /// Returns an error if Python initialization or event loop creation fails.
-    pub fn start() -> Result<Self, String> {
+    pub fn start(loop_policy: &str) -> Result<Self, String> {
         let (startup_tx, startup_rx) = std::sync::mpsc::channel();
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = Arc::clone(&running);
@@ -122,10 +153,14 @@ impl EventLoop {
         // Capture the tokio runtime handle for scheduler primitives.
         let tokio_handle = tokio::runtime::Handle::try_current().ok();
 
+        let loop_policy_owned = loop_policy.to_owned();
         let thread = std::thread::Builder::new()
             .name("apx-asyncio".to_owned())
             .spawn(move || {
                 Python::attach(|py| {
+                    // Install loop policy before creating the event loop.
+                    install_loop_policy(py, &loop_policy_owned);
+
                     let result =
                         Self::init_event_loop_thread(py, queue_rx, needs_wake_clone, tokio_handle);
 
@@ -349,7 +384,7 @@ mod tests {
         // Initialize Python if needed (test helper).
         crate::with_py(|_py| {});
 
-        let mut event_loop = EventLoop::start().unwrap();
+        let mut event_loop = EventLoop::start("asyncio").unwrap();
         assert!(event_loop.running.load(Ordering::Acquire));
 
         let handle = event_loop.handle().unwrap();
@@ -366,7 +401,7 @@ mod tests {
     fn double_stop_is_safe() {
         crate::with_py(|_py| {});
 
-        let mut event_loop = EventLoop::start().unwrap();
+        let mut event_loop = EventLoop::start("asyncio").unwrap();
         event_loop.stop();
         event_loop.stop(); // Should not panic.
     }

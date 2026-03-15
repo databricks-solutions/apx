@@ -186,7 +186,7 @@ mod tests {
     async fn drive_trivial_coroutine() {
         crate::with_py(|_py| {});
 
-        let mut event_loop = EventLoop::start().unwrap();
+        let mut event_loop = EventLoop::start("asyncio").unwrap();
         let handle = event_loop.handle().unwrap();
 
         // Create a trivial coroutine: `async def _t(): return 42`
@@ -211,7 +211,7 @@ mod tests {
     async fn drive_coroutine_with_await() {
         crate::with_py(|_py| {});
 
-        let mut event_loop = EventLoop::start().unwrap();
+        let mut event_loop = EventLoop::start("asyncio").unwrap();
         let handle = event_loop.handle().unwrap();
 
         // Coroutine that uses asyncio.sleep (requires running event loop).
@@ -238,7 +238,7 @@ mod tests {
     async fn drive_coroutine_exception() {
         crate::with_py(|_py| {});
 
-        let mut event_loop = EventLoop::start().unwrap();
+        let mut event_loop = EventLoop::start("asyncio").unwrap();
         let handle = event_loop.handle().unwrap();
 
         let coro = Python::attach(|py| {
@@ -263,7 +263,7 @@ mod tests {
     async fn drive_after_stop_fails() {
         crate::with_py(|_py| {});
 
-        let mut event_loop = EventLoop::start().unwrap();
+        let mut event_loop = EventLoop::start("asyncio").unwrap();
         let handle = event_loop.handle().unwrap();
         event_loop.stop();
 
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn handle_debug() {
         crate::with_py(|_py| {});
-        let mut event_loop = EventLoop::start().unwrap();
+        let mut event_loop = EventLoop::start("asyncio").unwrap();
         let handle = event_loop.handle().unwrap();
         let dbg = format!("{handle:?}");
         assert!(dbg.contains("EventLoopHandle"));

@@ -51,7 +51,7 @@ class ProfilingASGIMiddleware:
     - handler_ns: total - recv - send (pure framework + handler time)
 
     Compatible with app.add_middleware() so the FastAPI instance stays
-    discoverable by APX's manifest builder.
+    discoverable by APX's app loader.
     """
 
     def __init__(self, app):

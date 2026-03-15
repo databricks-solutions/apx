@@ -26,9 +26,8 @@ pub struct SupervisorConfig {
     pub app_dir: PathBuf,
     /// Per-request timeout passed to workers.
     pub request_timeout: Duration,
-    /// Path to pre-built manifest JSON.
-    /// `None` when using live-import mode (workers import the app module directly).
-    pub manifest_path: Option<PathBuf>,
+    /// Event loop policy: `"asyncio"` or `"uvloop"`.
+    pub loop_policy: String,
 }
 
 /// What went wrong with supervisor config validation.
@@ -214,15 +213,9 @@ async fn spawn_worker(
         .arg("--timeout")
         .arg(config.request_timeout.as_secs().to_string());
 
-    // Pass the target: manifest path if available, else app module string.
-    match config.manifest_path {
-        Some(ref path) => {
-            cmd.arg(path);
-        }
-        None => {
-            cmd.arg(config.app_module.as_str());
-        }
-    }
+    cmd.arg(config.app_module.as_str())
+        .arg("--loop")
+        .arg(&config.loop_policy);
 
     cmd.current_dir(&config.app_dir)
         .env("APX_WORKER_NONCE", nonce.as_str())
@@ -256,7 +249,7 @@ async fn spawn_worker(
         app_module: config.app_module.clone(),
         request_timeout_secs: config.request_timeout.as_secs(),
         nonce: nonce.clone(),
-        manifest_path: config.manifest_path.clone(),
+        loop_policy: config.loop_policy.clone(),
     };
 
     channel
@@ -458,7 +451,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
-            manifest_path: Some(PathBuf::from("/app/manifest.json")),
+            loop_policy: "uvloop".to_owned(),
         };
         assert!(validate_config(&config).is_ok());
     }
@@ -472,7 +465,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
-            manifest_path: Some(PathBuf::from("/app/manifest.json")),
+            loop_policy: "uvloop".to_owned(),
         };
         let err = validate_config(&config).unwrap_err();
         assert!(matches!(
@@ -490,7 +483,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
-            manifest_path: Some(PathBuf::from("/app/manifest.json")),
+            loop_policy: "uvloop".to_owned(),
         };
         let err = validate_config(&config).unwrap_err();
         assert!(matches!(

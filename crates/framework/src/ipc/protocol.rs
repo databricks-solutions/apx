@@ -5,7 +5,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::PathBuf;
+
+/// Default event loop policy — `"uvloop"` for optimal performance.
+fn default_loop_policy() -> String {
+    "uvloop".to_owned()
+}
 
 // ── AppModule ───────────────────────────────────────────────────────────
 
@@ -205,10 +209,10 @@ pub struct WorkerBootstrap {
     pub request_timeout_secs: u64,
     /// One-time nonce — verified against `APX_WORKER_NONCE` env var.
     pub nonce: Nonce,
-    /// Path to the pre-built `AppManifest` JSON file.
-    /// `None` when using live-import mode (app module imported at worker startup).
-    #[serde(default)]
-    pub manifest_path: Option<PathBuf>,
+    /// Event loop policy: `"asyncio"` (default stdlib) or `"uvloop"`.
+    /// Workers install the corresponding policy before creating the event loop.
+    #[serde(default = "default_loop_policy")]
+    pub loop_policy: String,
 }
 
 // ── Bootstrap errors ────────────────────────────────────────────────────
@@ -291,7 +295,7 @@ mod tests {
                 .unwrap_or_else(|e| unreachable!("hardcoded valid module: {e}")),
             request_timeout_secs: 30,
             nonce: Nonce::generate(),
-            manifest_path: Some(PathBuf::from("/app/manifest.json")),
+            loop_policy: "uvloop".to_owned(),
         };
         let msg = IpcMessage::Bootstrap(bootstrap);
         let encoded = rmp_serde::to_vec(&msg)
@@ -377,35 +381,31 @@ mod tests {
     }
 
     #[test]
-    fn worker_bootstrap_serde_with_manifest_path() {
+    fn worker_bootstrap_serde_loop_policy() {
         let bootstrap = WorkerBootstrap {
             host: "0.0.0.0".to_owned(),
             port: 8000,
             app_module: AppModule::new("backend.app").unwrap(),
             request_timeout_secs: 30,
             nonce: Nonce::from_string("abc123".to_owned()),
-            manifest_path: Some(PathBuf::from("/app/manifest.json")),
+            loop_policy: "uvloop".to_owned(),
         };
         let encoded = rmp_serde::to_vec(&bootstrap).unwrap();
         let decoded: WorkerBootstrap = rmp_serde::from_slice(&encoded).unwrap();
-        assert_eq!(
-            decoded.manifest_path,
-            Some(PathBuf::from("/app/manifest.json"))
-        );
+        assert_eq!(decoded.loop_policy, "uvloop");
     }
 
     #[test]
-    fn worker_bootstrap_serde_without_manifest_path() {
+    fn worker_bootstrap_serde_default_loop_policy() {
+        // Simulate decoding a message without loop_policy (backward compat).
         let bootstrap = WorkerBootstrap {
             host: "0.0.0.0".to_owned(),
             port: 8000,
             app_module: AppModule::new("backend.app").unwrap(),
             request_timeout_secs: 30,
             nonce: Nonce::from_string("abc123".to_owned()),
-            manifest_path: None,
+            loop_policy: default_loop_policy(),
         };
-        let encoded = rmp_serde::to_vec(&bootstrap).unwrap();
-        let decoded: WorkerBootstrap = rmp_serde::from_slice(&encoded).unwrap();
-        assert!(decoded.manifest_path.is_none());
+        assert_eq!(bootstrap.loop_policy, "uvloop");
     }
 }

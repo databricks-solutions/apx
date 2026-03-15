@@ -9,12 +9,7 @@ use std::time::Duration;
 /// CLI arguments for `apx serve`.
 #[derive(clap::Args, Debug)]
 pub struct ServeArgs {
-    /// App module (e.g. "backend.app") or path to manifest JSON.
-    ///
-    /// If the target is a file that exists on disk, it is treated as a
-    /// pre-built manifest (produced by `apx build`). Otherwise it is
-    /// interpreted as a Python module path and the app is imported live
-    /// at worker startup.
+    /// App module (e.g. "backend.app").
     #[arg(value_name = "TARGET")]
     target: String,
 
@@ -33,19 +28,16 @@ pub struct ServeArgs {
     /// Request timeout in seconds (0 = no timeout).
     #[arg(long, default_value_t = 30)]
     timeout: u64,
+
+    /// Event loop policy: "asyncio" (stdlib) or "uvloop" (default).
+    #[arg(long = "loop", default_value = "uvloop")]
+    loop_policy: String,
 }
 
-/// Resolve the CLI target into an `(app_module, manifest_path)` pair.
-///
-/// Currently only supports live-import mode (Python module string).
-/// Manifest-based serving will be restored in a future step.
-fn resolve_target(
-    target: &str,
-) -> Result<(apx_framework::ipc::protocol::AppModule, Option<PathBuf>), String> {
-    // Live-import path — target is a Python module string.
-    let app_module = apx_framework::ipc::protocol::AppModule::new(target)
-        .map_err(|e| format!("invalid app module '{target}': {e}"))?;
-    Ok((app_module, None))
+/// Validate the CLI target as a Python dotted module path.
+fn resolve_target(target: &str) -> Result<apx_framework::ipc::protocol::AppModule, String> {
+    apx_framework::ipc::protocol::AppModule::new(target)
+        .map_err(|e| format!("invalid app module '{target}': {e}"))
 }
 
 /// Run the serve command.
@@ -64,8 +56,8 @@ pub async fn run(args: ServeArgs) -> i32 {
         }
         Ok(None) => {
             // Supervisor mode — resolve target.
-            let (app_module, manifest_path) = match resolve_target(&args.target) {
-                Ok(pair) => pair,
+            let app_module = match resolve_target(&args.target) {
+                Ok(m) => m,
                 Err(e) => {
                     eprintln!("{e}");
                     return 1;
@@ -80,7 +72,7 @@ pub async fn run(args: ServeArgs) -> i32 {
                 app_module,
                 app_dir,
                 request_timeout: Duration::from_secs(args.timeout),
-                manifest_path,
+                loop_policy: args.loop_policy,
             };
 
             if let Err(e) = apx_framework::runtime::supervisor::run_supervisor(config).await {

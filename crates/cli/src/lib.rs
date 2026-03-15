@@ -8,7 +8,6 @@ pub(crate) mod __generate_openapi;
 pub(crate) mod build;
 pub(crate) mod bun;
 pub(crate) mod common;
-pub(crate) mod compile_manifest;
 pub(crate) mod components;
 pub(crate) mod dev;
 pub(crate) mod feedback;
