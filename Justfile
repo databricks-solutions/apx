@@ -70,6 +70,8 @@ release *tag:
     #!/usr/bin/env bash
     # Update Cargo.toml with the tag version (remove 'v' prefix)
     VERSION=$(echo "{{tag}}" | sed 's/^v//')
+    # Update workspace.package.version in root Cargo.toml (cargo set-version skips it)
+    sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
     cargo set-version $VERSION
     cargo check # ensure the version is set correctly in lockfile
     git commit -am "Release {{tag}}"
