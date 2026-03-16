@@ -754,9 +754,10 @@ def bench(
     connections: int = typer.Option(100, "-c", "--connections", help="Concurrent connections"),
     warmup: int = typer.Option(1000, help="Number of warmup requests"),
     do_profile: bool = typer.Option(False, "--profile-asgi", help="Also run profiling pass"),
+    detached: bool = typer.Option(False, "--detached", help="Start and return immediately without polling"),
     results_dir: Path = typer.Option(DEFAULT_RESULTS, "--results-dir"),
 ) -> None:
-    """Start a remote benchmark via the bencher server, poll until done, download report."""
+    """Start a remote benchmark via the bencher server."""
     ws = get_workspace_client(profile)
     bencher_url = _get_bencher_url(ws)
     token = get_databricks_token(ws)
@@ -787,7 +788,11 @@ def bench(
 
     run_data = resp.json()
     run_id = run_data["id"]
-    console.print(f"[green]Started:[/] run_id={run_id}")
+    console.print(f"[green]Started:[/] run_id={run_id}  name={name}")
+
+    if detached:
+        console.print("[dim]Detached mode — use 'list' to check status, 'report --name' to fetch results.[/]")
+        return
 
     # Poll until completed/failed.
     final = _poll_run(bencher_url, token, run_id)
@@ -860,36 +865,66 @@ def list_runs(
     console.print(table)
 
 
+def _resolve_run_id_by_name(bencher_url: str, token: str, name: str) -> str | None:
+    """Query the server for the latest run with the given name. Returns run_id or None."""
+    headers = _bencher_headers(token)
+    resp = httpx.get(
+        f"{bencher_url}/api/benchmarks",
+        params={"name": name},
+        headers=headers, timeout=30.0,
+    )
+    resp.raise_for_status()
+    runs = resp.json()
+    if not runs:
+        return None
+    # First result is the latest (server orders by created_at desc).
+    return runs[0]["id"]
+
+
+def _fetch_and_print_report(
+    bencher_url: str, token: str, run_id: str,
+    *, save_dir: Path | None = None,
+) -> None:
+    """Download report from server, optionally save locally, and print tables."""
+    headers = _bencher_headers(token)
+    resp = httpx.get(
+        f"{bencher_url}/api/benchmarks/{run_id}/report",
+        headers=headers, timeout=30.0,
+    )
+    if resp.status_code == 404:
+        console.print(f"[red]Error:[/] Report not available for run {run_id}")
+        raise typer.Exit(1)
+    resp.raise_for_status()
+
+    report_data = resp.json()
+
+    if save_dir:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        report_path = save_dir / "report.json"
+        report_path.write_text(json.dumps(report_data, indent=2))
+        console.print(f"[bold green]Report saved:[/] {report_path}")
+
+    _print_report(report_data)
+
+
 @app.command()
 def report(
-    name: str = typer.Option(None, help="Run name (local results)"),
+    name: str = typer.Option(None, help="Run name (server or local)"),
     run_id: str = typer.Option(None, "--id", help="Run ID (download from server)"),
     profile: str = typer.Option("DEFAULT", "-p", "--profile", help="Databricks CLI profile"),
     results_dir: Path = typer.Option(DEFAULT_RESULTS, "--results-dir"),
     scenarios: Path = typer.Option(DEFAULT_SCENARIOS, help="Path to scenarios.json"),
 ) -> None:
-    """Display report — from server (--id) or local results (--name)."""
+    """Display report — by run name or run ID."""
     if run_id:
-        # Download from server.
+        # Fetch by explicit ID.
         ws = get_workspace_client(profile)
         bencher_url = _get_bencher_url(ws)
         token = get_databricks_token(ws)
-        headers = _bencher_headers(token)
-
-        resp = httpx.get(
-            f"{bencher_url}/api/benchmarks/{run_id}/report",
-            headers=headers, timeout=30.0,
-        )
-        if resp.status_code == 404:
-            console.print(f"[red]Error:[/] Report not found for run {run_id}")
-            raise typer.Exit(1)
-        resp.raise_for_status()
-
-        report_data = resp.json()
-        _print_report(report_data)
+        _fetch_and_print_report(bencher_url, token, run_id)
 
     elif name:
-        # Local report — check if report.json already exists.
+        # Try local first, then server.
         run_dir = results_dir / name
         report_path = run_dir / "report.json"
 
@@ -897,15 +932,28 @@ def report(
             report_data = json.loads(report_path.read_text())
             _print_report(report_data)
         else:
-            # Legacy: generate from filesystem results.
-            if not run_dir.exists():
-                console.print(f"[red]Error:[/] Run '{name}' not found at {run_dir}")
+            # Try server by name.
+            ws = get_workspace_client(profile)
+            bencher_url = _get_bencher_url(ws)
+            token = get_databricks_token(ws)
+            resolved_id = _resolve_run_id_by_name(bencher_url, token, name)
+
+            if resolved_id:
+                console.print(f"[dim]Resolved '{name}' → {resolved_id[:12]}[/]")
+                _fetch_and_print_report(
+                    bencher_url, token, resolved_id,
+                    save_dir=run_dir,
+                )
+            elif run_dir.exists():
+                # Legacy filesystem-based report generation.
+                sys.path.insert(0, str(BENCH_DIR))
+                from profile_analysis import analyze_records, load_records  # noqa: F401
+                _generate_report_legacy(run_dir, scenarios)
+            else:
+                console.print(f"[red]Error:[/] Run '{name}' not found locally or on server")
                 raise typer.Exit(1)
-            sys.path.insert(0, str(BENCH_DIR))
-            from profile_analysis import analyze_records, load_records  # noqa: F401
-            _generate_report_legacy(run_dir, scenarios)
     else:
-        console.print("[red]Error:[/] Provide --name (local) or --id (remote)")
+        console.print("[red]Error:[/] Provide --name or --id")
         raise typer.Exit(1)
 
 

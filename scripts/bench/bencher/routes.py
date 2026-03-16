@@ -68,12 +68,16 @@ async def start_benchmark(
 
 
 @router.get("/benchmarks", response_model=list[BenchRunResponse])
-async def list_benchmarks(session: Session = Depends(get_session)):
-    """List all benchmark runs."""
-    runs = session.exec(
-        select(BenchmarkRun).order_by(BenchmarkRun.created_at.desc())  # type: ignore[attr-defined]
-    ).all()
-    logger.info("Listing %d benchmark runs", len(runs))
+async def list_benchmarks(
+    name: str | None = None,
+    session: Session = Depends(get_session),
+):
+    """List benchmark runs, optionally filtered by name."""
+    stmt = select(BenchmarkRun).order_by(BenchmarkRun.created_at.desc())  # type: ignore[attr-defined]
+    if name:
+        stmt = stmt.where(BenchmarkRun.name == name)
+    runs = session.exec(stmt).all()
+    logger.info("Listing %d benchmark runs (name=%s)", len(runs), name)
     return [
         BenchRunResponse(
             id=r.id,
