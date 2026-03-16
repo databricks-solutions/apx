@@ -158,7 +158,7 @@ struct WorkerHandle {
     /// Child process handle.
     child: tokio::process::Child,
     /// IPC channel to the worker.
-    _channel: WorkerChannel,
+    channel: WorkerChannel,
     /// Number of restarts for this worker slot.
     restart_count: usize,
     /// Last restart time.
@@ -267,12 +267,12 @@ async fn spawn_worker(
         IpcMessage::Ready => {
             tracing::info!(worker = index, "worker ready");
         }
-        IpcMessage::Bootstrap(_) => {
+        other => {
             return Err(SupervisorError::Ipc {
                 index,
-                source: crate::ipc::protocol::IpcError::Io(std::io::Error::other(
-                    "worker sent Bootstrap instead of Ready",
-                )),
+                source: crate::ipc::protocol::IpcError::Io(std::io::Error::other(format!(
+                    "expected Ready, got {other:?}"
+                ))),
             });
         }
     }
@@ -280,7 +280,7 @@ async fn spawn_worker(
     Ok(WorkerHandle {
         index,
         child,
-        _channel: channel,
+        channel,
         restart_count: 0,
         last_restart: std::time::Instant::now(),
     })
@@ -363,33 +363,78 @@ async fn wait_for_any_exit(
     }
 }
 
+/// How long to wait after sending SIGTERM before sending SIGKILL.
+const SIGKILL_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Gracefully shut down all workers.
 ///
-/// Phase 1: Send SIGTERM via `sysinfo` (same pattern as `crates/core/src/dev/process.rs`).
-/// Phase 2: Wait up to [`GRACEFUL_SHUTDOWN_TIMEOUT`].
-/// Phase 3: Force kill remaining via `child.kill()`.
+/// Phase 1: Send `IpcMessage::Drain` to all workers.
+/// Phase 2: Wait for `IpcMessage::Drained` from all (up to `GRACEFUL_SHUTDOWN_TIMEOUT`).
+/// Phase 3: If timeout, send SIGTERM to remaining workers.
+/// Phase 4: Wait 5s, then SIGKILL.
 async fn shutdown_workers(workers: &mut [WorkerHandle]) {
-    // Phase 1: SIGTERM via sysinfo.
+    // Phase 1: Send Drain over IPC.
+    for worker in workers.iter_mut() {
+        if let Err(e) = worker.channel.send(&IpcMessage::Drain).await {
+            tracing::debug!(worker = worker.index, error = %e, "failed to send Drain");
+        }
+    }
+
+    // Phase 2: Wait for Drained from all workers (or timeout).
+    let drain_all = async {
+        for worker in workers.iter_mut() {
+            match worker.channel.recv().await {
+                Ok(IpcMessage::Drained) => {
+                    tracing::info!(worker = worker.index, "worker drained");
+                }
+                Ok(msg) => {
+                    tracing::debug!(
+                        worker = worker.index,
+                        ?msg,
+                        "unexpected message during drain"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(worker = worker.index, error = %e, "IPC error during drain");
+                }
+            }
+        }
+    };
+    if tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, drain_all)
+        .await
+        .is_ok()
+    {
+        // All workers drained — wait for process exit.
+        let wait_all = async {
+            for worker in workers.iter_mut() {
+                let _ = worker.child.wait().await;
+            }
+        };
+        let _ = tokio::time::timeout(SIGKILL_TIMEOUT, wait_all).await;
+        return;
+    }
+
+    // Phase 3: SIGTERM remaining workers that didn't drain in time.
+    tracing::warn!("drain timeout, sending SIGTERM to remaining workers");
     for worker in workers.iter() {
         if let Some(pid) = worker.child.id() {
             send_signal(pid, Signal::Term).await;
         }
     }
 
-    // Phase 2: Wait for graceful exit (or timeout).
+    // Phase 4: Wait briefly, then SIGKILL.
     let wait_all = async {
         for worker in workers.iter_mut() {
             let _ = worker.child.wait().await;
         }
     };
-    if tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, wait_all)
+    if tokio::time::timeout(SIGKILL_TIMEOUT, wait_all)
         .await
         .is_ok()
     {
         return;
     }
 
-    // Phase 3: SIGKILL remaining.
     for worker in workers.iter_mut() {
         let _ = worker.child.kill().await;
     }

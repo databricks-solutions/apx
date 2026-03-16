@@ -316,20 +316,25 @@ impl futures_core::Stream for PermitGuardedStream {
 /// Accept connections and serve them using the given `ApxService`.
 ///
 /// Runs until the `shutdown` future completes, then stops accepting new
-/// connections. In-flight connections continue until they complete naturally.
+/// connections. Returns a `JoinSet` of in-flight connections so the caller
+/// can await their completion (graceful drain).
 pub async fn serve_tcp(
     listener: TcpListener,
     service: ApxService,
     shutdown: impl Future<Output = ()> + Send + 'static,
-) -> Result<(), std::io::Error> {
+) -> Result<tokio::task::JoinSet<()>, std::io::Error> {
     tokio::pin!(shutdown);
+    let mut connections = tokio::task::JoinSet::new();
 
     loop {
+        // Reap finished tasks to avoid unbounded growth.
+        while connections.try_join_next().is_some() {}
+
         tokio::select! {
             result = listener.accept() => {
                 let (stream, client_addr) = result?;
                 let svc = service.clone().with_client_addr(client_addr);
-                tokio::spawn(serve_connection(stream, svc));
+                connections.spawn(serve_connection(stream, svc));
             }
             () = &mut shutdown => {
                 tracing::info!("shutdown signal received, stopping accept loop");
@@ -338,7 +343,7 @@ pub async fn serve_tcp(
         }
     }
 
-    Ok(())
+    Ok(connections)
 }
 
 /// Serve a single connection using HTTP/1 auto-detection.

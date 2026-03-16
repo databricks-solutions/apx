@@ -125,14 +125,29 @@ enum FluxCommands {
 /// Used when the top-level Ctrl+C handler cancels the running command.
 const EXIT_CODE_SIGINT: i32 = 130;
 
+/// Build the Tokio runtime for this process.
+///
+/// Worker processes (detected via `APX_WORKER_NONCE`) use a single-threaded
+/// runtime — all I/O and Python execution share one thread, matching the
+/// uvicorn model. Supervisor and CLI commands use the multi-threaded runtime.
+fn build_runtime() -> Result<tokio::runtime::Runtime, std::io::Error> {
+    let is_worker = std::env::var_os("APX_WORKER_NONCE").is_some();
+    if is_worker {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+    }
+}
+
 /// Parse CLI arguments and execute the corresponding subcommand.
 ///
 /// Returns an exit code (0 for success, non-zero for failure).
 pub fn run_cli(args: Vec<String>) -> i32 {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let runtime = match build_runtime() {
         Ok(runtime) => runtime,
         Err(err) => {
             eprintln!("Failed to create tokio runtime: {err}");

@@ -17,8 +17,8 @@ use std::cell::RefCell;
 thread_local! {
     /// Tokio runtime handle cached on the event loop thread.
     ///
-    /// Set once during [`EventLoop::init_event_loop_thread`] when
-    /// `LoopPolicy::RustNative` is active.
+    /// Set once during [`InlineEventLoop::init`] when the Rust
+    /// scheduler is installed.
     static TOKIO_HANDLE: RefCell<Option<tokio::runtime::Handle>> = const { RefCell::new(None) };
 }
 

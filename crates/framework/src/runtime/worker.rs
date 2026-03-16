@@ -1,11 +1,11 @@
 //! Single worker: initialize Python, bind TCP, serve requests.
 //!
 //! A worker is a child process spawned by the supervisor. It owns one Python
-//! interpreter, one asyncio event loop, and one TCP listener bound via
+//! interpreter, one inline asyncio event loop, and one TCP listener bound via
 //! `SO_REUSEPORT`.
 
 use crate::app_loader::{AppSource, ModuleImport};
-use crate::event_loop::EventLoop;
+use crate::event_loop::InlineEventLoop;
 use crate::ipc::channel::WorkerChannel;
 use crate::ipc::protocol::{BootstrapError, IpcMessage, Nonce, WorkerBootstrap};
 use crate::service::{ApxService, ServiceConfig, serve_tcp};
@@ -16,6 +16,9 @@ use pyo3::Python;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Minimum drain timeout (seconds) even if request_timeout_secs is lower.
+const MIN_DRAIN_TIMEOUT_SECS: u64 = 5;
 
 /// Errors during worker operation.
 #[derive(Debug, thiserror::Error)]
@@ -47,8 +50,8 @@ pub struct WorkerRuntime {
     pub listener: crate::transport::TcpListener,
     /// IPC channel to supervisor — stays open for the worker's lifetime.
     pub channel: WorkerChannel,
-    /// Persistent asyncio event loop on a dedicated thread.
-    pub py_event_loop: EventLoop,
+    /// Inline asyncio event loop (dormant — driven by Rust scheduler).
+    pub event_loop: InlineEventLoop,
 }
 
 impl std::fmt::Debug for WorkerRuntime {
@@ -58,6 +61,9 @@ impl std::fmt::Debug for WorkerRuntime {
 }
 
 /// Phase 1: Create TCP listener and initialize the Python interpreter.
+///
+/// Uses [`InlineEventLoop`] — the asyncio loop is installed as dormant and
+/// all coroutine driving happens inline on the tokio thread.
 ///
 /// # Errors
 ///
@@ -80,14 +86,14 @@ pub async fn init_worker(
     // IMPORTANT: must only be called once per process, only in worker processes.
     Python::initialize();
 
-    // Start a persistent asyncio event loop on a dedicated thread.
-    let py_event_loop = EventLoop::start(&bootstrap.loop_policy)
-        .map_err(|e| WorkerError::PythonInit(format!("event loop: {e}")))?;
+    // Initialize inline event loop (dormant asyncio + Rust scheduler).
+    let event_loop = Python::attach(|py| InlineEventLoop::init(py, &bootstrap.loop_policy))
+        .map_err(|e| WorkerError::PythonInit(format!("inline event loop: {e}")))?;
 
     Ok(WorkerRuntime {
         listener,
         channel,
-        py_event_loop,
+        event_loop,
     })
 }
 
@@ -115,13 +121,16 @@ pub async fn run_worker(
     let mut runtime = init_worker(&bootstrap, channel).await?;
     signal_readiness(&mut runtime.channel).await?;
 
-    // Build WorkerContext from the event loop.
-    let loop_handle = runtime.py_event_loop.handle();
-    let event_loop_ref = Python::attach(|py| runtime.py_event_loop.event_loop_ref().clone_ref(py));
-    let ctx = Arc::new(WorkerContext {
-        loop_handle,
-        event_loop_ref,
-    });
+    // Build WorkerContext from the inline event loop.
+    let ctx = {
+        let el = &runtime.event_loop;
+        Arc::new(WorkerContext {
+            cached_types: Arc::clone(el.cached_types()),
+            ready_queue: Arc::clone(el.ready_queue()),
+            call_soon: Python::attach(|py| el.call_soon().clone_ref(py)),
+            event_loop_ref: Python::attach(|py| el.event_loop_ref().clone_ref(py)),
+        })
+    };
 
     // Load app and build dispatch pipeline.
     let dispatch =
@@ -135,14 +144,49 @@ pub async fn run_worker(
     let server_addr = runtime.listener.local_addr();
     let service = ApxService::new(dispatch, server_addr, &config);
 
-    // Serve requests until shutdown.
-    serve_tcp(runtime.listener, service, shutdown_signal())
+    // Split IPC channel for concurrent read/write.
+    let (ipc_reader, mut ipc_writer) = runtime.channel.split();
+
+    // Spawn drain listener — waits for supervisor's Drain command.
+    let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let mut reader = ipc_reader;
+        match reader.recv().await {
+            Ok(IpcMessage::Drain) => {
+                tracing::info!("received Drain from supervisor");
+                let _ = drain_tx.send(());
+            }
+            Ok(msg) => tracing::warn!(?msg, "unexpected IPC message"),
+            Err(e) => tracing::debug!(error = %e, "IPC channel closed"),
+        }
+    });
+
+    // Combined shutdown: OS signal OR IPC drain.
+    let combined_shutdown = async {
+        tokio::select! {
+            () = shutdown_signal() => {}
+            _ = drain_rx => {}
+        }
+    };
+
+    let mut connections = serve_tcp(runtime.listener, service, combined_shutdown)
         .await
         .map_err(WorkerError::Serve)?;
 
+    // Drain in-flight connections (bounded by request timeout).
+    let drain_timeout =
+        Duration::from_secs(bootstrap.request_timeout_secs.max(MIN_DRAIN_TIMEOUT_SECS));
+    let _ = tokio::time::timeout(drain_timeout, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+
+    // Best-effort: tell supervisor we're done draining.
+    let _ = ipc_writer.send(&IpcMessage::Drained).await;
+
     // Flush pending OTLP spans, metrics, and logs before the event loop stops.
     apx_core::tracing_init::shutdown_telemetry();
-    runtime.py_event_loop.stop();
+    runtime.event_loop.shutdown();
 
     Ok(())
 }
@@ -176,7 +220,7 @@ pub async fn connect_to_supervisor()
     let msg = channel.recv().await.map_err(BootstrapError::from)?;
     let bootstrap = match msg {
         IpcMessage::Bootstrap(b) => b,
-        other @ IpcMessage::Ready => {
+        other => {
             return Err(BootstrapError::UnexpectedMessage(format!("{other:?}")));
         }
     };

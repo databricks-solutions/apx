@@ -1,12 +1,12 @@
 //! Ready queue for the Rust scheduler.
 //!
 //! Tasks that become ready (awaitable resolved, event set, timer fired)
-//! are pushed here. The drain loop in [`super::super::event_loop::queue::QueueDrainer`]
+//! are pushed here. The drain task in [`super::super::event_loop::inline`]
 //! pops and re-drives them.
 
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crossbeam_queue::SegQueue;
 use pyo3::prelude::*;
@@ -32,20 +32,15 @@ impl std::fmt::Debug for ReadyTask {
     }
 }
 
-/// Wake state for the ready queue — schedules the drainer when it is sleeping.
-///
-/// Set after [`super::super::event_loop::queue::QueueDrainer`] construction
-/// via [`ReadyQueue::set_wake`].
-struct WakeState {
-    needs_wake: Arc<AtomicBool>,
-    call_soon: Py<PyAny>,
-    drainer_ref: Py<PyAny>,
-}
-
 /// Per-worker ready queue. Lock-free push, single-consumer drain.
 pub struct ReadyQueue {
     queue: SegQueue<ReadyTask>,
-    wake: OnceLock<WakeState>,
+    /// Tokio notify for inline mode — signals drain task when items are pushed.
+    notify_wake: OnceLock<Arc<tokio::sync::Notify>>,
+    /// Tokio notify for the asyncio loop pump task.
+    pump_notify: OnceLock<Arc<tokio::sync::Notify>>,
+    /// Number of tasks currently waiting on an asyncio Future.
+    pending_asyncio: AtomicUsize,
     enqueue_count: std::sync::atomic::AtomicU64,
     drain_count: std::sync::atomic::AtomicU64,
 }
@@ -53,7 +48,6 @@ pub struct ReadyQueue {
 impl std::fmt::Debug for ReadyQueue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReadyQueue")
-            .field("has_wake", &self.wake.get().is_some())
             .field("enqueue_count", &self.enqueue_count.load(Ordering::Relaxed))
             .field("drain_count", &self.drain_count.load(Ordering::Relaxed))
             .finish()
@@ -61,39 +55,60 @@ impl std::fmt::Debug for ReadyQueue {
 }
 
 impl ReadyQueue {
-    /// Create an empty ready queue (wake state set later via [`set_wake`]).
+    /// Create an empty ready queue.
     pub fn new() -> Self {
         Self {
             queue: SegQueue::new(),
-            wake: OnceLock::new(),
+            notify_wake: OnceLock::new(),
+            pump_notify: OnceLock::new(),
+            pending_asyncio: AtomicUsize::new(0),
             enqueue_count: std::sync::atomic::AtomicU64::new(0),
             drain_count: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    /// Install the wake references so that [`push`] can reschedule the
-    /// drainer when it is sleeping. Called once after drainer allocation.
-    pub fn set_wake(
-        &self,
-        needs_wake: Arc<AtomicBool>,
-        call_soon: Py<PyAny>,
-        drainer_ref: Py<PyAny>,
-    ) {
-        let _ = self.wake.set(WakeState {
-            needs_wake,
-            call_soon,
-            drainer_ref,
-        });
+    /// Install a tokio notify for inline mode wake.
+    ///
+    /// When set, [`push`] signals this notify to wake the drain task.
+    /// Used by [`InlineEventLoop`] to wake its drain task.
+    pub fn set_notify_wake(&self, notify: Arc<tokio::sync::Notify>) {
+        let _ = self.notify_wake.set(notify);
     }
 
-    /// Enqueue a task and wake the drainer if it is sleeping.
-    pub fn push(&self, py: Python<'_>, task: ReadyTask) {
+    /// Install a tokio notify for the asyncio loop pump task.
+    pub fn set_pump_notify(&self, notify: Arc<tokio::sync::Notify>) {
+        let _ = self.pump_notify.set(notify);
+    }
+
+    /// Increment the count of tasks waiting on asyncio Futures.
+    pub fn inc_pending_asyncio(&self) {
+        self.pending_asyncio.fetch_add(1, Ordering::Release);
+    }
+
+    /// Decrement the count of tasks waiting on asyncio Futures.
+    pub fn dec_pending_asyncio(&self) {
+        self.pending_asyncio.fetch_sub(1, Ordering::Release);
+    }
+
+    /// Return the number of tasks waiting on asyncio Futures.
+    pub fn pending_asyncio_count(&self) -> usize {
+        self.pending_asyncio.load(Ordering::Acquire)
+    }
+
+    /// Signal the asyncio loop pump task to run a loop iteration.
+    pub fn signal_pump(&self) {
+        if let Some(notify) = self.pump_notify.get() {
+            notify.notify_one();
+        }
+    }
+
+    /// Enqueue a task and wake the drain task.
+    pub fn push(&self, _py: Python<'_>, task: ReadyTask) {
         self.enqueue_count.fetch_add(1, Ordering::Relaxed);
         self.queue.push(task);
-        if let Some(wake) = self.wake.get()
-            && wake.needs_wake.swap(false, Ordering::AcqRel)
-        {
-            let _ = wake.call_soon.call1(py, (&wake.drainer_ref,));
+
+        if let Some(notify) = self.notify_wake.get() {
+            notify.notify_one();
         }
     }
 

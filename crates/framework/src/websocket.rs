@@ -12,6 +12,7 @@ use crate::bridge::asgi::{
     AsgiEvent, AsgiSend, AsgiWsReceive, ScopeInterns, WsIncomingEvent, build_ws_scope,
 };
 use crate::error::AppError;
+use crate::scheduler::driver::spawn_and_drive;
 use crate::transport::types::{
     BodyStream, InboundRequest, ProtocolVersion, ResponseBody, TransportKind,
 };
@@ -156,38 +157,31 @@ async fn ws_session(
     let recv_handle = tokio::spawn(forward_incoming(stream, incoming_tx));
     let send_handle = tokio::spawn(forward_outgoing(outgoing_rx, sink));
 
-    // Schedule the ASGI app coroutine on the event loop.
-    let coro_rx = ctx.loop_handle.schedule_deferred(move |py| {
+    // Build scope, call app, and drive coroutine inline.
+    let schedule_result = Python::attach(|py| -> Result<(), AppError> {
         let scope = build_ws_scope(py, &request, &interns)
             .map_err(|e| AppError::Internal(format!("ws scope build: {e}")))?;
-
         let receive = Py::new(py, AsgiWsReceive::new(incoming_rx))
             .map_err(|e| AppError::Internal(format!("wrap ws receive: {e}")))?;
-
         let send = Py::new(py, AsgiSend::new(outgoing_tx))
             .map_err(|e| AppError::Internal(format!("wrap ws send: {e}")))?;
-
         let coro = app
             .call1(py, (scope, receive, send))
             .map_err(|e| AppError::Internal(format!("ASGI app call (ws): {e}")))?;
 
-        Ok(coro)
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        spawn_and_drive(
+            py,
+            coro,
+            result_tx,
+            &ctx.cached_types,
+            &ctx.call_soon,
+            &ctx.ready_queue,
+        );
+        Ok(())
     });
-
-    // Wait for the ASGI coroutine to complete.
-    match coro_rx {
-        Ok(rx) => match rx.await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                tracing::error!(error = %e, "ASGI websocket coroutine failed");
-            }
-            Err(_) => {
-                tracing::error!("event loop closed before websocket coroutine completed");
-            }
-        },
-        Err(e) => {
-            tracing::error!(error = %e, "failed to schedule websocket coroutine");
-        }
+    if let Err(e) = schedule_result {
+        tracing::error!(error = %e, "failed to schedule websocket coroutine");
     }
 
     // Clean up forwarding tasks.

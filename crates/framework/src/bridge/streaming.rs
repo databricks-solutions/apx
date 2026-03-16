@@ -1,12 +1,9 @@
-//! Streaming ASGI response builder.
+//! Streaming ASGI response body.
 //!
-//! Converts an ASGI send channel into an [`OutboundResponse`] with a
-//! [`ResponseBody::Stream`] body. Used for SSE and `StreamingResponse` routes.
+//! [`AsgiBodyStream`] wraps an mpsc channel of body chunks into a
+//! [`futures_core::Stream`] suitable for HTTP chunked/SSE responses.
 
 use super::asgi::AsgiEvent;
-use super::asgi_dispatch::recv_response_start;
-use crate::error::AppError;
-use crate::transport::types::{OutboundResponse, ResponseBody};
 use bytes::Bytes;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -25,15 +22,15 @@ pub struct AsgiBodyStream {
 
 impl AsgiBodyStream {
     /// Create a new body stream with an optional initial chunk and disconnect signal.
-    fn new(
+    pub(super) fn new(
         rx: mpsc::Receiver<AsgiEvent>,
         initial_chunk: Option<Bytes>,
-        disconnect_tx: oneshot::Sender<()>,
+        disconnect_tx: Option<oneshot::Sender<()>>,
     ) -> Self {
         Self {
             rx,
             initial_chunk,
-            disconnect_tx: Some(disconnect_tx),
+            disconnect_tx,
             done: false,
         }
     }
@@ -78,59 +75,11 @@ impl Drop for AsgiBodyStream {
     }
 }
 
-/// Classify an ASGI response from a send channel as fixed or streaming.
-///
-/// Reads `ResponseStart` for status/headers, then the first body chunk.
-/// `more_body=false` → `Fixed`. `more_body=true` → `Stream`.
-pub(super) async fn classify_response(
-    mut rx: mpsc::Receiver<AsgiEvent>,
-    disconnect_tx: oneshot::Sender<()>,
-) -> Result<OutboundResponse, AppError> {
-    let (status, headers) = recv_response_start(&mut rx).await?;
-    let status =
-        http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-
-    match rx.recv().await {
-        Some(AsgiEvent::ResponseBody {
-            body,
-            more_body: false,
-        }) => {
-            // Fixed — disconnect_tx drops here, fires disconnect signal.
-            Ok(OutboundResponse {
-                status,
-                headers,
-                body: ResponseBody::Fixed(body),
-            })
-        }
-        Some(AsgiEvent::ResponseBody {
-            body,
-            more_body: true,
-        }) => {
-            // Streaming — pass disconnect_tx to stream for lifetime tracking.
-            let stream = AsgiBodyStream::new(rx, Some(body), disconnect_tx);
-            Ok(OutboundResponse {
-                status,
-                headers,
-                body: ResponseBody::Stream(Box::pin(stream)),
-            })
-        }
-        Some(_) => Err(AppError::Internal(
-            "ASGI protocol error: unexpected event after response start".to_owned(),
-        )),
-        None => Ok(OutboundResponse {
-            status,
-            headers,
-            body: ResponseBody::Fixed(Bytes::new()),
-        }),
-    }
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    clippy::panic,
     reason = "test code uses unwrap/assert for clarity"
 )]
 mod tests {
@@ -149,7 +98,7 @@ mod tests {
         drop(tx);
 
         let (disconnect_tx, _disconnect_rx) = oneshot::channel();
-        let mut stream = AsgiBodyStream::new(rx, None, disconnect_tx);
+        let mut stream = AsgiBodyStream::new(rx, None, Some(disconnect_tx));
         let chunk = stream.next().await.unwrap().unwrap();
         assert_eq!(chunk.as_ref(), b"hello");
         assert!(stream.next().await.is_none());
@@ -173,7 +122,7 @@ mod tests {
         drop(tx);
 
         let (disconnect_tx, _disconnect_rx) = oneshot::channel();
-        let mut stream = AsgiBodyStream::new(rx, None, disconnect_tx);
+        let mut stream = AsgiBodyStream::new(rx, None, Some(disconnect_tx));
         let c1 = stream.next().await.unwrap().unwrap();
         assert_eq!(c1.as_ref(), b"hel");
         let c2 = stream.next().await.unwrap().unwrap();
@@ -187,7 +136,7 @@ mod tests {
         drop(tx);
 
         let (disconnect_tx, _disconnect_rx) = oneshot::channel();
-        let mut stream = AsgiBodyStream::new(rx, None, disconnect_tx);
+        let mut stream = AsgiBodyStream::new(rx, None, Some(disconnect_tx));
         assert!(stream.next().await.is_none());
     }
 
@@ -203,7 +152,7 @@ mod tests {
         drop(tx);
 
         let (disconnect_tx, _disconnect_rx) = oneshot::channel();
-        let mut stream = AsgiBodyStream::new(rx, Some(Bytes::from("hello ")), disconnect_tx);
+        let mut stream = AsgiBodyStream::new(rx, Some(Bytes::from("hello ")), Some(disconnect_tx));
         let c1 = stream.next().await.unwrap().unwrap();
         assert_eq!(c1.as_ref(), b"hello ");
         let c2 = stream.next().await.unwrap().unwrap();
@@ -215,126 +164,10 @@ mod tests {
     async fn asgi_body_stream_drop_fires_disconnect() {
         let (disconnect_tx, disconnect_rx) = oneshot::channel();
         let (_tx, rx) = mpsc::channel::<AsgiEvent>(4);
-        let stream = AsgiBodyStream::new(rx, None, disconnect_tx);
+        let stream = AsgiBodyStream::new(rx, None, Some(disconnect_tx));
         drop(stream);
 
         // disconnect_rx should have received the signal.
         assert!(disconnect_rx.await.is_ok());
-    }
-
-    /// Build a `HeaderMap` from byte pair slices (test convenience).
-    fn headers(pairs: &[(&[u8], &[u8])]) -> http::header::HeaderMap {
-        let mut map = http::header::HeaderMap::with_capacity(pairs.len());
-        for (name, value) in pairs {
-            map.insert(
-                http::HeaderName::from_bytes(name).unwrap(),
-                http::HeaderValue::from_bytes(value).unwrap(),
-            );
-        }
-        map
-    }
-
-    #[tokio::test]
-    async fn classify_fixed_single_body() {
-        let (tx, rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::ResponseStart {
-            status: 200,
-            headers: headers(&[(b"content-type", b"text/plain")]),
-        })
-        .await
-        .unwrap();
-        tx.send(AsgiEvent::ResponseBody {
-            body: Bytes::from("hello"),
-            more_body: false,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-
-        let (disconnect_tx, _disconnect_rx) = oneshot::channel();
-        let resp = classify_response(rx, disconnect_tx).await.unwrap();
-        assert_eq!(resp.status, http::StatusCode::OK);
-        assert_eq!(resp.headers.get("content-type").unwrap(), "text/plain");
-        match resp.body {
-            ResponseBody::Fixed(b) => assert_eq!(b.as_ref(), b"hello"),
-            ResponseBody::Stream(_) => panic!("expected Fixed body"),
-        }
-    }
-
-    #[tokio::test]
-    async fn classify_streaming_body() {
-        let (tx, rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::ResponseStart {
-            status: 200,
-            headers: headers(&[(b"content-type", b"text/event-stream")]),
-        })
-        .await
-        .unwrap();
-        tx.send(AsgiEvent::ResponseBody {
-            body: Bytes::from("data: hello\n\n"),
-            more_body: true,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-
-        let (disconnect_tx, _disconnect_rx) = oneshot::channel();
-        let resp = classify_response(rx, disconnect_tx).await.unwrap();
-        assert_eq!(resp.status, http::StatusCode::OK);
-        assert_eq!(
-            resp.headers.get("content-type").unwrap(),
-            "text/event-stream"
-        );
-        match resp.body {
-            ResponseBody::Stream(mut stream) => {
-                // The initial chunk should be the first body.
-                use futures_core::Stream;
-                let waker = futures_util::task::noop_waker();
-                let mut cx = Context::from_waker(&waker);
-                match Pin::new(&mut stream).poll_next(&mut cx) {
-                    Poll::Ready(Some(Ok(chunk))) => {
-                        assert_eq!(chunk.as_ref(), b"data: hello\n\n");
-                    }
-                    other => panic!("expected Ready(Some(Ok(...))), got {other:?}"),
-                }
-            }
-            ResponseBody::Fixed(_) => panic!("expected Stream body"),
-        }
-    }
-
-    #[tokio::test]
-    async fn classify_empty_body_channel_closed() {
-        let (tx, rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::ResponseStart {
-            status: 204,
-            headers: headers(&[]),
-        })
-        .await
-        .unwrap();
-        drop(tx);
-
-        let (disconnect_tx, _disconnect_rx) = oneshot::channel();
-        let resp = classify_response(rx, disconnect_tx).await.unwrap();
-        assert_eq!(resp.status, http::StatusCode::NO_CONTENT);
-        match resp.body {
-            ResponseBody::Fixed(b) => assert!(b.is_empty()),
-            ResponseBody::Stream(_) => panic!("expected Fixed body"),
-        }
-    }
-
-    #[tokio::test]
-    async fn classify_missing_response_start() {
-        let (tx, rx) = mpsc::channel(4);
-        tx.send(AsgiEvent::ResponseBody {
-            body: Bytes::from("oops"),
-            more_body: false,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-
-        let (disconnect_tx, _disconnect_rx) = oneshot::channel();
-        let result = classify_response(rx, disconnect_tx).await;
-        assert!(result.is_err());
     }
 }

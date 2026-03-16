@@ -34,19 +34,28 @@ impl WorkerChannel {
         }
     }
 
+    /// Split into independent reader and writer halves.
+    ///
+    /// Useful when the worker needs to read drain commands from a spawned
+    /// task while the main flow still holds the writer to send `Drained`.
+    pub fn split(self) -> (IpcReader, IpcWriter) {
+        (
+            IpcReader {
+                reader: self.reader,
+            },
+            IpcWriter {
+                writer: self.writer,
+            },
+        )
+    }
+
     /// Send a length-prefixed msgpack message.
     ///
     /// # Errors
     ///
     /// Returns an error on serialization failure or IO error.
     pub async fn send(&mut self, msg: &IpcMessage) -> Result<(), IpcError> {
-        let payload = rmp_serde::to_vec(msg)?;
-        let len =
-            u32::try_from(payload.len()).map_err(|_| IpcError::MessageTooLarge(payload.len()))?;
-        self.writer.write_all(&len.to_be_bytes()).await?;
-        self.writer.write_all(&payload).await?;
-        self.writer.flush().await?;
-        Ok(())
+        IpcWriter::send_impl(&mut self.writer, msg).await
     }
 
     /// Receive a length-prefixed msgpack message.
@@ -56,15 +65,65 @@ impl WorkerChannel {
     /// Returns an error on IO error, deserialization failure, or if the
     /// message exceeds [`MAX_IPC_MESSAGE_SIZE`].
     pub async fn recv(&mut self) -> Result<IpcMessage, IpcError> {
+        IpcReader::recv_impl(&mut self.reader).await
+    }
+}
+
+/// Read half of an IPC channel.
+pub struct IpcReader {
+    reader: BufReader<OwnedReadHalf>,
+}
+
+impl std::fmt::Debug for IpcReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IpcReader").finish_non_exhaustive()
+    }
+}
+
+impl IpcReader {
+    /// Receive a length-prefixed msgpack message.
+    pub async fn recv(&mut self) -> Result<IpcMessage, IpcError> {
+        Self::recv_impl(&mut self.reader).await
+    }
+
+    async fn recv_impl(reader: &mut BufReader<OwnedReadHalf>) -> Result<IpcMessage, IpcError> {
         let mut len_buf = [0u8; 4];
-        self.reader.read_exact(&mut len_buf).await?;
+        reader.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf);
         if len > MAX_IPC_MESSAGE_SIZE {
             return Err(IpcError::MessageTooLarge(len as usize));
         }
         let mut payload = vec![0u8; len as usize];
-        self.reader.read_exact(&mut payload).await?;
+        reader.read_exact(&mut payload).await?;
         Ok(rmp_serde::from_slice(&payload)?)
+    }
+}
+
+/// Write half of an IPC channel.
+pub struct IpcWriter {
+    writer: OwnedWriteHalf,
+}
+
+impl std::fmt::Debug for IpcWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IpcWriter").finish_non_exhaustive()
+    }
+}
+
+impl IpcWriter {
+    /// Send a length-prefixed msgpack message.
+    pub async fn send(&mut self, msg: &IpcMessage) -> Result<(), IpcError> {
+        Self::send_impl(&mut self.writer, msg).await
+    }
+
+    async fn send_impl(writer: &mut OwnedWriteHalf, msg: &IpcMessage) -> Result<(), IpcError> {
+        let payload = rmp_serde::to_vec(msg)?;
+        let len =
+            u32::try_from(payload.len()).map_err(|_| IpcError::MessageTooLarge(payload.len()))?;
+        writer.write_all(&len.to_be_bytes()).await?;
+        writer.write_all(&payload).await?;
+        writer.flush().await?;
+        Ok(())
     }
 }
 
@@ -179,7 +238,7 @@ mod tests {
                 assert_eq!(b.host, "127.0.0.1");
                 assert_eq!(b.port, 9000);
             }
-            IpcMessage::Ready => unreachable!("expected Bootstrap"),
+            other => unreachable!("expected Bootstrap, got {other:?}"),
         }
         worker_ch
             .send(&IpcMessage::Ready)

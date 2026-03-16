@@ -6,7 +6,8 @@
 //! These types enable Starlette's `Request`, `StreamingResponse`, and `WebSocket`
 //! to work unmodified against a Rust-backed ASGI server.
 
-use crate::transport::types::InboundRequest;
+use crate::error::AppError;
+use crate::transport::types::{InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use pyo3::prelude::*;
@@ -404,26 +405,66 @@ impl ResolvedAwaitableWithValue {
 
 // ── AsgiSend ─────────────────────────────────────────────────────────────
 
+/// Channel capacity for streaming body chunks after the first.
+const STREAM_CHANNEL_CAPACITY: usize = 8;
+
+/// Internal state for [`AsgiSend`] — HTTP vs WebSocket mode.
+enum SendInner {
+    /// HTTP mode — accumulates response, sends via oneshot.
+    Http {
+        status: Option<u16>,
+        headers: Option<HeaderMap>,
+        response_tx: Option<oneshot::Sender<Result<OutboundResponse, AppError>>>,
+        disconnect_tx: Option<oneshot::Sender<()>>,
+        stream_tx: Option<mpsc::Sender<AsgiEvent>>,
+    },
+    /// WebSocket mode — forwards events via mpsc (unchanged).
+    Ws { tx: mpsc::Sender<AsgiEvent> },
+}
+
 /// ASGI `send` callable backed by Rust.
 ///
-/// Pushes events through an mpsc channel for concurrent response collection.
-/// Used for both fixed and streaming responses — the response type is
-/// classified by the first body chunk's `more_body` flag.
+/// In HTTP mode, accumulates status/headers from `ResponseStart` and builds
+/// an [`OutboundResponse`] directly — no intermediate mpsc channel for the
+/// common fixed-response case.
+///
+/// In WebSocket mode, forwards events via mpsc (same as before).
 #[pyclass(module = "apx._core", freelist = 64)]
 pub struct AsgiSend {
-    tx: mpsc::Sender<AsgiEvent>,
+    inner: SendInner,
 }
 
 impl std::fmt::Debug for AsgiSend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AsgiSend").finish_non_exhaustive()
+        match &self.inner {
+            SendInner::Http { .. } => f.debug_struct("AsgiSend::Http").finish_non_exhaustive(),
+            SendInner::Ws { .. } => f.debug_struct("AsgiSend::Ws").finish_non_exhaustive(),
+        }
     }
 }
 
 impl AsgiSend {
-    /// Create a channel-backed sender.
+    /// Create an HTTP-mode sender backed by a oneshot response channel.
+    pub fn http(
+        response_tx: oneshot::Sender<Result<OutboundResponse, AppError>>,
+        disconnect_tx: oneshot::Sender<()>,
+    ) -> Self {
+        Self {
+            inner: SendInner::Http {
+                status: None,
+                headers: None,
+                response_tx: Some(response_tx),
+                disconnect_tx: Some(disconnect_tx),
+                stream_tx: None,
+            },
+        }
+    }
+
+    /// Create a WebSocket-mode sender backed by an mpsc channel.
     pub fn new(tx: mpsc::Sender<AsgiEvent>) -> Self {
-        Self { tx }
+        Self {
+            inner: SendInner::Ws { tx },
+        }
     }
 }
 
@@ -444,12 +485,149 @@ impl AsgiSend {
                 elapsed_us = t0.elapsed().as_micros(),
             );
         }
-        match self.tx.try_send(parsed) {
+
+        match &mut self.inner {
+            SendInner::Http {
+                status,
+                headers,
+                response_tx,
+                disconnect_tx,
+                stream_tx,
+            } => Self::handle_http(
+                py,
+                parsed,
+                status,
+                headers,
+                response_tx,
+                disconnect_tx,
+                stream_tx,
+            ),
+            SendInner::Ws { tx } => Self::handle_ws(py, parsed, tx),
+        }
+    }
+}
+
+impl AsgiSend {
+    /// Handle an event in HTTP mode.
+    fn handle_http<'py>(
+        py: Python<'py>,
+        event: AsgiEvent,
+        status: &mut Option<u16>,
+        headers: &mut Option<HeaderMap>,
+        response_tx: &mut Option<oneshot::Sender<Result<OutboundResponse, AppError>>>,
+        disconnect_tx: &mut Option<oneshot::Sender<()>>,
+        stream_tx: &mut Option<mpsc::Sender<AsgiEvent>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        match event {
+            AsgiEvent::ResponseStart {
+                status: s,
+                headers: h,
+            } => {
+                *status = Some(s);
+                *headers = Some(h);
+                Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
+            }
+            AsgiEvent::ResponseBody { body, more_body } if stream_tx.is_none() => {
+                // First body chunk.
+                let Some(raw_status) = status.take() else {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "ASGI protocol error: body before response start",
+                    ));
+                };
+                let resp_headers = headers.take().unwrap_or_default();
+                let http_status = http::StatusCode::from_u16(raw_status)
+                    .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+
+                if more_body {
+                    // Streaming — create mpsc for remaining chunks.
+                    let (stx, srx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
+                    let dtx = disconnect_tx.take();
+                    let stream = super::streaming::AsgiBodyStream::new(srx, Some(body), dtx);
+                    if let Some(tx) = response_tx.take() {
+                        let _ = tx.send(Ok(OutboundResponse {
+                            status: http_status,
+                            headers: resp_headers,
+                            body: ResponseBody::Stream(Box::pin(stream)),
+                        }));
+                    }
+                    *stream_tx = Some(stx);
+                } else {
+                    // Fixed response — send via oneshot, drop disconnect_tx.
+                    let _ = disconnect_tx.take();
+                    if let Some(tx) = response_tx.take() {
+                        let _ = tx.send(Ok(OutboundResponse {
+                            status: http_status,
+                            headers: resp_headers,
+                            body: ResponseBody::Fixed(body),
+                        }));
+                    }
+                }
+                Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
+            }
+            AsgiEvent::ResponseBody { body, more_body } => {
+                // Subsequent streaming chunk — forward to mpsc.
+                let Some(tx) = stream_tx.as_ref() else {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "ASGI protocol error: body after stream closed",
+                    ));
+                };
+                match tx.try_send(AsgiEvent::ResponseBody { body, more_body }) {
+                    Ok(()) => {
+                        if !more_body {
+                            *stream_tx = None;
+                        }
+                        Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
+                    }
+                    Err(mpsc::error::TrySendError::Full(event)) => {
+                        let (future, resolve_tx) =
+                            crate::scheduler::primitives::Future::with_channel();
+                        let py_future = Py::new(py, future)?;
+                        let tx = tx.clone();
+                        let drop_stream = !more_body;
+                        crate::scheduler::with_tokio_handle(|handle| {
+                            handle.spawn(async move {
+                                let _ = tx.send(event).await;
+                                Python::attach(|py| {
+                                    let _ = resolve_tx.send(py.None());
+                                });
+                            });
+                        })
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(
+                                "no tokio runtime for backpressure send",
+                            )
+                        })?;
+                        if drop_stream {
+                            *stream_tx = None;
+                        }
+                        Ok(py_future.into_bound(py).into_any())
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        *stream_tx = None;
+                        Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            "stream channel closed",
+                        ))
+                    }
+                }
+            }
+            _ => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "unexpected event type in HTTP mode",
+            )),
+        }
+    }
+
+    /// Handle an event in WebSocket mode (unchanged logic).
+    fn handle_ws<'py>(
+        py: Python<'py>,
+        event: AsgiEvent,
+        tx: &mpsc::Sender<AsgiEvent>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        match tx.try_send(event) {
             Ok(()) => Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any()),
             Err(mpsc::error::TrySendError::Full(event)) => {
                 let (future, resolve_tx) = crate::scheduler::primitives::Future::with_channel();
                 let py_future = Py::new(py, future)?;
-                let tx = self.tx.clone();
+                let tx = tx.clone();
                 crate::scheduler::with_tokio_handle(|handle| {
                     handle.spawn(async move {
                         let _ = tx.send(event).await;
@@ -1031,217 +1209,6 @@ const fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-// ── ASGI Lifespan Protocol ───────────────────────────────────────────────
-
-// Gated behind cfg(test) — only the integration test harness uses lifespan.
-// Remove the gate when production `apx serve` runs lifespan startup.
-#[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    dead_code,
-    reason = "test-only lifespan helpers; not all tests exercise lifespan"
-)]
-pub mod lifespan {
-    use super::*;
-    use crate::error::AppError;
-    use crate::event_loop::EventLoopHandle;
-    use tokio::sync::oneshot;
-
-    /// Startup-complete signal sender.
-    type StartupTx = Arc<std::sync::Mutex<Option<oneshot::Sender<Result<(), String>>>>>;
-
-    /// RAII guard for a running ASGI lifespan. Sends `lifespan.shutdown` on drop.
-    pub struct LifespanGuard {
-        /// Send `lifespan.shutdown` when ready to stop.
-        shutdown_tx: Option<mpsc::Sender<Py<PyAny>>>,
-        /// Join handle for the background lifespan task (the ASGI app coroutine).
-        _task: Option<tokio::task::JoinHandle<()>>,
-    }
-
-    impl Drop for LifespanGuard {
-        fn drop(&mut self) {
-            if let Some(tx) = self.shutdown_tx.take() {
-                // Build shutdown event and send it (best-effort on drop).
-                // Use try_send (non-blocking) since drop may run inside a tokio runtime.
-                Python::attach(|py| {
-                    let event = build_lifespan_event(py, "lifespan.shutdown");
-                    let _ = tx.try_send(event);
-                });
-            }
-        }
-    }
-
-    /// ASGI `receive` callable for the lifespan protocol.
-    ///
-    /// Yields events from a channel: first `lifespan.startup`, then
-    /// `lifespan.shutdown` (sent by [`LifespanGuard`] on drop).
-    #[pyclass(module = "apx._core")]
-    struct AsgiLifespanReceive {
-        rx: Arc<Mutex<mpsc::Receiver<Py<PyAny>>>>,
-    }
-
-    #[pymethods]
-    impl AsgiLifespanReceive {
-        fn __call__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-            let rx = Arc::clone(&self.rx);
-            pyo3_async_runtimes::tokio::future_into_py(py, async move {
-                let mut guard = rx.lock().await;
-                match guard.recv().await {
-                    Some(event) => Ok(event),
-                    None => {
-                        // Channel closed — block forever to prevent the ASGI app
-                        // from returning prematurely.
-                        std::future::pending::<PyResult<Py<PyAny>>>().await
-                    }
-                }
-            })
-        }
-    }
-
-    /// ASGI `send` callable for the lifespan protocol.
-    ///
-    /// Captures `lifespan.startup.complete` and `lifespan.shutdown.complete`.
-    #[pyclass(module = "apx._core")]
-    struct AsgiLifespanSend {
-        startup_complete_tx: StartupTx,
-    }
-
-    #[pymethods]
-    impl AsgiLifespanSend {
-        fn __call__<'py>(
-            &self,
-            py: Python<'py>,
-            event: Bound<'py, PyDict>,
-        ) -> PyResult<Bound<'py, PyAny>> {
-            let event_type: String = event
-                .get_item("type")?
-                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("type"))?
-                .extract()?;
-
-            match event_type.as_str() {
-                "lifespan.startup.complete" => {
-                    let maybe_tx = self.startup_complete_tx.lock().unwrap().take();
-                    if let Some(tx) = maybe_tx {
-                        let _ = tx.send(Ok(()));
-                    }
-                }
-                "lifespan.startup.failed" => {
-                    let message: String = event
-                        .get_item("message")?
-                        .map(|v| v.extract())
-                        .transpose()?
-                        .unwrap_or_default();
-                    let maybe_tx = self.startup_complete_tx.lock().unwrap().take();
-                    if let Some(tx) = maybe_tx {
-                        let _ = tx.send(Err(message));
-                    }
-                }
-                "lifespan.shutdown.complete" | "lifespan.shutdown.failed" => {
-                    // Nothing to do — the ASGI app will return on its own.
-                }
-                other => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "unexpected lifespan event: {other}"
-                    )));
-                }
-            }
-
-            // Return an awaitable None.
-            pyo3_async_runtimes::tokio::future_into_py(py, async {
-                Python::attach(|py| Ok(py.None()))
-            })
-        }
-    }
-
-    /// Build a lifespan event dict: `{"type": <event_type>}`.
-    fn build_lifespan_event(py: Python<'_>, event_type: &str) -> Py<PyAny> {
-        let dict = PyDict::new(py);
-        dict.set_item("type", event_type).unwrap();
-        dict.into_any().unbind()
-    }
-
-    /// Build the ASGI lifespan scope dict.
-    fn build_lifespan_scope(py: Python<'_>) -> Py<PyDict> {
-        let dict = PyDict::new(py);
-        dict.set_item("type", "lifespan").unwrap();
-        let asgi = PyDict::new(py);
-        asgi.set_item("version", ASGI_VERSION).unwrap();
-        asgi.set_item("spec_version", ASGI_SPEC_VERSION).unwrap();
-        dict.set_item("asgi", asgi).unwrap();
-        dict.unbind()
-    }
-
-    /// Run the ASGI lifespan startup protocol against the app.
-    ///
-    /// Returns a [`LifespanGuard`] whose drop sends `lifespan.shutdown`.
-    /// The ASGI app coroutine runs in the background on the event loop.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if startup fails or the event loop can't drive the coroutine.
-    pub async fn run_lifespan_startup(
-        app: &Py<PyAny>,
-        loop_handle: &EventLoopHandle,
-    ) -> Result<LifespanGuard, AppError> {
-        // Channel for receive events (startup, then shutdown on drop).
-        let (receive_tx, receive_rx) = mpsc::channel::<Py<PyAny>>(2);
-
-        // Oneshot for startup-complete signal.
-        let (startup_tx, startup_rx) = oneshot::channel::<Result<(), String>>();
-
-        // Build ASGI objects and call app(scope, receive, send).
-        let coro = Python::attach(|py| -> Result<Py<PyAny>, AppError> {
-            let scope = build_lifespan_scope(py);
-
-            let receive = AsgiLifespanReceive {
-                rx: Arc::new(Mutex::new(receive_rx)),
-            };
-            let send = AsgiLifespanSend {
-                startup_complete_tx: Arc::new(std::sync::Mutex::new(Some(startup_tx))),
-            };
-
-            let receive_obj = Py::new(py, receive)
-                .map_err(|e| AppError::Internal(format!("wrap lifespan receive: {e}")))?;
-            let send_obj = Py::new(py, send)
-                .map_err(|e| AppError::Internal(format!("wrap lifespan send: {e}")))?;
-
-            app.call(py, (scope, receive_obj, send_obj), None)
-                .map_err(|e| AppError::Internal(format!("lifespan call: {e}")))
-        })?;
-
-        // Send the startup event through the receive channel.
-        let startup_event = Python::attach(|py| build_lifespan_event(py, "lifespan.startup"));
-        receive_tx.send(startup_event).await.map_err(|_| {
-            AppError::Internal("lifespan receive channel closed before startup".to_owned())
-        })?;
-
-        // Spawn the ASGI app coroutine on the event loop (don't await — it runs
-        // until shutdown).
-        let lh = loop_handle.clone();
-        let task = tokio::spawn(async move {
-            if let Err(e) = lh.drive_coroutine(coro).await {
-                tracing::warn!(error = %e, "lifespan coroutine error");
-            }
-        });
-
-        // Wait for the app to signal startup complete.
-        let result = startup_rx.await.map_err(|_| {
-            AppError::Internal("lifespan startup: app never sent startup.complete".to_owned())
-        })?;
-
-        if let Err(message) = result {
-            return Err(AppError::Internal(format!(
-                "lifespan startup failed: {message}"
-            )));
-        }
-
-        Ok(LifespanGuard {
-            shutdown_tx: Some(receive_tx),
-            _task: Some(task),
-        })
-    }
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1283,11 +1250,20 @@ mod tests {
     }
 
     #[test]
-    fn asgi_send_debug() {
+    fn asgi_send_debug_http() {
+        let (tx, _rx) = oneshot::channel();
+        let (dtx, _drx) = oneshot::channel();
+        let send = AsgiSend::http(tx, dtx);
+        let dbg = format!("{send:?}");
+        assert!(dbg.contains("AsgiSend::Http"));
+    }
+
+    #[test]
+    fn asgi_send_debug_ws() {
         let (tx, _rx) = mpsc::channel(1);
         let send = AsgiSend::new(tx);
         let dbg = format!("{send:?}");
-        assert!(dbg.contains("AsgiSend"));
+        assert!(dbg.contains("AsgiSend::Ws"));
     }
 
     // ── Helper ───────────────────────────────────────────────────────────
@@ -1620,31 +1596,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_event_through_channel() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut h = HeaderMap::new();
-        h.insert("content-type", "text/plain".parse().unwrap());
-        let event = AsgiEvent::ResponseStart {
-            status: 200,
-            headers: h,
-        };
-        tx.send(event).await.unwrap();
-        let received = rx.recv().await.unwrap();
-        assert!(matches!(
-            received,
-            AsgiEvent::ResponseStart { status: 200, .. }
-        ));
+    async fn asgi_send_http_fixed_response() {
+        let (response_tx, response_rx) = oneshot::channel();
+        let (disconnect_tx, _disconnect_rx) = oneshot::channel();
+        let mut send = AsgiSend::http(response_tx, disconnect_tx);
+
+        with_py(|py| {
+            // Send ResponseStart.
+            let start_dict = PyDict::new(py);
+            start_dict.set_item("type", "http.response.start").unwrap();
+            start_dict.set_item("status", 200u16).unwrap();
+            let headers = PyList::empty(py);
+            start_dict.set_item("headers", headers).unwrap();
+            send.__call__(py, start_dict.clone()).unwrap();
+
+            // Send ResponseBody (more_body=false).
+            let body_dict = PyDict::new(py);
+            body_dict.set_item("type", "http.response.body").unwrap();
+            body_dict
+                .set_item("body", PyBytes::new(py, b"hello"))
+                .unwrap();
+            body_dict.set_item("more_body", false).unwrap();
+            send.__call__(py, body_dict.clone()).unwrap();
+        });
+
+        let resp = response_rx.await.unwrap().unwrap();
+        assert_eq!(resp.status, http::StatusCode::OK);
+        match resp.body {
+            ResponseBody::Fixed(b) => assert_eq!(b.as_ref(), b"hello"),
+            ResponseBody::Stream(_) => panic!("expected Fixed body"),
+        }
     }
 
     #[tokio::test]
-    async fn send_channel_closed_returns_error() {
-        let (tx, rx) = mpsc::channel::<AsgiEvent>(1);
-        drop(rx);
-        let event = AsgiEvent::ResponseBody {
-            body: Bytes::from("x"),
-            more_body: false,
-        };
-        assert!(tx.send(event).await.is_err());
+    async fn asgi_send_http_streaming_response() {
+        let (response_tx, response_rx) = oneshot::channel();
+        let (disconnect_tx, _disconnect_rx) = oneshot::channel();
+        let mut send = AsgiSend::http(response_tx, disconnect_tx);
+
+        with_py(|py| {
+            // Send ResponseStart.
+            let start_dict = PyDict::new(py);
+            start_dict.set_item("type", "http.response.start").unwrap();
+            start_dict.set_item("status", 200u16).unwrap();
+            let headers = PyList::empty(py);
+            start_dict.set_item("headers", headers).unwrap();
+            send.__call__(py, start_dict.clone()).unwrap();
+
+            // Send ResponseBody (more_body=true → streaming).
+            let body_dict = PyDict::new(py);
+            body_dict.set_item("type", "http.response.body").unwrap();
+            body_dict
+                .set_item("body", PyBytes::new(py, b"chunk1"))
+                .unwrap();
+            body_dict.set_item("more_body", true).unwrap();
+            send.__call__(py, body_dict.clone()).unwrap();
+        });
+
+        let resp = response_rx.await.unwrap().unwrap();
+        assert_eq!(resp.status, http::StatusCode::OK);
+        match resp.body {
+            ResponseBody::Stream(mut stream) => {
+                use futures_core::Stream;
+                let waker = futures_util::task::noop_waker();
+                let mut cx = std::task::Context::from_waker(&waker);
+                match std::pin::Pin::new(&mut stream).poll_next(&mut cx) {
+                    std::task::Poll::Ready(Some(Ok(chunk))) => {
+                        assert_eq!(chunk.as_ref(), b"chunk1");
+                    }
+                    other => panic!("expected Ready(Some(Ok(...))), got {other:?}"),
+                }
+            }
+            ResponseBody::Fixed(_) => panic!("expected Stream body"),
+        }
     }
 
     #[test]

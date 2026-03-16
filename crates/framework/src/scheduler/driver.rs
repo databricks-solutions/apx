@@ -455,6 +455,7 @@ impl ResumeCallback {
 
         let proxy = self.proxy.take();
         tracing::trace!("resume_callback: enqueue");
+        self.queue.dec_pending_asyncio();
         self.queue.push(py, ReadyTask { task, proxy });
         Ok(())
     }
@@ -516,8 +517,10 @@ pub fn handle_drive_result(
             Ok(())
         }
         DriveResult::WaitingOnAsyncioFuture(fut) => {
+            ready_queue.inc_pending_asyncio();
             let cb = make_resume_callback(py, task, ready_queue, proxy)?;
             fut.call_method1(py, c"add_done_callback", (cb,))?;
+            ready_queue.signal_pump();
             Ok(())
         }
         DriveResult::BudgetExhausted => {

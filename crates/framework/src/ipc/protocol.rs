@@ -191,6 +191,12 @@ pub enum IpcMessage {
 
     /// Worker → Supervisor: worker is ready to accept HTTP traffic.
     Ready,
+
+    /// Supervisor → Worker: stop accepting, finish in-flight requests.
+    Drain,
+
+    /// Worker → Supervisor: drain complete, about to exit.
+    Drained,
 }
 
 /// Bootstrap config sent to the worker over the IPC channel.
@@ -307,7 +313,7 @@ mod tests {
                 assert_eq!(b.host, "0.0.0.0");
                 assert_eq!(b.port, 8000);
             }
-            IpcMessage::Ready => unreachable!("expected Bootstrap"),
+            other => unreachable!("expected Bootstrap, got {other:?}"),
         }
     }
 
@@ -319,6 +325,26 @@ mod tests {
         let decoded: IpcMessage = rmp_serde::from_slice(&encoded)
             .unwrap_or_else(|e| unreachable!("Ready should be deserializable: {e}"));
         assert!(matches!(decoded, IpcMessage::Ready));
+    }
+
+    #[test]
+    fn ipc_message_drain_roundtrip() {
+        let msg = IpcMessage::Drain;
+        let encoded = rmp_serde::to_vec(&msg)
+            .unwrap_or_else(|e| unreachable!("Drain should be serializable: {e}"));
+        let decoded: IpcMessage = rmp_serde::from_slice(&encoded)
+            .unwrap_or_else(|e| unreachable!("Drain should be deserializable: {e}"));
+        assert!(matches!(decoded, IpcMessage::Drain));
+    }
+
+    #[test]
+    fn ipc_message_drained_roundtrip() {
+        let msg = IpcMessage::Drained;
+        let encoded = rmp_serde::to_vec(&msg)
+            .unwrap_or_else(|e| unreachable!("Drained should be serializable: {e}"));
+        let decoded: IpcMessage = rmp_serde::from_slice(&encoded)
+            .unwrap_or_else(|e| unreachable!("Drained should be deserializable: {e}"));
+        assert!(matches!(decoded, IpcMessage::Drained));
     }
 
     #[test]
