@@ -2,14 +2,14 @@
 # requires-python = ">=3.11"
 # dependencies = ["rich>=13", "httpx>=0.27", "pydantic>=2", "typer>=0.15", "databricks-sdk>=0.74"]
 # ///
-"""APX benchmark tool — Databricks Apps deployment.
+"""APX benchmark tool — Databricks Apps deployment + remote bencher.
 
 Usage:
     uv run scripts/bench/main.py build
     uv run scripts/bench/main.py deploy  -p PROFILE
     uv run scripts/bench/main.py bench   -p PROFILE --name run1 -d 30s -c 100
-    uv run scripts/bench/main.py profile -p PROFILE --name run1 -d 10s -c 100
-    uv run scripts/bench/main.py report  --name run1
+    uv run scripts/bench/main.py list    -p PROFILE
+    uv run scripts/bench/main.py report  --name run1 -p PROFILE
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ from rich.table import Table
 console = Console()
 app = typer.Typer(help="APX benchmark tool")
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.apps import AppAccessControlRequest, AppPermissionLevel
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -146,6 +147,14 @@ DATABRICKS_APPS = {
     "bench_uvicorn": "bench-uvicorn",
     "bench_granian": "bench-granian",
     "bench_apx": "bench-apx",
+    "bench_bencher": "bench-bencher",
+}
+
+# Apps that are benchmarkable targets (excludes the bencher itself).
+BENCHABLE_APPS = {
+    "bench_uvicorn": "bench-uvicorn",
+    "bench_granian": "bench-granian",
+    "bench_apx": "bench-apx",
 }
 
 DATABRICKS_ENVS = [
@@ -220,71 +229,50 @@ def get_workspace_client(profile: str):
     return WorkspaceClient(profile=profile)
 
 
-def check_oha() -> None:
-    """Verify oha is available."""
-    if not shutil.which("oha"):
-        console.print("[red]Error:[/] 'oha' not found. Please install it.")
+# ---------------------------------------------------------------------------
+# Databricks auth & URL helpers
+# ---------------------------------------------------------------------------
+
+
+def get_databricks_token(ws: WorkspaceClient) -> str:
+    """Get a fresh Databricks access token via SDK."""
+    headers = ws.config.authenticate()
+    auth = headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        console.print("[red]Error:[/] Failed to get Databricks token")
         raise typer.Exit(1)
+    return auth.removeprefix("Bearer ")
 
 
-# ---------------------------------------------------------------------------
-# Run directory helpers
-# ---------------------------------------------------------------------------
+def get_app_url(ws: WorkspaceClient, app_name: str) -> str:
+    """Get the URL for a Databricks App via SDK."""
+    app = ws.apps.get(app_name)
+    url = app.url or ""
+    if not url:
+        console.print(f"[red]Error:[/] No URL found for {app_name}")
+        raise typer.Exit(1)
+    return url.rstrip("/")
 
 
-def ensure_run_dir(
-    name: str,
-    results_dir: Path,
-    *,
-    mode: str,
-    duration: str,
-    connections: int,
-    warmup_requests: int,
-) -> Path:
-    """Create run dir + meta.json on first use, update mode on subsequent calls."""
-    run_dir = results_dir / name
-    meta_path = run_dir / "meta.json"
+def wait_for_app_active(ws: WorkspaceClient, app_name: str, timeout: float = 600.0) -> None:
+    """Poll app status via SDK until RUNNING."""
+    deadline = time.monotonic() + timeout
+    with Progress(
+        SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task(f"Waiting for {app_name} to be ACTIVE...", total=None)
+        while time.monotonic() < deadline:
+            app = ws.apps.get(app_name)
+            state = app.app_status.state.value if app.app_status and app.app_status.state else "?"
+            if state == "RUNNING":
+                progress.update(task, description=f"[green]{app_name} is ACTIVE!")
+                return
+            progress.update(task, description=f"Waiting for {app_name}... (state={state})")
+            time.sleep(10)
 
-    if run_dir.exists() and meta_path.exists():
-        # Update mode if needed (e.g. bench -> bench+profile).
-        meta_raw = json.loads(meta_path.read_text())
-        existing_mode = meta_raw.get("mode", "")
-        if mode not in existing_mode:
-            if existing_mode:
-                meta_raw["mode"] = f"{existing_mode}+{mode}"
-            else:
-                meta_raw["mode"] = mode
-            meta_path.write_text(json.dumps(meta_raw, indent=2))
-        console.print(f"[bold green]Run:[/] {name} → {run_dir} (existing)")
-        return run_dir
-
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    commit_hash, commit_message = get_git_info()
-    meta = RunMeta(
-        name=name,
-        timestamp=datetime.datetime.now(datetime.timezone.utc),
-        commit_hash=commit_hash,
-        commit_message=commit_message,
-        duration=duration,
-        connections=connections,
-        warmup_requests=warmup_requests,
-        mode=mode,
-        environments=DATABRICKS_ENVS,
-    )
-
-    meta_path.write_text(json.dumps(meta.model_dump(mode="json"), indent=2))
-    console.print(f"[bold green]Run:[/] {name} → {run_dir}")
-    console.print(f"[dim]Commit: {commit_hash[:12]} — {commit_message}[/]")
-    return run_dir
-
-
-def resolve_app_urls(ws: WorkspaceClient) -> dict[str, str]:
-    """Fetch all 3 app URLs from Databricks via SDK."""
-    urls = {}
-    for key, name in DATABRICKS_APPS.items():
-        urls[key] = get_app_url(ws, name)
-    return urls
+    console.print(f"[red]Error:[/] {app_name} did not become ACTIVE within {timeout}s")
+    raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -426,15 +414,22 @@ def assemble_databricks_apps(wheel_path: Path | None) -> None:
     """Copy shared app code + per-app configs → .build/{app-name}/."""
     build_dir = DATABRICKS_DIR / ".build"
     app_src = BENCH_DIR / "app"
+    bencher_src = BENCH_DIR / "bencher"
 
-    for app_name in DATABRICKS_APPS.values():
+    for resource_key, app_name in DATABRICKS_APPS.items():
         app_build = build_dir / app_name
         if app_build.exists():
             shutil.rmtree(app_build)
         app_build.mkdir(parents=True)
 
-        # Copy shared app code.
-        shutil.copytree(app_src, app_build / "app")
+        if app_name == "bench-bencher":
+            # Bencher app: copy bencher package + supporting files.
+            shutil.copytree(bencher_src, app_build / "bencher")
+            shutil.copy2(BENCH_DIR / "profile_analysis.py", app_build / "profile_analysis.py")
+            shutil.copy2(BENCH_DIR / "scenarios.json", app_build / "scenarios.json")
+        else:
+            # Benchmarkable apps: copy shared app code.
+            shutil.copytree(app_src, app_build / "app")
 
         # Copy per-app requirements.txt.
         src_reqs = DATABRICKS_DIR / "apps" / app_name / "requirements.txt"
@@ -477,372 +472,102 @@ def run_databricks_app(profile: str, resource_key: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Databricks auth & polling
+# Permissions
 # ---------------------------------------------------------------------------
 
 
-def get_databricks_token(ws: WorkspaceClient) -> str:
-    """Get a fresh Databricks access token via SDK."""
-    headers = ws.config.authenticate()
-    auth = headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        console.print("[red]Error:[/] Failed to get Databricks token")
-        raise typer.Exit(1)
-    return auth.removeprefix("Bearer ")
-
-
-def get_app_url(ws: WorkspaceClient, app_name: str) -> str:
-    """Get the URL for a Databricks App via SDK."""
-    app = ws.apps.get(app_name)
-    url = app.url or ""
-    if not url:
-        console.print(f"[red]Error:[/] No URL found for {app_name}")
-        raise typer.Exit(1)
-    return url.rstrip("/")
-
-
-def wait_for_app_active(ws: WorkspaceClient, app_name: str, timeout: float = 600.0) -> None:
-    """Poll app status via SDK until RUNNING."""
-    deadline = time.monotonic() + timeout
-    with Progress(
-        SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task(f"Waiting for {app_name} to be ACTIVE...", total=None)
-        while time.monotonic() < deadline:
-            app = ws.apps.get(app_name)
-            state = app.app_status.state.value if app.app_status and app.app_status.state else "?"
-            if state == "RUNNING":
-                progress.update(task, description=f"[green]{app_name} is ACTIVE!")
-                return
-            progress.update(task, description=f"Waiting for {app_name}... (state={state})")
-            time.sleep(10)
-
-    console.print(f"[red]Error:[/] {app_name} did not become ACTIVE within {timeout}s")
-    raise typer.Exit(1)
-
-
-# ---------------------------------------------------------------------------
-# Remote health, warmup, oha, profiling
-# ---------------------------------------------------------------------------
-
-
-def wait_for_health(url: str, token: str, timeout: float = 120.0) -> None:
-    """Poll /api/health on a remote Databricks App."""
-    health_url = f"{url}/api/health"
-    deadline = time.monotonic() + timeout
-    headers = {"Authorization": f"Bearer {token}"}
-
-    with Progress(
-        SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task(f"Waiting for {url} health...", total=None)
-        while time.monotonic() < deadline:
-            try:
-                resp = httpx.get(health_url, headers=headers, timeout=10.0)
-                if resp.status_code == 200:
-                    progress.update(task, description=f"[green]{url} healthy!")
-                    return
-            except httpx.HTTPError:
-                pass
-            time.sleep(5)
-
-    console.print(f"[red]Error:[/] {url} did not become healthy within {timeout}s")
-    raise typer.Exit(1)
-
-
-def run_warmup(url: str, token: str, warmup_requests: int) -> None:
-    """Send warmup requests to a remote Databricks App."""
-    if warmup_requests <= 0:
+def grant_bencher_permissions(ws: WorkspaceClient) -> None:
+    """Grant the bencher app's service principal CAN_USE on all benchable apps."""
+    bencher_app = ws.apps.get("bench-bencher")
+    # service_principal_name in the ACL API expects the client_id (UUID),
+    # not the display name.
+    sp_client_id = bencher_app.service_principal_client_id
+    if not sp_client_id:
+        console.print("[yellow]Warning:[/] Could not find bencher service principal client ID — skip permission grant.")
         return
-    console.print(f"  [dim]Warming up {url} with {warmup_requests} requests...[/]")
-    cmd = [
-        "oha",
-        "--no-tui",
-        "-n", str(warmup_requests),
-        "-c", str(min(warmup_requests, 50)),
-        "-H", f"Authorization: Bearer {token}",
-        f"{url}/api/health",
-    ]
-    subprocess.run(cmd, capture_output=True, check=False)
 
-
-def run_oha(
-    scenario: Scenario,
-    url: str,
-    token: str,
-    duration: str,
-    connections: int,
-    output_path: Path,
-) -> bool:
-    """Run oha against a remote Databricks App. Returns True on success."""
-    cmd = [
-        "oha",
-        "--output-format", "json",
-        "--no-tui",
-        "-z", duration,
-        "-c", str(connections),
-        "-m", scenario.method,
-        "-H", f"Authorization: Bearer {token}",
-    ]
-
-    if scenario.body is not None:
-        cmd.extend(["-d", json.dumps(scenario.body)])
-        cmd.extend(["-T", "application/json"])
-
-    cmd.append(f"{url}{scenario.path}")
-
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        console.print(
-            f"  [yellow]Warning:[/] oha failed for {scenario.name}: {result.stderr[:200]}"
-        )
-        return False
-
-    output_path.write_text(result.stdout)
-    return True
-
-
-def extract_profiling(url: str, token: str, dest: Path) -> None:
-    """Download profiling JSONL from a remote Databricks App."""
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        resp = httpx.get(f"{url}/api/profile/dump", headers=headers, timeout=30.0)
-        if resp.status_code == 200:
-            dest.write_text(resp.text)
-            console.print(f"  [green]Profile data:[/] {dest}")
-        else:
-            console.print(f"  [yellow]No profile data:[/] {resp.status_code}")
-    except httpx.HTTPError as exc:
-        console.print(f"  [red]Error fetching profile:[/] {exc}")
-
-
-def reset_profiling(url: str, token: str) -> None:
-    """Reset profiling data on a remote Databricks App."""
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        httpx.delete(f"{url}/api/profile/reset", headers=headers, timeout=10.0)
-    except httpx.HTTPError:
-        pass
+    console.print(f"\n[bold blue]Granting CAN_USE to bencher SP ({sp_client_id}) on benchable apps...[/]")
+    for app_name in BENCHABLE_APPS.values():
+        try:
+            result = ws.apps.update_permissions(
+                app_name=app_name,
+                access_control_list=[
+                    AppAccessControlRequest(
+                        service_principal_name=sp_client_id,
+                        permission_level=AppPermissionLevel.CAN_USE,
+                    )
+                ],
+            )
+            # Verify SP is in the resulting ACL.
+            granted = any(
+                acr.service_principal_name == sp_client_id
+                for acr in (result.access_control_list or [])
+            )
+            if granted:
+                console.print(f"  [green]Granted:[/] CAN_USE on {app_name}")
+            else:
+                console.print(f"  [yellow]Warning:[/] CAN_USE grant on {app_name} not reflected in ACL")
+        except Exception as exc:
+            console.print(f"  [yellow]Warning:[/] Failed to set permission on {app_name}: {exc}")
 
 
 # ---------------------------------------------------------------------------
-# Report generation
+# Bencher HTTP client helpers
+# ---------------------------------------------------------------------------
+
+
+def _bencher_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+def _get_bencher_url(ws: WorkspaceClient) -> str:
+    return get_app_url(ws, "bench-bencher")
+
+
+def _poll_run(
+    bencher_url: str, token: str, run_id: str, poll_interval: float = 5.0
+) -> dict:
+    """Poll GET /api/benchmarks/{id} until completed or failed. Returns final response."""
+    headers = _bencher_headers(token)
+    with Progress(
+        SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Waiting for benchmark...", total=None)
+        while True:
+            resp = httpx.get(
+                f"{bencher_url}/api/benchmarks/{run_id}",
+                headers=headers, timeout=30.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            status = data["status"]
+            prog = data.get("progress", {})
+            current = prog.get("current", "")
+            completed = prog.get("completed", 0)
+            total = prog.get("total", 0)
+
+            if status == "completed":
+                progress.update(task, description="[green]Benchmark completed!")
+                return data
+            elif status == "failed":
+                progress.update(task, description="[red]Benchmark failed!")
+                return data
+            else:
+                desc = f"[{completed}/{total}] {current}" if total else current
+                progress.update(task, description=desc)
+
+            time.sleep(poll_interval)
+
+
+# ---------------------------------------------------------------------------
+# Report printing (reused from original — operates on report dict)
 # ---------------------------------------------------------------------------
 
 
 def _safe_ratio(a: float, b: float) -> float | None:
     """Compute a/b, returning None if b is zero."""
     return round(a / b, 4) if b else None
-
-
-def generate_report(
-    run_dir: Path,
-    scenarios: list[Scenario],
-) -> None:
-    """Load all results, compute ratios, write report.json, print terminal tables."""
-    sys.path.insert(0, str(BENCH_DIR))
-    from profile_analysis import analyze_records, load_records
-
-    meta_raw = json.loads((run_dir / "meta.json").read_text())
-    meta = RunMeta(**meta_raw)
-
-    env_names = [e.name for e in meta.environments]
-    scenario_meta = {s.name: {"method": s.method, "path": s.path} for s in scenarios}
-
-    # ── Discover throughput results from disk ──
-    all_oha: dict[str, dict[str, dict]] = {}
-    all_scenario_names: set[str] = set()
-    for env_name in env_names:
-        all_oha[env_name] = {}
-        env_dir = run_dir / "environments" / env_name
-        if not env_dir.exists():
-            continue
-        for json_file in sorted(env_dir.glob("*.json")):
-            sname = json_file.stem
-            all_oha[env_name][sname] = json.loads(json_file.read_text())
-            all_scenario_names.add(sname)
-
-    scenario_names = sorted(all_scenario_names)
-
-    # ── Build scenarios section ──
-    scenarios_section: dict[str, dict] = {}
-    for sname in scenario_names:
-        smeta = scenario_meta.get(sname, {})
-        results_raw: dict[str, dict] = {}
-        throughput_rps: dict[str, float] = {}
-        latency_ms: dict[str, dict] = {}
-
-        for env_name in env_names:
-            raw = all_oha[env_name].get(sname)
-            if raw is None:
-                continue
-            results_raw[env_name] = raw
-            parsed = ScenarioResult.from_oha_json(env_name, sname, raw)
-            if parsed:
-                throughput_rps[env_name] = round(parsed.requests_per_sec, 1)
-                latency_ms[env_name] = {
-                    "p50": round(parsed.latency_p50_ms, 2),
-                    "p90": round(parsed.latency_p90_ms, 2),
-                    "p99": round(parsed.latency_p99_ms, 2),
-                }
-
-        # Compute pairwise ratios.
-        ratios: dict[str, dict] = {}
-        for i, a in enumerate(env_names):
-            for b in env_names[i + 1 :]:
-                label = f"{a}_vs_{b}"
-                a_tp = throughput_rps.get(a, 0)
-                b_tp = throughput_rps.get(b, 0)
-                a_lat = latency_ms.get(a, {})
-                b_lat = latency_ms.get(b, {})
-                ratios[label] = {
-                    "throughput": _safe_ratio(a_tp, b_tp),
-                    "latency_p50": _safe_ratio(
-                        a_lat.get("p50", 0), b_lat.get("p50", 0)
-                    ),
-                    "latency_p99": _safe_ratio(
-                        a_lat.get("p99", 0), b_lat.get("p99", 0)
-                    ),
-                }
-
-        scenarios_section[sname] = {
-            **smeta,
-            "results": results_raw,
-            "comparison": {
-                "throughput_rps": throughput_rps,
-                "latency_ms": latency_ms,
-                "ratios": ratios,
-            },
-        }
-
-    # ── Load profiling data ──
-    profiling_section: dict[str, dict] = {}
-    profile_dir = run_dir / "profile"
-    if profile_dir.exists():
-        for env_name in env_names:
-            jsonl_path = profile_dir / f"{env_name}.jsonl"
-            if not jsonl_path.exists():
-                continue
-            info, reqs = load_records(jsonl_path)
-            stats = analyze_records(reqs)
-
-            endpoints: dict[str, dict] = {}
-            for path, s in stats.items():
-                endpoints[path] = {
-                    "count": s["count"],
-                    "handler_us": {
-                        "p50": round(s["handler_p50_us"], 1),
-                        "p99": round(s["handler_p99_us"], 1),
-                        "avg": round(s["handler_avg_us"], 1),
-                    },
-                    "send_us": {
-                        "p50": round(s["send_p50_us"], 1),
-                        "p99": round(s["send_p99_us"], 1),
-                        "avg": round(s["send_avg_us"], 1),
-                    },
-                    "recv_us": {
-                        "p50": round(s["recv_p50_us"], 1),
-                        "p99": round(s["recv_p99_us"], 1),
-                        "avg": round(s["recv_avg_us"], 1),
-                    },
-                    "total_us": {
-                        "p50": round(s["total_p50_us"], 1),
-                        "p99": round(s["total_p99_us"], 1),
-                        "avg": round(s["total_avg_us"], 1),
-                    },
-                    "recv_calls_avg": round(s["recv_calls_avg"], 1),
-                    "send_calls_avg": round(s["send_calls_avg"], 1),
-                }
-
-            profiling_section[env_name] = {
-                "info": {
-                    "loop": info.get("loop", "?") if info else "?",
-                    "python": info.get("python", "?") if info else "?",
-                    "pid": info.get("pid", "?") if info else "?",
-                },
-                "endpoints": endpoints,
-            }
-
-    # ── Compute profiling ratios ──
-    profiling_ratios: dict[str, dict] = {}
-    all_paths: set[str] = set()
-    for env_name in env_names:
-        if env_name in profiling_section:
-            all_paths.update(profiling_section[env_name]["endpoints"].keys())
-
-    for path in sorted(all_paths):
-        path_ratios: dict[str, float | None] = {}
-        for i, a in enumerate(env_names):
-            for b in env_names[i + 1 :]:
-                a_ep = profiling_section.get(a, {}).get("endpoints", {}).get(path)
-                b_ep = profiling_section.get(b, {}).get("endpoints", {}).get(path)
-                if a_ep and b_ep:
-                    label = f"{a}_vs_{b}"
-                    path_ratios[f"handler_p50_{label}"] = _safe_ratio(
-                        a_ep["handler_us"]["p50"], b_ep["handler_us"]["p50"]
-                    )
-                    path_ratios[f"send_p50_{label}"] = _safe_ratio(
-                        a_ep["send_us"]["p50"], b_ep["send_us"]["p50"]
-                    )
-        if path_ratios:
-            profiling_ratios[path] = path_ratios
-
-    # ── Compute summary ──
-    summary: dict[str, dict] = {}
-    for i, a in enumerate(env_names):
-        for b in env_names[i + 1 :]:
-            label = f"{a}_vs_{b}"
-
-            # Average throughput ratio.
-            tp_ratios = []
-            for sname in scenario_names:
-                r = scenarios_section.get(sname, {}).get("comparison", {}).get("ratios", {}).get(label, {})
-                if r.get("throughput") is not None:
-                    tp_ratios.append(r["throughput"])
-            summary.setdefault("avg_throughput_ratio", {})[label] = (
-                round(sum(tp_ratios) / len(tp_ratios), 4) if tp_ratios else None
-            )
-
-            # Average profiling ratios.
-            handler_rs, send_rs = [], []
-            for path in sorted(all_paths):
-                pr = profiling_ratios.get(path, {})
-                h = pr.get(f"handler_p50_{label}")
-                s = pr.get(f"send_p50_{label}")
-                if h is not None:
-                    handler_rs.append(h)
-                if s is not None:
-                    send_rs.append(s)
-            summary.setdefault("avg_handler_p50_ratio", {})[label] = (
-                round(sum(handler_rs) / len(handler_rs), 4) if handler_rs else None
-            )
-            summary.setdefault("avg_send_p50_ratio", {})[label] = (
-                round(sum(send_rs) / len(send_rs), 4) if send_rs else None
-            )
-
-    # ── Assemble report ──
-    report = {
-        "meta": meta_raw,
-        "scenarios": scenarios_section,
-        "profiling": profiling_section,
-        "profiling_ratios": profiling_ratios,
-        "summary": summary,
-    }
-
-    report_path = run_dir / "report.json"
-    report_path.write_text(json.dumps(report, indent=2))
-    console.print(f"\n[bold green]Report written:[/] {report_path}")
-
-    _print_comparison_tables(report, env_names, scenario_names)
-    if profiling_section:
-        _print_profiling_tables(report, env_names)
-
-
-# ---------------------------------------------------------------------------
-# Terminal printing
-# ---------------------------------------------------------------------------
 
 
 def _print_comparison_tables(
@@ -961,6 +686,23 @@ def _print_profiling_tables(report: dict, env_names: list[str]) -> None:
                 console.print(f"  {path}: {', '.join(parts)}")
 
 
+def _print_report(report: dict) -> None:
+    """Print report tables from a report dict."""
+    # Derive env_names and scenario_names from the report.
+    scenarios_section = report.get("scenarios", {})
+    scenario_names = sorted(scenarios_section.keys())
+
+    env_names_set: set[str] = set()
+    for sdata in scenarios_section.values():
+        env_names_set.update(sdata.get("comparison", {}).get("throughput_rps", {}).keys())
+    env_names = sorted(env_names_set)
+
+    if scenario_names:
+        _print_comparison_tables(report, env_names, scenario_names)
+    if report.get("profiling"):
+        _print_profiling_tables(report, env_names)
+
+
 # ---------------------------------------------------------------------------
 # Typer commands
 # ---------------------------------------------------------------------------
@@ -1000,140 +742,335 @@ def deploy(
         url = get_app_url(ws, app_name)
         console.print(f"  [cyan]{app_name}:[/] {url}")
 
+    # Grant bencher SP CAN_USE on all benchable apps.
+    grant_bencher_permissions(ws)
+
 
 @app.command()
 def bench(
-    name: str = typer.Option(..., help="Run name (results stored under results/<name>/)"),
+    name: str = typer.Option(..., help="Run name"),
     profile: str = typer.Option("DEFAULT", "-p", "--profile", help="Databricks CLI profile"),
     duration: str = typer.Option("10s", "-d", "--duration", help="Duration per scenario (oha -z)"),
     connections: int = typer.Option(100, "-c", "--connections", help="Concurrent connections"),
     warmup: int = typer.Option(1000, help="Number of warmup requests"),
-    scenarios: Path = typer.Option(DEFAULT_SCENARIOS, help="Path to scenarios.json"),
+    do_profile: bool = typer.Option(False, "--profile-asgi", help="Also run profiling pass"),
     results_dir: Path = typer.Option(DEFAULT_RESULTS, "--results-dir"),
-    no_report: bool = typer.Option(False, "--no-report", help="Skip report generation"),
 ) -> None:
-    """Run throughput benchmarks against live Databricks Apps."""
-    check_oha()
-
+    """Start a remote benchmark via the bencher server, poll until done, download report."""
     ws = get_workspace_client(profile)
-    scenario_list = [Scenario(**s) for s in json.loads(scenarios.read_text())]
-    run_dir = ensure_run_dir(
-        name, results_dir,
-        mode="bench", duration=duration, connections=connections, warmup_requests=warmup,
-    )
-
-    app_urls = resolve_app_urls(ws)
-    for key, url in app_urls.items():
-        console.print(f"  [cyan]{DATABRICKS_APPS[key]}:[/] {url}")
-
-    # Health check + warmup.
+    bencher_url = _get_bencher_url(ws)
     token = get_databricks_token(ws)
-    for url in app_urls.values():
-        wait_for_health(url, token)
-    for url in app_urls.values():
-        run_warmup(url, token, warmup)
 
-    # Run benchmarks for each app.
-    for resource_key, url in app_urls.items():
-        env_name = KEY_TO_ENV[resource_key]
-        console.print(f"\n[bold magenta]{'=' * 50}[/]")
-        console.print(f"[bold magenta]Databricks: {env_name}[/]")
-        console.print(f"[bold magenta]{'=' * 50}[/]")
+    console.print(f"[bold blue]Bencher:[/] {bencher_url}")
 
-        # Refresh token before each environment pass.
-        token = get_databricks_token(ws)
+    # Build environments map: env_name → app_name.
+    environments = {KEY_TO_ENV[k]: v for k, v in BENCHABLE_APPS.items()}
 
-        env_dir = run_dir / "environments" / env_name
-        env_dir.mkdir(parents=True, exist_ok=True)
+    config = {
+        "name": name,
+        "environments": environments,
+        "duration": duration,
+        "connections": connections,
+        "warmup_requests": warmup,
+        "profile": do_profile,
+    }
 
-        for scenario in scenario_list:
-            console.print(
-                f"  [cyan]Running:[/] {scenario.name} ({scenario.method} {scenario.path})"
-            )
-            output_path = env_dir / f"{scenario.name}.json"
-            ok = run_oha(scenario, url, token, duration, connections, output_path)
-            if ok:
-                console.print(f"  [green]Done:[/] {output_path}")
-            else:
-                console.print(f"  [yellow]Skipped:[/] {scenario.name}")
+    # POST /api/benchmarks
+    headers = _bencher_headers(token)
+    resp = httpx.post(
+        f"{bencher_url}/api/benchmarks",
+        json=config, headers=headers, timeout=30.0,
+    )
+    if resp.status_code != 202:
+        console.print(f"[red]Error:[/] Failed to start benchmark: {resp.status_code} {resp.text}")
+        raise typer.Exit(1)
 
-    if not no_report:
-        generate_report(run_dir, scenario_list)
+    run_data = resp.json()
+    run_id = run_data["id"]
+    console.print(f"[green]Started:[/] run_id={run_id}")
+
+    # Poll until completed/failed.
+    final = _poll_run(bencher_url, token, run_id)
+
+    if final["status"] == "failed":
+        console.print(f"[red]Benchmark failed:[/] {final.get('error_message', 'unknown error')}")
+        raise typer.Exit(1)
+
+    # Download report.
+    resp = httpx.get(
+        f"{bencher_url}/api/benchmarks/{run_id}/report",
+        headers=headers, timeout=30.0,
+    )
+    if resp.status_code != 200:
+        console.print("[yellow]Warning:[/] Could not download report.")
+        raise typer.Exit(1)
+
+    report = resp.json()
+
+    # Save report locally.
+    run_dir = results_dir / name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    report_path = run_dir / "report.json"
+    report_path.write_text(json.dumps(report, indent=2))
+    console.print(f"[bold green]Report saved:[/] {report_path}")
+
+    _print_report(report)
 
 
-@app.command("profile")
-def profile_cmd(
-    name: str = typer.Option(..., help="Run name (results stored under results/<name>/)"),
+@app.command("list")
+def list_runs(
     profile: str = typer.Option("DEFAULT", "-p", "--profile", help="Databricks CLI profile"),
-    duration: str = typer.Option("10s", "-d", "--duration", help="Duration per profiling scenario"),
-    connections: int = typer.Option(100, "-c", "--connections", help="Concurrent connections"),
-    warmup: int = typer.Option(1000, help="Number of warmup requests"),
-    results_dir: Path = typer.Option(DEFAULT_RESULTS, "--results-dir"),
-    no_report: bool = typer.Option(False, "--no-report", help="Skip report generation"),
 ) -> None:
-    """Run profiling benchmarks against live Databricks Apps."""
-    check_oha()
-
+    """List benchmark runs from the remote bencher server."""
     ws = get_workspace_client(profile)
-    run_dir = ensure_run_dir(
-        name, results_dir,
-        mode="profile", duration=duration, connections=connections, warmup_requests=warmup,
-    )
-
-    app_urls = resolve_app_urls(ws)
-    for key, url in app_urls.items():
-        console.print(f"  [cyan]{DATABRICKS_APPS[key]}:[/] {url}")
-
-    # Health check + warmup.
+    bencher_url = _get_bencher_url(ws)
     token = get_databricks_token(ws)
-    for url in app_urls.values():
-        wait_for_health(url, token)
-    for url in app_urls.values():
-        run_warmup(url, token, warmup)
 
-    # Run profiling for each app.
-    prof_dir = run_dir / "profile"
-    prof_dir.mkdir(parents=True, exist_ok=True)
+    headers = _bencher_headers(token)
+    resp = httpx.get(f"{bencher_url}/api/benchmarks", headers=headers, timeout=30.0)
+    resp.raise_for_status()
+    runs = resp.json()
 
-    for resource_key, url in app_urls.items():
-        env_name = KEY_TO_ENV[resource_key]
-        console.print(f"\n[bold magenta]{'=' * 50}[/]")
-        console.print(f"[bold magenta]Profiling: {env_name}[/]")
-        console.print(f"[bold magenta]{'=' * 50}[/]")
+    if not runs:
+        console.print("[dim]No benchmark runs found.[/]")
+        return
 
-        # Refresh token before each environment pass.
-        token = get_databricks_token(ws)
+    table = Table(title="Benchmark Runs")
+    table.add_column("ID", style="dim", max_width=12)
+    table.add_column("Name", style="cyan")
+    table.add_column("Status")
+    table.add_column("Mode")
+    table.add_column("Progress")
+    table.add_column("Created")
 
-        reset_profiling(url, token)
+    for r in runs:
+        status = r["status"]
+        style = {"completed": "green", "failed": "red", "running": "yellow"}.get(status, "")
+        prog = r.get("progress", {})
+        prog_str = f"{prog.get('completed', 0)}/{prog.get('total', 0)}"
+        table.add_row(
+            r["id"][:12],
+            r["name"],
+            f"[{style}]{status}[/{style}]" if style else status,
+            r["mode"],
+            prog_str,
+            r["created_at"][:19],
+        )
 
-        for scenario in PROFILE_SCENARIOS:
-            console.print(f"  [cyan]Profiling:[/] {scenario.name}")
-            run_oha(
-                scenario, url, token, duration,
-                connections, prof_dir / f"_oha_{env_name}_{scenario.name}.json",
-            )
-
-        extract_profiling(url, token, prof_dir / f"{env_name}.jsonl")
-
-    if not no_report:
-        scenario_list = [Scenario(**s) for s in json.loads(DEFAULT_SCENARIOS.read_text())]
-        generate_report(run_dir, scenario_list)
+    console.print(table)
 
 
 @app.command()
 def report(
-    name: str = typer.Option(..., help="Run name"),
+    name: str = typer.Option(None, help="Run name (local results)"),
+    run_id: str = typer.Option(None, "--id", help="Run ID (download from server)"),
+    profile: str = typer.Option("DEFAULT", "-p", "--profile", help="Databricks CLI profile"),
     results_dir: Path = typer.Option(DEFAULT_RESULTS, "--results-dir"),
     scenarios: Path = typer.Option(DEFAULT_SCENARIOS, help="Path to scenarios.json"),
 ) -> None:
-    """Generate report from existing results."""
-    run_dir = results_dir / name
-    if not run_dir.exists():
-        console.print(f"[red]Error:[/] Run '{name}' not found at {run_dir}")
+    """Display report — from server (--id) or local results (--name)."""
+    if run_id:
+        # Download from server.
+        ws = get_workspace_client(profile)
+        bencher_url = _get_bencher_url(ws)
+        token = get_databricks_token(ws)
+        headers = _bencher_headers(token)
+
+        resp = httpx.get(
+            f"{bencher_url}/api/benchmarks/{run_id}/report",
+            headers=headers, timeout=30.0,
+        )
+        if resp.status_code == 404:
+            console.print(f"[red]Error:[/] Report not found for run {run_id}")
+            raise typer.Exit(1)
+        resp.raise_for_status()
+
+        report_data = resp.json()
+        _print_report(report_data)
+
+    elif name:
+        # Local report — check if report.json already exists.
+        run_dir = results_dir / name
+        report_path = run_dir / "report.json"
+
+        if report_path.exists():
+            report_data = json.loads(report_path.read_text())
+            _print_report(report_data)
+        else:
+            # Legacy: generate from filesystem results.
+            if not run_dir.exists():
+                console.print(f"[red]Error:[/] Run '{name}' not found at {run_dir}")
+                raise typer.Exit(1)
+            sys.path.insert(0, str(BENCH_DIR))
+            from profile_analysis import analyze_records, load_records  # noqa: F401
+            _generate_report_legacy(run_dir, scenarios)
+    else:
+        console.print("[red]Error:[/] Provide --name (local) or --id (remote)")
         raise typer.Exit(1)
 
-    scenario_list = [Scenario(**s) for s in json.loads(scenarios.read_text())]
-    generate_report(run_dir, scenario_list)
+
+def _generate_report_legacy(run_dir: Path, scenarios_path: Path) -> None:
+    """Legacy report generation from filesystem results (backward compat)."""
+    sys.path.insert(0, str(BENCH_DIR))
+    from profile_analysis import analyze_records, load_records
+
+    meta_raw = json.loads((run_dir / "meta.json").read_text())
+    meta = RunMeta(**meta_raw)
+    scenario_list = [Scenario(**s) for s in json.loads(scenarios_path.read_text())]
+
+    env_names = [e.name for e in meta.environments]
+    scenario_meta = {s.name: {"method": s.method, "path": s.path} for s in scenario_list}
+
+    all_oha: dict[str, dict[str, dict]] = {}
+    all_scenario_names: set[str] = set()
+    for env_name in env_names:
+        all_oha[env_name] = {}
+        env_dir = run_dir / "environments" / env_name
+        if not env_dir.exists():
+            continue
+        for json_file in sorted(env_dir.glob("*.json")):
+            sname = json_file.stem
+            all_oha[env_name][sname] = json.loads(json_file.read_text())
+            all_scenario_names.add(sname)
+
+    scenario_names = sorted(all_scenario_names)
+
+    scenarios_section: dict[str, dict] = {}
+    for sname in scenario_names:
+        smeta = scenario_meta.get(sname, {})
+        results_raw: dict[str, dict] = {}
+        throughput_rps: dict[str, float] = {}
+        latency_ms: dict[str, dict] = {}
+
+        for env_name in env_names:
+            raw = all_oha[env_name].get(sname)
+            if raw is None:
+                continue
+            results_raw[env_name] = raw
+            parsed = ScenarioResult.from_oha_json(env_name, sname, raw)
+            if parsed:
+                throughput_rps[env_name] = round(parsed.requests_per_sec, 1)
+                latency_ms[env_name] = {
+                    "p50": round(parsed.latency_p50_ms, 2),
+                    "p90": round(parsed.latency_p90_ms, 2),
+                    "p99": round(parsed.latency_p99_ms, 2),
+                }
+
+        ratios: dict[str, dict] = {}
+        for i, a in enumerate(env_names):
+            for b in env_names[i + 1 :]:
+                label = f"{a}_vs_{b}"
+                a_tp = throughput_rps.get(a, 0)
+                b_tp = throughput_rps.get(b, 0)
+                a_lat = latency_ms.get(a, {})
+                b_lat = latency_ms.get(b, {})
+                ratios[label] = {
+                    "throughput": _safe_ratio(a_tp, b_tp),
+                    "latency_p50": _safe_ratio(a_lat.get("p50", 0), b_lat.get("p50", 0)),
+                    "latency_p99": _safe_ratio(a_lat.get("p99", 0), b_lat.get("p99", 0)),
+                }
+
+        scenarios_section[sname] = {
+            **smeta,
+            "results": results_raw,
+            "comparison": {
+                "throughput_rps": throughput_rps,
+                "latency_ms": latency_ms,
+                "ratios": ratios,
+            },
+        }
+
+    profiling_section: dict[str, dict] = {}
+    profile_dir = run_dir / "profile"
+    if profile_dir.exists():
+        for env_name in env_names:
+            jsonl_path = profile_dir / f"{env_name}.jsonl"
+            if not jsonl_path.exists():
+                continue
+            info, reqs = load_records(jsonl_path)
+            stats = analyze_records(reqs)
+
+            endpoints: dict[str, dict] = {}
+            for path, s in stats.items():
+                endpoints[path] = {
+                    "count": s["count"],
+                    "handler_us": {"p50": round(s["handler_p50_us"], 1), "p99": round(s["handler_p99_us"], 1), "avg": round(s["handler_avg_us"], 1)},
+                    "send_us": {"p50": round(s["send_p50_us"], 1), "p99": round(s["send_p99_us"], 1), "avg": round(s["send_avg_us"], 1)},
+                    "recv_us": {"p50": round(s["recv_p50_us"], 1), "p99": round(s["recv_p99_us"], 1), "avg": round(s["recv_avg_us"], 1)},
+                    "total_us": {"p50": round(s["total_p50_us"], 1), "p99": round(s["total_p99_us"], 1), "avg": round(s["total_avg_us"], 1)},
+                    "recv_calls_avg": round(s["recv_calls_avg"], 1),
+                    "send_calls_avg": round(s["send_calls_avg"], 1),
+                }
+
+            profiling_section[env_name] = {
+                "info": {
+                    "loop": info.get("loop", "?") if info else "?",
+                    "python": info.get("python", "?") if info else "?",
+                    "pid": info.get("pid", "?") if info else "?",
+                },
+                "endpoints": endpoints,
+            }
+
+    profiling_ratios: dict[str, dict] = {}
+    all_paths: set[str] = set()
+    for env_name in env_names:
+        if env_name in profiling_section:
+            all_paths.update(profiling_section[env_name]["endpoints"].keys())
+
+    for path in sorted(all_paths):
+        path_ratios: dict[str, float | None] = {}
+        for i, a in enumerate(env_names):
+            for b in env_names[i + 1 :]:
+                a_ep = profiling_section.get(a, {}).get("endpoints", {}).get(path)
+                b_ep = profiling_section.get(b, {}).get("endpoints", {}).get(path)
+                if a_ep and b_ep:
+                    label = f"{a}_vs_{b}"
+                    path_ratios[f"handler_p50_{label}"] = _safe_ratio(a_ep["handler_us"]["p50"], b_ep["handler_us"]["p50"])
+                    path_ratios[f"send_p50_{label}"] = _safe_ratio(a_ep["send_us"]["p50"], b_ep["send_us"]["p50"])
+        if path_ratios:
+            profiling_ratios[path] = path_ratios
+
+    summary: dict[str, dict] = {}
+    for i, a in enumerate(env_names):
+        for b in env_names[i + 1 :]:
+            label = f"{a}_vs_{b}"
+            tp_ratios = []
+            for sname in scenario_names:
+                r = scenarios_section.get(sname, {}).get("comparison", {}).get("ratios", {}).get(label, {})
+                if r.get("throughput") is not None:
+                    tp_ratios.append(r["throughput"])
+            summary.setdefault("avg_throughput_ratio", {})[label] = (
+                round(sum(tp_ratios) / len(tp_ratios), 4) if tp_ratios else None
+            )
+            handler_rs, send_rs = [], []
+            for path in sorted(all_paths):
+                pr = profiling_ratios.get(path, {})
+                h = pr.get(f"handler_p50_{label}")
+                s = pr.get(f"send_p50_{label}")
+                if h is not None:
+                    handler_rs.append(h)
+                if s is not None:
+                    send_rs.append(s)
+            summary.setdefault("avg_handler_p50_ratio", {})[label] = (
+                round(sum(handler_rs) / len(handler_rs), 4) if handler_rs else None
+            )
+            summary.setdefault("avg_send_p50_ratio", {})[label] = (
+                round(sum(send_rs) / len(send_rs), 4) if send_rs else None
+            )
+
+    report_data = {
+        "meta": meta_raw,
+        "scenarios": scenarios_section,
+        "profiling": profiling_section,
+        "profiling_ratios": profiling_ratios,
+        "summary": summary,
+    }
+
+    report_path = run_dir / "report.json"
+    report_path.write_text(json.dumps(report_data, indent=2))
+    console.print(f"\n[bold green]Report written:[/] {report_path}")
+
+    _print_report(report_data)
 
 
 if __name__ == "__main__":

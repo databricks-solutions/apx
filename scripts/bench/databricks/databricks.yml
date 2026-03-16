@@ -72,6 +72,24 @@ resources:
           - name: TOKIO_WORKER_THREADS
             value: "2"
 
+    bench_bencher:
+      name: "bench-bencher"
+      description: "Benchmark orchestrator: runs oha, stores results"
+      source_code_path: ./.build/bench-bencher
+      config:
+        command:
+          - "uvicorn"
+          - "bencher.app:app"
+          - "--host"
+          - "0.0.0.0"
+          - "--port"
+          - "8000"
+          - "--workers"
+          - "1"
+        env:
+          - name: APX_BENCH_SERVER
+            value: bencher
+
 targets:
   dev:
     mode: development
