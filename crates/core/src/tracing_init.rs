@@ -133,6 +133,7 @@ fn base_endpoint() -> String {
 fn init_tracing_fmt_only(filter: &str) {
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .event_format(DevAwareFormatter)
         .with_filter(EnvFilter::new(filter));
 
@@ -232,6 +233,7 @@ fn init_tracing_with_otel(
     // ── Fmt (always) ────────────────────────────────────────────────
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .event_format(DevAwareFormatter)
         .with_filter(EnvFilter::new(filter));
 

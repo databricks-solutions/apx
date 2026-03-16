@@ -6,30 +6,23 @@ from .models import Item, ItemCreate, ItemUpdate
 
 router = APIRouter()
 
-_COUNTER: int = 0
-ITEMS: dict[int, Item] = {}
+_COUNTER: int = 10
+ITEMS: dict[int, Item] = {
+    i: Item(
+        id=i,
+        name=f"Item {i}",
+        description=f"Description for item {i}",
+        price=round(i * 9.99, 2),
+        tags=[f"tag-{i % 3}", f"tag-{i % 5}"],
+    )
+    for i in range(1, 11)
+}
 
 
 def _next_id() -> int:
     global _COUNTER  # noqa: PLW0603
     _COUNTER += 1
     return _COUNTER
-
-
-def _seed() -> None:
-    global _COUNTER  # noqa: PLW0603
-    for i in range(1, 11):
-        ITEMS[i] = Item(
-            id=i,
-            name=f"Item {i}",
-            description=f"Description for item {i}",
-            price=round(i * 9.99, 2),
-            tags=[f"tag-{i % 3}", f"tag-{i % 5}"],
-        )
-        _COUNTER = i
-
-
-_seed()
 
 
 @router.get("/echo")
@@ -73,5 +66,25 @@ def update_item(item_id: int, body: ItemUpdate) -> Item:
 
 
 @router.delete("/items/{item_id}", status_code=204)
-def delete_item(item_id: int) -> None:
+def delete_item(item_id: int):
     ITEMS.pop(item_id, None)
+    from fastapi.responses import Response
+    return Response(status_code=204)
+
+
+@router.get("/profile/dump")
+def profile_dump():
+    """Return profiling JSONL over HTTP (for remote extraction)."""
+    from fastapi.responses import Response
+    from .profiling import PROFILE_PATH
+    if not PROFILE_PATH.exists():
+        raise HTTPException(status_code=404, detail="No profiling data")
+    return Response(content=PROFILE_PATH.read_text(), media_type="application/x-ndjson")
+
+
+@router.delete("/profile/reset")
+def profile_reset():
+    """Clear profiling data for a fresh run."""
+    from . import profiling
+    profiling.reset()
+    return {"status": "reset"}

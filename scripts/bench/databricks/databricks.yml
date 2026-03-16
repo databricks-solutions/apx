@@ -1,0 +1,78 @@
+bundle:
+  name: apx-bench
+
+sync:
+  include:
+    - .build
+
+resources:
+  apps:
+    bench_uvicorn:
+      name: "bench-uvicorn"
+      description: "Benchmark: uvicorn + uvloop + httptools"
+      source_code_path: ./.build/bench-uvicorn
+      config:
+        command:
+          - "uvicorn"
+          - "app.main:app"
+          - "--host"
+          - "0.0.0.0"
+          - "--workers"
+          - "2"
+          - "--loop"
+          - "uvloop"
+          - "--http"
+          - "httptools"
+        env:
+          - name: APX_BENCH_SERVER
+            value: uvicorn
+          - name: APX_BENCH_PROFILE
+            value: "1"
+
+    bench_granian:
+      name: "bench-granian"
+      description: "Benchmark: granian + ASGI + uvloop"
+      source_code_path: ./.build/bench-granian
+      config:
+        command:
+          - "granian"
+          - "--interface"
+          - "asgi"
+          - "--loop"
+          - "uvloop"
+          - "app.main:app"
+          - "--host"
+          - "0.0.0.0"
+          - "--workers"
+          - "2"
+        env:
+          - name: APX_BENCH_SERVER
+            value: granian
+          - name: APX_BENCH_PROFILE
+            value: "1"
+
+    bench_apx:
+      name: "bench-apx"
+      description: "Benchmark: APX + asyncio"
+      source_code_path: ./.build/bench-apx
+      config:
+        command:
+          - "apx"
+          - "serve"
+          - "app.main"
+          - "--host"
+          - "0.0.0.0"
+          - "--workers"
+          - "2"
+        env:
+          - name: APX_BENCH_SERVER
+            value: apx
+          - name: APX_BENCH_PROFILE
+            value: "1"
+          - name: TOKIO_WORKER_THREADS
+            value: "2"
+
+targets:
+  dev:
+    mode: development
+    default: true

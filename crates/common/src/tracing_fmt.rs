@@ -129,6 +129,7 @@ pub fn init_fmt_subscriber(root: &str) {
     let filter = build_apx_filter(root);
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .event_format(DevAwareFormatter)
         .with_filter(EnvFilter::new(filter));
 

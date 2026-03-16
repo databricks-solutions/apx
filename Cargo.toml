@@ -3,7 +3,7 @@ members = ["crates/common", "crates/agent", "crates/studio", "crates/core", "cra
 resolver = "2"
 
 [workspace.package]
-version = "0.2.7"
+version = "0.3.8"
 edition = "2024"
 rust-version = "1.92"
 description = "APX application framework"
@@ -33,6 +33,7 @@ toml_edit = "0.24.0"
 
 # Database
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 
 # Async runtime
 tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "signal", "io-std", "net"] }

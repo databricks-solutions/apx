@@ -121,6 +121,16 @@ class ProfilingASGIMiddleware:
         f.flush()
 
 
+def reset() -> None:
+    """Close and delete the profiling file."""
+    global _file, _logged_info
+    if _file is not None:
+        _file.close()
+        _file = None
+    PROFILE_PATH.unlink(missing_ok=True)
+    _logged_info = False
+
+
 def install_profiling(app) -> None:
     """Add profiling middleware to a FastAPI app if enabled."""
     if _ENABLED:
