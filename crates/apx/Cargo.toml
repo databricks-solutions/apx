@@ -13,6 +13,9 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["apx-framework/mimalloc"]
+
 [lib]
 name = "_core"
 crate-type = ["cdylib"]

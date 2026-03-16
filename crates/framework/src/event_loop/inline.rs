@@ -123,10 +123,14 @@ impl InlineEventLoop {
         let pump_notify = Arc::new(tokio::sync::Notify::new());
         ready_queue.set_pump_notify(Arc::clone(&pump_notify));
 
-        // 14. Probe for _run_once (private but stable on CPython + uvloop).
+        // 14. Probe for _run_once (CPython stdlib loops only; uvloop lacks it).
         let has_run_once = event_loop.hasattr(c"_run_once").unwrap_or(false);
+        tracing::info!(has_run_once, "asyncio pump: _run_once probe");
 
-        // 15. Spawn the asyncio loop pump task.
+        // 15. Cache asyncio.events module for pump fallback path.
+        let events_mod = py.import(c"asyncio.events").ok().map(|m| m.unbind());
+
+        // 16. Spawn the asyncio loop pump task.
         let pump_n = Arc::clone(&pump_notify);
         let pump_rq = Arc::clone(&ready_queue);
         let pump_el = event_loop.clone().unbind();
@@ -137,11 +141,20 @@ impl InlineEventLoop {
                     Python::attach(|py| {
                         let el = pump_el.bind(py);
                         if has_run_once {
+                            // CPython stdlib: call _run_once() directly.
                             let _ = el.call_method0(c"_run_once");
-                        } else if let Ok(asyncio) = py.import(c"asyncio")
-                            && let Ok(coro) = asyncio.call_method1(c"sleep", (0,))
-                        {
-                            let _ = el.call_method1(c"run_until_complete", (coro,));
+                        } else if let Some(ref events) = events_mod {
+                            // uvloop fallback: temporarily clear the running loop
+                            // flag so run_until_complete doesn't raise
+                            // "Cannot run the event loop while another loop is running".
+                            let events = events.bind(py);
+                            let _ = events.call_method1(c"_set_running_loop", (py.None(),));
+                            if let Ok(asyncio) = py.import(c"asyncio")
+                                && let Ok(coro) = asyncio.call_method1(c"sleep", (0,))
+                            {
+                                let _ = el.call_method1(c"run_until_complete", (coro,));
+                            }
+                            let _ = events.call_method1(c"_set_running_loop", (el,));
                         }
                     });
                     tokio::task::yield_now().await;

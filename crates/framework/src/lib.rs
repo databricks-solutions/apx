@@ -10,6 +10,14 @@
 //! - **IPC** between supervisor and workers uses length-prefixed msgpack over UDS
 //! - **Bridge** calls Python ASGI handlers via PyO3 + `pyo3-async-runtimes`
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 pub mod error;
 pub mod pyapi;
 pub mod runtime;
