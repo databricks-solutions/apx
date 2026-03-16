@@ -10,7 +10,7 @@ use super::signal::shutdown_signal;
 use super::worker_context::WorkerContext;
 use crate::asgi::app::{AppSource, ModuleImport};
 use crate::protocol::http::service::{ApxService, ServiceConfig, serve_tcp};
-use crate::scheduler::event_loop::InlineEventLoop;
+use crate::scheduler::event_loop::EventLoop;
 use crate::transport::{Listener, TransportConfig, TransportError};
 use pyo3::Python;
 use std::net::IpAddr;
@@ -51,7 +51,7 @@ pub struct WorkerRuntime {
     /// IPC channel to supervisor — stays open for the worker's lifetime.
     pub channel: WorkerChannel,
     /// Inline asyncio event loop (dormant — driven by Rust scheduler).
-    pub event_loop: InlineEventLoop,
+    pub event_loop: EventLoop,
 }
 
 impl std::fmt::Debug for WorkerRuntime {
@@ -87,7 +87,7 @@ pub async fn init_worker(
     Python::initialize();
 
     // Initialize inline event loop (dormant asyncio + Rust scheduler).
-    let event_loop = Python::attach(|py| InlineEventLoop::init(py, &bootstrap.loop_policy))
+    let event_loop = Python::attach(|py| EventLoop::init(py, &bootstrap.loop_policy))
         .map_err(|e| WorkerError::PythonInit(format!("inline event loop: {e}")))?;
 
     Ok(WorkerRuntime {

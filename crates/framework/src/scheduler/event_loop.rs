@@ -108,7 +108,7 @@ fn gather_kwargs(py: Python<'_>) -> Bound<'_, pyo3::types::PyDict> {
 /// Initializes the asyncio event loop as dormant (installed but not running
 /// `run_forever()`). The Rust scheduler drives coroutines inline on the
 /// tokio thread.
-pub struct InlineEventLoop {
+pub struct EventLoop {
     /// Python asyncio event loop object.
     event_loop: Py<PyAny>,
     /// Pre-resolved Python type references.
@@ -127,7 +127,7 @@ pub struct InlineEventLoop {
     pump_notify: Arc<tokio::sync::Notify>,
 }
 
-impl InlineEventLoop {
+impl EventLoop {
     /// Initialize the inline event loop on the current thread.
     ///
     /// Sets up the asyncio event loop in "dormant" mode — installed and
@@ -297,7 +297,7 @@ impl InlineEventLoop {
     }
 }
 
-impl std::fmt::Debug for InlineEventLoop {
+impl std::fmt::Debug for EventLoop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InlineEventLoop").finish_non_exhaustive()
     }
