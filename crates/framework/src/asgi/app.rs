@@ -7,10 +7,10 @@
 //! `ModuleImport` is the live-import implementation; a future `ManifestSource`
 //! will provide pre-built dispatch pipelines.
 
-use crate::bridge::asgi::{ScopeInterns, build_receive_template};
-use crate::bridge::asgi_dispatch::AsgiDispatch;
+use crate::asgi::dispatch::AsgiDispatch;
+use crate::asgi::scope::{ScopeInterns, build_receive_template};
 use crate::dispatch::Dispatch;
-use crate::worker_context::WorkerContext;
+use crate::supervision::worker_context::WorkerContext;
 use pyo3::prelude::*;
 use std::sync::Arc;
 

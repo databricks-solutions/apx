@@ -3,7 +3,7 @@
 //! [`AsgiBodyStream`] wraps an mpsc channel of body chunks into a
 //! [`futures_core::Stream`] suitable for HTTP chunked/SSE responses.
 
-use super::asgi::AsgiEvent;
+use super::scope::AsgiEvent;
 use bytes::Bytes;
 use std::pin::Pin;
 use std::task::{Context, Poll};

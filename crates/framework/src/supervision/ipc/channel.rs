@@ -185,8 +185,8 @@ compile_error!("Windows IPC (Named Pipes) is not yet implemented. See extensions
 )]
 mod tests {
     use super::*;
-    use crate::ipc::protocol::AppModule;
-    use crate::ipc::protocol::{Nonce, WorkerBootstrap};
+    use crate::supervision::ipc::protocol::AppModule;
+    use crate::supervision::ipc::protocol::{Nonce, WorkerBootstrap};
 
     #[tokio::test]
     async fn ipc_bootstrap_roundtrip_over_uds() {

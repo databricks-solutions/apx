@@ -3,9 +3,11 @@
 use http::StatusCode;
 
 /// Max depth to walk the error source chain (fixed loop bound).
+#[cfg(test)]
 const MAX_ERROR_CHAIN_DEPTH: usize = 10;
 
 /// Walk an error's source chain looking for a specific error type.
+#[cfg(test)]
 pub fn find_in_error_chain<T: std::error::Error + 'static>(
     err: &dyn std::error::Error,
 ) -> Option<&T> {

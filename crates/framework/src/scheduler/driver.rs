@@ -17,7 +17,7 @@ use tokio::sync::oneshot;
 use super::primitives::{EventWaiter, Future};
 use super::queue::{ReadyQueue, ReadyTask};
 use super::task::{SchedulerTask, TaskProxy};
-use crate::error::AppError;
+use crate::protocol::http::error::AppError;
 
 // ---------------------------------------------------------------------------
 // CachedTypes — pre-resolved Python type references

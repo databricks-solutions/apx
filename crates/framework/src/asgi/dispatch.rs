@@ -8,12 +8,12 @@
 //! status/headers from `ResponseStart` and builds the complete
 //! `OutboundResponse` on the first body chunk.
 
-use crate::bridge::asgi::{AsgiReceive, AsgiSend, ScopeInterns, build_http_scope};
+use crate::asgi::scope::{AsgiReceive, AsgiSend, ScopeInterns, build_http_scope};
 use crate::dispatch::Dispatch;
-use crate::error::AppError;
+use crate::protocol::http::error::AppError;
 use crate::scheduler::driver::spawn_and_drive;
+use crate::supervision::worker_context::WorkerContext;
 use crate::transport::types::{BodyStream, InboundRequest, OutboundResponse, ResponseBody};
-use crate::worker_context::WorkerContext;
 use bytes::Bytes;
 use http::header::HeaderMap;
 use hyper::body::Incoming;
@@ -115,7 +115,7 @@ impl Dispatch for AsgiDispatch {
         let ctx = Arc::clone(&self.ctx);
 
         Box::pin(async move {
-            match crate::websocket::handle_upgrade(
+            match crate::protocol::ws::session::handle_upgrade(
                 request,
                 server_addr,
                 client_addr,

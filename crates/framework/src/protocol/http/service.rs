@@ -6,12 +6,12 @@
 //! via `Arc<Semaphore>`, and wraps dispatch in `tokio::time::timeout`.
 
 use crate::dispatch::Dispatch;
+use crate::protocol::ws::session as websocket;
 use crate::telemetry::http::{self, ActiveRequestGuard};
 use crate::transport::tcp::TcpListener;
 use crate::transport::types::{
     BodyStream, InboundRequest, OutboundResponse, ProtocolVersion, ResponseBody, TransportKind,
 };
-use crate::websocket;
 use bytes::Bytes;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;

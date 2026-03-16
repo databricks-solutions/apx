@@ -6,7 +6,7 @@
 //! These types enable Starlette's `Request`, `StreamingResponse`, and `WebSocket`
 //! to work unmodified against a Rust-backed ASGI server.
 
-use crate::error::AppError;
+use crate::protocol::http::error::AppError;
 use crate::transport::types::{InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};

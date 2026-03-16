@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
 use super::primitives::Future;
-use crate::error::AppError;
+use crate::protocol::http::error::AppError;
 
 // ---------------------------------------------------------------------------
 // SchedulerTask

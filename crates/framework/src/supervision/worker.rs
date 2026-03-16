@@ -4,14 +4,14 @@
 //! interpreter, one inline asyncio event loop, and one TCP listener bound via
 //! `SO_REUSEPORT`.
 
-use crate::app_loader::{AppSource, ModuleImport};
-use crate::event_loop::InlineEventLoop;
-use crate::ipc::channel::WorkerChannel;
-use crate::ipc::protocol::{BootstrapError, IpcMessage, Nonce, WorkerBootstrap};
-use crate::service::{ApxService, ServiceConfig, serve_tcp};
-use crate::signal::shutdown_signal;
+use super::ipc::channel::WorkerChannel;
+use super::ipc::protocol::{BootstrapError, IpcMessage, Nonce, WorkerBootstrap};
+use super::signal::shutdown_signal;
+use super::worker_context::WorkerContext;
+use crate::asgi::app::{AppSource, ModuleImport};
+use crate::protocol::http::service::{ApxService, ServiceConfig, serve_tcp};
+use crate::scheduler::event_loop::InlineEventLoop;
 use crate::transport::{Listener, TransportConfig, TransportError};
-use crate::worker_context::WorkerContext;
 use pyo3::Python;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -33,11 +33,11 @@ pub enum WorkerError {
 
     /// App loading failed (import, missing attribute, not callable).
     #[error("app load failed: {0}")]
-    AppLoad(#[from] crate::app_loader::AppLoadError),
+    AppLoad(#[from] crate::asgi::app::AppLoadError),
 
     /// IPC communication error.
     #[error("ipc: {0}")]
-    Ipc(#[from] crate::ipc::protocol::IpcError),
+    Ipc(#[from] super::ipc::protocol::IpcError),
 
     /// Serving requests failed.
     #[error("serve failed: {0}")]
@@ -209,7 +209,7 @@ pub async fn connect_to_supervisor()
 
     let sock_path = std::env::var("APX_WORKER_SOCK").map_err(|_| BootstrapError::MissingNonce)?;
 
-    let mut channel = crate::ipc::channel::connect(&sock_path)
+    let mut channel = super::ipc::channel::connect(&sock_path)
         .await
         .map_err(|e| BootstrapError::Connect {
             path: sock_path,
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn worker_error_display_app_load() {
-        let err = WorkerError::AppLoad(crate::app_loader::AppLoadError::MissingAttribute {
+        let err = WorkerError::AppLoad(crate::asgi::app::AppLoadError::MissingAttribute {
             module: "myapp".to_owned(),
             attr: "handler".to_owned(),
         });

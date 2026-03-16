@@ -4,6 +4,7 @@
 //! asyncio alive as a fallback for unhandled awaitables.
 
 pub mod driver;
+pub mod event_loop;
 pub mod primitives;
 pub mod queue;
 pub mod task;

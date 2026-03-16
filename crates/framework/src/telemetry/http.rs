@@ -4,7 +4,7 @@
 //! using OTEL semantic conventions v1.23+. When OTEL is disabled, the global
 //! meter returns noop instruments — zero overhead automatically.
 
-use crate::error::AppError;
+use crate::protocol::http::error::AppError;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::MeterProvider;
 

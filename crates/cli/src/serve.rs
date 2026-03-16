@@ -35,8 +35,10 @@ pub struct ServeArgs {
 }
 
 /// Validate the CLI target as a Python dotted module path.
-fn resolve_target(target: &str) -> Result<apx_framework::ipc::protocol::AppModule, String> {
-    apx_framework::ipc::protocol::AppModule::new(target)
+fn resolve_target(
+    target: &str,
+) -> Result<apx_framework::supervision::ipc::protocol::AppModule, String> {
+    apx_framework::supervision::ipc::protocol::AppModule::new(target)
         .map_err(|e| format!("invalid app module '{target}': {e}"))
 }
 
@@ -45,11 +47,12 @@ fn resolve_target(target: &str) -> Result<apx_framework::ipc::protocol::AppModul
 /// Returns 0 on success, 1 on error.
 pub async fn run(args: ServeArgs) -> i32 {
     // Mode detection: APX_WORKER_NONCE present → worker, absent → supervisor.
-    match apx_framework::runtime::worker::connect_to_supervisor().await {
+    match apx_framework::supervision::worker::connect_to_supervisor().await {
         Ok(Some((channel, bootstrap))) => {
             // Worker mode.
             tracing::info!("running as worker");
-            if let Err(e) = apx_framework::runtime::worker::run_worker(channel, bootstrap).await {
+            if let Err(e) = apx_framework::supervision::worker::run_worker(channel, bootstrap).await
+            {
                 eprintln!("Worker error: {e}");
                 return 1;
             }
@@ -65,7 +68,7 @@ pub async fn run(args: ServeArgs) -> i32 {
             };
 
             let app_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let config = apx_framework::runtime::supervisor::SupervisorConfig {
+            let config = apx_framework::supervision::supervisor::SupervisorConfig {
                 host: args.host,
                 port: args.port,
                 workers: args.workers,
@@ -75,7 +78,7 @@ pub async fn run(args: ServeArgs) -> i32 {
                 loop_policy: args.loop_policy,
             };
 
-            if let Err(e) = apx_framework::runtime::supervisor::run_supervisor(config).await {
+            if let Err(e) = apx_framework::supervision::supervisor::run_supervisor(config).await {
                 eprintln!("Supervisor error: {e}");
                 return 1;
             }

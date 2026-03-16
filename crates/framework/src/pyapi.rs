@@ -8,8 +8,8 @@ use pyo3::types::PyModule;
 
 /// Register framework types into the `apx._core` extension module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<crate::bridge::asgi::AsgiReceive>()?;
-    m.add_class::<crate::bridge::asgi::AsgiSend>()?;
+    m.add_class::<crate::asgi::scope::AsgiReceive>()?;
+    m.add_class::<crate::asgi::scope::AsgiSend>()?;
 
     // Primitives
     m.add_class::<crate::scheduler::primitives::Event>()?;

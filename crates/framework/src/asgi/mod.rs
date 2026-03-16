@@ -1,7 +1,11 @@
-//! HTTP ↔ Python ASGI bridge.
+//! Python ASGI boundary layer.
+//!
+//! Translates Rust domain types (InboundRequest, OutboundResponse) to/from
+//! ASGI protocol objects (scope, receive, send).
 
-pub mod asgi;
-pub mod asgi_dispatch;
+pub mod app;
+pub mod dispatch;
+pub mod scope;
 pub mod streaming;
 
 /// Check whether bench-trace instrumentation is enabled (`APX_BENCH_TRACE=1`).

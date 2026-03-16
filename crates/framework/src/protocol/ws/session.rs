@@ -8,15 +8,15 @@
 //! 3. The session bridges tungstenite frames ↔ ASGI `websocket.*` events
 //!    through mpsc channels, with the ASGI app driven by the Rust scheduler.
 
-use crate::bridge::asgi::{
+use crate::asgi::scope::{
     AsgiEvent, AsgiSend, AsgiWsReceive, ScopeInterns, WsIncomingEvent, build_ws_scope,
 };
-use crate::error::AppError;
+use crate::protocol::http::error::AppError;
 use crate::scheduler::driver::spawn_and_drive;
+use crate::supervision::worker_context::WorkerContext;
 use crate::transport::types::{
     BodyStream, InboundRequest, ProtocolVersion, ResponseBody, TransportKind,
 };
-use crate::worker_context::WorkerContext;
 use bytes::Bytes;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use hyper::body::Incoming;

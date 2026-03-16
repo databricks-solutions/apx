@@ -3,9 +3,9 @@
 //! The supervisor NEVER imports or calls PyO3. Python is initialized only
 //! in worker processes. See the architectural boundary note in the plan.
 
-use crate::ipc::channel::{self, WorkerChannel};
-use crate::ipc::protocol::AppModule;
-use crate::ipc::protocol::{IpcMessage, Nonce, WorkerBootstrap};
+use super::ipc::channel::{self, WorkerChannel};
+use super::ipc::protocol::AppModule;
+use super::ipc::protocol::{IpcMessage, Nonce, WorkerBootstrap};
 use std::path::PathBuf;
 use std::time::Duration;
 use sysinfo::{Pid, Signal, System};
@@ -66,7 +66,7 @@ pub enum SupervisorError {
         /// Worker index.
         index: usize,
         /// Underlying IPC error.
-        source: crate::ipc::protocol::IpcError,
+        source: super::ipc::protocol::IpcError,
     },
     /// Worker did not send Ready within timeout.
     #[error("worker {index} did not send Ready within timeout")]
@@ -270,7 +270,7 @@ async fn spawn_worker(
         other => {
             return Err(SupervisorError::Ipc {
                 index,
-                source: crate::ipc::protocol::IpcError::Io(std::io::Error::other(format!(
+                source: super::ipc::protocol::IpcError::Io(std::io::Error::other(format!(
                     "expected Ready, got {other:?}"
                 ))),
             });
@@ -458,7 +458,7 @@ async fn send_signal(pid: u32, signal: Signal) {
 }
 
 /// Re-export shared shutdown signal for supervisor use.
-use crate::signal::shutdown_signal;
+use super::signal::shutdown_signal;
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
