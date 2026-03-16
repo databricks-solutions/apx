@@ -22,9 +22,6 @@ pub struct WorkerContext {
     pub ready_queue: Arc<ReadyQueue>,
     /// Cached `loop.call_soon` bound method.
     pub call_soon: Py<pyo3::PyAny>,
-    /// Python reference to the asyncio event loop (diagnostics, lifespan).
-    #[expect(dead_code, reason = "read by lifespan protocol")]
-    pub event_loop_ref: Py<pyo3::PyAny>,
 }
 
 impl std::fmt::Debug for WorkerContext {

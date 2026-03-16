@@ -174,11 +174,6 @@ impl InlineEventLoop {
         })
     }
 
-    /// Get the Python event loop object.
-    pub fn event_loop_ref(&self) -> &Py<PyAny> {
-        &self.event_loop
-    }
-
     /// Get the cached Python types.
     pub fn cached_types(&self) -> &Arc<CachedTypes> {
         &self.cached_types

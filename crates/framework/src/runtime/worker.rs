@@ -128,7 +128,6 @@ pub async fn run_worker(
             cached_types: Arc::clone(el.cached_types()),
             ready_queue: Arc::clone(el.ready_queue()),
             call_soon: Python::attach(|py| el.call_soon().clone_ref(py)),
-            event_loop_ref: Python::attach(|py| el.event_loop_ref().clone_ref(py)),
         })
     };
 
