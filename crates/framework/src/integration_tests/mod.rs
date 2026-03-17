@@ -8,6 +8,7 @@
     reason = "test code uses unwrap/assert for clarity"
 )]
 
+mod scheduler_task;
 mod streaming;
 mod supervision;
 mod telemetry;
@@ -19,8 +20,9 @@ use std::sync::Once;
 
 static PYTHON_ENV_INIT: Once = Once::new();
 
-/// Ensure `PYTHONHOME` and `VIRTUAL_ENV` are set so the embedded interpreter
-/// can find its stdlib.
+/// Ensure `PYTHONHOME`, `VIRTUAL_ENV`, and `PYTHONPATH` are set so the
+/// embedded interpreter can find its stdlib **and** venv-installed packages
+/// (e.g. `uvloop`).
 #[expect(unsafe_code, reason = "env::set_var required for Python interpreter")]
 pub fn ensure_python_env() {
     PYTHON_ENV_INIT.call_once(|| {
@@ -47,5 +49,22 @@ pub fn ensure_python_env() {
             }
         }
         assert!(found_home, "pyvenv.cfg missing `home` key");
+
+        // The embedded interpreter doesn't run `site.py` the same way a
+        // normal `python` invocation does, so venv site-packages aren't
+        // automatically added to `sys.path`. Discover and export via
+        // `PYTHONPATH` so that packages like `uvloop` are importable.
+        let lib_dir = venv.join("lib");
+        if let Ok(entries) = std::fs::read_dir(&lib_dir) {
+            for entry in entries.flatten() {
+                let sp = entry.path().join("site-packages");
+                if sp.is_dir() {
+                    unsafe {
+                        std::env::set_var("PYTHONPATH", &sp);
+                    }
+                    break;
+                }
+            }
+        }
     });
 }
