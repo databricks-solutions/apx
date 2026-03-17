@@ -38,5 +38,27 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
 
+    // Bench trace + scheduler stats
+    m.add_function(pyo3::wrap_pyfunction!(bench_trace_dump, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(bench_trace_reset, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(scheduler_stats_json, m)?)?;
+
     Ok(())
+}
+
+#[pyfunction]
+fn bench_trace_dump() -> Option<String> {
+    crate::asgi::bench_trace::read()
+}
+
+#[pyfunction]
+fn bench_trace_reset() {
+    crate::asgi::bench_trace::reset();
+}
+
+#[pyfunction]
+fn scheduler_stats_json() -> Option<String> {
+    let counters = crate::scheduler::counters::get()?;
+    let snapshot = counters.snapshot();
+    serde_json::to_string(&snapshot).ok()
 }

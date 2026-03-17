@@ -3,6 +3,7 @@
 //! Replaces asyncio task scheduling for hot-path primitives while keeping
 //! asyncio alive as a fallback for unhandled awaitables.
 
+pub mod counters;
 pub mod driver;
 pub mod event_loop;
 pub mod primitives;

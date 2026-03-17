@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+
 import diskcache
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response, StreamingResponse
 
 from .models import Item, ItemCreate, ItemUpdate
 
@@ -99,11 +102,84 @@ def items_reset():
     return {"status": "reset", "items": 10}
 
 
+# ---------------------------------------------------------------------------
+# Diverse route types for scheduler/pipeline benchmarking
+# ---------------------------------------------------------------------------
+
+
+async def dep_level_c():
+    await asyncio.sleep(0)
+    return "c"
+
+
+async def dep_level_b(c: str = Depends(dep_level_c)):
+    await asyncio.sleep(0)
+    return f"b({c})"
+
+
+async def dep_level_a(b: str = Depends(dep_level_b)):
+    return f"a({b})"
+
+
+@router.get("/yield-once")
+async def yield_once():
+    """Scheduler yield/resume round-trip."""
+    await asyncio.sleep(0)
+    return {"yielded": True}
+
+
+@router.get("/cpu/{n}")
+def cpu_work(n: int):
+    """GIL hold under concurrency — sum of squares."""
+    n = min(n, 1_000_000)
+    total = sum(i * i for i in range(n))
+    return {"n": n, "result": total}
+
+
+@router.get("/large/{kb}")
+def large_response(kb: int):
+    """Large body — send() overhead."""
+    kb = min(kb, 1024)
+    data = "x" * (kb * 1024)
+    return Response(content=data, media_type="text/plain")
+
+
+@router.post("/upload")
+async def upload(request: Request):
+    """Body collection path."""
+    body = await request.body()
+    return {"size": len(body)}
+
+
+@router.get("/stream/{chunks}")
+async def stream_response(chunks: int):
+    """Streaming response with yields between chunks."""
+    chunks = min(chunks, 100)
+
+    async def generate():
+        for i in range(chunks):
+            yield f"chunk-{i}\n"
+            await asyncio.sleep(0)
+
+    return StreamingResponse(generate(), media_type="text/plain")
+
+
+@router.get("/deps")
+async def deps_endpoint(a: str = Depends(dep_level_a)):
+    """3-level dependency chain — DI + coroutine stack depth."""
+    return {"chain": a}
+
+
+# ---------------------------------------------------------------------------
+# Profiling / trace endpoints
+# ---------------------------------------------------------------------------
+
+
 @router.get("/profile/dump")
 def profile_dump():
     """Return profiling JSONL over HTTP (for remote extraction)."""
-    from fastapi.responses import Response
-    from .profiling import PROFILE_PATH
+    from .profiling import PROFILE_PATH, flush
+    flush()
     if not PROFILE_PATH.exists():
         raise HTTPException(status_code=404, detail="No profiling data")
     return Response(content=PROFILE_PATH.read_text(), media_type="application/x-ndjson")
@@ -115,3 +191,41 @@ def profile_reset():
     from . import profiling
     profiling.reset()
     return {"status": "reset"}
+
+
+@router.get("/rust-trace/dump")
+def rust_trace_dump():
+    """Return Rust-side bench trace JSONL."""
+    try:
+        from apx._core import bench_trace_dump
+    except ImportError:
+        raise HTTPException(status_code=404, detail="not running under APX")
+    data = bench_trace_dump()
+    if data is None:
+        raise HTTPException(status_code=404, detail="no Rust trace data")
+    return Response(content=data, media_type="application/x-ndjson")
+
+
+@router.delete("/rust-trace/reset")
+def rust_trace_reset():
+    """Clear Rust-side bench trace data."""
+    try:
+        from apx._core import bench_trace_reset
+        bench_trace_reset()
+    except ImportError:
+        pass
+    return {"status": "reset"}
+
+
+@router.get("/_bench/scheduler-stats")
+def scheduler_stats():
+    """Return scheduler counters as JSON."""
+    try:
+        from apx._core import scheduler_stats_json
+    except ImportError:
+        raise HTTPException(status_code=404, detail="not running under APX")
+    data = scheduler_stats_json()
+    if data is None:
+        raise HTTPException(status_code=404, detail="no scheduler stats")
+    import json
+    return json.loads(data)

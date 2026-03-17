@@ -4,6 +4,7 @@
 //! ASGI protocol objects (scope, receive, send).
 
 pub mod app;
+pub mod bench_trace;
 pub mod dispatch;
 pub mod scope;
 pub mod streaming;

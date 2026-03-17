@@ -25,8 +25,14 @@ _logged_info = False
 def _get_file():
     global _file
     if _file is None:
-        _file = open(PROFILE_PATH, "a")
+        _file = open(PROFILE_PATH, "a", buffering=8192)
     return _file
+
+
+def flush() -> None:
+    """Flush buffered profiling data to disk."""
+    if _file is not None:
+        _file.flush()
 
 
 def _detect_loop_type() -> str:
@@ -118,7 +124,6 @@ class ProfilingASGIMiddleware:
         }
         f = _get_file()
         f.write(json.dumps(record) + "\n")
-        f.flush()
 
 
 def reset() -> None:

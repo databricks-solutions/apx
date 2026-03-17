@@ -8,10 +8,11 @@
 //! status/headers from `ResponseStart` and builds the complete
 //! `OutboundResponse` on the first body chunk.
 
+use crate::asgi::bench_trace::{self, RequestTraceBuilder};
 use crate::asgi::scope::{AsgiReceive, AsgiSend, ScopeInterns, build_http_scope};
 use crate::dispatch::Dispatch;
 use crate::protocol::http::error::AppError;
-use crate::scheduler::driver::spawn_and_drive;
+use crate::scheduler::driver::{DriveStats, spawn_and_drive};
 use crate::supervision::worker_context::WorkerContext;
 use crate::transport::types::{BodyStream, InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
@@ -24,6 +25,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 // ── AsgiDispatch ─────────────────────────────────────────────────────────
 
@@ -79,6 +81,7 @@ impl Dispatch for AsgiDispatch {
         // Take body before moving request into the async block.
         let body_stream = request.take_body();
         let body_limit = self.body_limit;
+        let trace = super::bench_trace_enabled();
 
         // Arc clones — no GIL needed on the tokio thread.
         let app = Arc::clone(&self.app);
@@ -87,20 +90,30 @@ impl Dispatch for AsgiDispatch {
         let ctx = Arc::clone(&self.ctx);
 
         Box::pin(async move {
-            match dispatch_inner(
-                request,
-                body_stream,
-                body_limit,
-                app,
-                interns,
-                template,
-                ctx,
-            )
-            .await
-            {
-                Ok(resp) => resp,
-                Err(err) => error_response(err),
-            }
+            let result = if trace {
+                dispatch_traced(
+                    request,
+                    body_stream,
+                    body_limit,
+                    app,
+                    interns,
+                    template,
+                    ctx,
+                )
+                .await
+            } else {
+                dispatch_inner(
+                    request,
+                    body_stream,
+                    body_limit,
+                    app,
+                    interns,
+                    template,
+                    ctx,
+                )
+                .await
+            };
+            result.unwrap_or_else(error_response)
         })
     }
 
@@ -200,6 +213,118 @@ async fn dispatch_inner(
     response_rx
         .await
         .map_err(|_| AppError::Internal("response channel closed".to_owned()))?
+}
+
+// ── Traced dispatch ─────────────────────────────────────────────────────
+
+/// Dispatch with per-phase bench tracing. Delegates to phase helpers.
+async fn dispatch_traced(
+    request: InboundRequest,
+    body_stream: BodyStream,
+    body_limit: usize,
+    app: Arc<Py<PyAny>>,
+    interns: Arc<ScopeInterns>,
+    template: Arc<Py<PyDict>>,
+    ctx: Arc<WorkerContext>,
+) -> Result<OutboundResponse, AppError> {
+    let t_total = Instant::now();
+    let mut builder = RequestTraceBuilder::new(request.method.to_string(), request.path.clone());
+
+    // Phase 1: body collection (async, no GIL).
+    let t0 = Instant::now();
+    let body_bytes = body_stream
+        .collect(body_limit)
+        .await
+        .map_err(|e| AppError::Internal(format!("body collect: {e}")))?;
+    builder = builder.body_collect(t0.elapsed().as_micros() as u64);
+
+    // Phase 2-5: GIL block (scope, app call, drive).
+    let (response_rx, drive_stats, gil_us, scope_us, call_us, drive_us) =
+        dispatch_gil_block(&request, body_bytes, &app, &interns, &template, &ctx)?;
+    builder = builder
+        .gil_acquire(gil_us)
+        .scope_build(scope_us)
+        .app_call(call_us)
+        .drive(drive_us, drive_stats);
+
+    // Phase 6: await response.
+    let t0 = Instant::now();
+    let response = response_rx
+        .await
+        .map_err(|_| AppError::Internal("response channel closed".to_owned()))?;
+    builder = builder.response_wait(t0.elapsed().as_micros() as u64);
+
+    let status = response.as_ref().map(|r| r.status.as_u16()).unwrap_or(500);
+    let trace = builder.build(t_total.elapsed().as_micros() as u64, status);
+    bench_trace::write(&trace);
+
+    response
+}
+
+/// GIL block output: (response_rx, drive_stats, gil_us, scope_us, call_us, drive_us).
+type GilBlockOutput = (
+    tokio::sync::oneshot::Receiver<Result<OutboundResponse, AppError>>,
+    DriveStats,
+    u64,
+    u64,
+    u64,
+    u64,
+);
+
+/// Execute the GIL-bound dispatch phases, returning per-phase timings.
+fn dispatch_gil_block(
+    request: &InboundRequest,
+    body_bytes: Bytes,
+    app: &Py<PyAny>,
+    interns: &ScopeInterns,
+    template: &Py<PyDict>,
+    ctx: &WorkerContext,
+) -> Result<GilBlockOutput, AppError> {
+    let t_gil = Instant::now();
+    Python::attach(|py| {
+        let gil_us = t_gil.elapsed().as_micros() as u64;
+
+        let t0 = Instant::now();
+        let scope = build_http_scope(py, request, None, interns)
+            .map_err(|e| AppError::Internal(format!("scope build: {e}")))?;
+        let scope_us = t0.elapsed().as_micros() as u64;
+
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let tmpl = template.clone_ref(py);
+        let receive = if body_bytes.is_empty() {
+            AsgiReceive::empty(tmpl, disconnect_rx)
+        } else {
+            AsgiReceive::http(body_bytes, tmpl, disconnect_rx)
+        };
+        let receive_obj =
+            Py::new(py, receive).map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
+        let send = AsgiSend::http(response_tx, disconnect_tx);
+        let send_obj =
+            Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
+
+        let t0 = Instant::now();
+        let coro = app
+            .call1(py, (scope, receive_obj, send_obj))
+            .map_err(|e| AppError::Internal(format!("ASGI app call: {e}")))?;
+        let call_us = t0.elapsed().as_micros() as u64;
+
+        let t0 = Instant::now();
+        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
+        let stats = spawn_and_drive(
+            py,
+            coro,
+            result_tx,
+            &ctx.coroutine_ops,
+            &ctx.call_soon_threadsafe,
+            &ctx.ready_queue,
+        )
+        .unwrap_or_default();
+        let drive_us = t0.elapsed().as_micros() as u64;
+
+        Ok((response_rx, stats, gil_us, scope_us, call_us, drive_us))
+    })
 }
 
 /// Map an [`AppError`] to a generic HTTP error response.

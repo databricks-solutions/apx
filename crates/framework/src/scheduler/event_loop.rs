@@ -11,6 +11,7 @@ use pyo3::prelude::*;
 
 use crate::ffi::{CoroutineOps, FfiCoroutineOps};
 
+use super::counters::{self, SchedulerCounters};
 use super::queue::ReadyQueue;
 
 // ── Asyncio event loop utilities ─────────────────────────────────────────
@@ -179,6 +180,10 @@ impl EventLoop {
 
         // 7. Create ready queue.
         let ready_queue = Arc::new(ReadyQueue::new());
+
+        // 7b. Initialize scheduler counters.
+        let scheduler_counters = Arc::new(SchedulerCounters::new());
+        counters::init(Arc::clone(&scheduler_counters));
 
         // 8. Cache call_soon_threadsafe (thread-safe variant, needed since
         // the asyncio loop now runs on a dedicated thread).

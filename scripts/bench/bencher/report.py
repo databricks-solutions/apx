@@ -55,7 +55,7 @@ def generate_report(
     bench_dir = Path(__file__).resolve().parent.parent
     if str(bench_dir) not in sys.path:
         sys.path.insert(0, str(bench_dir))
-    from profile_analysis import analyze_records  # noqa: E402
+    from profile_analysis import analyze_records, analyze_rust_records  # noqa: E402
 
     logger.info(
         "Generating report: name=%s, %d scenario results, %d profile results",
@@ -178,6 +178,20 @@ def generate_report(
                 "send_calls_avg": round(s["send_calls_avg"], 1),
             }
 
+        # Parse Rust-side trace records if available.
+        rust_breakdown: dict[str, dict] = {}
+        if pr.rust_trace_jsonl:
+            rust_reqs: list[dict] = []
+            for line in pr.rust_trace_jsonl.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if rec.get("type") == "rust_req":
+                    rust_reqs.append(rec)
+            if rust_reqs:
+                rust_breakdown = analyze_rust_records(rust_reqs)
+
         profiling_section[pr.environment] = {
             "info": {
                 "loop": info.get("loop", "?") if info else "?",
@@ -185,6 +199,7 @@ def generate_report(
                 "pid": info.get("pid", "?") if info else "?",
             },
             "endpoints": endpoints,
+            "rust_breakdown": rust_breakdown,
         }
 
     # ---- Compute profiling ratios ----

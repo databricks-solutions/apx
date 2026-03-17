@@ -5,11 +5,11 @@
 """APX benchmark tool — Databricks Apps deployment + remote bencher.
 
 Usage:
-    uv run scripts/bench/main.py build
-    uv run scripts/bench/main.py deploy  -p PROFILE
-    uv run scripts/bench/main.py bench   -p PROFILE --name run1 -d 30s -c 100
-    uv run scripts/bench/main.py list    -p PROFILE
-    uv run scripts/bench/main.py report  --name run1 -p PROFILE
+    uv run scripts/bench/main.py -p PROFILE build
+    uv run scripts/bench/main.py -p PROFILE deploy
+    uv run scripts/bench/main.py -p PROFILE bench --name run1 -d 30s -c 100
+    uv run scripts/bench/main.py -p PROFILE list
+    uv run scripts/bench/main.py -p PROFILE report --name run1
 """
 from __future__ import annotations
 
@@ -31,9 +31,23 @@ from rich.table import Table
 
 console = Console()
 app = typer.Typer(help="APX benchmark tool")
+
+# Global state set by the app-level callback.
+_profile: str = "apx"
+
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.apps import AppAccessControlRequest, AppPermissionLevel
 from databricks.sdk.service.postgres import Role, RoleIdentityType, RoleMembershipRole, RoleRoleSpec
+
+
+@app.callback()
+def _main(
+    profile: str = typer.Option("apx", "-p", "--profile", help="Databricks CLI profile"),
+) -> None:
+    """APX benchmark tool — Databricks Apps deployment + remote bencher."""
+    global _profile
+    _profile = profile
+    console.print(f"[bold blue]Using Databricks CLI profile:[/] {_profile}")
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -702,6 +716,35 @@ def _print_profiling_tables(report: dict, env_names: list[str]) -> None:
 
         console.print(table)
 
+        # Rust-side breakdown table (if available).
+        rust_bd = pdata.get("rust_breakdown", {})
+        if rust_bd:
+            console.print(f"\n[bold yellow]Rust pipeline breakdown: {env_name}[/]")
+            rt = Table(show_header=True, header_style="bold")
+            rt.add_column("Path", style="dim")
+            rt.add_column("N", justify="right")
+            rt.add_column("total p50", justify="right")
+            rt.add_column("GIL p50", justify="right")
+            rt.add_column("scope p50", justify="right")
+            rt.add_column("app_call p50", justify="right")
+            rt.add_column("drive p50", justify="right")
+            rt.add_column("resp_wait p50", justify="right")
+            rt.add_column("steps avg", justify="right")
+
+            for path, rs in rust_bd.items():
+                rt.add_row(
+                    path,
+                    str(rs["count"]),
+                    f"{rs.get('total_us_p50', 0):.0f}\u00b5s",
+                    f"{rs.get('gil_acquire_us_p50', 0):.0f}\u00b5s",
+                    f"{rs.get('scope_build_us_p50', 0):.0f}\u00b5s",
+                    f"{rs.get('app_call_us_p50', 0):.0f}\u00b5s",
+                    f"{rs.get('drive_us_p50', 0):.0f}\u00b5s",
+                    f"{rs.get('response_wait_us_p50', 0):.0f}\u00b5s",
+                    f"{rs.get('steps_avg', 0):.1f}",
+                )
+            console.print(rt)
+
     # Profiling ratios.
     prof_ratios = report.get("profiling_ratios", {})
     if prof_ratios:
@@ -747,18 +790,16 @@ def build() -> None:
 
 
 @app.command()
-def deploy(
-    profile: str = typer.Option("DEFAULT", "-p", "--profile", help="Databricks CLI profile"),
-) -> None:
+def deploy() -> None:
     """Deploy Databricks bundle and start apps."""
     check_databricks_cli()
 
-    deploy_databricks_bundle(profile)
+    deploy_databricks_bundle(_profile)
 
     for resource_key in DATABRICKS_APPS:
-        run_databricks_app(profile, resource_key)
+        run_databricks_app(_profile, resource_key)
 
-    ws = get_workspace_client(profile)
+    ws = get_workspace_client(_profile)
     for app_name in DATABRICKS_APPS.values():
         wait_for_app_active(ws, app_name)
 
@@ -778,7 +819,6 @@ def deploy(
 @app.command()
 def bench(
     name: str = typer.Option(..., help="Run name"),
-    profile: str = typer.Option("DEFAULT", "-p", "--profile", help="Databricks CLI profile"),
     duration: str = typer.Option("10s", "-d", "--duration", help="Duration per scenario (oha -z)"),
     connections: int = typer.Option(100, "-c", "--connections", help="Concurrent connections"),
     warmup: int = typer.Option(1000, help="Number of warmup requests"),
@@ -787,7 +827,7 @@ def bench(
     results_dir: Path = typer.Option(DEFAULT_RESULTS, "--results-dir"),
 ) -> None:
     """Start a remote benchmark via the bencher server."""
-    ws = get_workspace_client(profile)
+    ws = get_workspace_client(_profile)
     bencher_url = _get_bencher_url(ws)
     token = get_databricks_token(ws)
 
@@ -852,11 +892,9 @@ def bench(
 
 
 @app.command("list")
-def list_runs(
-    profile: str = typer.Option("DEFAULT", "-p", "--profile", help="Databricks CLI profile"),
-) -> None:
+def list_runs() -> None:
     """List benchmark runs from the remote bencher server."""
-    ws = get_workspace_client(profile)
+    ws = get_workspace_client(_profile)
     bencher_url = _get_bencher_url(ws)
     token = get_databricks_token(ws)
 
@@ -940,14 +978,13 @@ def _fetch_and_print_report(
 def report(
     name: str = typer.Option(None, help="Run name (server or local)"),
     run_id: str = typer.Option(None, "--id", help="Run ID (download from server)"),
-    profile: str = typer.Option("DEFAULT", "-p", "--profile", help="Databricks CLI profile"),
     results_dir: Path = typer.Option(DEFAULT_RESULTS, "--results-dir"),
     scenarios: Path = typer.Option(DEFAULT_SCENARIOS, help="Path to scenarios.json"),
 ) -> None:
     """Display report — by run name or run ID."""
     if run_id:
         # Fetch by explicit ID.
-        ws = get_workspace_client(profile)
+        ws = get_workspace_client(_profile)
         bencher_url = _get_bencher_url(ws)
         token = get_databricks_token(ws)
         _fetch_and_print_report(bencher_url, token, run_id)
@@ -962,7 +999,7 @@ def report(
             _print_report(report_data)
         else:
             # Try server by name.
-            ws = get_workspace_client(profile)
+            ws = get_workspace_client(_profile)
             bencher_url = _get_bencher_url(ws)
             token = get_databricks_token(ws)
             resolved_id = _resolve_run_id_by_name(bencher_url, token, name)

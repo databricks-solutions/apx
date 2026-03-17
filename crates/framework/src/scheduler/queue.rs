@@ -13,6 +13,7 @@ use pyo3::prelude::*;
 
 use crate::ffi::CoroutineOps;
 
+use super::counters;
 use super::driver::resume_task;
 use super::task::{SchedulerTask, TaskProxy};
 
@@ -74,6 +75,9 @@ impl ReadyQueue {
     /// Enqueue a task and wake the drain task.
     pub fn push(&self, _py: Python<'_>, task: ReadyTask) {
         self.enqueue_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(c) = counters::get() {
+            c.record_enqueue();
+        }
         self.queue.push(task);
 
         if let Some(notify) = self.notify_wake.get() {
@@ -83,7 +87,13 @@ impl ReadyQueue {
 
     /// Pop the next ready task, if any.
     pub fn pop(&self) -> Option<ReadyTask> {
-        self.queue.pop()
+        let item = self.queue.pop();
+        if item.is_some()
+            && let Some(c) = counters::get()
+        {
+            c.record_dequeue();
+        }
+        item
     }
 
     /// Drain all ready tasks on the current thread.

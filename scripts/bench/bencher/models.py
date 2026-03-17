@@ -71,6 +71,7 @@ class ProfileResult(SQLModel, table=True):
     run_id: str = Field(foreign_key="benchmark_runs.id", index=True)
     environment: str
     raw_jsonl: str
+    rust_trace_jsonl: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     run: Optional[BenchmarkRun] = Relationship(back_populates="profiles")

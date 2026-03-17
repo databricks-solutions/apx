@@ -66,3 +66,38 @@ def analyze_records(reqs: list[dict], path_filter: str | None = None) -> dict[st
         s["send_calls_avg"] = sum(r["send_n"] for r in records) / len(records)
         stats[path] = s
     return stats
+
+
+def analyze_rust_records(reqs: list[dict]) -> dict[str, dict]:
+    """Analyze Rust-side per-request bench traces.
+
+    Groups by path, computes p50/p99/avg for timing fields and
+    averages for drive step counters.
+    """
+    by_path: dict[str, list[dict]] = {}
+    for r in reqs:
+        by_path.setdefault(r["path"], []).append(r)
+
+    timing_fields = [
+        "total_us", "body_collect_us", "gil_acquire_us",
+        "scope_build_us", "app_call_us", "drive_us", "response_wait_us",
+    ]
+    counter_fields = [
+        "steps", "yield_none", "yield_future",
+        "yield_asyncio_future", "yield_coroutine",
+    ]
+
+    stats: dict[str, dict] = {}
+    for path, records in sorted(by_path.items()):
+        s: dict = {"count": len(records)}
+        for field in timing_fields:
+            vals = [float(r.get(field, 0)) for r in records]
+            label = field
+            s[f"{label}_p50"] = percentile(vals, 50)
+            s[f"{label}_p99"] = percentile(vals, 99)
+            s[f"{label}_avg"] = sum(vals) / len(vals) if vals else 0
+        for field in counter_fields:
+            vals = [float(r.get(field, 0)) for r in records]
+            s[f"{field}_avg"] = sum(vals) / len(vals) if vals else 0
+        stats[path] = s
+    return stats

@@ -16,6 +16,23 @@ use super::queue::{ReadyQueue, ReadyTask};
 use super::task::{SchedulerTask, TaskProxy};
 use crate::ffi::{AwaitableKind, CoroutineOps, StepResult};
 use crate::protocol::http::error::AppError;
+use crate::scheduler::counters;
+
+// ---------------------------------------------------------------------------
+// DriveStats — per-request scheduler drive counters
+// ---------------------------------------------------------------------------
+
+/// Counters collected during a single `drive_task` invocation.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct DriveStats {
+    pub steps: u32,
+    pub yield_none: u32,
+    pub yield_future: u32,
+    pub yield_asyncio_future: u32,
+    pub yield_coroutine: u32,
+    pub yield_unknown: u32,
+    pub budget_exhausted: bool,
+}
 
 // ---------------------------------------------------------------------------
 // DriveResult — outcome of driving a task
@@ -59,14 +76,14 @@ pub fn drive_task(
     task: &mut SchedulerTask,
     ops: &dyn CoroutineOps,
     step_budget: usize,
-) -> DriveResult {
-    let mut steps: usize = 0;
+) -> (DriveResult, DriveStats) {
+    let mut stats = DriveStats::default();
     loop {
         // Clone the coro ref so the immutable borrow on `task` is released
         // before we mutate it (take_throw_error / take_send_value).
         let coro = match task.active_coro() {
             Ok(c) => c.clone_ref(py),
-            Err(e) => return DriveResult::Error(e),
+            Err(e) => return (DriveResult::Error(e), stats),
         };
         let step_result = if let Some(err) = task.take_throw_error() {
             ops.step_throw(py, &coro, err)
@@ -80,34 +97,44 @@ pub fn drive_task(
                 let kind = ops.classify(py, &obj);
                 match kind {
                     AwaitableKind::YieldNone => {
-                        steps += 1;
-                        if steps >= step_budget {
-                            return DriveResult::BudgetExhausted;
+                        stats.steps += 1;
+                        stats.yield_none += 1;
+                        if stats.steps as usize >= step_budget {
+                            stats.budget_exhausted = true;
+                            return (DriveResult::BudgetExhausted, stats);
                         }
                         continue;
                     }
                     AwaitableKind::Future => {
-                        return DriveResult::WaitingOnFuture(obj);
+                        stats.yield_future += 1;
+                        return (DriveResult::WaitingOnFuture(obj), stats);
                     }
                     AwaitableKind::EventWaiter => {
-                        return DriveResult::WaitingOnEvent(obj);
+                        stats.yield_future += 1;
+                        return (DriveResult::WaitingOnEvent(obj), stats);
                     }
                     AwaitableKind::Coroutine => {
+                        stats.yield_coroutine += 1;
                         task.push_coro(obj);
                         continue; // drive the sub-coroutine
                     }
                     AwaitableKind::AsyncioFuture => {
-                        return DriveResult::WaitingOnAsyncioFuture(obj);
+                        stats.yield_asyncio_future += 1;
+                        return (DriveResult::WaitingOnAsyncioFuture(obj), stats);
                     }
                     AwaitableKind::Unknown => {
+                        stats.yield_unknown += 1;
                         let type_name = obj
                             .bind(py)
                             .get_type()
                             .name()
                             .map_or_else(|_| "<unknown>".to_owned(), |n| n.to_string());
-                        return DriveResult::Error(pyo3::exceptions::PyTypeError::new_err(
-                            format!("unsupported awaitable type yielded: {type_name}"),
-                        ));
+                        return (
+                            DriveResult::Error(pyo3::exceptions::PyTypeError::new_err(format!(
+                                "unsupported awaitable type yielded: {type_name}"
+                            ))),
+                            stats,
+                        );
                     }
                 }
             }
@@ -118,7 +145,7 @@ pub fn drive_task(
                     continue;
                 }
                 // Top-level coroutine completed.
-                return DriveResult::Completed(value);
+                return (DriveResult::Completed(value), stats);
             }
             StepResult::Error(e) => {
                 if task.pop_coro() {
@@ -126,7 +153,7 @@ pub fn drive_task(
                     task.set_throw_error(e);
                     continue;
                 }
-                return DriveResult::Error(e);
+                return (DriveResult::Error(e), stats);
             }
         }
     }
@@ -295,7 +322,10 @@ pub fn resume_task(
 
     let saved = install_proxy(py, proxy.as_ref());
 
-    let drive_result = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+    let (drive_result, stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+    if let Some(c) = counters::get() {
+        c.record_drive(&stats);
+    }
     let result = handle_drive_result(
         py,
         task,
@@ -444,21 +474,36 @@ pub fn spawn_and_drive(
     ops: &Arc<dyn CoroutineOps>,
     call_soon_threadsafe: &Py<PyAny>,
     ready_queue: &Arc<ReadyQueue>,
-) {
+) -> Option<DriveStats> {
     let mut task = match SchedulerTask::new(py, coro, result_tx) {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(error = %e, "scheduler task creation failed");
-            return;
+            return None;
         }
     };
+
+    if let Some(c) = counters::get() {
+        c.record_spawn();
+    }
 
     // Set our task as asyncio's "current task" so Starlette/FastAPI
     // middleware that calls asyncio.current_task() gets a valid object
     // (needed for weakref support in ServerErrorMiddleware, etc.).
     let task_ctx = set_current_task(py, &task);
 
-    let drive_result = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+    let (drive_result, stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+
+    // Record counters based on drive result.
+    if let Some(c) = counters::get() {
+        c.record_drive(&stats);
+        match &drive_result {
+            DriveResult::Completed(_) | DriveResult::Error(_) => c.record_inline_completion(),
+            DriveResult::BudgetExhausted => c.record_budget_exhaustion(),
+            _ => c.record_suspension(),
+        }
+    }
+
     let proxy = task_ctx.as_ref().map(|(_, p)| p.clone_ref(py));
     // Keep a reference for ownership check in clear_current_task.
     let proxy_for_clear = proxy.as_ref().map(|p| p.clone_ref(py));
@@ -474,6 +519,7 @@ pub fn spawn_and_drive(
     }
 
     clear_current_task(py, task_ctx.map(|(ct, _)| ct), proxy_for_clear.as_ref());
+    Some(stats)
 }
 
 // ---------------------------------------------------------------------------
@@ -515,7 +561,7 @@ pub fn first_drive(
         }
     };
     let task_ctx = set_current_task(py, &task);
-    let drive_result = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+    let (drive_result, _stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
     route_first_drive(py, task, task_ctx, drive_result)
 }
 
