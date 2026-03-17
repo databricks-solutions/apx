@@ -335,8 +335,11 @@ def _stamp_wheel(wheel_path: Path, new_version: str) -> Path:
     return new_wheel
 
 
+DOCKER_IMAGE = "apx-cross-bench:latest"
+
+
 def build_apx_wheel(dest_dir: Path) -> Path:
-    """Cross-compile APX wheel for linux/amd64 using maturin + zig."""
+    """Cross-compile APX wheel for linux/amd64 using Docker."""
     import re
 
     # Stub the agent binary — crates/core/build.rs copies it and resources.rs
@@ -347,17 +350,28 @@ def build_apx_wheel(dest_dir: Path) -> Path:
     agent_stub.touch()
     console.print(f"[dim]Stubbed agent binary:[/] {agent_stub}")
 
-    console.print("\n[bold blue]Building APX wheel via maturin...[/]")
+    console.print("\n[bold blue]Building APX wheel via maturin (Docker)...[/]")
     dest_dir.mkdir(parents=True, exist_ok=True)
     for old in dest_dir.glob("apx-*.whl"):
         old.unlink()
+
+    sccache_dir = Path.home() / "Library" / "Caches" / "Mozilla.sccache"
+    sccache_dir.mkdir(parents=True, exist_ok=True)
+    cargo_home = Path.home() / ".cargo"
+
     result = subprocess.run(
         [
+            "docker", "run", "--rm",
+            "-v", f"{PROJECT_ROOT}:/io",
+            "-v", f"{sccache_dir}:/cache/sccache",
+            "-v", f"{cargo_home / 'registry'}:/root/.cargo/registry",
+            "-v", f"{cargo_home / 'git'}:/root/.cargo/git",
+            DOCKER_IMAGE,
             "maturin", "build", "--release",
             "--target", CROSS_TARGET,
-            "--zig",
             "-i", "python3.11",
-            "--out", str(dest_dir),
+            "--out", str(Path("/io") / dest_dir.relative_to(PROJECT_ROOT)),
+            "--manifest-path", "crates/apx/Cargo.toml",
         ],
         cwd=str(PROJECT_ROOT),
         check=False,
