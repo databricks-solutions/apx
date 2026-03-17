@@ -657,4 +657,46 @@ async def outer():
             }
         });
     }
+
+    #[test]
+    fn classify_event_waiter() {
+        crate::with_py(|py| {
+            use super::super::primitives::Event;
+
+            let ops = FfiCoroutineOps::resolve(py).unwrap();
+            let event = Event::new();
+            let py_event = Py::new(py, event).unwrap();
+            let waiter = py_event.call_method0(py, c"wait").unwrap();
+            // waiter is an EventWaiter
+            assert!(matches!(
+                ops.classify(py, &waiter),
+                AwaitableKind::EventWaiter
+            ));
+        });
+    }
+
+    #[test]
+    fn classify_asyncio_task_as_future() {
+        crate::with_py(|py| {
+            let ops = FfiCoroutineOps::resolve(py).unwrap();
+            // Create an asyncio.Task from a coroutine (needs a running loop).
+            let asyncio = py.import(c"asyncio").unwrap();
+            let loop_obj = asyncio.call_method0(c"new_event_loop").unwrap();
+            let events = py.import(c"asyncio.events").unwrap();
+            let _ = events.call_method1(c"_set_running_loop", (&loop_obj,));
+            py.run(c"async def _t(): pass", None, None).unwrap();
+            let coro = py.eval(c"_t()", None, None).unwrap();
+            let task = asyncio
+                .call_method1(c"ensure_future", (coro,))
+                .unwrap()
+                .unbind();
+            // asyncio.Task has _asyncio_future_blocking attribute, should classify as AsyncioFuture.
+            assert!(matches!(
+                ops.classify(py, &task),
+                AwaitableKind::AsyncioFuture
+            ));
+            let _ = events.call_method1(c"_set_running_loop", (py.None(),));
+            let _ = loop_obj.call_method0(c"close");
+        });
+    }
 }

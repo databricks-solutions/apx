@@ -242,4 +242,89 @@ mod tests {
             assert!(err.is_err());
         });
     }
+
+    #[test]
+    fn resolved_callback_fires_immediately() {
+        crate::with_py(|py| {
+            let future = Future::resolved(py.None());
+            let slf = Py::new(py, future).unwrap();
+            py.run(c"_cb_called = False", None, None).unwrap();
+            let cb = py
+                .eval(
+                    c"lambda fut: globals().__setitem__('_cb_called', True)",
+                    None,
+                    None,
+                )
+                .unwrap()
+                .unbind();
+            Future::add_done_callback(slf, py, cb).unwrap();
+            let called: bool = py
+                .eval(c"_cb_called", None, None)
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(
+                called,
+                "callback should fire immediately on resolved future"
+            );
+        });
+    }
+
+    #[test]
+    fn exception_propagates_on_next() {
+        crate::with_py(|py| {
+            let future = Future::pending();
+            let slf = Py::new(py, future).unwrap();
+            let exc = pyo3::exceptions::PyValueError::new_err("boom");
+            Future::set_exception(slf.clone_ref(py), py, exc.value(py).clone().unbind().into())
+                .unwrap();
+            // __next__ should re-raise the stored exception
+            let result = Future::__next__(slf, py);
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert!(err.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+        });
+    }
+
+    #[test]
+    fn multiple_wakers_all_fire() {
+        crate::with_py(|py| {
+            let future = Future::pending();
+            let slf = Py::new(py, future).unwrap();
+            py.run(c"_fire_count = 0", None, None).unwrap();
+            let cb = py
+                .eval(
+                    c"lambda fut: globals().__setitem__('_fire_count', globals()['_fire_count'] + 1)",
+                    None,
+                    None,
+                )
+                .unwrap()
+                .unbind();
+            Future::add_done_callback(slf.clone_ref(py), py, cb.clone_ref(py)).unwrap();
+            Future::add_done_callback(slf.clone_ref(py), py, cb.clone_ref(py)).unwrap();
+            Future::add_done_callback(slf.clone_ref(py), py, cb).unwrap();
+            Future::set_result(slf, py, py.None()).unwrap();
+            let count: i32 = py
+                .eval(c"_fire_count", None, None)
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(count, 3);
+        });
+    }
+
+    #[test]
+    fn await_protocol_chain() {
+        crate::with_py(|py| {
+            let future = Future::pending();
+            let slf = Py::new(py, future).unwrap();
+            let awaited = Future::__await__(slf.clone_ref(py));
+            assert!(awaited.is(&slf));
+            let itered = Future::__iter__(slf.clone_ref(py));
+            assert!(itered.is(&slf));
+            // __next__ on pending should return Ok(self)
+            let next_result = Future::__next__(slf.clone_ref(py), py).unwrap();
+            assert!(next_result.is(slf.clone_ref(py).into_any()));
+        });
+    }
 }

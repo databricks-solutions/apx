@@ -445,4 +445,144 @@ async def uses_bad():
             assert!(result.is_err(), "expected error from bad __await__, got Ok");
         });
     }
+
+    // -- drive cycle tests ---------------------------------------------------
+
+    #[test]
+    fn drive_deeply_nested_coroutines() {
+        crate::with_py(|py| {
+            let ops: Arc<dyn CoroutineOps> = Arc::new(FfiCoroutineOps::resolve(py).unwrap());
+            py.run(
+                c"
+async def level(n):
+    if n == 0:
+        return 'bottom'
+    return await level(n - 1)
+",
+                None,
+                None,
+            )
+            .unwrap();
+            let coro = py.eval(c"level(10)", None, None).unwrap().unbind();
+            let (tx, mut rx) = oneshot::channel();
+            let outcome = first_drive(py, coro, tx, &ops);
+            assert!(matches!(outcome, FirstDriveOutcome::Inline));
+            let result = rx.try_recv().unwrap().unwrap();
+            let val: String = result.extract(py).unwrap();
+            assert_eq!(val, "bottom");
+        });
+    }
+
+    #[test]
+    fn drive_budget_exhaustion() {
+        crate::with_py(|py| {
+            let ops: Arc<dyn CoroutineOps> = Arc::new(FfiCoroutineOps::resolve(py).unwrap());
+            py.run(
+                c"
+class ManyYields:
+    def __await__(self):
+        for _ in range(200):
+            yield None
+        return 'done'
+
+async def exhaust_budget():
+    return await ManyYields()
+",
+                None,
+                None,
+            )
+            .unwrap();
+            let coro = py.eval(c"exhaust_budget()", None, None).unwrap().unbind();
+            let (tx, _rx) = oneshot::channel();
+            let mut task = SchedulerTask::new(py, coro, tx).unwrap();
+            let (result, stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+            assert!(matches!(result, DriveResult::BudgetExhausted));
+            assert!(stats.budget_exhausted);
+            assert!(stats.steps as usize >= DEFAULT_STEP_BUDGET);
+        });
+    }
+
+    #[test]
+    fn drive_asyncio_future_suspends() {
+        crate::with_py(|py| {
+            let ops: Arc<dyn CoroutineOps> = Arc::new(FfiCoroutineOps::resolve(py).unwrap());
+            let asyncio = py.import(c"asyncio").unwrap();
+            let loop_obj = asyncio.call_method0(c"new_event_loop").unwrap();
+            let events = py.import(c"asyncio.events").unwrap();
+            let _ = events.call_method1(c"_set_running_loop", (&loop_obj,));
+            py.run(
+                c"
+import asyncio
+async def wait_for_future():
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    await fut
+",
+                None,
+                None,
+            )
+            .unwrap();
+            let coro = py.eval(c"wait_for_future()", None, None).unwrap().unbind();
+            let (tx, _rx) = oneshot::channel();
+            let mut task = SchedulerTask::new(py, coro, tx).unwrap();
+            let (result, _stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+            assert!(matches!(result, DriveResult::WaitingOnAsyncioFuture(_)));
+            let _ = events.call_method1(c"_set_running_loop", (py.None(),));
+            let _ = loop_obj.call_method0(c"close");
+        });
+    }
+
+    #[test]
+    fn drive_rust_future_suspends() {
+        crate::with_py(|py| {
+            let ops: Arc<dyn CoroutineOps> = Arc::new(FfiCoroutineOps::resolve(py).unwrap());
+            use crate::io::driver::primitives::Future as RustFuture;
+            let pending = Py::new(py, RustFuture::pending()).unwrap();
+            let globals = pyo3::types::PyDict::new(py);
+            globals.set_item("rust_fut", &pending).unwrap();
+            py.run(
+                c"
+async def wait_rust():
+    return await rust_fut
+",
+                Some(&globals),
+                None,
+            )
+            .unwrap();
+            let coro = py
+                .eval(c"wait_rust()", Some(&globals), None)
+                .unwrap()
+                .unbind();
+            let (tx, _rx) = oneshot::channel();
+            let mut task = SchedulerTask::new(py, coro, tx).unwrap();
+            let (result, _stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+            assert!(
+                matches!(result, DriveResult::WaitingOnFuture(_)),
+                "expected WaitingOnFuture, got {result:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn drive_concurrent_via_ready_queue() {
+        crate::with_py(|py| {
+            let ops: Arc<dyn CoroutineOps> = Arc::new(FfiCoroutineOps::resolve(py).unwrap());
+            // Task 1: completes inline
+            py.run(c"async def t1(): return 'one'", None, None).unwrap();
+            let coro1 = py.eval(c"t1()", None, None).unwrap().unbind();
+            let (tx1, mut rx1) = oneshot::channel();
+            let o1 = first_drive(py, coro1, tx1, &ops);
+            assert!(matches!(o1, FirstDriveOutcome::Inline));
+            let r1: String = rx1.try_recv().unwrap().unwrap().extract(py).unwrap();
+            // Task 2: also completes inline
+            py.run(c"async def t2(): return 'two'", None, None).unwrap();
+            let coro2 = py.eval(c"t2()", None, None).unwrap().unbind();
+            let (tx2, mut rx2) = oneshot::channel();
+            let o2 = first_drive(py, coro2, tx2, &ops);
+            assert!(matches!(o2, FirstDriveOutcome::Inline));
+            let r2: String = rx2.try_recv().unwrap().unwrap().extract(py).unwrap();
+            assert_eq!(r1, "one");
+            assert_eq!(r2, "two");
+        });
+    }
 }

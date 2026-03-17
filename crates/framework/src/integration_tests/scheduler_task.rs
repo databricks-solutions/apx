@@ -411,3 +411,144 @@ fn uvloop_trivial_coroutine() {
 fn uvloop_suspending_coroutine() {
     assert_suspending_coroutine_completes(LoopKind::Uvloop);
 }
+
+// ── Task lifecycle tests ────────────────────────────────────────────────
+
+#[test]
+fn current_task_set_during_drive() {
+    crate::integration_tests::ensure_python_env();
+    Python::initialize();
+    let (mut harness, rx) = Python::attach(|py| {
+        let harness = TaskTestHarness::new(py, LoopKind::Asyncio);
+        py.run(
+            c"
+import asyncio
+async def check_current_task():
+    t = asyncio.current_task()
+    return type(t).__name__
+",
+            None,
+            None,
+        )
+        .unwrap();
+        let coro = py
+            .eval(c"check_current_task()", None, None)
+            .unwrap()
+            .unbind();
+        let rx = harness.drive(py, coro);
+        (harness, rx)
+    });
+    let result = harness.poll_result(rx);
+    harness.shutdown();
+    assert_eq!(result.unwrap(), "_SchedulerTask");
+}
+
+#[test]
+fn scheduler_task_is_real_asyncio_task() {
+    crate::integration_tests::ensure_python_env();
+    Python::initialize();
+    let (mut harness, rx) = Python::attach(|py| {
+        let harness = TaskTestHarness::new(py, LoopKind::Asyncio);
+        py.run(
+            c"
+import asyncio
+async def check_isinstance():
+    t = asyncio.current_task()
+    return str(isinstance(t, asyncio.Task))
+",
+            None,
+            None,
+        )
+        .unwrap();
+        let coro = py.eval(c"check_isinstance()", None, None).unwrap().unbind();
+        let rx = harness.drive(py, coro);
+        (harness, rx)
+    });
+    let result = harness.poll_result(rx);
+    harness.shutdown();
+    assert_eq!(result.unwrap(), "True");
+}
+
+#[test]
+fn scheduler_task_weakref_works() {
+    crate::integration_tests::ensure_python_env();
+    Python::initialize();
+    let (mut harness, rx) = Python::attach(|py| {
+        let harness = TaskTestHarness::new(py, LoopKind::Asyncio);
+        py.run(
+            c"
+import asyncio, weakref
+async def check_weakref():
+    t = asyncio.current_task()
+    ref = weakref.ref(t)
+    return 'ok' if ref() is t else 'fail'
+",
+            None,
+            None,
+        )
+        .unwrap();
+        let coro = py.eval(c"check_weakref()", None, None).unwrap().unbind();
+        let rx = harness.drive(py, coro);
+        (harness, rx)
+    });
+    let result = harness.poll_result(rx);
+    harness.shutdown();
+    assert_eq!(result.unwrap(), "ok");
+}
+
+#[test]
+fn scheduler_task_in_all_tasks() {
+    crate::integration_tests::ensure_python_env();
+    Python::initialize();
+    let (mut harness, rx) = Python::attach(|py| {
+        let harness = TaskTestHarness::new(py, LoopKind::Asyncio);
+        py.run(
+            c"
+import asyncio
+async def check_all_tasks():
+    t = asyncio.current_task()
+    tasks = asyncio.all_tasks()
+    return 'found' if t in tasks else 'missing'
+",
+            None,
+            None,
+        )
+        .unwrap();
+        let coro = py.eval(c"check_all_tasks()", None, None).unwrap().unbind();
+        let rx = harness.drive(py, coro);
+        (harness, rx)
+    });
+    let result = harness.poll_result(rx);
+    harness.shutdown();
+    assert_eq!(result.unwrap(), "found");
+}
+
+#[test]
+fn contextvars_survive_full_suspension() {
+    crate::integration_tests::ensure_python_env();
+    Python::initialize();
+    let (mut harness, rx) = Python::attach(|py| {
+        let harness = TaskTestHarness::new(py, LoopKind::Asyncio);
+        py.run(
+            c"
+import asyncio, contextvars
+_cv = contextvars.ContextVar('_cv')
+_cv.set('before_suspend')
+async def check_cv():
+    before = _cv.get()
+    await asyncio.sleep(0)
+    after = _cv.get()
+    return f'{before},{after}'
+",
+            None,
+            None,
+        )
+        .unwrap();
+        let coro = py.eval(c"check_cv()", None, None).unwrap().unbind();
+        let rx = harness.drive(py, coro);
+        (harness, rx)
+    });
+    let result = harness.poll_result(rx);
+    harness.shutdown();
+    assert_eq!(result.unwrap(), "before_suspend,before_suspend");
+}

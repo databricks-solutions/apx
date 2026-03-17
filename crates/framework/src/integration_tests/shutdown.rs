@@ -165,3 +165,143 @@ print("ok")
         "WeakSet iteration error detected:\nstderr: {stderr}"
     );
 }
+
+#[test]
+fn event_loop_init_sets_running_loop() {
+    let (stdout, stderr, success) = run_python(
+        r#"
+import asyncio
+
+async def check():
+    loop = asyncio.get_running_loop()
+    return type(loop).__name__
+
+result = asyncio.run(check())
+print(f"loop_type={result}")
+"#,
+    );
+    assert!(
+        success,
+        "script failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("loop_type="),
+        "should report loop type:\nstdout: {stdout}"
+    );
+}
+
+#[test]
+fn event_loop_init_with_uvloop() {
+    let (stdout, stderr, success) = run_python(
+        r#"
+import asyncio
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass  # uvloop not available, skip
+
+async def check():
+    loop = asyncio.get_running_loop()
+    return type(loop).__name__
+
+result = asyncio.run(check())
+print(f"loop_type={result}")
+"#,
+    );
+    assert!(
+        success,
+        "script failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("loop_type="),
+        "should report loop type:\nstdout: {stdout}"
+    );
+}
+
+#[test]
+fn shutdown_cancels_pending_tasks() {
+    let (stdout, stderr, success) = run_python(
+        r#"
+import asyncio
+
+cancelled = False
+
+async def long_task():
+    global cancelled
+    try:
+        await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
+
+async def main():
+    task = asyncio.create_task(long_task())
+    await asyncio.sleep(0)  # let task start
+    # Return without awaiting — shutdown should cancel it
+
+asyncio.run(main())
+print(f"cancelled={cancelled}")
+"#,
+    );
+    assert!(
+        success,
+        "script failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.trim().contains("cancelled=True"),
+        "pending task should be cancelled during shutdown:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn call_soon_threadsafe_on_closed_loop_no_crash() {
+    let (stdout, stderr, success) = run_python(
+        r#"
+import asyncio
+
+loop = asyncio.new_event_loop()
+loop.close()
+
+try:
+    loop.call_soon_threadsafe(lambda: None)
+    print("no_error")
+except RuntimeError as e:
+    print(f"runtime_error={e}")
+"#,
+    );
+    assert!(
+        success,
+        "script failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("runtime_error=") || stdout.contains("no_error"),
+        "should handle closed loop gracefully:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn sniffio_detects_asyncio() {
+    let (stdout, stderr, success) = run_python(
+        r#"
+import asyncio
+try:
+    import sniffio
+    async def check():
+        return sniffio.current_async_library()
+    result = asyncio.run(check())
+    print(f"library={result}")
+except ImportError:
+    print("library=skipped")
+"#,
+    );
+    assert!(
+        success,
+        "script failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let output = stdout.trim();
+    assert!(
+        output.contains("library=asyncio") || output.contains("library=skipped"),
+        "sniffio should detect asyncio or be skipped:\nstdout: {stdout}"
+    );
+}
