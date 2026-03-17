@@ -8,8 +8,7 @@ sync:
 resources:
   apps:
     # Tuning rationale (2 CPU / 6 GB):
-    #   --workers 3: standard async formula (cores + 1) keeps CPUs busy when a
-    #     worker awaits I/O. https://www.uvicorn.org/deployment/
+    #   --workers 2: equalized across all servers for fair comparison.
     #   --loop uvloop / --http httptools: C-level loop + parser, 2-4x over pure-Python.
     #     https://github.com/MagicStack/uvloop
     #   --backlog 2048: larger TCP listen queue absorbs burst traffic under load.
@@ -24,7 +23,7 @@ resources:
           - "--host"
           - "0.0.0.0"
           - "--workers"
-          - "3"
+          - "2"
           - "--loop"
           - "uvloop"
           - "--http"
@@ -41,10 +40,10 @@ resources:
     #   --workers 2: maintainer recommends 1 worker per CPU for granian's Tokio-backed
     #     architecture. https://github.com/emmett-framework/granian/discussions/278
     #   --loop uvloop: rloop (Rust loop) is NOT production-ready (no TLS).
-    #   --runtime-mode st: single-threaded mode is more efficient at low process counts
-    #     per granian benchmarks. https://github.com/emmett-framework/granian/blob/master/benchmarks/vs.md
-    #   --backpressure 128: low backpressure improves load-sharing across workers and
-    #     prevents latency spikes. https://github.com/emmett-framework/granian/discussions/406
+    #   --runtime-mode mt: multi-threaded mode may suit the Databricks container scheduler
+    #     better than st. Testing per bench report recommendation.
+    #   --backpressure 256: doubled from 128 to test whether higher backpressure
+    #     reduces latency spikes under load.
     #   --no-ws: disables unused WebSocket support to reduce overhead.
     bench_granian:
       name: "bench-granian"
@@ -63,9 +62,9 @@ resources:
           - "--workers"
           - "2"
           - "--runtime-mode"
-          - "st"
+          - "mt"
           - "--backpressure"
-          - "128"
+          - "256"
           - "--backlog"
           - "1024"
           - "--no-ws"

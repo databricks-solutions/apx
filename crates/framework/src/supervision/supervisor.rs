@@ -90,8 +90,11 @@ const MAX_RESTARTS_PER_WORKER: usize = 5;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
 const WORKER_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long to wait after SIGTERM before sending SIGKILL.
-const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to wait for workers to drain in-flight requests.
+///
+/// Databricks Apps enforces a 15-second SIGTERM budget. Keep the total
+/// shutdown budget (drain + SIGKILL_TIMEOUT) well under that limit.
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Run the multi-worker supervisor.
 ///
@@ -152,17 +155,35 @@ fn validate_config(config: &SupervisorConfig) -> Result<(), SupervisorError> {
 }
 
 /// State for a single worker process.
-struct WorkerHandle {
+pub(crate) struct WorkerHandle {
     /// Worker index (0-based).
     index: usize,
     /// Child process handle.
-    child: tokio::process::Child,
+    pub(crate) child: tokio::process::Child,
     /// IPC channel to the worker.
     channel: WorkerChannel,
     /// Number of restarts for this worker slot.
     restart_count: usize,
     /// Last restart time.
     last_restart: std::time::Instant,
+}
+
+impl WorkerHandle {
+    /// Test-only constructor. Production code builds handles in `spawn_worker`.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        index: usize,
+        child: tokio::process::Child,
+        channel: WorkerChannel,
+    ) -> Self {
+        Self {
+            index,
+            child,
+            channel,
+            restart_count: 0,
+            last_restart: std::time::Instant::now(),
+        }
+    }
 }
 
 impl std::fmt::Debug for WorkerHandle {
@@ -364,15 +385,15 @@ async fn wait_for_any_exit(
 }
 
 /// How long to wait after sending SIGTERM before sending SIGKILL.
-const SIGKILL_TIMEOUT: Duration = Duration::from_secs(5);
+const SIGKILL_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Gracefully shut down all workers.
 ///
 /// Phase 1: Send `IpcMessage::Drain` to all workers.
 /// Phase 2: Wait for `IpcMessage::Drained` from all (up to `GRACEFUL_SHUTDOWN_TIMEOUT`).
 /// Phase 3: If timeout, send SIGTERM to remaining workers.
-/// Phase 4: Wait 5s, then SIGKILL.
-async fn shutdown_workers(workers: &mut [WorkerHandle]) {
+/// Phase 4: Wait `SIGKILL_TIMEOUT`, then SIGKILL.
+pub(crate) async fn shutdown_workers(workers: &mut [WorkerHandle]) {
     // Phase 1: Send Drain over IPC.
     for worker in workers.iter_mut() {
         if let Err(e) = worker.channel.send(&IpcMessage::Drain).await {
@@ -410,7 +431,15 @@ async fn shutdown_workers(workers: &mut [WorkerHandle]) {
                 let _ = worker.child.wait().await;
             }
         };
-        let _ = tokio::time::timeout(SIGKILL_TIMEOUT, wait_all).await;
+        if tokio::time::timeout(SIGKILL_TIMEOUT, wait_all)
+            .await
+            .is_err()
+        {
+            tracing::warn!("workers did not exit after drain, sending SIGKILL");
+            for worker in workers.iter_mut() {
+                let _ = worker.child.kill().await;
+            }
+        }
         return;
     }
 

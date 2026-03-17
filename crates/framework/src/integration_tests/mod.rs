@@ -8,6 +8,7 @@
     reason = "test code uses unwrap/assert for clarity"
 )]
 
+mod supervision;
 mod telemetry;
 
 use std::path::Path;
