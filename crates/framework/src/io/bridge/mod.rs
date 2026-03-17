@@ -13,7 +13,9 @@ use tokio::sync::oneshot;
 use crate::io::counters;
 use crate::io::driver::ffi::{ContextGuard, CoroutineOps};
 use crate::io::driver::task::SchedulerTask;
-use crate::io::driver::{DEFAULT_STEP_BUDGET, DriveResult, DriveStats, drive_task};
+use crate::io::driver::{
+    DEFAULT_STEP_BUDGET, DEFAULT_TIME_BUDGET, DriveResult, DriveStats, drive_task,
+};
 use crate::io::reactor::{
     TaskOps, create_scheduler_task, enter_scheduler_task, leave_scheduler_task,
 };
@@ -201,7 +203,13 @@ pub fn resume_task(
         .as_ref()
         .map(|c| c.clone_ref(py))
         .and_then(ContextGuard::enter);
-    let (drive_result, stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+    let (drive_result, stats) = drive_task(
+        py,
+        &mut task,
+        ops.as_ref(),
+        DEFAULT_STEP_BUDGET,
+        DEFAULT_TIME_BUDGET,
+    );
     drop(ctx_guard);
 
     if let Some(c) = counters::get() {
@@ -284,7 +292,13 @@ pub fn spawn_and_drive(
         .as_ref()
         .map(|c| c.clone_ref(py))
         .and_then(ContextGuard::enter);
-    let (drive_result, stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+    let (drive_result, stats) = drive_task(
+        py,
+        &mut task,
+        ops.as_ref(),
+        DEFAULT_STEP_BUDGET,
+        DEFAULT_TIME_BUDGET,
+    );
     drop(ctx_guard);
 
     // Record counters based on drive result.

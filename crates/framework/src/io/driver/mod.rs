@@ -11,6 +11,8 @@ pub mod ffi;
 pub mod primitives;
 pub mod task;
 
+use std::time::{Duration, Instant};
+
 use pyo3::prelude::*;
 
 use self::ffi::{AwaitableKind, CoroutineOps, StepResult};
@@ -30,6 +32,7 @@ pub struct DriveStats {
     pub yield_coroutine: u32,
     pub yield_unknown: u32,
     pub budget_exhausted: bool,
+    pub time_budget_exceeded: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -56,6 +59,19 @@ pub enum DriveResult {
 /// Maximum `YieldNone` steps before re-enqueueing for fairness.
 pub const DEFAULT_STEP_BUDGET: usize = 128;
 
+/// Maximum wall-clock time per drive cycle before re-enqueue.
+///
+/// Prevents GIL starvation when user coroutines do CPU-intensive work.
+/// The reactor thread needs GIL to run `_run_once` — holding it longer
+/// than this starves I/O processing.
+pub const DEFAULT_TIME_BUDGET: Duration = Duration::from_millis(5);
+
+/// Steps between wall-clock time checks.
+///
+/// `Instant::elapsed()` costs ~25ns — checking every 16 steps
+/// amortizes this to ~1.5ns/step.
+const TIME_CHECK_INTERVAL: u32 = 16;
+
 // ---------------------------------------------------------------------------
 // drive_task — the main drive loop
 // ---------------------------------------------------------------------------
@@ -74,7 +90,9 @@ pub fn drive_task(
     task: &mut SchedulerTask,
     ops: &dyn CoroutineOps,
     step_budget: usize,
+    time_budget: Duration,
 ) -> (DriveResult, DriveStats) {
+    let start = Instant::now();
     let mut stats = DriveStats::default();
     loop {
         // Clone the coro ref so the immutable borrow on `task` is released
@@ -99,6 +117,11 @@ pub fn drive_task(
                         stats.yield_none += 1;
                         if stats.steps as usize >= step_budget {
                             stats.budget_exhausted = true;
+                            return (DriveResult::BudgetExhausted, stats);
+                        }
+                        if stats.steps % TIME_CHECK_INTERVAL == 0 && start.elapsed() > time_budget {
+                            stats.budget_exhausted = true;
+                            stats.time_budget_exceeded = true;
                             return (DriveResult::BudgetExhausted, stats);
                         }
                         continue;
@@ -221,7 +244,13 @@ pub fn first_drive(
         .as_ref()
         .map(|c| c.clone_ref(py))
         .and_then(ContextGuard::enter);
-    let (drive_result, _stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+    let (drive_result, _stats) = drive_task(
+        py,
+        &mut task,
+        ops.as_ref(),
+        DEFAULT_STEP_BUDGET,
+        DEFAULT_TIME_BUDGET,
+    );
     drop(ctx_guard);
     route_first_drive(py, task, drive_result)
 }
@@ -495,7 +524,13 @@ async def exhaust_budget():
             let coro = py.eval(c"exhaust_budget()", None, None).unwrap().unbind();
             let (tx, _rx) = oneshot::channel();
             let mut task = SchedulerTask::new(py, coro, tx).unwrap();
-            let (result, stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+            let (result, stats) = drive_task(
+                py,
+                &mut task,
+                ops.as_ref(),
+                DEFAULT_STEP_BUDGET,
+                DEFAULT_TIME_BUDGET,
+            );
             assert!(matches!(result, DriveResult::BudgetExhausted));
             assert!(stats.budget_exhausted);
             assert!(stats.steps as usize >= DEFAULT_STEP_BUDGET);
@@ -525,7 +560,13 @@ async def wait_for_future():
             let coro = py.eval(c"wait_for_future()", None, None).unwrap().unbind();
             let (tx, _rx) = oneshot::channel();
             let mut task = SchedulerTask::new(py, coro, tx).unwrap();
-            let (result, _stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+            let (result, _stats) = drive_task(
+                py,
+                &mut task,
+                ops.as_ref(),
+                DEFAULT_STEP_BUDGET,
+                DEFAULT_TIME_BUDGET,
+            );
             assert!(matches!(result, DriveResult::WaitingOnAsyncioFuture(_)));
             let _ = events.call_method1(c"_set_running_loop", (py.None(),));
             let _ = loop_obj.call_method0(c"close");
@@ -555,7 +596,13 @@ async def wait_rust():
                 .unbind();
             let (tx, _rx) = oneshot::channel();
             let mut task = SchedulerTask::new(py, coro, tx).unwrap();
-            let (result, _stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+            let (result, _stats) = drive_task(
+                py,
+                &mut task,
+                ops.as_ref(),
+                DEFAULT_STEP_BUDGET,
+                DEFAULT_TIME_BUDGET,
+            );
             assert!(
                 matches!(result, DriveResult::WaitingOnFuture(_)),
                 "expected WaitingOnFuture, got {result:?}"
@@ -584,5 +631,70 @@ async def wait_rust():
             assert_eq!(r1, "one");
             assert_eq!(r2, "two");
         });
+    }
+
+    #[test]
+    fn drive_time_budget_triggers() {
+        crate::with_py(|py| {
+            let ops: Arc<dyn CoroutineOps> = Arc::new(FfiCoroutineOps::resolve(py).unwrap());
+            // Custom awaitable that yield-Nones with a busy sleep between each,
+            // burning wall-clock time to exceed the 1ms time budget.
+            py.run(
+                c"
+import time
+class SlowYields:
+    def __await__(self):
+        for _ in range(10000):
+            time.sleep(0.001)  # 1ms per yield — 16 yields = 16ms > budget
+            yield None
+        return 'done'
+
+async def slow():
+    return await SlowYields()
+",
+                None,
+                None,
+            )
+            .unwrap();
+            let coro = py.eval(c"slow()", None, None).unwrap().unbind();
+            let (tx, _rx) = oneshot::channel();
+            let mut task = SchedulerTask::new(py, coro, tx).unwrap();
+            let time_budget = Duration::from_millis(1);
+            let (result, stats) = drive_task(py, &mut task, ops.as_ref(), 10_000, time_budget);
+            assert!(matches!(result, DriveResult::BudgetExhausted));
+            assert!(stats.time_budget_exceeded);
+            // Should hit time budget well before the 10k step budget.
+            assert!((stats.steps as usize) < 10_000);
+        });
+    }
+
+    #[test]
+    fn drive_time_budget_does_not_trigger_fast_coro() {
+        crate::with_py(|py| {
+            let ops: Arc<dyn CoroutineOps> = Arc::new(FfiCoroutineOps::resolve(py).unwrap());
+            py.run(c"async def fast(): return 42", None, None).unwrap();
+            let coro = py.eval(c"fast()", None, None).unwrap().unbind();
+            let (tx, _rx) = oneshot::channel();
+            let mut task = SchedulerTask::new(py, coro, tx).unwrap();
+            let (result, stats) = drive_task(py, &mut task, ops.as_ref(), 128, DEFAULT_TIME_BUDGET);
+            assert!(matches!(result, DriveResult::Completed(_)));
+            assert!(!stats.time_budget_exceeded);
+            assert!(!stats.budget_exhausted);
+        });
+    }
+
+    #[test]
+    fn drive_stats_tracks_time_budget_field() {
+        let stats = DriveStats::default();
+        assert!(!stats.time_budget_exceeded);
+        assert!(!stats.budget_exhausted);
+
+        let stats = DriveStats {
+            time_budget_exceeded: true,
+            budget_exhausted: true,
+            ..DriveStats::default()
+        };
+        assert!(stats.time_budget_exceeded);
+        assert!(stats.budget_exhausted);
     }
 }
