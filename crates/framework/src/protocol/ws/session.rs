@@ -177,6 +177,7 @@ async fn ws_session(
             &ctx.coroutine_ops,
             &ctx.call_soon_threadsafe,
             &ctx.ready_queue,
+            &ctx.task_ops,
         );
         Ok(())
     });

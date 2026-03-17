@@ -8,6 +8,7 @@
     reason = "test code uses unwrap/assert for clarity"
 )]
 
+mod streaming;
 mod supervision;
 mod telemetry;
 

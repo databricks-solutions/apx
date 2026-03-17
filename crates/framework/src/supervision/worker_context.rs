@@ -9,6 +9,7 @@ use std::sync::Arc;
 use pyo3::Py;
 
 use crate::ffi::CoroutineOps;
+use crate::scheduler::driver::TaskOps;
 use crate::scheduler::queue::ReadyQueue;
 
 /// Shared infrastructure available to all dispatch strategies.
@@ -22,6 +23,8 @@ pub struct WorkerContext {
     pub ready_queue: Arc<ReadyQueue>,
     /// Cached `loop.call_soon_threadsafe` bound method.
     pub call_soon_threadsafe: Py<pyo3::PyAny>,
+    /// Cached Python callables for scheduler task lifecycle.
+    pub task_ops: TaskOps,
 }
 
 impl std::fmt::Debug for WorkerContext {

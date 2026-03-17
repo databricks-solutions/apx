@@ -14,8 +14,8 @@ use pyo3::prelude::*;
 use crate::ffi::CoroutineOps;
 
 use super::counters;
-use super::driver::resume_task;
-use super::task::{SchedulerTask, TaskProxy};
+use super::driver::{TaskOps, resume_task};
+use super::task::SchedulerTask;
 
 /// A task ready to be re-driven by the scheduler.
 ///
@@ -23,8 +23,8 @@ use super::task::{SchedulerTask, TaskProxy};
 pub struct ReadyTask {
     /// The task to resume.
     pub task: SchedulerTask,
-    /// Optional proxy installed as `asyncio.current_task()` during driving.
-    pub proxy: Option<Py<TaskProxy>>,
+    /// Optional `_SchedulerTask` installed as `asyncio.current_task()` during driving.
+    pub sched_task: Option<Py<PyAny>>,
 }
 
 impl std::fmt::Debug for ReadyTask {
@@ -107,11 +107,13 @@ impl ReadyQueue {
         ops: &Arc<dyn CoroutineOps>,
         call_soon_threadsafe: &Py<PyAny>,
         ready_queue: &Arc<ReadyQueue>,
+        task_ops: &TaskOps,
     ) -> usize {
         let mut count = 0;
         while let Some(ready) = self.pop() {
             count += 1;
-            if let Err(e) = resume_task(py, ready, ops, call_soon_threadsafe, ready_queue) {
+            if let Err(e) = resume_task(py, ready, ops, call_soon_threadsafe, ready_queue, task_ops)
+            {
                 tracing::warn!(error = %e, "ready queue drain: resume failed");
             }
         }
@@ -154,7 +156,13 @@ mod tests {
 
             let (tx, _rx) = tokio::sync::oneshot::channel();
             let task = SchedulerTask::new(py, py.None(), tx).unwrap();
-            queue.push(py, ReadyTask { task, proxy: None });
+            queue.push(
+                py,
+                ReadyTask {
+                    task,
+                    sched_task: None,
+                },
+            );
 
             let ready = queue.pop();
             assert!(ready.is_some());

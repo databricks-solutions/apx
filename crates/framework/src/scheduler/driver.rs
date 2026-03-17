@@ -13,10 +13,29 @@ use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
 use super::queue::{ReadyQueue, ReadyTask};
-use super::task::{SchedulerTask, TaskProxy};
+use super::task::SchedulerTask;
 use crate::ffi::{AwaitableKind, CoroutineOps, StepResult};
 use crate::protocol::http::error::AppError;
 use crate::scheduler::counters;
+
+// ---------------------------------------------------------------------------
+// TaskOps — cached Python callables for scheduler task lifecycle
+// ---------------------------------------------------------------------------
+
+/// Cached Python callables for the scheduler task lifecycle.
+///
+/// Resolved once at worker init, passed by reference to avoid per-call imports.
+pub struct TaskOps {
+    pub enter_task: Py<PyAny>,
+    pub leave_task: Py<PyAny>,
+    pub scheduler_task_cls: Py<PyAny>,
+}
+
+impl std::fmt::Debug for TaskOps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskOps").finish_non_exhaustive()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // DriveStats — per-request scheduler drive counters
@@ -110,7 +129,6 @@ pub fn drive_task(
                         return (DriveResult::WaitingOnFuture(obj), stats);
                     }
                     AwaitableKind::EventWaiter => {
-                        stats.yield_future += 1;
                         return (DriveResult::WaitingOnEvent(obj), stats);
                     }
                     AwaitableKind::Coroutine => {
@@ -173,7 +191,7 @@ pub fn drive_task(
 #[pyclass(module = "apx._core")]
 pub struct ResumeCallback {
     task: Option<SchedulerTask>,
-    proxy: Option<Py<TaskProxy>>,
+    sched_task: Option<Py<PyAny>>,
     queue: Arc<ReadyQueue>,
 }
 
@@ -205,9 +223,9 @@ impl ResumeCallback {
             }
         }
 
-        let proxy = self.proxy.take();
+        let sched_task = self.sched_task.take();
         tracing::trace!("resume_callback: enqueue");
-        self.queue.push(py, ReadyTask { task, proxy });
+        self.queue.push(py, ReadyTask { task, sched_task });
         Ok(())
     }
 }
@@ -246,34 +264,42 @@ pub fn handle_drive_result(
     drive_result: DriveResult,
     call_soon_threadsafe: &Py<PyAny>,
     ready_queue: &Arc<ReadyQueue>,
-    proxy: Option<Py<TaskProxy>>,
+    sched_task: Option<Py<PyAny>>,
 ) -> PyResult<()> {
     match drive_result {
         DriveResult::Completed(value) => {
+            if let Some(ref st) = sched_task {
+                let _ = st.call_method0(py, c"cancel");
+            }
             if let Some(tx) = task.take_result_tx() {
                 let _ = tx.send(Ok(value));
             }
             Ok(())
         }
         DriveResult::Error(err) => {
+            if let Some(ref st) = sched_task {
+                let _ = st.call_method0(py, c"cancel");
+            }
             if let Some(tx) = task.take_result_tx() {
                 let _ = tx.send(Err(AppError::Internal(err.to_string())));
             }
             Ok(())
         }
-        DriveResult::WaitingOnFuture(fut) => handle_rust_future(py, task, fut, ready_queue, proxy),
+        DriveResult::WaitingOnFuture(fut) => {
+            handle_rust_future(py, task, fut, ready_queue, sched_task)
+        }
         DriveResult::WaitingOnEvent(_waiter) => {
-            let cb = make_resume_callback(py, task, ready_queue, proxy)?;
+            let cb = make_resume_callback(py, task, ready_queue, sched_task)?;
             call_soon_threadsafe.call1(py, (cb,))?;
             Ok(())
         }
         DriveResult::WaitingOnAsyncioFuture(fut) => {
-            let cb = make_resume_callback(py, task, ready_queue, proxy)?;
+            let cb = make_resume_callback(py, task, ready_queue, sched_task)?;
             fut.call_method1(py, c"add_done_callback", (cb,))?;
             Ok(())
         }
         DriveResult::BudgetExhausted => {
-            ready_queue.push(py, ReadyTask { task, proxy });
+            ready_queue.push(py, ReadyTask { task, sched_task });
             Ok(())
         }
     }
@@ -286,7 +312,7 @@ fn handle_rust_future(
     task: SchedulerTask,
     fut: Py<PyAny>,
     ready_queue: &Arc<ReadyQueue>,
-    proxy: Option<Py<TaskProxy>>,
+    sched_task: Option<Py<PyAny>>,
 ) -> PyResult<()> {
     let is_done = fut.call_method0(py, c"done")?.is_truthy(py)?;
     if is_done {
@@ -295,10 +321,10 @@ fn handle_rust_future(
             Ok(value) => task.set_send_value(value),
             Err(err) => task.set_throw_error(err),
         }
-        ready_queue.push(py, ReadyTask { task, proxy });
+        ready_queue.push(py, ReadyTask { task, sched_task });
         return Ok(());
     }
-    let cb = make_resume_callback(py, task, ready_queue, proxy)?;
+    let cb = make_resume_callback(py, task, ready_queue, sched_task)?;
     fut.call_method1(py, c"add_done_callback", (cb,))?;
     Ok(())
 }
@@ -309,7 +335,7 @@ fn handle_rust_future(
 
 /// Re-drive a task that became ready via the queue.
 ///
-/// Reinstalls the proxy, calls [`drive_task`], dispatches the result.
+/// Re-enters the `_SchedulerTask`, calls [`drive_task`], dispatches the result.
 /// `result_tx` is inside `task` — no separate channel parameter.
 pub fn resume_task(
     py: Python<'_>,
@@ -317,10 +343,14 @@ pub fn resume_task(
     ops: &Arc<dyn CoroutineOps>,
     call_soon_threadsafe: &Py<PyAny>,
     ready_queue: &Arc<ReadyQueue>,
+    task_ops: &TaskOps,
 ) -> PyResult<()> {
-    let ReadyTask { mut task, proxy } = ready;
+    let ReadyTask {
+        mut task,
+        sched_task,
+    } = ready;
 
-    let saved = install_proxy(py, proxy.as_ref());
+    let entered = enter_scheduler_task(py, sched_task.as_ref(), task_ops);
 
     let (drive_result, stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
     if let Some(c) = counters::get() {
@@ -332,10 +362,10 @@ pub fn resume_task(
         drive_result,
         call_soon_threadsafe,
         ready_queue,
-        proxy,
+        sched_task,
     );
 
-    restore_proxy(py, saved);
+    leave_scheduler_task(py, entered, task_ops);
     result
 }
 
@@ -347,111 +377,57 @@ fn make_resume_callback(
     py: Python<'_>,
     task: SchedulerTask,
     ready_queue: &Arc<ReadyQueue>,
-    proxy: Option<Py<TaskProxy>>,
+    sched_task: Option<Py<PyAny>>,
 ) -> PyResult<Py<ResumeCallback>> {
     Py::new(
         py,
         ResumeCallback {
             task: Some(task),
-            proxy,
+            sched_task,
             queue: Arc::clone(ready_queue),
         },
     )
 }
 
-/// Install a [`TaskProxy`] as `asyncio.current_task()` for the running loop.
-///
-/// Returns `(current_tasks_dict, proxy)` for cleanup and for storing in
-/// `ResumeCallback` so that resumed coroutines also see a valid current task.
-fn set_current_task(py: Python<'_>, task: &SchedulerTask) -> Option<(Py<PyAny>, Py<TaskProxy>)> {
-    let asyncio = py.import(c"asyncio").ok()?;
-    let tasks_mod = py.import(c"asyncio.tasks").ok()?;
-    let current_tasks = tasks_mod.getattr(c"_current_tasks").ok()?;
-    let loop_obj = asyncio.call_method0(c"get_running_loop").ok()?;
-
-    let ctx = task.ctx.as_ref().map(|c| c.clone_ref(py));
-    let proxy = Py::new(
-        py,
-        TaskProxy::new(
-            task.result_future.clone_ref(py),
-            loop_obj.clone().unbind(),
-            task.root_coro(py),
-            ctx,
-        ),
-    )
-    .ok()?;
-
-    let _ = current_tasks.call_method1(c"__setitem__", (&loop_obj, &proxy));
-    Some((current_tasks.unbind(), proxy))
-}
-
-/// Reinstall an existing [`TaskProxy`] in `asyncio.tasks._current_tasks`.
-///
-/// Used by [`resume_task`] to restore the current task when re-driving.
-/// Saves the previous entry so it can be restored after driving.
-///
-/// Returns `(current_tasks_dict, loop_obj, previous_entry)` for restoration.
-fn install_proxy(
+/// Create a `_SchedulerTask` and register it as the current asyncio task.
+fn create_scheduler_task(
     py: Python<'_>,
-    proxy: Option<&Py<TaskProxy>>,
-) -> Option<(Py<PyAny>, Py<PyAny>, Py<PyAny>)> {
-    let proxy = proxy?;
-    let tasks_mod = py.import(c"asyncio.tasks").ok()?;
-    let current_tasks = tasks_mod.getattr(c"_current_tasks").ok()?;
+    task: &SchedulerTask,
+    ops: &TaskOps,
+) -> Option<(Py<PyAny>, Py<PyAny>)> {
     let asyncio = py.import(c"asyncio").ok()?;
     let loop_obj = asyncio.call_method0(c"get_running_loop").ok()?;
-    // Save previous entry before overwriting.
-    let prev = current_tasks
-        .call_method1(c"get", (&loop_obj, py.None()))
-        .ok()?
-        .unbind();
-    let _ = current_tasks.call_method1(c"__setitem__", (&loop_obj, proxy));
-    Some((current_tasks.unbind(), loop_obj.unbind(), prev))
+    let coro = task.root_coro(py);
+    let kwargs = pyo3::types::PyDict::new(py);
+    kwargs.set_item("loop", &loop_obj).ok()?;
+    let sched_task = ops
+        .scheduler_task_cls
+        .call(py, (coro,), Some(&kwargs))
+        .ok()?;
+    ops.enter_task.call1(py, (&loop_obj, &sched_task)).ok()?;
+    Some((loop_obj.unbind(), sched_task))
 }
 
-/// Restore the previous `_current_tasks` entry after [`resume_task`].
-///
-/// If the previous entry was `None`, removes the dict entry.
-/// Restores the previous entry so interleaved task drives don't clobber
-/// each other's current_task.
-fn restore_proxy(py: Python<'_>, saved: Option<(Py<PyAny>, Py<PyAny>, Py<PyAny>)>) {
-    let Some((ct, loop_obj, prev)) = saved else {
-        return;
-    };
-    if prev.bind(py).is_none() {
-        let _ = ct.call_method1(py, c"pop", (&loop_obj, py.None()));
-    } else {
-        let _ = ct.call_method1(py, c"__setitem__", (&loop_obj, &prev));
-    }
-}
-
-/// Remove our task from `asyncio._current_tasks`, but ONLY if it still
-/// matches our proxy.
-fn clear_current_task(
+/// Re-enter an existing `_SchedulerTask` as the current asyncio task.
+fn enter_scheduler_task(
     py: Python<'_>,
-    current_tasks: Option<Py<PyAny>>,
-    our_proxy: Option<&Py<TaskProxy>>,
-) {
-    let Some(ct) = current_tasks else { return };
-    let Ok(asyncio) = py.import(c"asyncio") else {
+    sched_task: Option<&Py<PyAny>>,
+    ops: &TaskOps,
+) -> Option<(Py<PyAny>, Py<PyAny>)> {
+    let sched_task = sched_task?;
+    let asyncio = py.import(c"asyncio").ok()?;
+    let loop_obj = asyncio.call_method0(c"get_running_loop").ok()?;
+    ops.enter_task.call1(py, (&loop_obj, sched_task)).ok()?;
+    Some((loop_obj.unbind(), sched_task.clone_ref(py)))
+}
+
+/// Unregister the current `_SchedulerTask` via `_leave_task`.
+fn leave_scheduler_task(py: Python<'_>, state: Option<(Py<PyAny>, Py<PyAny>)>, ops: &TaskOps) {
+    let Some((loop_obj, sched_task)) = state else {
         return;
     };
-    let Ok(loop_obj) = asyncio.call_method0(c"get_running_loop") else {
-        return;
-    };
-    // Only clear the shared dict if the entry is still our proxy.
-    match our_proxy {
-        Some(proxy) => {
-            if ct
-                .call_method1(py, c"get", (&loop_obj,))
-                .is_ok_and(|current| current.bind(py).is(proxy.bind(py)))
-            {
-                let _ = ct.call_method1(py, c"pop", (&loop_obj, py.None()));
-            }
-        }
-        None => {
-            let _ = ct.call_method1(py, c"pop", (&loop_obj, py.None()));
-        }
+    if let Err(e) = ops.leave_task.call1(py, (&loop_obj, &sched_task)) {
+        tracing::warn!(error = %e, "leave_scheduler_task: _leave_task failed");
     }
 }
 
@@ -474,6 +450,7 @@ pub fn spawn_and_drive(
     ops: &Arc<dyn CoroutineOps>,
     call_soon_threadsafe: &Py<PyAny>,
     ready_queue: &Arc<ReadyQueue>,
+    task_ops: &TaskOps,
 ) -> Option<DriveStats> {
     let mut task = match SchedulerTask::new(py, coro, result_tx) {
         Ok(t) => t,
@@ -490,7 +467,7 @@ pub fn spawn_and_drive(
     // Set our task as asyncio's "current task" so Starlette/FastAPI
     // middleware that calls asyncio.current_task() gets a valid object
     // (needed for weakref support in ServerErrorMiddleware, etc.).
-    let task_ctx = set_current_task(py, &task);
+    let state = create_scheduler_task(py, &task, task_ops);
 
     let (drive_result, stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
 
@@ -504,21 +481,19 @@ pub fn spawn_and_drive(
         }
     }
 
-    let proxy = task_ctx.as_ref().map(|(_, p)| p.clone_ref(py));
-    // Keep a reference for ownership check in clear_current_task.
-    let proxy_for_clear = proxy.as_ref().map(|p| p.clone_ref(py));
+    let sched_task = state.as_ref().map(|(_, st)| st.clone_ref(py));
     if let Err(e) = handle_drive_result(
         py,
         task,
         drive_result,
         call_soon_threadsafe,
         ready_queue,
-        proxy,
+        sched_task,
     ) {
         tracing::warn!(error = %e, "scheduler drive result handling failed");
     }
 
-    clear_current_task(py, task_ctx.map(|(ct, _)| ct), proxy_for_clear.as_ref());
+    leave_scheduler_task(py, state, task_ops);
     Some(stats)
 }
 
@@ -539,13 +514,15 @@ pub enum FirstDriveOutcome {
     /// Suspended on an awaitable — event loop thread must attach continuation.
     Suspended {
         task: Box<SchedulerTask>,
-        proxy: Option<Py<TaskProxy>>,
+        sched_task: Option<Py<PyAny>>,
         drive_result: DriveResult,
     },
 }
 
 /// Drive a coroutine's first cycle. Completes trivial coros inline;
 /// returns suspended state for the event loop to handle.
+///
+/// Skips task registration — drive mechanics don't depend on it.
 #[cfg(test)]
 pub fn first_drive(
     py: Python<'_>,
@@ -560,24 +537,18 @@ pub fn first_drive(
             return FirstDriveOutcome::Inline;
         }
     };
-    let task_ctx = set_current_task(py, &task);
     let (drive_result, _stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
-    route_first_drive(py, task, task_ctx, drive_result)
+    route_first_drive(py, task, drive_result)
 }
 
 /// Route the drive result: complete inline or return suspended state.
 #[cfg(test)]
 fn route_first_drive(
-    py: Python<'_>,
+    _py: Python<'_>,
     mut task: SchedulerTask,
-    task_ctx: Option<(Py<PyAny>, Py<TaskProxy>)>,
     drive_result: DriveResult,
 ) -> FirstDriveOutcome {
-    let proxy = task_ctx.as_ref().map(|(_, p)| p.clone_ref(py));
-    let proxy_for_clear = proxy.as_ref().map(|p| p.clone_ref(py));
-    let current_tasks = task_ctx.map(|(ct, _)| ct);
-
-    let outcome = match drive_result {
+    match drive_result {
         DriveResult::Completed(value) => {
             complete_inline(&mut task, Ok(value));
             FirstDriveOutcome::Inline
@@ -588,12 +559,10 @@ fn route_first_drive(
         }
         result => FirstDriveOutcome::Suspended {
             task: Box::new(task),
-            proxy,
+            sched_task: None,
             drive_result: result,
         },
-    };
-    clear_current_task(py, current_tasks, proxy_for_clear.as_ref());
-    outcome
+    }
 }
 
 /// Send result through the oneshot channel for inline completion.
@@ -706,7 +675,7 @@ async def _suspend():
             let task = SchedulerTask::new(py, py.None(), tx).unwrap();
             let cb = ResumeCallback {
                 task: Some(task),
-                proxy: None,
+                sched_task: None,
                 queue: ready_queue,
             };
             let dbg = format!("{cb:?}");

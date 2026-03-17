@@ -12,6 +12,7 @@ use pyo3::prelude::*;
 use crate::ffi::{CoroutineOps, FfiCoroutineOps};
 
 use super::counters::{self, SchedulerCounters};
+use super::driver::TaskOps;
 use super::queue::ReadyQueue;
 
 // ── Asyncio event loop utilities ─────────────────────────────────────────
@@ -121,6 +122,8 @@ pub struct EventLoop {
     /// Cached `loop.call_soon_threadsafe` bound method (thread-safe variant,
     /// needed since the asyncio loop runs on a dedicated thread).
     call_soon_threadsafe: Py<PyAny>,
+    /// Cached Python callables for scheduler task lifecycle.
+    task_ops: TaskOps,
     /// Notify for waking the drain task when ready queue has items.
     /// Held to keep the Arc alive for the spawned drain task.
     #[expect(dead_code, reason = "Arc kept alive for spawned drain task")]
@@ -173,6 +176,31 @@ impl EventLoop {
             }
         }
 
+        // 5b. Cache _enter_task / _leave_task / _SchedulerTask for task lifecycle.
+        let tasks_mod = py
+            .import(c"asyncio.tasks")
+            .map_err(|e| format!("import asyncio.tasks: {e}"))?;
+        let enter_task = tasks_mod
+            .getattr(c"_enter_task")
+            .map_err(|e| format!("missing _enter_task: {e}"))?
+            .unbind();
+        let leave_task = tasks_mod
+            .getattr(c"_leave_task")
+            .map_err(|e| format!("missing _leave_task: {e}"))?
+            .unbind();
+        let task_mod = py
+            .import(c"apx._task")
+            .map_err(|e| format!("import apx._task: {e}"))?;
+        let scheduler_task_cls = task_mod
+            .getattr(c"_SchedulerTask")
+            .map_err(|e| format!("missing _SchedulerTask: {e}"))?
+            .unbind();
+        let task_ops = TaskOps {
+            enter_task,
+            leave_task,
+            scheduler_task_cls,
+        };
+
         // 6. Resolve coroutine ops (FFI implementation).
         let coroutine_ops: Arc<dyn CoroutineOps> = Arc::new(
             FfiCoroutineOps::resolve(py).map_err(|e| format!("FfiCoroutineOps::resolve: {e}"))?,
@@ -207,11 +235,19 @@ impl EventLoop {
         let ct = Arc::clone(&coroutine_ops);
         let cs = call_soon_threadsafe.clone_ref(py);
         let notify = Arc::clone(&drain_notify);
+        let drain_enter = task_ops.enter_task.clone_ref(py);
+        let drain_leave = task_ops.leave_task.clone_ref(py);
+        let drain_cls = task_ops.scheduler_task_cls.clone_ref(py);
         tokio::spawn(async move {
             loop {
                 notify.notified().await;
                 Python::attach(|py| {
-                    rq.drain(py, &ct, &cs, &rq);
+                    let drain_ops = TaskOps {
+                        enter_task: drain_enter.clone_ref(py),
+                        leave_task: drain_leave.clone_ref(py),
+                        scheduler_task_cls: drain_cls.clone_ref(py),
+                    };
+                    rq.drain(py, &ct, &cs, &rq, &drain_ops);
                 });
             }
         });
@@ -239,6 +275,7 @@ impl EventLoop {
             coroutine_ops,
             ready_queue,
             call_soon_threadsafe,
+            task_ops,
             drain_notify,
             asyncio_thread: Mutex::new(Some(asyncio_thread)),
         })
@@ -257,6 +294,11 @@ impl EventLoop {
     /// Get the cached `call_soon_threadsafe` method.
     pub fn call_soon_threadsafe(&self) -> &Py<PyAny> {
         &self.call_soon_threadsafe
+    }
+
+    /// Get the cached task lifecycle operations.
+    pub fn task_ops(&self) -> &TaskOps {
+        &self.task_ops
     }
 
     /// Shut down the event loop.

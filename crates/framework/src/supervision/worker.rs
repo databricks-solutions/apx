@@ -124,10 +124,18 @@ pub async fn run_worker(
     // Build WorkerContext from the inline event loop.
     let ctx = {
         let el = &runtime.event_loop;
-        Arc::new(WorkerContext {
-            coroutine_ops: Arc::clone(el.coroutine_ops()),
-            ready_queue: Arc::clone(el.ready_queue()),
-            call_soon_threadsafe: Python::attach(|py| el.call_soon_threadsafe().clone_ref(py)),
+        Python::attach(|py| {
+            let to = el.task_ops();
+            Arc::new(WorkerContext {
+                coroutine_ops: Arc::clone(el.coroutine_ops()),
+                ready_queue: Arc::clone(el.ready_queue()),
+                call_soon_threadsafe: el.call_soon_threadsafe().clone_ref(py),
+                task_ops: crate::scheduler::driver::TaskOps {
+                    enter_task: to.enter_task.clone_ref(py),
+                    leave_task: to.leave_task.clone_ref(py),
+                    scheduler_task_cls: to.scheduler_task_cls.clone_ref(py),
+                },
+            })
         })
     };
 
