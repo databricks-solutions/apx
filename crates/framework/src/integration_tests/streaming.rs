@@ -741,3 +741,368 @@ def _capture_handler(loop, context):
          (sentinel no longer cancelled via _ready), but got none.",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Bug reproduction: /stream/10 endpoint pattern — async generator + sleep(0)
+// ---------------------------------------------------------------------------
+
+/// Reproduces the exact `/stream/{chunks}` endpoint pattern from the bench app.
+/// An async generator yields chunks with `await asyncio.sleep(0)` between them.
+/// Multiple concurrent requests trigger "Cannot enter into task" errors when
+/// the sentinel `__step` conflicts with `async_generator_athrow` cleanup tasks.
+#[test]
+fn stream_endpoint_async_generator_pattern() {
+    crate::integration_tests::ensure_python_env();
+    Python::initialize();
+
+    let errors = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let errors_clone = Arc::clone(&errors);
+
+    let (mut harness, rx1, rx2, rx3) = Python::attach(|py| {
+        let harness = StreamingTestHarness::new(py);
+
+        // Install error capture.
+        py.run(
+            c"
+import builtins
+builtins._stream_errors = []
+def _stream_capture(loop, context):
+    msg = context.get('message', '')
+    exc = context.get('exception')
+    if exc:
+        msg = f'{msg}: {exc}'
+    builtins._stream_errors.append(msg)
+",
+            None,
+            None,
+        )
+        .unwrap();
+        let handler = py.eval(c"_stream_capture", None, None).unwrap();
+        harness
+            .event_loop
+            .call_method1(py, c"set_exception_handler", (handler,))
+            .unwrap();
+
+        // Exact pattern from scripts/bench/app/api.py stream_response endpoint.
+        py.run(
+            c"
+import asyncio
+
+async def generate(chunks):
+    for i in range(chunks):
+        yield f'chunk-{i}\\n'
+        await asyncio.sleep(0)
+
+async def stream_handler():
+    # Iterate the async generator (like StreamingResponse.__call__ does).
+    result = []
+    async for chunk in generate(10):
+        result.append(chunk)
+    return ''.join(result)
+",
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Drive 3 concurrent requests — the conflict needs concurrency.
+        let c1 = py.eval(c"stream_handler()", None, None).unwrap().unbind();
+        let c2 = py.eval(c"stream_handler()", None, None).unwrap().unbind();
+        let c3 = py.eval(c"stream_handler()", None, None).unwrap().unbind();
+        let rx1 = harness.drive(py, c1);
+        let rx2 = harness.drive(py, c2);
+        let rx3 = harness.drive(py, c3);
+        (harness, rx1, rx2, rx3)
+    });
+
+    let r1 = harness.poll_result(rx1);
+    let r2 = harness.poll_result(rx2);
+    let r3 = harness.poll_result(rx3);
+
+    // Collect errors before shutdown.
+    Python::attach(|py| {
+        let captured: Vec<String> = py
+            .eval(c"builtins._stream_errors", None, None)
+            .unwrap()
+            .extract()
+            .unwrap();
+        let mut errs = errors_clone.lock().unwrap();
+        errs.extend(captured);
+    });
+
+    harness.shutdown();
+
+    // Check for the production failure pattern.
+    let errs = errors.lock().unwrap();
+    let enter_errors: Vec<_> = errs
+        .iter()
+        .filter(|e| e.contains("Cannot enter into task"))
+        .collect();
+    assert!(
+        enter_errors.is_empty(),
+        "stream_10 pattern produced {n} 'Cannot enter into task' errors:\n{errors:#?}\n\n\
+         This is the production bug from /stream/10 endpoint.",
+        n = enter_errors.len(),
+        errors = enter_errors,
+    );
+
+    // All 3 requests should complete successfully.
+    assert!(r1.is_ok(), "request 1 failed: {r1:?}");
+    assert!(r2.is_ok(), "request 2 failed: {r2:?}");
+    assert!(r3.is_ok(), "request 3 failed: {r3:?}");
+
+    let v1 = r1.unwrap();
+    assert!(
+        v1.contains("chunk-0") && v1.contains("chunk-9"),
+        "unexpected r1: {v1}"
+    );
+}
+
+/// Same pattern as above but on uvloop — this is the exact production config.
+/// Runs in a subprocess for clean uvloop state.
+#[test]
+fn stream_endpoint_uvloop_subprocess() {
+    let exe = std::env::current_exe().unwrap();
+    let output = std::process::Command::new(exe)
+        .args([
+            "integration_tests::streaming::stream_endpoint_uvloop_impl",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("APX_SUBPROCESS_TEST", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stream uvloop subprocess test failed (exit={}):\nstdout: {stdout}\nstderr: {stderr}",
+        output.status,
+    );
+}
+
+#[test]
+fn stream_endpoint_uvloop_impl() {
+    if std::env::var("APX_SUBPROCESS_TEST").is_err() {
+        return;
+    }
+
+    crate::integration_tests::ensure_python_env();
+    Python::initialize();
+
+    let has_uvloop = Python::attach(|py| py.import(c"uvloop").is_ok());
+    if !has_uvloop {
+        eprintln!("uvloop not available, skipping");
+        return;
+    }
+
+    let errors = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let errors_clone = Arc::clone(&errors);
+
+    // Build harness with uvloop.
+    let mut harness = Python::attach(|py| {
+        // Import apx._task
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let workspace_root = std::path::Path::new(manifest_dir)
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let src_dir = workspace_root.join("src");
+        let locals = pyo3::types::PyDict::new(py);
+        locals
+            .set_item("_src_dir", src_dir.to_str().unwrap())
+            .unwrap();
+        py.run(
+            c"
+import importlib, importlib.util, sys, types
+if 'apx' not in sys.modules:
+    apx_pkg = types.ModuleType('apx')
+    apx_pkg.__path__ = [_src_dir + '/apx']
+    apx_pkg.__package__ = 'apx'
+    sys.modules['apx'] = apx_pkg
+if 'apx._task' not in sys.modules or not hasattr(sys.modules['apx._task'], '_SchedulerTask'):
+    spec = importlib.util.spec_from_file_location(
+        'apx._task', _src_dir + '/apx/_task.py',
+        submodule_search_locations=[])
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    sys.modules['apx._task'] = mod
+",
+            None,
+            Some(&locals),
+        )
+        .unwrap();
+
+        let ops: Arc<dyn CoroutineOps> = Arc::new(FfiCoroutineOps::resolve(py).unwrap());
+        let ready_queue = Arc::new(ReadyQueue::new());
+
+        // Create uvloop event loop.
+        let uvloop = py.import(c"uvloop").unwrap();
+        let event_loop = uvloop.call_method0(c"new_event_loop").unwrap();
+        let asyncio = py.import(c"asyncio").unwrap();
+        asyncio
+            .call_method1(c"set_event_loop", (&event_loop,))
+            .unwrap();
+        let events = py.import(c"asyncio.events").unwrap();
+        events
+            .call_method1(c"_set_running_loop", (&event_loop,))
+            .unwrap();
+
+        let call_soon_threadsafe = event_loop
+            .getattr(c"call_soon_threadsafe")
+            .unwrap()
+            .unbind();
+
+        let tasks_mod = py.import(c"asyncio.tasks").unwrap();
+        let enter_task = tasks_mod.getattr(c"_enter_task").unwrap().unbind();
+        let leave_task = tasks_mod.getattr(c"_leave_task").unwrap().unbind();
+        let task_mod = py.import(c"apx._task").unwrap();
+        let scheduler_task_cls = task_mod.getattr(c"_SchedulerTask").unwrap().unbind();
+        let task_ops = TaskOps {
+            enter_task,
+            leave_task,
+            scheduler_task_cls,
+        };
+
+        // Error capture.
+        py.run(
+            c"
+import builtins
+builtins._uv_errors = []
+def _uv_capture(loop, context):
+    msg = context.get('message', '')
+    exc = context.get('exception')
+    if exc:
+        msg = f'{msg}: {exc}'
+    builtins._uv_errors.append(msg)
+",
+            None,
+            None,
+        )
+        .unwrap();
+        let handler = py.eval(c"_uv_capture", None, None).unwrap();
+        event_loop
+            .call_method1(c"set_exception_handler", (handler,))
+            .unwrap();
+
+        // Async generator + sleep(0) pattern.
+        py.run(
+            c"
+import asyncio
+
+async def generate(chunks):
+    for i in range(chunks):
+        yield f'chunk-{i}\\n'
+        await asyncio.sleep(0)
+
+async def stream_handler():
+    result = []
+    async for chunk in generate(10):
+        result.append(chunk)
+    return ''.join(result)
+",
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Start asyncio thread.
+        let el_for_thread = event_loop.clone().unbind();
+        let asyncio_thread = std::thread::Builder::new()
+            .name("test-uvloop".to_owned())
+            .spawn(move || {
+                Python::attach(|py| {
+                    let el = el_for_thread.bind(py);
+                    let _ = el.call_method0(c"run_forever");
+                });
+            })
+            .unwrap();
+
+        StreamingTestHarness {
+            ops,
+            ready_queue,
+            event_loop: event_loop.unbind(),
+            call_soon_threadsafe,
+            task_ops,
+            asyncio_thread: Some(asyncio_thread),
+        }
+    });
+
+    // Drive 50 requests in batches of 10, releasing the GIL between batches
+    // so the uvloop thread processes sentinel __step callbacks while new
+    // requests arrive — matching production load pattern.
+    for _batch in 0..5 {
+        Python::attach(|py| {
+            for _ in 0..10 {
+                let coro = py.eval(c"stream_handler()", None, None).unwrap().unbind();
+                let (tx, _) = tokio::sync::oneshot::channel();
+                spawn_and_drive(
+                    py,
+                    coro,
+                    tx,
+                    &harness.ops,
+                    &harness.call_soon_threadsafe,
+                    &harness.ready_queue,
+                    &harness.task_ops,
+                );
+            }
+            harness.ready_queue.drain(
+                py,
+                &harness.ops,
+                &harness.call_soon_threadsafe,
+                &harness.ready_queue,
+                &harness.task_ops,
+            );
+        });
+        // Release GIL — uvloop thread processes sentinels + async generator cleanup.
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Extra settle time for uvloop to process remaining callbacks.
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Collect errors.
+    Python::attach(|py| {
+        harness.ready_queue.drain(
+            py,
+            &harness.ops,
+            &harness.call_soon_threadsafe,
+            &harness.ready_queue,
+            &harness.task_ops,
+        );
+        let captured: Vec<String> = py
+            .eval(c"builtins._uv_errors", None, None)
+            .unwrap()
+            .extract()
+            .unwrap();
+        let mut errs = errors_clone.lock().unwrap();
+        errs.extend(captured);
+    });
+
+    harness.shutdown();
+
+    let errs = errors.lock().unwrap();
+    let enter_errors: Vec<_> = errs
+        .iter()
+        .filter(|e| e.contains("Cannot enter into task"))
+        .collect();
+
+    // Print diagnostic info.
+    if !enter_errors.is_empty() {
+        eprintln!(
+            "EXPECTED FAILURE: {n} 'Cannot enter into task' errors on uvloop:\n{errors:#?}",
+            n = enter_errors.len(),
+            errors = enter_errors,
+        );
+    }
+
+    assert!(
+        enter_errors.is_empty(),
+        "stream_10 uvloop pattern produced {n} 'Cannot enter into task' errors:\n{errors:#?}\n\n\
+         This is the production bug from /stream/10 on uvloop.",
+        n = enter_errors.len(),
+        errors = enter_errors,
+    );
+}
