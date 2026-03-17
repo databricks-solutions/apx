@@ -30,6 +30,7 @@ struct StreamingTestHarness {
     event_loop: Py<PyAny>,
     call_soon_threadsafe: Py<PyAny>,
     task_ops: TaskOps,
+    poke_ops: crate::io::PokeOps,
     asyncio_thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -104,6 +105,12 @@ if 'apx._task' not in sys.modules or not hasattr(sys.modules['apx._task'], '_Sch
             scheduler_task_cls,
         };
 
+        let poke_ops = crate::io::PokeOps {
+            cached_noop: py.eval(c"lambda: None", None, None).unwrap().unbind(),
+            ready_deque: event_loop.getattr(c"_ready").ok().map(|o| o.unbind()),
+            poke_notify: Arc::new(tokio::sync::Notify::new()),
+        };
+
         let el_for_thread = event_loop.clone().unbind();
         let asyncio_thread = std::thread::Builder::new()
             .name("test-asyncio".to_owned())
@@ -121,6 +128,7 @@ if 'apx._task' not in sys.modules or not hasattr(sys.modules['apx._task'], '_Sch
             event_loop: event_loop.unbind(),
             call_soon_threadsafe,
             task_ops,
+            poke_ops,
             asyncio_thread: Some(asyncio_thread),
         }
     }
@@ -141,6 +149,7 @@ if 'apx._task' not in sys.modules or not hasattr(sys.modules['apx._task'], '_Sch
             &self.call_soon_threadsafe,
             &self.ready_queue,
             &self.task_ops,
+            &self.poke_ops,
         );
         result_rx
     }
@@ -1020,12 +1029,19 @@ async def stream_handler():
             })
             .unwrap();
 
+        let poke_ops = crate::io::PokeOps {
+            cached_noop: py.eval(c"lambda: None", None, None).unwrap().unbind(),
+            ready_deque: event_loop.getattr(c"_ready").ok().map(|o| o.unbind()),
+            poke_notify: Arc::new(tokio::sync::Notify::new()),
+        };
+
         StreamingTestHarness {
             ops,
             ready_queue,
             event_loop: event_loop.unbind(),
             call_soon_threadsafe,
             task_ops,
+            poke_ops,
             asyncio_thread: Some(asyncio_thread),
         }
     });
@@ -1046,6 +1062,7 @@ async def stream_handler():
                     &harness.call_soon_threadsafe,
                     &harness.ready_queue,
                     &harness.task_ops,
+                    &harness.poke_ops,
                 );
             }
             harness.ready_queue.drain(

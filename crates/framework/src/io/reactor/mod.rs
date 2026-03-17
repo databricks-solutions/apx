@@ -360,7 +360,6 @@ impl Reactor {
     }
 
     /// Get a reference to the Python asyncio event loop object.
-    #[expect(dead_code, reason = "extension seam for future reactor swap")]
     pub fn event_loop_ref(&self) -> &Py<PyAny> {
         &self.event_loop
     }

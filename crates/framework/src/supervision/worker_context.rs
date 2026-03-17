@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use pyo3::Py;
 
+use crate::io::PokeOps;
 use crate::io::bridge::queue::ReadyQueue;
 use crate::io::driver::ffi::CoroutineOps;
 use crate::io::reactor::TaskOps;
@@ -25,6 +26,8 @@ pub struct WorkerContext {
     pub call_soon_threadsafe: Py<pyo3::PyAny>,
     /// Cached Python callables for scheduler task lifecycle.
     pub task_ops: TaskOps,
+    /// Cached state for conditional event loop poke.
+    pub poke_ops: PokeOps,
 }
 
 impl std::fmt::Debug for WorkerContext {

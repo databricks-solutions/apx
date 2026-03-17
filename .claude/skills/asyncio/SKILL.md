@@ -371,15 +371,73 @@ The asyncio-created tasks (step 2) never run because `select()` never returns.
 - **Rust Future suspension:** When the driver suspends on a Rust-side awaitable, nothing interacts with the asyncio loop. The selector stays blocked. These requests deadlock.
 - **Rosetta / emulation:** Different CPU architectures change timing. Under Rosetta (ARM→x86 translation), the libuv poll may return more frequently due to signal handling differences, masking the bug.
 
-### The fix
+### When is a poke needed?
 
-After every drive cycle that may have added items to `_ready` (i.e. after `spawn_and_drive` and after `drain`), unconditionally call:
+A poke (`call_soon_threadsafe(noop)`) is needed **only** when all three conditions hold:
 
-```python
-loop.call_soon_threadsafe(lambda: None)
+1. The drive cycle added items to `_ready` via `call_soon` (not `call_soon_threadsafe`) that the handler **depends on** for forward progress.
+2. The event loop has no other reason to wake (no thread pool completion, no timer, no I/O).
+3. The drive result is **not** `Completed` or `Error` (inline completions have no pending asyncio work).
+
+This occurs when the handler creates asyncio tasks (e.g. `anyio.create_task_group()`, `loop.create_task()`) and then awaits their completion. The tasks' `__step` sits in `_ready`; without a wake, `select()` blocks forever.
+
+### When is a poke NOT needed?
+
+- **Inline completion** (`DriveResult::Completed` / `DriveResult::Error`): the coroutine finished synchronously — no pending asyncio work.
+- **Sync handlers run via thread pool** (e.g. FastAPI sync endpoints): the thread pool's own `call_soon_threadsafe` already wakes the event loop when the result future resolves. An extra poke is redundant.
+- **Handlers that only yield Rust Futures without creating asyncio tasks**: `_SchedulerTask.__init__` adds exactly 1 item to `_ready` (the sentinel `__step`). This is harmless — the sentinel completes immediately and doesn't require a poke for forward progress.
+
+### The performance trap: unconditional poking
+
+An unconditional `call_soon_threadsafe(lambda: None)` after every drive cycle fixes the deadlock but introduces severe overhead:
+
+1. **`py.eval(c"lambda: None")`** on every poke — compiles+evaluates Python on every call (~10-50µs).
+2. **Premature event loop wake-up** — for sync handlers, the thread pool's own `call_soon_threadsafe` already wakes the loop. The extra poke causes a useless `_run_once` cycle (processes `__step` + noop) before the real work arrives.
+3. **GIL contention** — the poke call extends the `Python::attach` hold by ~50µs per request. Under 50 concurrent connections, that is ~2.5ms of extra serialized GIL time, plus the event loop thread competing for GIL to process the premature wakes.
+
+Benchmarks showed `resp_wait_p50 = 46ms` for trivial sync handlers like `/api/health` — 96% of total latency was waiting for the suspend-resume round-trip, inflated by the extra event loop work. Streaming throughput dropped 46x vs granian.
+
+### The conditional poke strategy
+
+Track `_ready` growth during the drive cycle:
+
+```
+CPython:  loop._ready is accessible  → measure len() delta → poke only if delta > 1
+uvloop:   loop._ready does not exist → coalesced poke via dedicated tokio task + Notify
+Both:     skip poke entirely when DriveResult is Completed or Error
 ```
 
-This writes to the self-pipe (CPython) or calls `uv_async_send` (uvloop), guaranteeing the event loop thread wakes from `select()` and processes `_ready` on its next `_run_once`.
+**CPython path** (definitive check):
+
+```python
+n_before = len(loop._ready)          # snapshot before create_scheduler_task
+# ... drive cycle ...
+n_after = len(loop._ready)
+if n_after > n_before + 1:           # +1 accounts for _SchedulerTask sentinel __step
+    loop.call_soon_threadsafe(noop)   # handler created extra asyncio tasks
+```
+
+The `+ 1` threshold accounts for `_SchedulerTask.__init__` which always adds exactly one `__step` to `_ready`. A delta > 1 means the handler itself called `loop.create_task()` or similar.
+
+**uvloop path** (no `_ready` introspection):
+
+Since uvloop's callback queue is opaque, signal a dedicated coalesced poke task via `tokio::sync::Notify`. The poke task batches multiple signals into one `call_soon_threadsafe` call, keeping the overhead off the critical request path and out of the GIL-holding `Python::attach` block.
+
+**Implementation details** (see `crates/framework/src/io/`):
+
+- `cached_noop`: `lambda: None` evaluated once at `EventLoop::init`, reused everywhere.
+- `ready_deque`: `getattr(loop, "_ready", None)` cached at init — `Some` on CPython, `None` on uvloop.
+- `poke_notify`: `Arc<Notify>` shared between `spawn_and_drive` callers and a dedicated tokio poke task.
+- `maybe_poke()` in `io/mod.rs`: the conditional logic used by both `spawn_and_drive` and the drain task.
+
+| Scenario | Unconditional poke | Conditional poke |
+|---|---|---|
+| Inline completion (`yield_once`) | Poke (wasted) | No poke |
+| Sync handler, CPython | Poke (wasted) | No poke (`_ready` delta = 1) |
+| Sync handler, uvloop | Poke (wasted) | Coalesced async poke (minimal overhead) |
+| TaskGroup handler, CPython | Poke (correct) | Poke (correct, `_ready` delta > 1) |
+| TaskGroup handler, uvloop | Poke (correct) | Coalesced poke (correct) |
+| Streaming | Poke (per-request overhead) | Conditional (poke only if asyncio tasks created) |
 
 ### Diagnostic pattern
 

@@ -43,6 +43,7 @@ pub struct EventLoop {
     ready_queue: Arc<ReadyQueue>,
     #[expect(dead_code, reason = "Arc kept alive for spawned drain task")]
     drain_notify: Arc<tokio::sync::Notify>,
+    poke_ops: PokeOps,
 }
 
 impl EventLoop {
@@ -80,13 +81,31 @@ impl EventLoop {
         }
         tracing::info!("rust scheduler initialized (no asyncio monkeypatching)");
 
-        // 6. Create notify for drain task wake.
+        // 6. Cache noop callable and `_ready` deque for conditional poke.
+        let cached_noop = py
+            .eval(c"lambda: None", None, None)
+            .map_err(|e| format!("cache noop: {e}"))?
+            .unbind();
+        let ready_deque: Option<Py<PyAny>> = reactor.event_loop_ref().getattr(py, c"_ready").ok();
+        let poke_notify = Arc::new(tokio::sync::Notify::new());
+        tracing::info!(
+            has_ready_deque = ready_deque.is_some(),
+            "poke: cached noop + _ready introspection"
+        );
+
+        let poke_ops = PokeOps {
+            cached_noop,
+            ready_deque,
+            poke_notify: Arc::clone(&poke_notify),
+        };
+
+        // 7. Create notify for drain task wake.
         let drain_notify = Arc::new(tokio::sync::Notify::new());
 
-        // 7. Set notify-based wake on the ready queue.
+        // 8. Set notify-based wake on the ready queue.
         ready_queue.set_notify_wake(Arc::clone(&drain_notify));
 
-        // 8. Spawn the drain task on the current-thread tokio runtime.
+        // 9. Spawn the drain task on the current-thread tokio runtime.
         let rq = Arc::clone(&ready_queue);
         let ct = Arc::clone(&coroutine_ops);
         let cs = reactor.call_soon_threadsafe().clone_ref(py);
@@ -94,6 +113,11 @@ impl EventLoop {
         let drain_enter = reactor.task_ops().enter_task.clone_ref(py);
         let drain_leave = reactor.task_ops().leave_task.clone_ref(py);
         let drain_cls = reactor.task_ops().scheduler_task_cls.clone_ref(py);
+        let drain_poke = PokeOps {
+            cached_noop: poke_ops.cached_noop.clone_ref(py),
+            ready_deque: poke_ops.ready_deque.as_ref().map(|d| d.clone_ref(py)),
+            poke_notify: Arc::clone(&poke_notify),
+        };
         tokio::spawn(async move {
             loop {
                 notify.notified().await;
@@ -104,17 +128,28 @@ impl EventLoop {
                         leave_task: drain_leave.clone_ref(py),
                         scheduler_task_cls: drain_cls.clone_ref(py),
                     };
+                    let n_before = drain_poke.ready_len(py);
                     let count = rq.drain(py, &ct, &cs, &rq, &drain_ops);
                     if count > 0 {
-                        // Wake the asyncio loop — drain may have created
-                        // _SchedulerTasks or asyncio tasks that added items
-                        // to `_ready` via `call_soon`. See `poke_event_loop`.
-                        let noop = py.eval(c"lambda: None", None, None);
-                        if let Ok(noop) = noop {
-                            let _ = cs.call1(py, (noop,));
-                        }
+                        let n_after = drain_poke.ready_len(py);
+                        drain_poke.maybe_poke(py, n_before, n_after, &cs);
                     }
                     tracing::trace!(count, "drain_task: drained");
+                });
+            }
+        });
+
+        // 10. Spawn the coalesced poke task (uvloop fallback path).
+        let poke_cs = reactor.call_soon_threadsafe().clone_ref(py);
+        let poke_noop = poke_ops.cached_noop.clone_ref(py);
+        let poke_listen = Arc::clone(&poke_notify);
+        tokio::spawn(async move {
+            loop {
+                poke_listen.notified().await;
+                Python::attach(|py| {
+                    if let Err(e) = poke_cs.call1(py, (poke_noop.clone_ref(py),)) {
+                        tracing::debug!(error = %e, "poke_task: call_soon_threadsafe failed");
+                    }
                 });
             }
         });
@@ -126,6 +161,7 @@ impl EventLoop {
             coroutine_ops,
             ready_queue,
             drain_notify,
+            poke_ops,
         })
     }
 
@@ -149,6 +185,11 @@ impl EventLoop {
         self.reactor.task_ops()
     }
 
+    /// Cached state for conditional event loop poke.
+    pub fn poke_ops(&self) -> &PokeOps {
+        &self.poke_ops
+    }
+
     /// Shut down the event loop.
     ///
     /// Delegates to [`reactor::Reactor::shutdown`] which stops the asyncio loop,
@@ -161,6 +202,72 @@ impl EventLoop {
 impl std::fmt::Debug for EventLoop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InlineEventLoop").finish_non_exhaustive()
+    }
+}
+
+// ── Conditional poke ─────────────────────────────────────────────────────
+
+/// Cached state for conditionally waking the asyncio event loop.
+///
+/// On CPython, `ready_deque` holds a reference to `loop._ready` for
+/// delta-based poke decisions. On uvloop (where `_ready` doesn't exist),
+/// `poke_notify` signals a dedicated coalesced poke task instead.
+pub struct PokeOps {
+    /// `lambda: None` evaluated once at init, reused for every poke.
+    pub cached_noop: Py<PyAny>,
+    /// `loop._ready` deque (CPython only, `None` on uvloop).
+    pub ready_deque: Option<Py<PyAny>>,
+    /// Notify handle for the coalesced poke task (uvloop path).
+    pub poke_notify: Arc<tokio::sync::Notify>,
+}
+
+impl PokeOps {
+    /// Read `len(loop._ready)` when available (CPython); 0 on uvloop.
+    pub fn ready_len(&self, py: Python<'_>) -> usize {
+        self.ready_deque
+            .as_ref()
+            .and_then(|d| d.call_method0(py, c"__len__").ok())
+            .and_then(|v| v.extract::<usize>(py).ok())
+            .unwrap_or(0)
+    }
+
+    /// Poke only when `_ready` grew beyond the expected sentinel `__step`.
+    ///
+    /// On CPython: compares `_ready` length before/after the drive. If the
+    /// handler created extra asyncio tasks, `delta > 1` and we poke
+    /// synchronously with the cached noop.
+    ///
+    /// On uvloop: signals the coalesced poke task via `Notify` (no GIL,
+    /// no syscall on the hot path).
+    pub fn maybe_poke(
+        &self,
+        py: Python<'_>,
+        n_before: usize,
+        n_after: usize,
+        call_soon_threadsafe: &Py<PyAny>,
+    ) {
+        match &self.ready_deque {
+            Some(_) => {
+                if n_after > n_before + 1 {
+                    tracing::trace!(
+                        delta = n_after.saturating_sub(n_before),
+                        "poke: _ready grew beyond sentinel, poking synchronously"
+                    );
+                    let _ = call_soon_threadsafe.call1(py, (&self.cached_noop,));
+                }
+            }
+            None => {
+                self.poke_notify.notify_one();
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for PokeOps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PokeOps")
+            .field("has_ready_deque", &self.ready_deque.is_some())
+            .finish_non_exhaustive()
     }
 }
 

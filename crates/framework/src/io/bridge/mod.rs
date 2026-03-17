@@ -257,27 +257,6 @@ pub fn resume_task(
 }
 
 // ---------------------------------------------------------------------------
-// poke_event_loop — wake the asyncio loop so it processes _ready items
-// ---------------------------------------------------------------------------
-
-/// Send a no-op callback via `call_soon_threadsafe` to wake the asyncio
-/// event loop from `select()`.
-///
-/// Items added to `_ready` via `call_soon` (e.g. `loop.create_task()` in
-/// anyio task groups, or `_SchedulerTask.__init__`) don't wake the
-/// selector. This is the only cross-thread wake mechanism in both CPython
-/// asyncio (self-pipe) and uvloop (`uv_async_send`).
-fn poke_event_loop(py: Python<'_>, call_soon_threadsafe: &Py<PyAny>) {
-    // The lambda is tiny and short-lived — freelist allocation in CPython.
-    let Ok(noop) = py.eval(c"lambda: None", None, None) else {
-        return;
-    };
-    if let Err(e) = call_soon_threadsafe.call1(py, (noop,)) {
-        tracing::debug!(error = %e, "poke_event_loop: call_soon_threadsafe failed");
-    }
-}
-
-// ---------------------------------------------------------------------------
 // make_resume_callback — factory for ResumeCallback instances
 // ---------------------------------------------------------------------------
 
@@ -309,6 +288,10 @@ fn make_resume_callback(
 ///
 /// Sets the task as `asyncio.current_task()` for the duration of driving
 /// so that Starlette/FastAPI middleware can create weak references to it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "scheduler entry point wires driver, reactor, bridge, and poke — a context struct would couple tests to WorkerContext"
+)]
 pub fn spawn_and_drive(
     py: Python<'_>,
     coro: Py<PyAny>,
@@ -317,6 +300,7 @@ pub fn spawn_and_drive(
     call_soon_threadsafe: &Py<PyAny>,
     ready_queue: &Arc<ReadyQueue>,
     task_ops: &TaskOps,
+    poke_ops: &crate::io::PokeOps,
 ) -> Option<DriveStats> {
     tracing::trace!("spawn_and_drive: entry");
     let mut task = match SchedulerTask::new(py, coro, result_tx) {
@@ -330,6 +314,8 @@ pub fn spawn_and_drive(
     if let Some(c) = counters::get() {
         c.record_spawn();
     }
+
+    let n_ready_before = poke_ops.ready_len(py);
 
     let root_coro = task.root_coro(py);
     let state = create_scheduler_task(py, &root_coro, task_ops);
@@ -366,6 +352,11 @@ pub fn spawn_and_drive(
         }
     }
 
+    let needs_poke = !matches!(
+        &drive_result,
+        DriveResult::Completed(_) | DriveResult::Error(_)
+    );
+
     let sched_task = state.as_ref().map(|(_, st)| st.clone_ref(py));
     if let Err(e) = handle_drive_result(
         py,
@@ -380,21 +371,10 @@ pub fn spawn_and_drive(
 
     leave_scheduler_task(py, state, task_ops);
 
-    // Wake the asyncio event loop thread.
-    //
-    // During `create_scheduler_task`, `_SchedulerTask.__init__` calls
-    // `loop.call_soon(self.__step)`. If the ASGI app also creates asyncio
-    // tasks during the drive cycle (e.g. `anyio.create_task_group()` in
-    // Starlette's `StreamingResponse`), those tasks are added to `_ready`
-    // via `call_soon` as well. None of these wake the event loop's
-    // selector — `call_soon` only appends to `_ready`, it doesn't poke
-    // the self-pipe / uv_async. If the event loop thread is blocked in
-    // `select()`, `_ready` items are never processed.
-    //
-    // `call_soon_threadsafe` writes to the self-pipe (CPython) or calls
-    // `uv_async_send` (uvloop), guaranteeing the event loop thread wakes
-    // from `select()` and processes `_ready` on its next `_run_once`.
-    poke_event_loop(py, call_soon_threadsafe);
+    if needs_poke {
+        let n_ready_after = poke_ops.ready_len(py);
+        poke_ops.maybe_poke(py, n_ready_before, n_ready_after, call_soon_threadsafe);
+    }
 
     Some(stats)
 }

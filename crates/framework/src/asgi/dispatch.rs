@@ -207,6 +207,7 @@ async fn dispatch_inner(
             &ctx.call_soon_threadsafe,
             &ctx.ready_queue,
             &ctx.task_ops,
+            &ctx.poke_ops,
         );
         Ok(())
     })?;
@@ -322,6 +323,7 @@ fn dispatch_gil_block(
             &ctx.call_soon_threadsafe,
             &ctx.ready_queue,
             &ctx.task_ops,
+            &ctx.poke_ops,
         )
         .unwrap_or_default();
         let drive_us = t0.elapsed().as_micros() as u64;

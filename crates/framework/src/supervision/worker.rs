@@ -126,6 +126,7 @@ pub async fn run_worker(
         let el = &runtime.event_loop;
         Python::attach(|py| {
             let to = el.task_ops();
+            let po = el.poke_ops();
             Arc::new(WorkerContext {
                 coroutine_ops: Arc::clone(el.coroutine_ops()),
                 ready_queue: Arc::clone(el.ready_queue()),
@@ -134,6 +135,11 @@ pub async fn run_worker(
                     enter_task: to.enter_task.clone_ref(py),
                     leave_task: to.leave_task.clone_ref(py),
                     scheduler_task_cls: to.scheduler_task_cls.clone_ref(py),
+                },
+                poke_ops: crate::io::PokeOps {
+                    cached_noop: po.cached_noop.clone_ref(py),
+                    ready_deque: po.ready_deque.as_ref().map(|d| d.clone_ref(py)),
+                    poke_notify: Arc::clone(&po.poke_notify),
                 },
             })
         })
