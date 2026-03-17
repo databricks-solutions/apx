@@ -33,6 +33,7 @@ console = Console()
 app = typer.Typer(help="APX benchmark tool")
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.apps import AppAccessControlRequest, AppPermissionLevel
+from databricks.sdk.service.postgres import Role, RoleIdentityType, RoleMembershipRole, RoleRoleSpec
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -156,30 +157,6 @@ BENCHABLE_APPS = {
     "bench_granian": "bench-granian",
     "bench_apx": "bench-apx",
 }
-
-DATABRICKS_ENVS = [
-    Environment(
-        name="uvicorn",
-        server=ServerType.UVICORN,
-        scheduler=Scheduler.UVLOOP,
-        workers=2,
-        description="Uvicorn + uvloop + httptools",
-    ),
-    Environment(
-        name="granian",
-        server=ServerType.GRANIAN,
-        scheduler=Scheduler.UVLOOP,
-        workers=2,
-        description="Granian + ASGI + uvloop",
-    ),
-    Environment(
-        name="apx",
-        server=ServerType.APX,
-        scheduler=Scheduler.ASYNCIO,
-        workers=2,
-        description="APX + asyncio",
-    ),
-]
 
 KEY_TO_ENV = {
     "bench_uvicorn": "uvicorn",
@@ -511,6 +488,41 @@ def grant_bencher_permissions(ws: WorkspaceClient) -> None:
             console.print(f"  [yellow]Warning:[/] Failed to set permission on {app_name}: {exc}")
 
 
+def grant_bencher_pg_access(ws: WorkspaceClient, project_id: str = "bench-pg") -> None:
+    """Grant the bencher app's SP a superuser role on the Lakebase project."""
+    bencher_app = ws.apps.get("bench-bencher")
+    sp_client_id = bencher_app.service_principal_client_id
+    if not sp_client_id:
+        console.print("[yellow]Warning:[/] No bencher SP client ID — skip PG role grant.")
+        return
+
+    # Discover the default branch (typically "production").
+    branches = list(ws.postgres.list_branches(parent=f"projects/{project_id}"))
+    if not branches:
+        console.print(f"[yellow]Warning:[/] No branches found for project {project_id} — skip PG role grant.")
+        return
+    branch = branches[0].name
+    role_id = f"sp-{sp_client_id[:8]}"
+    console.print(f"[bold blue]Granting PG superuser role to bencher SP on {branch}...[/]")
+    assert branch, f"Branch is required, got {branch}"
+    try:
+        ws.postgres.create_role(
+            parent=branch,
+            role=Role(
+                spec=RoleRoleSpec(
+                    identity_type=RoleIdentityType.SERVICE_PRINCIPAL,
+                    membership_roles=[RoleMembershipRole.DATABRICKS_SUPERUSER],
+                    postgres_role=sp_client_id,
+                )
+            ),
+            role_id=role_id,
+        )
+        console.print(f"  [green]Granted:[/] PG role {role_id} on {branch}")
+    except Exception as exc:
+        # Role may already exist from a previous deploy.
+        console.print(f"  [yellow]Warning:[/] PG role grant: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Bencher HTTP client helpers
 # ---------------------------------------------------------------------------
@@ -744,6 +756,9 @@ def deploy(
 
     # Grant bencher SP CAN_USE on all benchable apps.
     grant_bencher_permissions(ws)
+
+    # Grant bencher SP access to the Lakebase PostgreSQL project.
+    grant_bencher_pg_access(ws)
 
 
 @app.command()

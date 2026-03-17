@@ -12,7 +12,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, Request
 
-from .database import create_db
+from .database import create_db, get_engine, init_engine
 from .models import Scenario
 from .routes import router
 from .runner import set_default_scenarios
@@ -69,6 +69,7 @@ async def lifespan(app: FastAPI):
     app.state.oha_path = oha_path
 
     # 2. Initialize database.
+    init_engine()
     create_db()
     logger.info("Database initialized")
 
@@ -79,6 +80,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("Bencher ready")
     yield
+    get_engine().dispose()
     logger.info("Bencher shutting down")
 
 

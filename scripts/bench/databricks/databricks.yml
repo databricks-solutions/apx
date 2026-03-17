@@ -119,6 +119,14 @@ resources:
         env:
           - name: APX_BENCH_SERVER
             value: bencher
+          - name: BENCH_PG_PROJECT_ID
+            value: "bench-pg"
+
+  postgres_projects:
+    bench_pg:
+      project_id: 'bench-pg'
+      display_name: 'Bencher PostgreSQL'
+      pg_version: 17
 
 targets:
   dev:

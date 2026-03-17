@@ -1,7 +1,7 @@
 """Benchmark execution logic.
 
 Runs as a BackgroundTask. Uses the Databricks SDK for auth and
-app URL resolution. Stores results in the SQLite database.
+app URL resolution. Stores results in Lakebase Autoscaled (PostgreSQL).
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import httpx
 from databricks.sdk import WorkspaceClient
 from sqlmodel import Session
 
-from .database import engine
+from .database import get_engine
 from .models import (
     BenchConfig,
     BenchmarkRun,
@@ -233,7 +233,7 @@ async def _reset_profiling(url: str, token: str) -> None:
 
 def _update_run(run_id: str, **kwargs) -> None:
     """Update a BenchmarkRun row."""
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         run = session.get(BenchmarkRun, run_id)
         if not run:
             return
@@ -355,7 +355,7 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
                             latency_p99_ms=_f(percentiles, "p99") * 1000,
                             success_rate=success_rate,
                         )
-                        with Session(engine) as session:
+                        with Session(get_engine()) as session:
                             session.add(sr)
                             session.commit()
                         logger.info(
@@ -409,7 +409,7 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
                         environment=env_name,
                         raw_jsonl=jsonl_text,
                     )
-                    with Session(engine) as session:
+                    with Session(get_engine()) as session:
                         session.add(pr)
                         session.commit()
                     logger.info("[%s] Stored profiling data for %s", run_id[:8], env_name)
@@ -418,7 +418,7 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
         _set_progress(run_id, total, total, "generating report")
         logger.info("[%s] Generating report...", run_id[:8])
 
-        with Session(engine) as session:
+        with Session(get_engine()) as session:
             run = session.get(BenchmarkRun, run_id)
             scenario_results = list(run.results) if run else []
             profile_results_list = list(run.profiles) if run else []
