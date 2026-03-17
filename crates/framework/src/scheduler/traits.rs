@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 
-use super::driver::CachedTypes;
+use crate::ffi::CoroutineOps;
+
 use super::queue::ReadyQueue;
 
 /// Asyncio event loop lifecycle management.
@@ -32,8 +33,8 @@ pub trait Reactor: Send + std::fmt::Debug {
 /// - `EventLoop`: inline driver on the tokio thread (current)
 /// - Future: multi-thread scheduler for free-threaded Python
 pub trait Scheduler: Send + std::fmt::Debug {
-    /// Pre-resolved Python type pointers for hot-path classification.
-    fn cached_types(&self) -> &Arc<CachedTypes>;
+    /// Coroutine stepping and classification operations.
+    fn coroutine_ops(&self) -> &Arc<dyn CoroutineOps>;
 
     /// Per-worker ready queue for task suspension and resumption.
     fn ready_queue(&self) -> &Arc<ReadyQueue>;

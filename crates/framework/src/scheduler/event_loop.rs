@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 
-use super::driver::CachedTypes;
+use crate::ffi::{CoroutineOps, FfiCoroutineOps};
+
 use super::queue::ReadyQueue;
 
 // ── Asyncio event loop utilities ─────────────────────────────────────────
@@ -111,8 +112,8 @@ fn gather_kwargs(py: Python<'_>) -> Bound<'_, pyo3::types::PyDict> {
 pub struct EventLoop {
     /// Python asyncio event loop object.
     event_loop: Py<PyAny>,
-    /// Pre-resolved Python type references.
-    cached_types: Arc<CachedTypes>,
+    /// Coroutine stepping and classification operations.
+    coroutine_ops: Arc<dyn CoroutineOps>,
     /// Per-worker ready queue for suspended tasks.
     ready_queue: Arc<ReadyQueue>,
     /// Cached `loop.call_soon` bound method (local — safe, same thread).
@@ -171,9 +172,10 @@ impl EventLoop {
             }
         }
 
-        // 6. Resolve cached types.
-        let cached_types =
-            Arc::new(CachedTypes::resolve(py).map_err(|e| format!("CachedTypes::resolve: {e}"))?);
+        // 6. Resolve coroutine ops (FFI implementation).
+        let coroutine_ops: Arc<dyn CoroutineOps> = Arc::new(
+            FfiCoroutineOps::resolve(py).map_err(|e| format!("FfiCoroutineOps::resolve: {e}"))?,
+        );
 
         // 7. Create ready queue.
         let ready_queue = Arc::new(ReadyQueue::new());
@@ -196,7 +198,7 @@ impl EventLoop {
 
         // 12. Spawn the drain task on the current-thread tokio runtime.
         let rq = Arc::clone(&ready_queue);
-        let ct = Arc::clone(&cached_types);
+        let ct = Arc::clone(&coroutine_ops);
         let cs = call_soon.clone_ref(py);
         let notify = Arc::clone(&drain_notify);
         tokio::spawn(async move {
@@ -255,7 +257,7 @@ impl EventLoop {
 
         Ok(Self {
             event_loop: event_loop.unbind(),
-            cached_types,
+            coroutine_ops,
             ready_queue,
             call_soon,
             drain_notify,
@@ -263,9 +265,9 @@ impl EventLoop {
         })
     }
 
-    /// Get the cached Python types.
-    pub fn cached_types(&self) -> &Arc<CachedTypes> {
-        &self.cached_types
+    /// Get the coroutine operations.
+    pub fn coroutine_ops(&self) -> &Arc<dyn CoroutineOps> {
+        &self.coroutine_ops
     }
 
     /// Get the ready queue.

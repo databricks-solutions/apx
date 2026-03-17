@@ -125,7 +125,7 @@ pub async fn run_worker(
     let ctx = {
         let el = &runtime.event_loop;
         Arc::new(WorkerContext {
-            cached_types: Arc::clone(el.cached_types()),
+            coroutine_ops: Arc::clone(el.coroutine_ops()),
             ready_queue: Arc::clone(el.ready_queue()),
             call_soon: Python::attach(|py| el.call_soon().clone_ref(py)),
         })

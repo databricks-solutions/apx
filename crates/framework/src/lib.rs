@@ -25,6 +25,7 @@ pub mod telemetry;
 pub mod transport;
 
 pub(crate) mod asgi;
+pub(crate) mod ffi;
 pub(crate) mod scheduler;
 pub mod supervision;
 

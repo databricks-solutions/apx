@@ -6,6 +6,7 @@
 //! These types enable Starlette's `Request`, `StreamingResponse`, and `WebSocket`
 //! to work unmodified against a Rust-backed ASGI server.
 
+use crate::ffi::new_presized_dict;
 use crate::protocol::http::error::AppError;
 use crate::transport::types::{InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
@@ -924,26 +925,6 @@ fn extract_bytes_field(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
 }
 
 // ── build_http_scope ─────────────────────────────────────────────────────
-
-// CPython internal: create a dict pre-sized for `minused` keys.
-// Stable across CPython 3.8-3.13. Not exposed by pyo3-ffi (marked private),
-// so we declare it manually.
-#[expect(unsafe_code, reason = "CPython FFI declaration for dict pre-sizing")]
-unsafe extern "C" {
-    fn _PyDict_NewPresized(minused: pyo3::ffi::Py_ssize_t) -> *mut pyo3::ffi::PyObject;
-}
-
-/// Create a `PyDict` with pre-allocated capacity.
-///
-/// Avoids internal rehashing for dicts with a known number of keys.
-#[expect(unsafe_code, reason = "CPython FFI for dict pre-sizing")]
-fn new_presized_dict(py: Python<'_>, capacity: isize) -> Bound<'_, PyDict> {
-    let ptr = unsafe { _PyDict_NewPresized(capacity) };
-    if ptr.is_null() {
-        return PyDict::new(py);
-    }
-    unsafe { Bound::from_owned_ptr(py, ptr).cast_into_unchecked() }
-}
 
 /// Expected key count for HTTP scope dicts (type, asgi, http_version, method,
 /// path, raw_path, query_string, headers, server, client, scheme, root_path,

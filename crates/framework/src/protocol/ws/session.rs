@@ -174,7 +174,7 @@ async fn ws_session(
             py,
             coro,
             result_tx,
-            &ctx.cached_types,
+            &ctx.coroutine_ops,
             &ctx.call_soon,
             &ctx.ready_queue,
         );

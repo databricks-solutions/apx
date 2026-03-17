@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use pyo3::Py;
 
-use crate::scheduler::driver::CachedTypes;
+use crate::ffi::CoroutineOps;
 use crate::scheduler::queue::ReadyQueue;
 
 /// Shared infrastructure available to all dispatch strategies.
@@ -16,8 +16,8 @@ use crate::scheduler::queue::ReadyQueue;
 /// Created once per worker in `run_worker`, wrapped in `Arc`, and passed
 /// to `AppSource::build()` which forwards it to the dispatch implementation.
 pub struct WorkerContext {
-    /// Pre-resolved Python type references.
-    pub cached_types: Arc<CachedTypes>,
+    /// Coroutine stepping and classification operations.
+    pub coroutine_ops: Arc<dyn CoroutineOps>,
     /// Per-worker ready queue for suspended tasks.
     pub ready_queue: Arc<ReadyQueue>,
     /// Cached `loop.call_soon` bound method.

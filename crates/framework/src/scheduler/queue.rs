@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crossbeam_queue::SegQueue;
 use pyo3::prelude::*;
 
-use super::driver::{CachedTypes, resume_task};
+use crate::ffi::CoroutineOps;
+
+use super::driver::resume_task;
 use super::task::{SchedulerTask, TaskProxy};
 
 /// A task ready to be re-driven by the scheduler.
@@ -125,14 +127,14 @@ impl ReadyQueue {
     pub fn drain(
         &self,
         py: Python<'_>,
-        cached_types: &Arc<CachedTypes>,
+        ops: &Arc<dyn CoroutineOps>,
         call_soon: &Py<PyAny>,
         ready_queue: &Arc<ReadyQueue>,
     ) -> usize {
         let mut count = 0;
         while let Some(ready) = self.pop() {
             count += 1;
-            if let Err(e) = resume_task(py, ready, cached_types, call_soon, ready_queue) {
+            if let Err(e) = resume_task(py, ready, ops, call_soon, ready_queue) {
                 tracing::warn!(error = %e, "ready queue drain: resume failed");
             }
         }

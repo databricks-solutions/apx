@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
 use super::primitives::Future;
+use crate::ffi::copy_context;
 use crate::protocol::http::error::AppError;
 
 // ---------------------------------------------------------------------------
@@ -148,22 +149,6 @@ impl SchedulerTask {
     /// Check whether the task has been cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
-    }
-}
-
-/// Copy the current contextvars context via C-level `PyContext_CopyCurrent`.
-///
-/// Returns `None` if the copy fails (should not happen in practice).
-#[expect(unsafe_code, reason = "FFI call to PyContext_CopyCurrent")]
-fn copy_context(py: Python<'_>) -> Option<Py<PyAny>> {
-    let ctx_ptr = unsafe { pyo3::ffi::PyContext_CopyCurrent() };
-    if ctx_ptr.is_null() {
-        // Clear any pending exception and return None.
-        unsafe { pyo3::ffi::PyErr_Clear() };
-        None
-    } else {
-        // Safety: PyContext_CopyCurrent returns a new reference on success.
-        Some(unsafe { Bound::from_owned_ptr(py, ctx_ptr) }.unbind())
     }
 }
 
