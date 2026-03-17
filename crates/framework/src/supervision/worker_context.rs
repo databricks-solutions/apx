@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use pyo3::Py;
 
-use crate::ffi::CoroutineOps;
-use crate::scheduler::driver::TaskOps;
-use crate::scheduler::queue::ReadyQueue;
+use crate::io::bridge::queue::ReadyQueue;
+use crate::io::driver::ffi::CoroutineOps;
+use crate::io::reactor::TaskOps;
 
 /// Shared infrastructure available to all dispatch strategies.
 ///

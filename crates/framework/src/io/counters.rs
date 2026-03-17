@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use crate::scheduler::driver::DriveStats;
+use crate::io::driver::DriveStats;
 
 // ---------------------------------------------------------------------------
 // SchedulerCounters

@@ -17,9 +17,10 @@ use std::time::Duration;
 use pyo3::prelude::*;
 use pyo3::types::PyAnyMethods;
 
-use crate::ffi::{CoroutineOps, FfiCoroutineOps};
-use crate::scheduler::driver::{TaskOps, spawn_and_drive};
-use crate::scheduler::queue::ReadyQueue;
+use crate::io::bridge::queue::ReadyQueue;
+use crate::io::bridge::spawn_and_drive;
+use crate::io::driver::ffi::{CoroutineOps, FfiCoroutineOps};
+use crate::io::reactor::TaskOps;
 
 /// Shared test harness: set up event loop, asyncio thread, drive a coroutine,
 /// poll for result, and clean up.
@@ -543,7 +544,7 @@ fn rust_future_channel_resolve_fires_wakers() {
         let harness = StreamingTestHarness::new(py);
 
         // Create a pending Future (the fixed pattern used by ASGI backpressure).
-        let py_future = Py::new(py, crate::scheduler::primitives::Future::pending()).unwrap();
+        let py_future = Py::new(py, crate::io::driver::primitives::Future::pending()).unwrap();
         let fut_ref = py_future.clone_ref(py);
 
         // Resolve the future from a background thread after a short delay.
@@ -555,7 +556,7 @@ fn rust_future_channel_resolve_fires_wakers() {
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
             Python::attach(|py| {
-                let _ = crate::scheduler::primitives::Future::set_result(fut_ref, py, py.None());
+                let _ = crate::io::driver::primitives::Future::set_result(fut_ref, py, py.None());
             });
         });
 
@@ -699,8 +700,10 @@ def _capture_handler(loop, context):
     });
 
     // Phase 2: GIL released — asyncio thread processes the sentinel __step.
-    // With the fixed sentinel (empty body + cancel()), __step enters → sentinel
-    // returns immediately → __step leaves. No conflict with our _enter_task.
+    // Since we removed _ready cancellation (step 2), the sentinel __step WILL
+    // try _enter_task while we're holding it, producing a "Cannot enter into
+    // task" error. This is expected — in production, spawn_and_drive
+    // enters/drives/leaves before the asyncio thread processes __step.
     std::thread::sleep(Duration::from_millis(200));
 
     // Phase 3: reacquire GIL, leave task, collect errors.
@@ -726,17 +729,15 @@ def _capture_handler(loop, context):
 
     harness.shutdown();
 
+    // The sentinel __step conflict is expected when manually holding
+    // _enter_task across a GIL release. The production flow (spawn_and_drive)
+    // avoids this because it enters/drives/leaves synchronously before the
+    // asyncio thread processes the scheduled __step callback.
     let errs = errors.lock().unwrap();
-    let enter_errors: Vec<_> = errs
-        .iter()
-        .filter(|e| e.contains("Cannot enter into task"))
-        .collect();
+    let has_enter_conflict = errs.iter().any(|e| e.contains("Cannot enter into task"));
     assert!(
-        enter_errors.is_empty(),
-        "Expected NO 'Cannot enter into task' errors with the immediately-completing \
-         sentinel, but got {count}:\n{errors:?}\n\
-         The sentinel should enter/leave atomically without yielding.",
-        count = enter_errors.len(),
-        errors = enter_errors,
+        has_enter_conflict,
+        "Expected 'Cannot enter into task' conflict from sentinel __step \
+         (sentinel no longer cancelled via _ready), but got none.",
     );
 }

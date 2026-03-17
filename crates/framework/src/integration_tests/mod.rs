@@ -9,6 +9,7 @@
 )]
 
 mod scheduler_task;
+mod shutdown;
 mod streaming;
 mod supervision;
 mod telemetry;

@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::Mutex;
 
-use crate::scheduler::driver::DriveStats;
+use crate::io::driver::DriveStats;
 
 /// Path for Rust-side bench traces.
 const TRACE_PATH: &str = "/tmp/bench_rust_trace.jsonl";

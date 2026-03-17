@@ -11,11 +11,12 @@ use std::sync::atomic::Ordering;
 use crossbeam_queue::SegQueue;
 use pyo3::prelude::*;
 
-use crate::ffi::CoroutineOps;
+use crate::io::counters;
+use crate::io::driver::ffi::CoroutineOps;
+use crate::io::driver::task::SchedulerTask;
+use crate::io::reactor::TaskOps;
 
-use super::counters;
-use super::driver::{TaskOps, resume_task};
-use super::task::SchedulerTask;
+use super::resume_task;
 
 /// A task ready to be re-driven by the scheduler.
 ///

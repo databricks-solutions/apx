@@ -1,23 +1,23 @@
 //! Integration tests for [`_SchedulerTask`] on both the default asyncio event
 //! loop and uvloop.
 //!
-//! The production deployment uses uvloop, which does **not** expose the CPython
-//! `loop._ready` deque. These tests verify that:
+//! These tests verify that:
 //!
-//! 1. `_SchedulerTask.__init__` handles the missing `_ready` gracefully
-//!    (`getattr` fallback) and does not raise on either loop implementation.
+//! 1. `_SchedulerTask.__init__` does not raise on either loop implementation.
 //! 2. The sentinel's `__step` runs cleanly on the event loop thread.
 //! 3. Coroutines (trivial + suspending) can be driven through the full Rust
 //!    scheduler on both loop implementations.
+//! 4. `**kwargs` (name, context) are forwarded to `asyncio.Task.__init__`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use pyo3::prelude::*;
 
-use crate::ffi::{CoroutineOps, FfiCoroutineOps};
-use crate::scheduler::driver::{TaskOps, spawn_and_drive};
-use crate::scheduler::queue::ReadyQueue;
+use crate::io::bridge::queue::ReadyQueue;
+use crate::io::bridge::spawn_and_drive;
+use crate::io::driver::ffi::{CoroutineOps, FfiCoroutineOps};
+use crate::io::reactor::TaskOps;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -273,8 +273,6 @@ def _capture(loop, context):
             .unwrap();
 
         // Create a _SchedulerTask — this must not raise.
-        // On uvloop, the `getattr(loop, "_ready", None)` fallback must
-        // prevent AttributeError.
         let asyncio = py.import(c"asyncio").unwrap();
         let loop_obj = asyncio.call_method0(c"get_running_loop").unwrap();
         let kwargs = pyo3::types::PyDict::new(py);

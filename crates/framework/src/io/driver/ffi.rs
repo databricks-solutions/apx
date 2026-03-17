@@ -9,7 +9,7 @@ use pyo3::PyTypeInfo;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 
-use crate::scheduler::primitives::{EventWaiter, Future};
+use super::primitives::{EventWaiter, Future};
 
 // ---------------------------------------------------------------------------
 // StepResult — outcome of advancing a coroutine one step
@@ -43,6 +43,8 @@ pub enum AwaitableKind {
     Coroutine,
     /// `yield None` — reschedule immediately (like `call_soon`).
     YieldNone,
+    /// Custom awaitable with `__await__` — call it to get an iterator.
+    CustomAwaitable,
     /// Unknown awaitable — unsupported, returns error.
     Unknown,
 }
@@ -123,6 +125,8 @@ pub struct FfiCoroutineOps {
     /// Interned `"_asyncio_future_blocking"` attribute name for duck-type
     /// asyncio.Future detection via `_asyncio_future_blocking` attribute.
     asyncio_future_blocking_attr: Py<PyAny>,
+    /// Interned `"__await__"` attribute name for custom awaitable detection.
+    await_attr: Py<PyAny>,
     /// Cached `Py_None` pointer for yield-None fast path.
     py_none_ptr: *mut pyo3::ffi::PyObject,
 }
@@ -166,11 +170,26 @@ impl FfiCoroutineOps {
         let coroutine_type_ptr = coroutine_type.as_ptr();
         let py_none_ptr = py.None().as_ptr();
 
-        // Intern "_asyncio_future_blocking" for duck-type asyncio.Future detection.
+        // -- De facto stable private API: _asyncio_future_blocking --
+        //
+        // Duck-type protocol for asyncio.Future detection. Objects with this
+        // attribute (set to True when pending) are treated as asyncio Futures
+        // by Task.__step. This is how CPython itself distinguishes futures
+        // from other awaitables.
+        //
+        // Used by: CPython Task.__step, uvloop, anyio
+        // Stable since: Python 3.4 (asyncio inception)
+        // Source: Modules/_asynciomodule.c — enter_task_step
+        //
+        // If removed: fall back to isinstance(obj, asyncio.Future) — slower
+        // but correct. Cache the type pointer at init.
         let asyncio_future_blocking_attr: Py<PyAny> = pyo3::intern!(py, "_asyncio_future_blocking")
             .clone()
             .unbind()
             .into();
+
+        // Intern "__await__" for custom awaitable detection.
+        let await_attr: Py<PyAny> = pyo3::intern!(py, "__await__").clone().unbind().into();
 
         Ok(Self {
             coroutine_type,
@@ -180,6 +199,7 @@ impl FfiCoroutineOps {
             event_waiter_type_ptr,
             coroutine_type_ptr,
             asyncio_future_blocking_attr,
+            await_attr,
             py_none_ptr,
         })
     }
@@ -296,6 +316,16 @@ impl CoroutineOps for FfiCoroutineOps {
         // Clear the AttributeError from the failed GetAttr.
         unsafe { pyo3::ffi::PyErr_Clear() };
 
+        // Custom awaitable: has __await__ method.
+        // The driver will call __await__() and push the resulting iterator
+        // onto the coro stack, like a regular sub-coroutine.
+        let await_attr = unsafe { pyo3::ffi::PyObject_GetAttr(obj_ptr, self.await_attr.as_ptr()) };
+        if !await_attr.is_null() {
+            unsafe { pyo3::ffi::Py_DECREF(await_attr) };
+            return AwaitableKind::CustomAwaitable;
+        }
+        unsafe { pyo3::ffi::PyErr_Clear() };
+
         AwaitableKind::Unknown
     }
 }
@@ -383,9 +413,15 @@ impl Drop for ContextGuard {
 // new_presized_dict — pre-allocated dict
 // ---------------------------------------------------------------------------
 
-// CPython internal: create a dict pre-sized for `minused` keys.
-// Stable across CPython 3.8-3.13. Not exposed by pyo3-ffi (marked private),
-// so we declare it manually.
+// -- Private API: _PyDict_NewPresized --
+//
+// Creates a dict pre-sized for N keys, avoiding rehash during population.
+// Used for ASGI scope dicts (15+ keys). Saves ~100ns per dict.
+//
+// Stable across CPython 3.8-3.13. Not available on PyPy.
+// Fallback: PyDict::new(py) — works everywhere, just without pre-sizing.
+// The null-pointer check in new_presized_dict already handles removal —
+// if the symbol is missing at link time, use #[weak] or feature-gate it.
 #[expect(unsafe_code, reason = "CPython FFI declaration for dict pre-sizing")]
 unsafe extern "C" {
     fn _PyDict_NewPresized(minused: pyo3::ffi::Py_ssize_t) -> *mut pyo3::ffi::PyObject;
@@ -472,6 +508,37 @@ mod tests {
                 "asyncio.Future should be classified as AsyncioFuture"
             );
             let _ = loop_obj.call_method0(c"close");
+        });
+    }
+
+    #[test]
+    fn classify_custom_awaitable() {
+        crate::with_py(|py| {
+            let ops = FfiCoroutineOps::resolve(py).unwrap();
+            py.run(
+                c"
+class HasAwait:
+    def __await__(self):
+        return iter([])
+",
+                None,
+                None,
+            )
+            .unwrap();
+            let obj = py.eval(c"HasAwait()", None, None).unwrap().unbind();
+            assert!(matches!(
+                ops.classify(py, &obj),
+                AwaitableKind::CustomAwaitable
+            ));
+        });
+    }
+
+    #[test]
+    fn classify_plain_object_is_unknown() {
+        crate::with_py(|py| {
+            let ops = FfiCoroutineOps::resolve(py).unwrap();
+            let obj = py.eval(c"object()", None, None).unwrap().unbind();
+            assert!(matches!(ops.classify(py, &obj), AwaitableKind::Unknown));
         });
     }
 

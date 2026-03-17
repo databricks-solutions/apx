@@ -6,7 +6,7 @@
 //! These types enable Starlette's `Request`, `StreamingResponse`, and `WebSocket`
 //! to work unmodified against a Rust-backed ASGI server.
 
-use crate::ffi::new_presized_dict;
+use crate::io::driver::ffi::new_presized_dict;
 use crate::protocol::http::error::AppError;
 use crate::transport::types::{InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
@@ -319,7 +319,7 @@ impl AsgiReceive {
                 .map(|obj| obj.into_bound(py).into_any())
         } else {
             // Deliver http.disconnect when the response stream ends.
-            let py_future = Py::new(py, crate::scheduler::primitives::Future::pending())?;
+            let py_future = Py::new(py, crate::io::driver::primitives::Future::pending())?;
             let fut_ref = py_future.clone_ref(py);
 
             let maybe_disconnect = self
@@ -332,13 +332,13 @@ impl AsgiReceive {
             if let Some(disconnect_rx) = maybe_disconnect {
                 let disconnect_type = pyo3::intern!(py, "http.disconnect").clone().unbind();
                 let type_key = pyo3::intern!(py, "type").clone().unbind();
-                crate::scheduler::with_tokio_handle(|handle| {
+                crate::io::with_tokio_handle(|handle| {
                     handle.spawn(async move {
                         let _ = disconnect_rx.await;
                         Python::attach(|py| {
                             let event = PyDict::new(py);
                             event.set_item(&type_key, &disconnect_type).ok();
-                            let _ = crate::scheduler::primitives::Future::set_result(
+                            let _ = crate::io::driver::primitives::Future::set_result(
                                 fut_ref,
                                 py,
                                 event.unbind().into_any(),
@@ -593,15 +593,15 @@ impl AsgiSend {
                     }
                     Err(mpsc::error::TrySendError::Full(event)) => {
                         let py_future =
-                            Py::new(py, crate::scheduler::primitives::Future::pending())?;
+                            Py::new(py, crate::io::driver::primitives::Future::pending())?;
                         let fut_ref = py_future.clone_ref(py);
                         let tx = tx.clone();
                         let drop_stream = !more_body;
-                        crate::scheduler::with_tokio_handle(|handle| {
+                        crate::io::with_tokio_handle(|handle| {
                             handle.spawn(async move {
                                 let _ = tx.send(event).await;
                                 Python::attach(|py| {
-                                    let _ = crate::scheduler::primitives::Future::set_result(
+                                    let _ = crate::io::driver::primitives::Future::set_result(
                                         fut_ref,
                                         py,
                                         py.None(),
@@ -642,14 +642,14 @@ impl AsgiSend {
         match tx.try_send(event) {
             Ok(()) => Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any()),
             Err(mpsc::error::TrySendError::Full(event)) => {
-                let py_future = Py::new(py, crate::scheduler::primitives::Future::pending())?;
+                let py_future = Py::new(py, crate::io::driver::primitives::Future::pending())?;
                 let fut_ref = py_future.clone_ref(py);
                 let tx = tx.clone();
-                crate::scheduler::with_tokio_handle(|handle| {
+                crate::io::with_tokio_handle(|handle| {
                     handle.spawn(async move {
                         let _ = tx.send(event).await;
                         Python::attach(|py| {
-                            let _ = crate::scheduler::primitives::Future::set_result(
+                            let _ = crate::io::driver::primitives::Future::set_result(
                                 fut_ref,
                                 py,
                                 py.None(),

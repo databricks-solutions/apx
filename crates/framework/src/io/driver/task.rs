@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
+use super::ffi::copy_context;
 use super::primitives::Future;
-use crate::ffi::copy_context;
 use crate::protocol::http::error::AppError;
 
 // ---------------------------------------------------------------------------

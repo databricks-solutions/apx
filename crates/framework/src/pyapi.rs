@@ -12,9 +12,9 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::asgi::scope::AsgiSend>()?;
 
     // Primitives
-    m.add_class::<crate::scheduler::primitives::Event>()?;
-    m.add_class::<crate::scheduler::primitives::EventWaiter>()?;
-    m.add_class::<crate::scheduler::primitives::Future>()?;
+    m.add_class::<crate::io::driver::primitives::Event>()?;
+    m.add_class::<crate::io::driver::primitives::EventWaiter>()?;
+    m.add_class::<crate::io::driver::primitives::Future>()?;
 
     // Telemetry
     m.add_class::<crate::telemetry::spans::SpanHandle>()?;
@@ -58,7 +58,7 @@ fn bench_trace_reset() {
 
 #[pyfunction]
 fn scheduler_stats_json() -> Option<String> {
-    let counters = crate::scheduler::counters::get()?;
+    let counters = crate::io::counters::get()?;
     let snapshot = counters.snapshot();
     serde_json::to_string(&snapshot).ok()
 }

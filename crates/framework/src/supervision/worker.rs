@@ -9,8 +9,8 @@ use super::ipc::protocol::{BootstrapError, IpcMessage, Nonce, WorkerBootstrap};
 use super::signal::shutdown_signal;
 use super::worker_context::WorkerContext;
 use crate::asgi::app::{AppSource, ModuleImport};
+use crate::io::EventLoop;
 use crate::protocol::http::service::{ApxService, ServiceConfig, serve_tcp};
-use crate::scheduler::event_loop::EventLoop;
 use crate::transport::{Listener, TransportConfig, TransportError};
 use pyo3::Python;
 use std::net::IpAddr;
@@ -62,7 +62,7 @@ impl std::fmt::Debug for WorkerRuntime {
 
 /// Phase 1: Create TCP listener and initialize the Python interpreter.
 ///
-/// Uses [`InlineEventLoop`] — the asyncio loop is installed as dormant and
+/// Uses `io::EventLoop` — the asyncio loop is installed as dormant and
 /// all coroutine driving happens inline on the tokio thread.
 ///
 /// # Errors
@@ -130,7 +130,7 @@ pub async fn run_worker(
                 coroutine_ops: Arc::clone(el.coroutine_ops()),
                 ready_queue: Arc::clone(el.ready_queue()),
                 call_soon_threadsafe: el.call_soon_threadsafe().clone_ref(py),
-                task_ops: crate::scheduler::driver::TaskOps {
+                task_ops: crate::io::reactor::TaskOps {
                     enter_task: to.enter_task.clone_ref(py),
                     leave_task: to.leave_task.clone_ref(py),
                     scheduler_task_cls: to.scheduler_task_cls.clone_ref(py),

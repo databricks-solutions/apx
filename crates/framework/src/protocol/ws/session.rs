@@ -11,8 +11,8 @@
 use crate::asgi::scope::{
     AsgiEvent, AsgiSend, AsgiWsReceive, ScopeInterns, WsIncomingEvent, build_ws_scope,
 };
+use crate::io::bridge::spawn_and_drive;
 use crate::protocol::http::error::AppError;
-use crate::scheduler::driver::spawn_and_drive;
 use crate::supervision::worker_context::WorkerContext;
 use crate::transport::types::{
     BodyStream, InboundRequest, ProtocolVersion, ResponseBody, TransportKind,

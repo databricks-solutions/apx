@@ -11,8 +11,9 @@
 use crate::asgi::bench_trace::{self, RequestTraceBuilder};
 use crate::asgi::scope::{AsgiReceive, AsgiSend, ScopeInterns, build_http_scope};
 use crate::dispatch::Dispatch;
+use crate::io::bridge::spawn_and_drive;
+use crate::io::driver::DriveStats;
 use crate::protocol::http::error::AppError;
-use crate::scheduler::driver::{DriveStats, spawn_and_drive};
 use crate::supervision::worker_context::WorkerContext;
 use crate::transport::types::{BodyStream, InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
