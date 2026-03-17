@@ -200,6 +200,20 @@ async def _extract_profiling(url: str, token: str) -> str | None:
     return None
 
 
+async def _reset_items(url: str, token: str) -> None:
+    """Reset items to defaults before a benchmark pass."""
+    logger.info("Resetting items on %s", url)
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.post(
+                f"{url}/api/items/reset", headers=headers, timeout=10.0
+            )
+            logger.info("Items reset: %s", resp.text[:100])
+        except httpx.HTTPError as exc:
+            logger.warning("Failed to reset items on %s: %s", url, exc)
+
+
 async def _reset_profiling(url: str, token: str) -> None:
     logger.info("Resetting profiling on %s", url)
     headers = {"Authorization": f"Bearer {token}"}
@@ -303,6 +317,7 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
             logger.info("[%s] === Benchmark pass: %s ===", run_id[:8], env_name)
             # Refresh token before each environment pass.
             token = _get_token(ws)
+            await _reset_items(url, token)
 
             for scenario in scenarios:
                 if _is_cancelled(run_id):
@@ -368,6 +383,7 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
                 logger.info("[%s] === Profiling pass: %s ===", run_id[:8], env_name)
                 token = _get_token(ws)
 
+                await _reset_items(url, token)
                 await _reset_profiling(url, token)
 
                 for scenario in PROFILE_SCENARIOS:

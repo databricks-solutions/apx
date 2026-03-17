@@ -1,2 +1,3 @@
+diskcache
 fastapi
 uvloop

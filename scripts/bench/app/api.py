@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import diskcache
 from fastapi import APIRouter, HTTPException
 
 from .models import Item, ItemCreate, ItemUpdate
 
 router = APIRouter()
 
-_COUNTER: int = 10
-ITEMS: dict[int, Item] = {
-    i: Item(
+_CACHE_DIR = "/tmp/bench_items_cache"
+_cache = diskcache.Cache(_CACHE_DIR)
+
+_DEFAULT_ITEMS = [
+    Item(
         id=i,
         name=f"Item {i}",
         description=f"Description for item {i}",
@@ -16,13 +19,23 @@ ITEMS: dict[int, Item] = {
         tags=[f"tag-{i % 3}", f"tag-{i % 5}"],
     )
     for i in range(1, 11)
-}
+]
+
+
+def _populate_defaults():
+    _cache.clear()
+    for item in _DEFAULT_ITEMS:
+        _cache[f"item:{item.id}"] = item.model_dump()
+    _cache["_counter"] = 10
+
+
+# Auto-populate on first boot
+if "_counter" not in _cache:
+    _populate_defaults()
 
 
 def _next_id() -> int:
-    global _COUNTER  # noqa: PLW0603
-    _COUNTER += 1
-    return _COUNTER
+    return _cache.incr("_counter")
 
 
 @router.get("/echo")
@@ -38,38 +51,52 @@ def health() -> dict[str, str]:
 
 @router.get("/items", response_model=list[Item])
 def list_items() -> list[Item]:
-    return list(ITEMS.values())
+    items = []
+    for key in _cache:
+        if isinstance(key, str) and key.startswith("item:"):
+            items.append(Item(**_cache[key]))
+    items.sort(key=lambda x: x.id)
+    return items
 
 
 @router.get("/items/{item_id}", response_model=Item)
 def get_item(item_id: int) -> Item:
-    if item_id not in ITEMS:
+    data = _cache.get(f"item:{item_id}")
+    if data is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    return ITEMS[item_id]
+    return Item(**data)
 
 
 @router.post("/items", response_model=Item, status_code=201)
 def create_item(body: ItemCreate) -> Item:
     item = Item(id=_next_id(), **body.model_dump())
-    ITEMS[item.id] = item
+    _cache[f"item:{item.id}"] = item.model_dump()
     return item
 
 
 @router.patch("/items/{item_id}", response_model=Item)
 def update_item(item_id: int, body: ItemUpdate) -> Item:
-    if item_id not in ITEMS:
+    data = _cache.get(f"item:{item_id}")
+    if data is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    existing = ITEMS[item_id]
+    existing = Item(**data)
     updated = existing.model_copy(update=body.model_dump(exclude_unset=True))
-    ITEMS[item_id] = updated
+    _cache[f"item:{item_id}"] = updated.model_dump()
     return updated
 
 
 @router.delete("/items/{item_id}", status_code=204)
 def delete_item(item_id: int):
-    ITEMS.pop(item_id, None)
+    _cache.pop(f"item:{item_id}", None)
     from fastapi.responses import Response
     return Response(status_code=204)
+
+
+@router.post("/items/reset")
+def items_reset():
+    """Clear all items and repopulate with defaults."""
+    _populate_defaults()
+    return {"status": "reset", "items": 10}
 
 
 @router.get("/profile/dump")

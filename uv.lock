@@ -41,6 +41,7 @@ dependencies = [
 dev = [
     { name = "beautifulsoup4" },
     { name = "databricks-sdk" },
+    { name = "diskcache" },
     { name = "docutils" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -88,6 +89,7 @@ requires-dist = [
 dev = [
     { name = "beautifulsoup4", specifier = ">=4.14.3" },
     { name = "databricks-sdk", specifier = ">=0.74.0" },
+    { name = "diskcache", specifier = ">=5.6.3" },
     { name = "docutils", specifier = ">=0.22.4" },
     { name = "fastapi", specifier = ">=0.119.0" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -271,6 +273,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/fd/69/c91d6730adf3f335f30c3e2e3cab7ad56eea84aff159e03a3af3afa9803f/databricks_sdk-0.74.0.tar.gz", hash = "sha256:321c758c14937ca7ad106d262219a03efaedfd18e2c5a75b3908c882970376ac", size = 811966, upload-time = "2025-12-10T12:01:30.831Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ae/6b/e75557df7c8210a6b362640251f85fdbfd8cd1e3a220ca4a0e3b0e27aa27/databricks_sdk-0.74.0-py3-none-any.whl", hash = "sha256:c04c5ed14bcc5a8df3e630088050adff54bf06dd4adf2ecb6bef6e68e5e545e6", size = 764214, upload-time = "2025-12-10T12:01:29.033Z" },
+]
+
+[[package]]
+name = "diskcache"
+version = "5.6.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/21/1c1ffc1a039ddcc459db43cc108658f32c57d271d7289a2794e401d0fdb6/diskcache-5.6.3.tar.gz", hash = "sha256:2c3a3fa2743d8535d832ec61c2054a1641f41775aa7c556758a109941e33e4fc", size = 67916, upload-time = "2023-08-31T06:12:00.316Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3f/27/4570e78fc0bf5ea0ca45eb1de3818a23787af9b390c0b0a0033a1b8236f9/diskcache-5.6.3-py3-none-any.whl", hash = "sha256:5e31b2d5fbad117cc363ebaf6b689474db18a1f6438bc82358b024abd4c2ca19", size = 45550, upload-time = "2023-08-31T06:11:58.822Z" },
 ]
 
 [[package]]
