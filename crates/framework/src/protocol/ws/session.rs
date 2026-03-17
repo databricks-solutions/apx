@@ -208,7 +208,7 @@ where
                     },
                     Message::Binary(b) => WsIncomingEvent::Receive {
                         text: None,
-                        bytes: Some(b.to_vec()),
+                        bytes: Some(b),
                     },
                     Message::Close(frame) => {
                         let code = frame

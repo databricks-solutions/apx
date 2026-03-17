@@ -12,6 +12,7 @@ use crate::transport::types::{InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::{PyBytes, PyDict, PyDictMethods, PyList, PyString, PyTuple};
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -220,8 +221,8 @@ pub enum AsgiEvent {
     WsSend {
         /// Text frame payload.
         text: Option<String>,
-        /// Binary frame payload.
-        bytes: Option<Vec<u8>>,
+        /// Binary frame payload (zero-copy from Python via `PyBackedBytes`).
+        bytes: Option<Bytes>,
     },
     /// `websocket.close` — server closes the connection.
     WsClose {
@@ -297,6 +298,13 @@ impl AsgiReceive {
                 .bind(py)
                 .call_method0(pyo3::intern!(py, "copy"))?
                 .cast_into()?;
+            // NOTE: this copy is unavoidable — `PyBytes::new` always memcpys because
+            // CPython's allocator owns `bytes` object memory. There is no PyO3 API to
+            // make a Python `bytes` point into a Rust-owned buffer, and ASGI requires
+            // `isinstance(body, bytes)` (frameworks like Starlette depend on this).
+            // A `#[pyclass]` implementing `__buffer__` could avoid the copy, but would
+            // break the ASGI contract.
+            // See: https://pyo3.rs/v0.23.4/types#pybytes
             event.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, &bytes))?;
             if let Some(t0) = t0 {
                 tracing::info!(
@@ -662,8 +670,8 @@ pub enum WsIncomingEvent {
     Receive {
         /// Text frame payload.
         text: Option<String>,
-        /// Binary frame payload.
-        bytes: Option<Vec<u8>>,
+        /// Binary frame payload (zero-copy from tungstenite `Bytes`).
+        bytes: Option<Bytes>,
     },
     /// `websocket.disconnect` — client disconnected.
     Disconnect {
@@ -797,14 +805,20 @@ fn parse_response_body(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
     Ok(AsgiEvent::ResponseBody { body, more_body })
 }
 
-/// Extract body bytes from an ASGI event dict, preferring zero-copy via `PyBytes`.
+/// Extract body bytes from an ASGI event dict via zero-copy ownership transfer.
+///
+/// `PyBackedBytes` borrows Python's buffer; `Bytes::from_owner` wraps it for
+/// hyper. Python's refcount keeps the buffer alive until Rust drops it.
 fn extract_body_bytes(event: &Bound<'_, PyDict>) -> PyResult<Bytes> {
     let py = event.py();
     let Some(obj) = event.get_item(pyo3::intern!(py, "body"))? else {
         return Ok(Bytes::new());
     };
     match obj.cast::<PyBytes>() {
-        Ok(py_bytes) => Ok(Bytes::copy_from_slice(py_bytes.as_bytes())),
+        Ok(py_bytes) => {
+            let backed: PyBackedBytes = py_bytes.clone().into();
+            Ok(Bytes::from_owner(backed))
+        }
         Err(_) => Ok(Bytes::from(obj.extract::<Vec<u8>>()?)),
     }
 }
@@ -823,14 +837,24 @@ fn parse_ws_accept(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
 }
 
 /// Parse `websocket.send` — extract text or binary payload.
+///
+/// Binary frames use `PyBackedBytes` + `Bytes::from_owner` for zero-copy
+/// transfer from Python to tungstenite.
 fn parse_ws_send(event: &Bound<'_, PyDict>) -> PyResult<AsgiEvent> {
     let py = event.py();
     let text: Option<String> = event
         .get_item(pyo3::intern!(py, "text"))?
         .and_then(|v| v.extract().ok());
-    let bytes: Option<Vec<u8>> = event
-        .get_item(pyo3::intern!(py, "bytes"))?
-        .and_then(|v| v.extract().ok());
+    let bytes: Option<Bytes> = match event.get_item(pyo3::intern!(py, "bytes"))? {
+        Some(v) => match v.cast::<PyBytes>() {
+            Ok(py_bytes) => {
+                let backed: PyBackedBytes = py_bytes.clone().into();
+                Some(Bytes::from_owner(backed))
+            }
+            Err(_) => None,
+        },
+        None => None,
+    };
     Ok(AsgiEvent::WsSend { text, bytes })
 }
 
@@ -1726,7 +1750,7 @@ mod tests {
             match event {
                 AsgiEvent::WsSend { text, bytes } => {
                     assert!(text.is_none());
-                    assert_eq!(bytes.as_deref(), Some(b"\x01\x02\x03".as_slice()));
+                    assert_eq!(bytes.as_deref(), Some(b"\x01\x02\x03".as_ref()));
                 }
                 other => panic!("expected WsSend, got {other:?}"),
             }
@@ -1871,7 +1895,7 @@ mod tests {
         with_py(|py| {
             let event = WsIncomingEvent::Receive {
                 text: None,
-                bytes: Some(vec![0x01, 0x02, 0x03]),
+                bytes: Some(Bytes::from_static(&[0x01, 0x02, 0x03])),
             };
             let result = build_ws_receive_event(py, Some(event)).unwrap();
             let dict = result.bind(py);

@@ -7,7 +7,7 @@
 //! transport-specific code (hyper, future quinn) and the transport-agnostic
 //! application code (routing, dispatch, ASGI adapter).
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http::header::HeaderMap;
 use http_body::Frame;
 use serde::{Deserialize, Serialize};
@@ -128,23 +128,60 @@ impl BodyStream {
 /// for endpoints with large limits but small actual bodies.
 const STREAM_COLLECT_INITIAL_CAPACITY: usize = 4096;
 
+/// Read the next chunk from the stream.
+async fn next_chunk(
+    stream: &mut Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
+) -> Result<Option<Bytes>, BodyError> {
+    match std::future::poll_fn(|cx| Pin::as_mut(stream).poll_next(cx)).await {
+        Some(Ok(bytes)) => Ok(Some(bytes)),
+        Some(Err(e)) => Err(BodyError::Io(e)),
+        None => Ok(None),
+    }
+}
+
 /// Collect a stream of bytes into a single `Bytes`, enforcing a size limit.
+///
+/// Fast path: single-chunk bodies (common for small JSON payloads) are returned
+/// directly without any copy or concatenation. Multi-chunk bodies use `BytesMut`
+/// for contiguous concatenation, then `freeze()` for zero-copy conversion to `Bytes`.
 async fn collect_stream(
     stream: &mut Pin<Box<dyn futures_core::Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
     limit: usize,
 ) -> Result<Bytes, BodyError> {
-    let mut buf = Vec::with_capacity(limit.min(STREAM_COLLECT_INITIAL_CAPACITY));
+    // Read the first chunk.
+    let first = match next_chunk(stream).await? {
+        Some(bytes) => {
+            if bytes.len() > limit {
+                return Err(BodyError::TooLarge { limit });
+            }
+            bytes
+        }
+        None => return Ok(Bytes::new()),
+    };
+
+    // Fast path: if the stream is exhausted after one chunk, return it directly (zero-copy).
+    let Some(second) = next_chunk(stream).await? else {
+        return Ok(first);
+    };
+
+    // Multi-chunk: concatenate into BytesMut.
+    let mut buf = BytesMut::with_capacity(limit.min(STREAM_COLLECT_INITIAL_CAPACITY));
+    buf.extend_from_slice(&first);
+
+    if buf.len() + second.len() > limit {
+        return Err(BodyError::TooLarge { limit });
+    }
+    buf.extend_from_slice(&second);
+
     loop {
-        let chunk = std::future::poll_fn(|cx| Pin::as_mut(stream).poll_next(cx)).await;
-        match chunk {
-            Some(Ok(bytes)) => {
+        match next_chunk(stream).await? {
+            Some(bytes) => {
                 if buf.len() + bytes.len() > limit {
                     return Err(BodyError::TooLarge { limit });
                 }
                 buf.extend_from_slice(&bytes);
             }
-            Some(Err(e)) => return Err(BodyError::Io(e)),
-            None => return Ok(Bytes::from(buf)),
+            None => return Ok(buf.freeze()),
         }
     }
 }
