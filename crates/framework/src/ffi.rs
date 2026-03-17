@@ -321,6 +321,65 @@ pub fn copy_context(py: Python<'_>) -> Option<Py<PyAny>> {
 }
 
 // ---------------------------------------------------------------------------
+// enter_context / exit_context — contextvars context switching
+// ---------------------------------------------------------------------------
+
+/// Enter a contextvars context — makes it the current context for this thread.
+///
+/// Must be paired with [`exit_context`] using the same context object.
+/// Returns `true` on success.
+#[expect(unsafe_code, reason = "FFI call to PyContext_Enter")]
+pub fn enter_context(ctx: &Py<PyAny>) -> bool {
+    unsafe { pyo3::ffi::PyContext_Enter(ctx.as_ptr()) == 0 }
+}
+
+/// Exit a contextvars context — restores the previous context for this thread.
+///
+/// Must be paired with a prior [`enter_context`] call using the same object.
+/// Returns `true` on success.
+#[expect(unsafe_code, reason = "FFI call to PyContext_Exit")]
+pub fn exit_context(ctx: &Py<PyAny>) -> bool {
+    unsafe { pyo3::ffi::PyContext_Exit(ctx.as_ptr()) == 0 }
+}
+
+// ---------------------------------------------------------------------------
+// ContextGuard — RAII guard for contextvars context
+// ---------------------------------------------------------------------------
+
+/// RAII guard that enters a contextvars context and exits it on drop.
+///
+/// Ensures `PyContext_Exit` is called even if the driving code panics
+/// between enter and exit. This matches `asyncio.Task._step`'s use of
+/// `context.run()` to bracket each coroutine step.
+///
+/// Owns a clone of the `Py<PyAny>` (just a refcount bump) so the guard
+/// doesn't borrow the task — allowing `&mut task` in `drive_task`.
+pub struct ContextGuard {
+    ctx: Py<PyAny>,
+}
+
+impl ContextGuard {
+    /// Enter the context. Returns `None` if `PyContext_Enter` fails.
+    ///
+    /// Takes ownership of the `Py<PyAny>` to avoid borrowing the task.
+    pub fn enter(ctx: Py<PyAny>) -> Option<Self> {
+        if enter_context(&ctx) {
+            Some(Self { ctx })
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for ContextGuard {
+    fn drop(&mut self) {
+        if !exit_context(&self.ctx) {
+            tracing::warn!("ContextGuard: PyContext_Exit failed");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // new_presized_dict — pre-allocated dict
 // ---------------------------------------------------------------------------
 

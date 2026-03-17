@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 
 use super::queue::{ReadyQueue, ReadyTask};
 use super::task::SchedulerTask;
-use crate::ffi::{AwaitableKind, CoroutineOps, StepResult};
+use crate::ffi::{AwaitableKind, ContextGuard, CoroutineOps, StepResult};
 use crate::protocol::http::error::AppError;
 use crate::scheduler::counters;
 
@@ -352,7 +352,14 @@ pub fn resume_task(
 
     let entered = enter_scheduler_task(py, sched_task.as_ref(), task_ops);
 
+    let ctx_guard = task
+        .ctx
+        .as_ref()
+        .map(|c| c.clone_ref(py))
+        .and_then(ContextGuard::enter);
     let (drive_result, stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+    drop(ctx_guard);
+
     if let Some(c) = counters::get() {
         c.record_drive(&stats);
     }
@@ -469,7 +476,13 @@ pub fn spawn_and_drive(
     // (needed for weakref support in ServerErrorMiddleware, etc.).
     let state = create_scheduler_task(py, &task, task_ops);
 
+    let ctx_guard = task
+        .ctx
+        .as_ref()
+        .map(|c| c.clone_ref(py))
+        .and_then(ContextGuard::enter);
     let (drive_result, stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+    drop(ctx_guard);
 
     // Record counters based on drive result.
     if let Some(c) = counters::get() {
@@ -537,7 +550,13 @@ pub fn first_drive(
             return FirstDriveOutcome::Inline;
         }
     };
+    let ctx_guard = task
+        .ctx
+        .as_ref()
+        .map(|c| c.clone_ref(py))
+        .and_then(ContextGuard::enter);
     let (drive_result, _stats) = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
+    drop(ctx_guard);
     route_first_drive(py, task, drive_result)
 }
 

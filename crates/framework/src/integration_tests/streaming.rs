@@ -380,3 +380,103 @@ async def anyio_app():
         Err(err) => panic!("anyio task group pattern failed: {err}"),
     }
 }
+
+/// Contextvars set in middleware must survive across await boundaries.
+/// This is the exact scenario where the old code failed: the drain task
+/// re-drives the coroutine and the context is wrong.
+#[test]
+fn contextvars_survive_suspension() {
+    crate::integration_tests::ensure_python_env();
+    Python::initialize();
+
+    let (mut harness, result_rx) = Python::attach(|py| {
+        let harness = StreamingTestHarness::new(py);
+
+        py.run(
+            c"
+import contextvars, asyncio
+
+request_id = contextvars.ContextVar('request_id', default='unset')
+request_id.set('req-abc-123')
+
+async def check_context_after_suspend():
+    before = request_id.get()
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    loop.call_soon_threadsafe(fut.set_result, 'woke')
+    await fut
+    after = request_id.get()
+    return f'{before},{after}'
+",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let coro = py
+            .eval(c"check_context_after_suspend()", None, None)
+            .unwrap()
+            .unbind();
+        let rx = harness.drive(py, coro);
+        (harness, rx)
+    });
+
+    let result = harness.poll_result(result_rx);
+    harness.shutdown();
+
+    match result {
+        Ok(val) => assert_eq!(
+            val, "req-abc-123,req-abc-123",
+            "contextvar must survive suspension, got: {val}"
+        ),
+        Err(err) => panic!("contextvars_survive_suspension failed: {err}"),
+    }
+}
+
+/// Two requests with different contextvars must not see each other's values.
+#[test]
+fn contextvars_isolated_between_requests() {
+    crate::integration_tests::ensure_python_env();
+    Python::initialize();
+
+    let (mut harness, rx1, rx2) = Python::attach(|py| {
+        let harness = StreamingTestHarness::new(py);
+
+        py.run(
+            c"
+import contextvars, asyncio
+
+req_var = contextvars.ContextVar('req_var', default='none')
+
+async def handler(tag):
+    req_var.set(tag)
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+    loop.call_soon_threadsafe(fut.set_result, 'done')
+    await fut
+    return f'{tag}={req_var.get()}'
+",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let coro1 = py.eval(c"handler('A')", None, None).unwrap().unbind();
+        let coro2 = py.eval(c"handler('B')", None, None).unwrap().unbind();
+        let rx1 = harness.drive(py, coro1);
+        let rx2 = harness.drive(py, coro2);
+        (harness, rx1, rx2)
+    });
+
+    let r1 = harness.poll_result(rx1);
+    let r2 = harness.poll_result(rx2);
+    harness.shutdown();
+
+    match (&r1, &r2) {
+        (Ok(v1), Ok(v2)) => {
+            assert!(v1.contains("A=A"), "request 1 got: {v1}");
+            assert!(v2.contains("B=B"), "request 2 got: {v2}");
+        }
+        _ => panic!("isolation test failed: r1={r1:?}, r2={r2:?}"),
+    }
+}
