@@ -41,6 +41,16 @@ def _next_id() -> int:
     return _cache.incr("_counter")
 
 
+@router.get("/version")
+def version() -> dict[str, str]:
+    """Return the APX package version (includes build timestamp)."""
+    try:
+        from importlib.metadata import version as pkg_version
+        return {"apx": pkg_version("apx")}
+    except Exception as exc:
+        return {"apx": f"unknown ({exc})"}
+
+
 @router.get("/echo")
 def echo() -> dict[str, bool]:
     """Minimal handler — isolates framework overhead from app logic."""

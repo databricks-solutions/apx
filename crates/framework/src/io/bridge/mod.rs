@@ -62,15 +62,25 @@ impl ResumeCallback {
             pyo3::exceptions::PyRuntimeError::new_err("ResumeCallback invoked twice")
         })?;
 
+        let has_future = future.is_some();
         if let Some(fut) = future {
             match extract_future_result(py, fut) {
-                Ok(value) => task.set_send_value(value),
-                Err(err) => task.set_throw_error(err),
+                Ok(value) => {
+                    tracing::trace!("resume_cb: future resolved ok");
+                    task.set_send_value(value);
+                }
+                Err(err) => {
+                    tracing::trace!("resume_cb: future resolved with exception");
+                    task.set_throw_error(err);
+                }
             }
         }
 
         let sched_task = self.sched_task.take();
-        tracing::trace!("resume_callback: enqueue");
+        tracing::trace!(
+            from_future = has_future,
+            "resume_cb: enqueue to ready_queue"
+        );
         self.queue.push(py, ReadyTask { task, sched_task });
         Ok(())
     }
@@ -114,6 +124,7 @@ pub fn handle_drive_result(
 ) -> PyResult<()> {
     match drive_result {
         DriveResult::Completed(value) => {
+            tracing::trace!("handle_result: completed");
             if let Some(ref st) = sched_task {
                 let _ = st.call_method0(py, c"cancel");
             }
@@ -123,6 +134,7 @@ pub fn handle_drive_result(
             Ok(())
         }
         DriveResult::Error(err) => {
+            tracing::trace!(error = %err, "handle_result: error");
             if let Some(ref st) = sched_task {
                 let _ = st.call_method0(py, c"cancel");
             }
@@ -132,19 +144,23 @@ pub fn handle_drive_result(
             Ok(())
         }
         DriveResult::WaitingOnFuture(fut) => {
+            tracing::trace!("handle_result: waiting on rust Future");
             handle_rust_future(py, task, fut, ready_queue, sched_task)
         }
         DriveResult::WaitingOnEvent(_waiter) => {
+            tracing::trace!("handle_result: waiting on EventWaiter");
             let cb = make_resume_callback(py, task, ready_queue, sched_task)?;
             call_soon_threadsafe.call1(py, (cb,))?;
             Ok(())
         }
         DriveResult::WaitingOnAsyncioFuture(fut) => {
+            tracing::trace!("handle_result: waiting on asyncio Future");
             let cb = make_resume_callback(py, task, ready_queue, sched_task)?;
             fut.call_method1(py, c"add_done_callback", (cb,))?;
             Ok(())
         }
         DriveResult::BudgetExhausted => {
+            tracing::trace!("handle_result: budget exhausted, re-enqueue");
             ready_queue.push(py, ReadyTask { task, sched_task });
             Ok(())
         }
@@ -162,6 +178,7 @@ fn handle_rust_future(
 ) -> PyResult<()> {
     let is_done = fut.call_method0(py, c"done")?.is_truthy(py)?;
     if is_done {
+        tracing::trace!("handle_rust_future: already done, immediate re-enqueue");
         let mut task = task;
         match extract_future_result(py, fut.bind(py)) {
             Ok(value) => task.set_send_value(value),
@@ -170,6 +187,7 @@ fn handle_rust_future(
         ready_queue.push(py, ReadyTask { task, sched_task });
         return Ok(());
     }
+    tracing::trace!("handle_rust_future: pending, attaching done callback");
     let cb = make_resume_callback(py, task, ready_queue, sched_task)?;
     fut.call_method1(py, c"add_done_callback", (cb,))?;
     Ok(())
@@ -191,6 +209,7 @@ pub fn resume_task(
     ready_queue: &Arc<ReadyQueue>,
     task_ops: &TaskOps,
 ) -> PyResult<()> {
+    tracing::trace!("resume_task: entry");
     let ReadyTask {
         mut task,
         sched_task,
@@ -212,6 +231,15 @@ pub fn resume_task(
     );
     drop(ctx_guard);
 
+    tracing::trace!(
+        steps = stats.steps,
+        yield_none = stats.yield_none,
+        yield_future = stats.yield_future,
+        yield_asyncio_future = stats.yield_asyncio_future,
+        budget_exhausted = stats.budget_exhausted,
+        "resume_task: drive done"
+    );
+
     if let Some(c) = counters::get() {
         c.record_drive(&stats);
     }
@@ -226,6 +254,27 @@ pub fn resume_task(
 
     leave_scheduler_task(py, entered, task_ops);
     result
+}
+
+// ---------------------------------------------------------------------------
+// poke_event_loop — wake the asyncio loop so it processes _ready items
+// ---------------------------------------------------------------------------
+
+/// Send a no-op callback via `call_soon_threadsafe` to wake the asyncio
+/// event loop from `select()`.
+///
+/// Items added to `_ready` via `call_soon` (e.g. `loop.create_task()` in
+/// anyio task groups, or `_SchedulerTask.__init__`) don't wake the
+/// selector. This is the only cross-thread wake mechanism in both CPython
+/// asyncio (self-pipe) and uvloop (`uv_async_send`).
+fn poke_event_loop(py: Python<'_>, call_soon_threadsafe: &Py<PyAny>) {
+    // The lambda is tiny and short-lived — freelist allocation in CPython.
+    let Ok(noop) = py.eval(c"lambda: None", None, None) else {
+        return;
+    };
+    if let Err(e) = call_soon_threadsafe.call1(py, (noop,)) {
+        tracing::debug!(error = %e, "poke_event_loop: call_soon_threadsafe failed");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +318,7 @@ pub fn spawn_and_drive(
     ready_queue: &Arc<ReadyQueue>,
     task_ops: &TaskOps,
 ) -> Option<DriveStats> {
+    tracing::trace!("spawn_and_drive: entry");
     let mut task = match SchedulerTask::new(py, coro, result_tx) {
         Ok(t) => t,
         Err(e) => {
@@ -281,9 +331,6 @@ pub fn spawn_and_drive(
         c.record_spawn();
     }
 
-    // Set our task as asyncio's "current task" so Starlette/FastAPI
-    // middleware that calls asyncio.current_task() gets a valid object
-    // (needed for weakref support in ServerErrorMiddleware, etc.).
     let root_coro = task.root_coro(py);
     let state = create_scheduler_task(py, &root_coro, task_ops);
 
@@ -301,7 +348,15 @@ pub fn spawn_and_drive(
     );
     drop(ctx_guard);
 
-    // Record counters based on drive result.
+    tracing::trace!(
+        steps = stats.steps,
+        yield_none = stats.yield_none,
+        yield_future = stats.yield_future,
+        yield_asyncio_future = stats.yield_asyncio_future,
+        budget_exhausted = stats.budget_exhausted,
+        "spawn_and_drive: first drive done"
+    );
+
     if let Some(c) = counters::get() {
         c.record_drive(&stats);
         match &drive_result {
@@ -324,6 +379,23 @@ pub fn spawn_and_drive(
     }
 
     leave_scheduler_task(py, state, task_ops);
+
+    // Wake the asyncio event loop thread.
+    //
+    // During `create_scheduler_task`, `_SchedulerTask.__init__` calls
+    // `loop.call_soon(self.__step)`. If the ASGI app also creates asyncio
+    // tasks during the drive cycle (e.g. `anyio.create_task_group()` in
+    // Starlette's `StreamingResponse`), those tasks are added to `_ready`
+    // via `call_soon` as well. None of these wake the event loop's
+    // selector — `call_soon` only appends to `_ready`, it doesn't poke
+    // the self-pipe / uv_async. If the event loop thread is blocked in
+    // `select()`, `_ready` items are never processed.
+    //
+    // `call_soon_threadsafe` writes to the self-pipe (CPython) or calls
+    // `uv_async_send` (uvloop), guaranteeing the event loop thread wakes
+    // from `select()` and processes `_ready` on its next `_run_once`.
+    poke_event_loop(py, call_soon_threadsafe);
+
     Some(stats)
 }
 

@@ -165,6 +165,7 @@ pub fn create_scheduler_task(
         .call(py, (coro,), Some(&kwargs))
         .ok()?;
     ops.enter_task.call1(py, (&loop_obj, &sched_task)).ok()?;
+    tracing::trace!("create_scheduler_task: created + entered");
     Some((loop_obj.unbind(), sched_task))
 }
 
@@ -177,7 +178,15 @@ pub fn enter_scheduler_task(
     let sched_task = sched_task?;
     let asyncio = py.import(c"asyncio").ok()?;
     let loop_obj = asyncio.call_method0(c"get_running_loop").ok()?;
-    ops.enter_task.call1(py, (&loop_obj, sched_task)).ok()?;
+    match ops.enter_task.call1(py, (&loop_obj, sched_task)) {
+        Ok(_) => {
+            tracing::trace!("enter_scheduler_task: ok");
+        }
+        Err(ref e) => {
+            tracing::warn!(error = %e, "enter_scheduler_task: _enter_task FAILED");
+            return None;
+        }
+    }
     Some((loop_obj.unbind(), sched_task.clone_ref(py)))
 }
 
@@ -186,8 +195,9 @@ pub fn leave_scheduler_task(py: Python<'_>, state: Option<(Py<PyAny>, Py<PyAny>)
     let Some((loop_obj, sched_task)) = state else {
         return;
     };
-    if let Err(e) = ops.leave_task.call1(py, (&loop_obj, &sched_task)) {
-        tracing::warn!(error = %e, "leave_scheduler_task: _leave_task failed");
+    match ops.leave_task.call1(py, (&loop_obj, &sched_task)) {
+        Ok(_) => tracing::trace!("leave_scheduler_task: ok"),
+        Err(e) => tracing::warn!(error = %e, "leave_scheduler_task: _leave_task FAILED"),
     }
 }
 

@@ -97,13 +97,24 @@ impl EventLoop {
         tokio::spawn(async move {
             loop {
                 notify.notified().await;
+                tracing::trace!("drain_task: woke up");
                 Python::attach(|py| {
                     let drain_ops = TaskOps {
                         enter_task: drain_enter.clone_ref(py),
                         leave_task: drain_leave.clone_ref(py),
                         scheduler_task_cls: drain_cls.clone_ref(py),
                     };
-                    rq.drain(py, &ct, &cs, &rq, &drain_ops);
+                    let count = rq.drain(py, &ct, &cs, &rq, &drain_ops);
+                    if count > 0 {
+                        // Wake the asyncio loop — drain may have created
+                        // _SchedulerTasks or asyncio tasks that added items
+                        // to `_ready` via `call_soon`. See `poke_event_loop`.
+                        let noop = py.eval(c"lambda: None", None, None);
+                        if let Ok(noop) = noop {
+                            let _ = cs.call1(py, (noop,));
+                        }
+                    }
+                    tracing::trace!(count, "drain_task: drained");
                 });
             }
         });

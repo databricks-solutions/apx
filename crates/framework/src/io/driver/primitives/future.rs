@@ -103,9 +103,14 @@ impl Future {
     fn __next__(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let inner = slf.get().lock();
         if let Some(ref result) = inner.result {
+            tracing::trace!(
+                ok = result.is_ok(),
+                "Future::__next__: done, raising StopIteration"
+            );
             return Err(Self::raise_result(py, result));
         }
         drop(inner);
+        tracing::trace!("Future::__next__: pending, yielding self");
         Ok(slf.into_any())
     }
 
@@ -123,7 +128,10 @@ impl Future {
             inner.result = Some(Ok(value));
             std::mem::take(&mut inner.wakers)
         };
-        // Fire wakers outside the lock — callbacks may call done()/result().
+        tracing::trace!(
+            waker_count = wakers.len(),
+            "Future::set_result: firing wakers"
+        );
         for cb in wakers {
             if let Err(e) = cb.call1(py, (&slf,)) {
                 tracing::warn!(error = %e, "Future done-callback raised");
@@ -191,12 +199,20 @@ impl Future {
             if inner.result.is_some() {
                 true
             } else {
+                let n = inner.wakers.len() + 1;
                 inner.wakers.push(callback.clone_ref(py));
+                tracing::trace!(
+                    waker_idx = n,
+                    "Future::add_done_callback: registered (pending)"
+                );
                 false
             }
         };
-        if fire_now && let Err(e) = callback.call1(py, (&slf,)) {
-            tracing::warn!(error = %e, "Future done-callback raised");
+        if fire_now {
+            tracing::trace!("Future::add_done_callback: already done, firing immediately");
+            if let Err(e) = callback.call1(py, (&slf,)) {
+                tracing::warn!(error = %e, "Future done-callback raised");
+            }
         }
         Ok(())
     }

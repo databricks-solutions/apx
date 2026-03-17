@@ -345,6 +345,54 @@ def __exit__(self, ...):
 
 `tg.start_soon(worker)` calls `loop.create_task(coro)` which uses `call_soon` (not threadsafe). If the event loop thread is in `select()`, the worker's `__step` won't run until the selector wakes. See [the stall pattern](#the-stall-pattern) above.
 
+## Rust Scheduler + asyncio: The Cross-Thread `_ready` Stall
+
+When a Rust scheduler drives Python coroutines on a **different thread** from the asyncio event loop, any `call_soon` triggered during the drive cycle (e.g. `Task.__init__`, `loop.create_task()` from anyio task groups) adds items to `_ready` without waking the selector.
+
+### The deadlock
+
+```
+Tokio thread (GIL):
+  1. Drive coroutine via coro.send(None)
+  2. Coroutine calls loop.create_task() → call_soon → _ready grows
+  3. Coroutine suspends on a non-asyncio awaitable (e.g. Rust Future)
+  4. Driver returns, releases GIL
+
+Asyncio thread:
+  _run_once → select(timeout=None) → BLOCKED forever
+  (_ready has items, but select doesn't know)
+```
+
+The asyncio-created tasks (step 2) never run because `select()` never returns.
+
+### Why it's intermittent
+
+- **asyncio Future suspension:** When the driver suspends on an `asyncio.Future` and calls `fut.add_done_callback()`, the callback interacts with the asyncio loop internals, which may indirectly poke the selector. These requests succeed.
+- **Rust Future suspension:** When the driver suspends on a Rust-side awaitable, nothing interacts with the asyncio loop. The selector stays blocked. These requests deadlock.
+- **Rosetta / emulation:** Different CPU architectures change timing. Under Rosetta (ARM→x86 translation), the libuv poll may return more frequently due to signal handling differences, masking the bug.
+
+### The fix
+
+After every drive cycle that may have added items to `_ready` (i.e. after `spawn_and_drive` and after `drain`), unconditionally call:
+
+```python
+loop.call_soon_threadsafe(lambda: None)
+```
+
+This writes to the self-pipe (CPython) or calls `uv_async_send` (uvloop), guaranteeing the event loop thread wakes from `select()` and processes `_ready` on its next `_run_once`.
+
+### Diagnostic pattern
+
+Add trace logging to the driver to capture the **yield type** on suspension:
+
+| Yield type | Selector wakes? | Risk |
+|---|---|---|
+| `asyncio.Future` | Usually yes (via `add_done_callback`) | Low |
+| Rust Future / custom awaitable | **No** | **Deadlock** |
+| `yield None` (budget exhaustion) | N/A (re-enqueued immediately) | None |
+
+If a request hangs with `steps=0, yield_future=1` and no subsequent traces, the asyncio loop is stuck in `select()` with unprocessed `_ready` items.
+
 ## Quick-Test Cheatsheet
 
 All tests use `uv run python -c "..."`. Copy-paste ready.

@@ -45,21 +45,31 @@ impl futures_core::Stream for AsgiBodyStream {
         }
 
         if let Some(chunk) = self.initial_chunk.take() {
+            tracing::trace!(chunk_len = chunk.len(), "body_stream: initial chunk");
             return Poll::Ready(Some(Ok(chunk)));
         }
 
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some(AsgiEvent::ResponseBody { body, more_body })) => {
+                tracing::trace!(
+                    body_len = body.len(),
+                    more_body,
+                    "body_stream: chunk received"
+                );
                 if !more_body {
                     self.done = true;
                 }
                 Poll::Ready(Some(Ok(body)))
             }
             Poll::Ready(Some(_) | None) => {
+                tracing::trace!("body_stream: channel closed or unexpected event");
                 self.done = true;
                 Poll::Ready(None)
             }
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                tracing::trace!("body_stream: pending (waiting for next chunk)");
+                Poll::Pending
+            }
         }
     }
 }

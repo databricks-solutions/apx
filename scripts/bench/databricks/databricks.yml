@@ -102,6 +102,8 @@ resources:
             value: "1"
           - name: APX_BENCH_TRACE
             value: "1"
+          - name: APX_LOG
+            value: "trace"
 
     bench_bencher:
       name: "bench-bencher"

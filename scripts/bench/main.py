@@ -350,6 +350,9 @@ def _stamp_wheel(wheel_path: Path, new_version: str) -> Path:
 
 
 DOCKER_IMAGE = "apx-cross-bench:latest"
+LOCAL_IMAGE = "apx-local:latest"
+LOCAL_CONTAINER = "apx-local-bench"
+LOCAL_DOCKERFILE = PROJECT_ROOT / "docker" / "Dockerfile.apx-local"
 
 
 def build_apx_wheel(dest_dir: Path) -> Path:
@@ -1185,6 +1188,88 @@ def _generate_report_legacy(run_dir: Path, scenarios_path: Path) -> None:
     console.print(f"\n[bold green]Report written:[/] {report_path}")
 
     _print_report(report_data)
+
+
+# ---------------------------------------------------------------------------
+# Local Docker runner
+# ---------------------------------------------------------------------------
+
+local_app = typer.Typer(help="Run APX benchmark app locally via Docker")
+app.add_typer(local_app, name="local")
+
+
+@local_app.command()
+def start(
+    port: int = typer.Option(8000, "--port", help="Host port to expose"),
+    workers: int = typer.Option(2, "--workers", "-w", help="Number of APX workers"),
+    cpus: float = typer.Option(2.0, "--cpus", help="CPU limit for the container"),
+    memory: str = typer.Option("6g", "--memory", "-m", help="Memory limit (e.g. 512m, 2g, 6g)"),
+    build_image: bool = typer.Option(True, "--build/--no-build", help="Build Docker image before starting"),
+) -> None:
+    """Build the Docker image and start the APX bench app locally."""
+    build_dir = DATABRICKS_DIR / ".build" / "bench-apx"
+    if not build_dir.exists():
+        console.print("[red]Error:[/] Build directory not found. Run 'build' first.")
+        raise typer.Exit(1)
+
+    if build_image:
+        console.print("[bold blue]Building Docker image...[/]")
+        result = subprocess.run(
+            [
+                "docker", "build",
+                "-f", str(LOCAL_DOCKERFILE),
+                "-t", LOCAL_IMAGE,
+                str(build_dir),
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            console.print("[red]Error:[/] Docker build failed")
+            raise typer.Exit(1)
+        console.print(f"[green]Image built:[/] {LOCAL_IMAGE}")
+
+    subprocess.run(
+        ["docker", "rm", "-f", LOCAL_CONTAINER],
+        capture_output=True, check=False,
+    )
+
+    console.print(f"[bold blue]Starting container on port {port} (cpus={cpus}, memory={memory})...[/]")
+    result = subprocess.run(
+        [
+            "docker", "run", "-d",
+            "--platform", "linux/amd64",
+            "--name", LOCAL_CONTAINER,
+            "--cpus", str(cpus),
+            "--memory", memory,
+            "-p", f"{port}:8000",
+            "-e", "APX_BENCH_SERVER=apx",
+            "-e", "APX_BENCH_PROFILE=1",
+            "-e", "APX_BENCH_TRACE=1",
+            LOCAL_IMAGE,
+            "apx", "serve", "app.main",
+            "--host", "0.0.0.0",
+            "--workers", str(workers),
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        console.print("[red]Error:[/] Failed to start container")
+        raise typer.Exit(1)
+
+    console.print(f"[bold green]APX running at http://localhost:{port}[/]")
+
+
+@local_app.command()
+def stop() -> None:
+    """Stop the locally running APX bench app."""
+    result = subprocess.run(
+        ["docker", "rm", "-f", LOCAL_CONTAINER],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode == 0:
+        console.print(f"[green]Container '{LOCAL_CONTAINER}' stopped and removed.[/]")
+    else:
+        console.print("[yellow]No running container found.[/]")
 
 
 if __name__ == "__main__":

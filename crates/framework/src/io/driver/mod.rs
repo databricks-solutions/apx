@@ -117,42 +117,51 @@ pub fn drive_task(
                         stats.yield_none += 1;
                         if stats.steps as usize >= step_budget {
                             stats.budget_exhausted = true;
+                            tracing::trace!(
+                                steps = stats.steps,
+                                "drive: budget exhausted (step limit)"
+                            );
                             return (DriveResult::BudgetExhausted, stats);
                         }
                         if stats.steps % TIME_CHECK_INTERVAL == 0 && start.elapsed() > time_budget {
                             stats.budget_exhausted = true;
                             stats.time_budget_exceeded = true;
+                            tracing::trace!(
+                                steps = stats.steps,
+                                elapsed_us = start.elapsed().as_micros() as u64,
+                                "drive: budget exhausted (time)"
+                            );
                             return (DriveResult::BudgetExhausted, stats);
                         }
                         continue;
                     }
                     AwaitableKind::Future => {
                         stats.yield_future += 1;
+                        tracing::trace!(steps = stats.steps, "drive: suspend on Future");
                         return (DriveResult::WaitingOnFuture(obj), stats);
                     }
                     AwaitableKind::EventWaiter => {
+                        tracing::trace!(steps = stats.steps, "drive: suspend on EventWaiter");
                         return (DriveResult::WaitingOnEvent(obj), stats);
                     }
                     AwaitableKind::Coroutine => {
                         stats.yield_coroutine += 1;
                         task.push_coro(obj);
-                        continue; // drive the sub-coroutine
+                        continue;
                     }
                     AwaitableKind::AsyncioFuture => {
                         stats.yield_asyncio_future += 1;
+                        tracing::trace!(steps = stats.steps, "drive: suspend on AsyncioFuture");
                         return (DriveResult::WaitingOnAsyncioFuture(obj), stats);
                     }
-                    AwaitableKind::CustomAwaitable => {
-                        // Call __await__() to get the iterator, push onto coro stack.
-                        match obj.call_method0(py, c"__await__") {
-                            Ok(iter) => {
-                                stats.yield_coroutine += 1;
-                                task.push_coro(iter);
-                                continue;
-                            }
-                            Err(e) => return (DriveResult::Error(e), stats),
+                    AwaitableKind::CustomAwaitable => match obj.call_method0(py, c"__await__") {
+                        Ok(iter) => {
+                            stats.yield_coroutine += 1;
+                            task.push_coro(iter);
+                            continue;
                         }
-                    }
+                        Err(e) => return (DriveResult::Error(e), stats),
+                    },
                     AwaitableKind::Unknown => {
                         stats.yield_unknown += 1;
                         let type_name = obj
@@ -160,6 +169,7 @@ pub fn drive_task(
                             .get_type()
                             .name()
                             .map_or_else(|_| "<unknown>".to_owned(), |n| n.to_string());
+                        tracing::trace!(steps = stats.steps, %type_name, "drive: unknown awaitable");
                         return (
                             DriveResult::Error(pyo3::exceptions::PyTypeError::new_err(format!(
                                 "unsupported awaitable type yielded: {type_name}"
@@ -171,19 +181,24 @@ pub fn drive_task(
             }
             StepResult::Completed(value) => {
                 if task.pop_coro() {
-                    // Sub-coroutine completed — send its result to parent.
                     task.set_send_value(value);
                     continue;
                 }
-                // Top-level coroutine completed.
+                tracing::trace!(
+                    steps = stats.steps,
+                    yield_none = stats.yield_none,
+                    yield_future = stats.yield_future,
+                    yield_asyncio_future = stats.yield_asyncio_future,
+                    "drive: completed"
+                );
                 return (DriveResult::Completed(value), stats);
             }
             StepResult::Error(e) => {
                 if task.pop_coro() {
-                    // Sub-coroutine raised — throw into parent.
                     task.set_throw_error(e);
                     continue;
                 }
+                tracing::trace!(steps = stats.steps, error = %e, "drive: error");
                 return (DriveResult::Error(e), stats);
             }
         }

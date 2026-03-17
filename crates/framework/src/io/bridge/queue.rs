@@ -75,11 +75,12 @@ impl ReadyQueue {
 
     /// Enqueue a task and wake the drain task.
     pub fn push(&self, _py: Python<'_>, task: ReadyTask) {
-        self.enqueue_count.fetch_add(1, Ordering::Relaxed);
+        let seq = self.enqueue_count.fetch_add(1, Ordering::Relaxed) + 1;
         if let Some(c) = counters::get() {
             c.record_enqueue();
         }
         self.queue.push(task);
+        tracing::trace!(seq, "ready_queue: push + notify");
 
         if let Some(notify) = self.notify_wake.get() {
             notify.notify_one();
