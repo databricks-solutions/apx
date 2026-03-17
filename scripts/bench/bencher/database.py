@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import os
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlmodel import Session, SQLModel, create_engine
 
 logger = logging.getLogger("bencher.database")
@@ -72,9 +72,27 @@ def get_engine():
 
 
 def create_db() -> None:
-    """Create all tables via CREATE TABLE IF NOT EXISTS."""
+    """Create all tables via CREATE TABLE IF NOT EXISTS, then apply migrations."""
     logger.info("Creating tables via SQLModel.metadata.create_all()")
     SQLModel.metadata.create_all(get_engine())
+    _migrate(get_engine())
+
+
+def _migrate(engine) -> None:
+    """Apply incremental schema migrations for columns added after initial deploy."""
+    migrations = [
+        ("profile_results", "rust_trace_jsonl", "VARCHAR"),
+    ]
+    with engine.connect() as conn:
+        for table, column, col_type in migrations:
+            result = conn.execute(text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = :table AND column_name = :column"
+            ), {"table": table, "column": column})
+            if result.fetchone() is None:
+                logger.info("Migrating: ALTER TABLE %s ADD COLUMN %s", table, column)
+                conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {column} {col_type}'))
+        conn.commit()
 
 
 def get_session():
