@@ -52,7 +52,7 @@ impl SchedulerTask {
         coro: Py<PyAny>,
         result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
     ) -> PyResult<Self> {
-        let (fresh_future, _tx) = Future::with_channel();
+        let fresh_future = Future::pending();
         let result_future = Py::new(py, fresh_future)?;
         let ctx = copy_context(py);
 

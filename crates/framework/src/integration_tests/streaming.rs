@@ -480,3 +480,221 @@ async def handler(tag):
         _ => panic!("isolation test failed: r1={r1:?}, r2={r2:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bug reproduction: Future.with_channel() wakers not fired on resolve
+// ---------------------------------------------------------------------------
+
+/// Verifies that `Future::pending()` + `Future::set_result()` fires
+/// done-callbacks immediately, allowing the Rust scheduler to resume the
+/// suspended coroutine. This is the fixed code path for ASGI backpressure.
+///
+/// Previously, `Future::with_channel()` + `resolve_tx.send()` was used,
+/// which only deposited the value in the oneshot channel without firing
+/// wakers — causing all streaming requests to hang (stream_10 = 0 req/s).
+#[test]
+fn rust_future_channel_resolve_fires_wakers() {
+    crate::integration_tests::ensure_python_env();
+    Python::initialize();
+
+    let (mut harness, mut result_rx) = Python::attach(|py| {
+        let harness = StreamingTestHarness::new(py);
+
+        // Create a pending Future (the fixed pattern used by ASGI backpressure).
+        let py_future = Py::new(py, crate::scheduler::primitives::Future::pending()).unwrap();
+        let fut_ref = py_future.clone_ref(py);
+
+        // Resolve the future from a background thread after a short delay.
+        // This mirrors the fixed backpressure tokio task:
+        //   handle.spawn(async move {
+        //       tx.send(event).await;
+        //       Python::attach(|py| { Future::set_result(fut_ref, py, py.None()); });
+        //   });
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            Python::attach(|py| {
+                let _ = crate::scheduler::primitives::Future::set_result(fut_ref, py, py.None());
+            });
+        });
+
+        // Coroutine that awaits the Rust Future.
+        let builtins = py.import(c"builtins").unwrap();
+        builtins
+            .setattr(c"_test_rust_future", py_future.bind(py))
+            .unwrap();
+        py.run(
+            c"
+import builtins
+async def _await_rust_future():
+    await builtins._test_rust_future
+    return 'backpressure_resolved'
+",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let coro = py
+            .eval(c"_await_rust_future()", None, None)
+            .unwrap()
+            .unbind();
+        let rx = harness.drive(py, coro);
+        (harness, rx)
+    });
+
+    // Use a short timeout — before the fix, this would hang forever.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut result = Err("timed out".to_owned());
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+        let done = Python::attach(|py| {
+            harness.ready_queue.drain(
+                py,
+                &harness.ops,
+                &harness.call_soon_threadsafe,
+                &harness.ready_queue,
+                &harness.task_ops,
+            );
+            match result_rx.try_recv() {
+                Ok(Ok(value)) => Some(Ok(value.extract::<String>(py).unwrap_or_else(|_| {
+                    value
+                        .bind(py)
+                        .repr()
+                        .map(|r| r.to_string())
+                        .unwrap_or_default()
+                }))),
+                Ok(Err(err)) => Some(Err(format!("{err:?}"))),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    Some(Err("result channel closed".to_owned()))
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+            }
+        });
+        if let Some(r) = done {
+            result = r;
+            break;
+        }
+    }
+    harness.shutdown();
+
+    match result {
+        Ok(val) => assert_eq!(val, "backpressure_resolved", "unexpected result: {val}"),
+        Err(err) => panic!(
+            "rust_future_channel_resolve_fires_wakers FAILED: {err}\n\
+             Future::set_result() should fire done-callbacks immediately, \
+             resuming the suspended coroutine."
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bug reproduction: _SchedulerTask sentinel conflicts with _enter_task
+// ---------------------------------------------------------------------------
+
+/// Verifies that the immediately-completing sentinel in `_SchedulerTask` does
+/// NOT produce "_enter_task" conflicts. With the old forever-suspended sentinel,
+/// `__step` would call `_enter_task(loop, task)` and yield, leaving the task
+/// "entered" — racing with the Rust driver's own `_enter_task` call.
+///
+/// With the fixed sentinel (empty body), `__step` enters → sentinel returns →
+/// `__step` leaves, all atomically in one synchronous callback. The race window
+/// collapses. Additionally, `self.cancel()` in `__init__` prevents the task
+/// from lingering in `asyncio.all_tasks()`.
+#[test]
+fn scheduler_task_sentinel_conflicts_with_enter_task() {
+    crate::integration_tests::ensure_python_env();
+    Python::initialize();
+
+    let errors = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let errors_clone = Arc::clone(&errors);
+
+    // Phase 1: set up harness, install error capture, create task, enter it.
+    let (mut harness, loop_obj, sched_task) = Python::attach(|py| {
+        let harness = StreamingTestHarness::new(py);
+
+        // Install a custom exception handler that captures errors.
+        py.run(
+            c"
+import builtins
+builtins._sentinel_errors = []
+def _capture_handler(loop, context):
+    msg = context.get('message', '')
+    exc = context.get('exception')
+    if exc:
+        msg = f'{msg}: {exc}'
+    builtins._sentinel_errors.append(msg)
+",
+            None,
+            None,
+        )
+        .unwrap();
+        let handler = py.eval(c"_capture_handler", None, None).unwrap();
+        harness
+            .event_loop
+            .call_method1(py, c"set_exception_handler", (handler,))
+            .unwrap();
+
+        // Create a _SchedulerTask — this schedules call_soon(self.__step).
+        let asyncio = py.import(c"asyncio").unwrap();
+        let loop_obj = asyncio.call_method0(c"get_running_loop").unwrap().unbind();
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("loop", loop_obj.bind(py)).unwrap();
+        let dummy_coro = py.eval(c"(lambda: None)()", None, None).unwrap().unbind();
+        let sched_task = harness
+            .task_ops
+            .scheduler_task_cls
+            .call(py, (dummy_coro,), Some(&kwargs))
+            .unwrap();
+
+        // Enter the task as "current" — just like spawn_and_drive does.
+        harness
+            .task_ops
+            .enter_task
+            .call1(py, (&loop_obj, &sched_task))
+            .unwrap();
+
+        (harness, loop_obj, sched_task)
+    });
+
+    // Phase 2: GIL released — asyncio thread processes the sentinel __step.
+    // With the fixed sentinel (empty body + cancel()), __step enters → sentinel
+    // returns immediately → __step leaves. No conflict with our _enter_task.
+    std::thread::sleep(Duration::from_millis(200));
+
+    // Phase 3: reacquire GIL, leave task, collect errors.
+    Python::attach(|py| {
+        let _ = harness
+            .task_ops
+            .leave_task
+            .call1(py, (&loop_obj, &sched_task));
+    });
+
+    // Give asyncio thread time to process any remaining callbacks.
+    std::thread::sleep(Duration::from_millis(100));
+
+    Python::attach(|py| {
+        let captured: Vec<String> = py
+            .eval(c"builtins._sentinel_errors", None, None)
+            .unwrap()
+            .extract()
+            .unwrap();
+        let mut errs = errors_clone.lock().unwrap();
+        errs.extend(captured);
+    });
+
+    harness.shutdown();
+
+    let errs = errors.lock().unwrap();
+    let enter_errors: Vec<_> = errs
+        .iter()
+        .filter(|e| e.contains("Cannot enter into task"))
+        .collect();
+    assert!(
+        enter_errors.is_empty(),
+        "Expected NO 'Cannot enter into task' errors with the immediately-completing \
+         sentinel, but got {count}:\n{errors:?}\n\
+         The sentinel should enter/leave atomically without yielding.",
+        count = enter_errors.len(),
+        errors = enter_errors,
+    );
+}

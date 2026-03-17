@@ -3,7 +3,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pyo3::prelude::*;
-use tokio::sync::oneshot;
 
 use super::future::Future;
 
@@ -16,8 +15,8 @@ use super::future::Future;
 #[pyclass(module = "apx._core")]
 pub struct Event {
     is_set: AtomicBool,
-    /// Pending waiter senders — resolved when `set()` is called.
-    pending: std::sync::Mutex<Vec<oneshot::Sender<Py<PyAny>>>>,
+    /// Pending waiter futures — resolved via `Future::set_result()` when `set()` is called.
+    pending: std::sync::Mutex<Vec<Py<Future>>>,
 }
 
 impl std::fmt::Debug for Event {
@@ -41,15 +40,17 @@ impl Event {
     /// Set the event flag and resolve all pending waiter futures.
     fn set(&self) {
         self.is_set.store(true, Ordering::Release);
-        let senders = {
+        let waiters = {
             let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut *pending)
         };
-        Python::attach(|py| {
-            for tx in senders {
-                let _ = tx.send(py.None());
-            }
-        });
+        if !waiters.is_empty() {
+            Python::attach(|py| {
+                for fut in waiters {
+                    let _ = Future::set_result(fut, py, py.None());
+                }
+            });
+        }
     }
 
     /// Check whether the event is currently set.
@@ -68,15 +69,14 @@ impl Event {
             let inner = Py::new(py, Future::resolved(py.None()))?;
             return Ok(EventWaiter { inner });
         }
-        let (future, tx) = Future::with_channel();
-        let inner = Py::new(py, future)?;
+        let inner = Py::new(py, Future::pending())?;
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         // Double-check after acquiring lock — event may have been set.
         if self.is_set.load(Ordering::Acquire) {
             drop(pending);
-            let _ = tx.send(py.None());
+            let _ = Future::set_result(inner.clone_ref(py), py, py.None());
         } else {
-            pending.push(tx);
+            pending.push(inner.clone_ref(py));
         }
         Ok(EventWaiter { inner })
     }

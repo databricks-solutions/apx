@@ -319,8 +319,8 @@ impl AsgiReceive {
                 .map(|obj| obj.into_bound(py).into_any())
         } else {
             // Deliver http.disconnect when the response stream ends.
-            let (future, resolve_tx) = crate::scheduler::primitives::Future::with_channel();
-            let py_future = Py::new(py, future)?;
+            let py_future = Py::new(py, crate::scheduler::primitives::Future::pending())?;
+            let fut_ref = py_future.clone_ref(py);
 
             let maybe_disconnect = self
                 .disconnect_rx
@@ -338,7 +338,11 @@ impl AsgiReceive {
                         Python::attach(|py| {
                             let event = PyDict::new(py);
                             event.set_item(&type_key, &disconnect_type).ok();
-                            let _ = resolve_tx.send(event.unbind().into_any());
+                            let _ = crate::scheduler::primitives::Future::set_result(
+                                fut_ref,
+                                py,
+                                event.unbind().into_any(),
+                            );
                         });
                     });
                 })
@@ -588,16 +592,20 @@ impl AsgiSend {
                         Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
                     }
                     Err(mpsc::error::TrySendError::Full(event)) => {
-                        let (future, resolve_tx) =
-                            crate::scheduler::primitives::Future::with_channel();
-                        let py_future = Py::new(py, future)?;
+                        let py_future =
+                            Py::new(py, crate::scheduler::primitives::Future::pending())?;
+                        let fut_ref = py_future.clone_ref(py);
                         let tx = tx.clone();
                         let drop_stream = !more_body;
                         crate::scheduler::with_tokio_handle(|handle| {
                             handle.spawn(async move {
                                 let _ = tx.send(event).await;
                                 Python::attach(|py| {
-                                    let _ = resolve_tx.send(py.None());
+                                    let _ = crate::scheduler::primitives::Future::set_result(
+                                        fut_ref,
+                                        py,
+                                        py.None(),
+                                    );
                                 });
                             });
                         })
@@ -634,14 +642,18 @@ impl AsgiSend {
         match tx.try_send(event) {
             Ok(()) => Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any()),
             Err(mpsc::error::TrySendError::Full(event)) => {
-                let (future, resolve_tx) = crate::scheduler::primitives::Future::with_channel();
-                let py_future = Py::new(py, future)?;
+                let py_future = Py::new(py, crate::scheduler::primitives::Future::pending())?;
+                let fut_ref = py_future.clone_ref(py);
                 let tx = tx.clone();
                 crate::scheduler::with_tokio_handle(|handle| {
                     handle.spawn(async move {
                         let _ = tx.send(event).await;
                         Python::attach(|py| {
-                            let _ = resolve_tx.send(py.None());
+                            let _ = crate::scheduler::primitives::Future::set_result(
+                                fut_ref,
+                                py,
+                                py.None(),
+                            );
                         });
                     });
                 })
