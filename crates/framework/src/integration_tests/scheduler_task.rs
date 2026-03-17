@@ -212,10 +212,14 @@ if 'apx._task' not in sys.modules or not hasattr(sys.modules['apx._task'], '_Sch
             let _ = handle.join();
         }
         Python::attach(|py| {
+            let asyncio = py.import(c"asyncio").unwrap();
             let events = py.import(c"asyncio.events").unwrap();
             let _ = events.call_method1(c"_set_running_loop", (py.None(),));
             let el = self.event_loop.bind(py);
             let _ = el.call_method0(c"close");
+            // Reset the default event loop so subsequent tests don't inherit
+            // a closed uvloop as the global default.
+            let _ = asyncio.call_method1(c"set_event_loop", (py.None(),));
         });
     }
 }

@@ -166,6 +166,13 @@ if 'apx._task' not in sys.modules or not hasattr(sys.modules['apx._task'], '_Sch
                     &self.ready_queue,
                     &self.task_ops,
                 );
+                // Wake the event loop thread. Items added to `_ready`
+                // via `call_soon` (e.g. by `loop.create_task()` during a
+                // drive cycle) don't wake the selector. A no-op
+                // `call_soon_threadsafe` pokes the self-pipe so
+                // `_run_once` returns from `select()` and processes them.
+                let noop = py.eval(c"lambda: None", None, None).unwrap();
+                let _ = self.call_soon_threadsafe.call1(py, (noop,));
                 match result_rx.try_recv() {
                     Ok(Ok(value)) => Some(Ok(value.extract::<String>(py).unwrap_or_else(|_| {
                         value
@@ -330,20 +337,49 @@ async def streaming_app():
 /// Test the anyio task group pattern — this is the exact pattern Starlette
 /// uses internally that triggers `_enter_task`/`_leave_task` conflicts.
 ///
-/// Ignored: anyio's task group requires sniffio detection + a fully running
-/// asyncio event loop with proper backend registration, which the test
-/// harness doesn't set up. The test was effectively dead before PYTHONPATH
-/// was added (anyio wasn't importable), and now hangs on the task group.
+/// Runs in a **subprocess** for full process isolation. anyio's
+/// `create_task_group` interacts with asyncio global module state (sniffio
+/// detection, `_task_states`, `_running_loop`) that gets polluted by other
+/// tests sharing the same embedded Python interpreter. A fresh process
+/// guarantees clean state.
 #[test]
-#[ignore = "anyio task group requires sniffio backend setup not provided by test harness"]
 fn anyio_task_group_with_scheduler_task() {
+    // Re-exec ourselves in a child process with a specific test filter.
+    // The child runs `anyio_task_group_impl` (below) with clean Python state.
+    let exe = std::env::current_exe().unwrap();
+    let output = std::process::Command::new(exe)
+        .args([
+            "integration_tests::streaming::anyio_task_group_impl",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("APX_SUBPROCESS_TEST", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "anyio subprocess test failed (exit={}):\n{stderr}",
+        output.status,
+    );
+}
+
+/// Actual anyio test logic — only executes when invoked as a subprocess.
+#[test]
+fn anyio_task_group_impl() {
+    if std::env::var("APX_SUBPROCESS_TEST").is_err() {
+        // Skip when run as part of the main test suite — the outer
+        // `anyio_task_group_with_scheduler_task` spawns us in a subprocess.
+        return;
+    }
+
     crate::integration_tests::ensure_python_env();
     Python::initialize();
 
-    // Check if anyio is available, skip if not.
     let has_anyio = Python::attach(|py| py.import(c"anyio").is_ok());
     if !has_anyio {
-        eprintln!("anyio not available, skipping anyio_task_group_with_scheduler_task");
+        eprintln!("anyio not available, skipping");
         return;
     }
 
