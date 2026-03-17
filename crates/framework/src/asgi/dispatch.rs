@@ -190,7 +190,7 @@ async fn dispatch_inner(
             coro,
             result_tx,
             &ctx.coroutine_ops,
-            &ctx.call_soon,
+            &ctx.call_soon_threadsafe,
             &ctx.ready_queue,
         );
         Ok(())

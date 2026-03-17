@@ -4,7 +4,8 @@
 //! runs dormant while the Rust scheduler drives coroutines inline on the
 //! tokio thread.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 use pyo3::prelude::*;
 
@@ -116,16 +117,15 @@ pub struct EventLoop {
     coroutine_ops: Arc<dyn CoroutineOps>,
     /// Per-worker ready queue for suspended tasks.
     ready_queue: Arc<ReadyQueue>,
-    /// Cached `loop.call_soon` bound method (local — safe, same thread).
-    call_soon: Py<PyAny>,
+    /// Cached `loop.call_soon_threadsafe` bound method (thread-safe variant,
+    /// needed since the asyncio loop runs on a dedicated thread).
+    call_soon_threadsafe: Py<PyAny>,
     /// Notify for waking the drain task when ready queue has items.
     /// Held to keep the Arc alive for the spawned drain task.
     #[expect(dead_code, reason = "Arc kept alive for spawned drain task")]
     drain_notify: Arc<tokio::sync::Notify>,
-    /// Notify for waking the asyncio loop pump task.
-    /// Held to keep the Arc alive for the spawned pump task.
-    #[expect(dead_code, reason = "Arc kept alive for spawned pump task")]
-    pump_notify: Arc<tokio::sync::Notify>,
+    /// Dedicated OS thread running `loop.run_forever()`.
+    asyncio_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl EventLoop {
@@ -180,10 +180,11 @@ impl EventLoop {
         // 7. Create ready queue.
         let ready_queue = Arc::new(ReadyQueue::new());
 
-        // 8. Cache call_soon.
-        let call_soon = event_loop
-            .getattr(c"call_soon")
-            .map_err(|e| format!("missing call_soon: {e}"))?
+        // 8. Cache call_soon_threadsafe (thread-safe variant, needed since
+        // the asyncio loop now runs on a dedicated thread).
+        let call_soon_threadsafe = event_loop
+            .getattr(c"call_soon_threadsafe")
+            .map_err(|e| format!("missing call_soon_threadsafe: {e}"))?
             .unbind();
 
         // 9. Install tokio handle for scheduler primitives.
@@ -199,7 +200,7 @@ impl EventLoop {
         // 12. Spawn the drain task on the current-thread tokio runtime.
         let rq = Arc::clone(&ready_queue);
         let ct = Arc::clone(&coroutine_ops);
-        let cs = call_soon.clone_ref(py);
+        let cs = call_soon_threadsafe.clone_ref(py);
         let notify = Arc::clone(&drain_notify);
         tokio::spawn(async move {
             loop {
@@ -210,58 +211,31 @@ impl EventLoop {
             }
         });
 
-        // 13. Create pump notify and wire to ready queue.
-        let pump_notify = Arc::new(tokio::sync::Notify::new());
-        ready_queue.set_pump_notify(Arc::clone(&pump_notify));
+        // 13. Spawn dedicated asyncio thread running run_forever().
+        // The loop processes call_soon_threadsafe callbacks naturally when
+        // woken by thread pool completions (uv_async_send / self-pipe).
+        let el_for_thread = event_loop.clone().unbind();
+        let asyncio_thread = std::thread::Builder::new()
+            .name("apx-asyncio".to_owned())
+            .spawn(move || {
+                Python::attach(|py| {
+                    let el = el_for_thread.bind(py);
+                    if let Err(e) = el.call_method0(c"run_forever") {
+                        tracing::error!(error = %e, "asyncio thread: run_forever failed");
+                    }
+                });
+            })
+            .map_err(|e| format!("spawn asyncio thread: {e}"))?;
 
-        // 14. Probe for _run_once (CPython stdlib loops only; uvloop lacks it).
-        let has_run_once = event_loop.hasattr(c"_run_once").unwrap_or(false);
-        tracing::info!(has_run_once, "asyncio pump: _run_once probe");
-
-        // 15. Cache asyncio.events module for pump fallback path.
-        let events_mod = py.import(c"asyncio.events").ok().map(|m| m.unbind());
-
-        // 16. Spawn the asyncio loop pump task.
-        let pump_n = Arc::clone(&pump_notify);
-        let pump_rq = Arc::clone(&ready_queue);
-        let pump_el = event_loop.clone().unbind();
-        tokio::spawn(async move {
-            loop {
-                pump_n.notified().await;
-                while pump_rq.pending_asyncio_count() > 0 {
-                    Python::attach(|py| {
-                        let el = pump_el.bind(py);
-                        if has_run_once {
-                            // CPython stdlib: call _run_once() directly.
-                            let _ = el.call_method0(c"_run_once");
-                        } else if let Some(ref events) = events_mod {
-                            // uvloop fallback: temporarily clear the running loop
-                            // flag so run_until_complete doesn't raise
-                            // "Cannot run the event loop while another loop is running".
-                            let events = events.bind(py);
-                            let _ = events.call_method1(c"_set_running_loop", (py.None(),));
-                            if let Ok(asyncio) = py.import(c"asyncio")
-                                && let Ok(coro) = asyncio.call_method1(c"sleep", (0,))
-                            {
-                                let _ = el.call_method1(c"run_until_complete", (coro,));
-                            }
-                            let _ = events.call_method1(c"_set_running_loop", (el,));
-                        }
-                    });
-                    tokio::task::yield_now().await;
-                }
-            }
-        });
-
-        tracing::info!("inline event loop initialized (no dedicated asyncio thread)");
+        tracing::info!("event loop initialized (dedicated asyncio thread)");
 
         Ok(Self {
             event_loop: event_loop.unbind(),
             coroutine_ops,
             ready_queue,
-            call_soon,
+            call_soon_threadsafe,
             drain_notify,
-            pump_notify,
+            asyncio_thread: Mutex::new(Some(asyncio_thread)),
         })
     }
 
@@ -275,26 +249,45 @@ impl EventLoop {
         &self.ready_queue
     }
 
-    /// Get the cached `call_soon` method.
-    pub fn call_soon(&self) -> &Py<PyAny> {
-        &self.call_soon
+    /// Get the cached `call_soon_threadsafe` method.
+    pub fn call_soon_threadsafe(&self) -> &Py<PyAny> {
+        &self.call_soon_threadsafe
     }
 
-    /// Shut down the inline event loop.
+    /// Shut down the event loop.
     ///
-    /// Cancels pending tasks and closes the loop. Must be called with the
-    /// GIL held on the same thread that initialized the loop.
+    /// 1. Stops the asyncio loop (wakes `run_forever` via `call_soon_threadsafe`).
+    /// 2. Joins the dedicated asyncio thread.
+    /// 3. Cancels pending tasks and closes the loop.
     pub fn shutdown(&self) {
+        // 1. Stop the asyncio loop (wakes run_forever via call_soon_threadsafe).
         Python::attach(|py| {
-            let event_loop = self.event_loop.bind(py);
+            let el = self.event_loop.bind(py);
+            if let Ok(stop) = el.getattr(c"stop") {
+                let _ = el.call_method1(c"call_soon_threadsafe", (stop,));
+            }
+        });
 
-            // Clear the running loop marker.
+        // 2. Join the asyncio thread (run_forever returns after stop).
+        let handle = self
+            .asyncio_thread
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(h) = handle
+            && let Err(e) = h.join()
+        {
+            tracing::warn!("asyncio thread panicked: {e:?}");
+        }
+
+        // 3. Clean up (cancel tasks, close loop).
+        Python::attach(|py| {
+            let el = self.event_loop.bind(py);
             if let Ok(events) = py.import(c"asyncio.events") {
                 let _ = events.call_method1(c"_set_running_loop", (py.None(),));
             }
-
-            cancel_pending_tasks(py, event_loop);
-            let _ = event_loop.call_method0(c"close");
+            cancel_pending_tasks(py, el);
+            let _ = el.call_method0(c"close");
         });
     }
 }

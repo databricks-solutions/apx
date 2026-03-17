@@ -127,7 +127,7 @@ pub async fn run_worker(
         Arc::new(WorkerContext {
             coroutine_ops: Arc::clone(el.coroutine_ops()),
             ready_queue: Arc::clone(el.ready_queue()),
-            call_soon: Python::attach(|py| el.call_soon().clone_ref(py)),
+            call_soon_threadsafe: Python::attach(|py| el.call_soon_threadsafe().clone_ref(py)),
         })
     };
 

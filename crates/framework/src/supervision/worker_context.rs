@@ -20,8 +20,8 @@ pub struct WorkerContext {
     pub coroutine_ops: Arc<dyn CoroutineOps>,
     /// Per-worker ready queue for suspended tasks.
     pub ready_queue: Arc<ReadyQueue>,
-    /// Cached `loop.call_soon` bound method.
-    pub call_soon: Py<pyo3::PyAny>,
+    /// Cached `loop.call_soon_threadsafe` bound method.
+    pub call_soon_threadsafe: Py<pyo3::PyAny>,
 }
 
 impl std::fmt::Debug for WorkerContext {

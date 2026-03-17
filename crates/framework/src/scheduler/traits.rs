@@ -19,8 +19,8 @@ pub trait Reactor: Send + std::fmt::Debug {
     #[expect(dead_code, reason = "extension seam for future reactor swap")]
     fn event_loop_ref(&self) -> &Py<PyAny>;
 
-    /// Access the cached `loop.call_soon` bound method.
-    fn call_soon(&self) -> &Py<PyAny>;
+    /// Access the cached `loop.call_soon_threadsafe` bound method.
+    fn call_soon_threadsafe(&self) -> &Py<PyAny>;
 
     /// Shut down the reactor (cancel pending tasks, close loop).
     fn shutdown(&self);

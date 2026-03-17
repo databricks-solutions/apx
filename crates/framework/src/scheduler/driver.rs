@@ -180,7 +180,6 @@ impl ResumeCallback {
 
         let proxy = self.proxy.take();
         tracing::trace!("resume_callback: enqueue");
-        self.queue.dec_pending_asyncio();
         self.queue.push(py, ReadyTask { task, proxy });
         Ok(())
     }
@@ -218,7 +217,7 @@ pub fn handle_drive_result(
     py: Python<'_>,
     mut task: SchedulerTask,
     drive_result: DriveResult,
-    call_soon: &Py<PyAny>,
+    call_soon_threadsafe: &Py<PyAny>,
     ready_queue: &Arc<ReadyQueue>,
     proxy: Option<Py<TaskProxy>>,
 ) -> PyResult<()> {
@@ -238,14 +237,12 @@ pub fn handle_drive_result(
         DriveResult::WaitingOnFuture(fut) => handle_rust_future(py, task, fut, ready_queue, proxy),
         DriveResult::WaitingOnEvent(_waiter) => {
             let cb = make_resume_callback(py, task, ready_queue, proxy)?;
-            call_soon.call1(py, (cb,))?;
+            call_soon_threadsafe.call1(py, (cb,))?;
             Ok(())
         }
         DriveResult::WaitingOnAsyncioFuture(fut) => {
-            ready_queue.inc_pending_asyncio();
             let cb = make_resume_callback(py, task, ready_queue, proxy)?;
             fut.call_method1(py, c"add_done_callback", (cb,))?;
-            ready_queue.signal_pump();
             Ok(())
         }
         DriveResult::BudgetExhausted => {
@@ -291,7 +288,7 @@ pub fn resume_task(
     py: Python<'_>,
     ready: ReadyTask,
     ops: &Arc<dyn CoroutineOps>,
-    call_soon: &Py<PyAny>,
+    call_soon_threadsafe: &Py<PyAny>,
     ready_queue: &Arc<ReadyQueue>,
 ) -> PyResult<()> {
     let ReadyTask { mut task, proxy } = ready;
@@ -299,7 +296,14 @@ pub fn resume_task(
     let saved = install_proxy(py, proxy.as_ref());
 
     let drive_result = drive_task(py, &mut task, ops.as_ref(), DEFAULT_STEP_BUDGET);
-    let result = handle_drive_result(py, task, drive_result, call_soon, ready_queue, proxy);
+    let result = handle_drive_result(
+        py,
+        task,
+        drive_result,
+        call_soon_threadsafe,
+        ready_queue,
+        proxy,
+    );
 
     restore_proxy(py, saved);
     result
@@ -438,7 +442,7 @@ pub fn spawn_and_drive(
     coro: Py<PyAny>,
     result_tx: oneshot::Sender<Result<Py<PyAny>, AppError>>,
     ops: &Arc<dyn CoroutineOps>,
-    call_soon: &Py<PyAny>,
+    call_soon_threadsafe: &Py<PyAny>,
     ready_queue: &Arc<ReadyQueue>,
 ) {
     let mut task = match SchedulerTask::new(py, coro, result_tx) {
@@ -458,7 +462,14 @@ pub fn spawn_and_drive(
     let proxy = task_ctx.as_ref().map(|(_, p)| p.clone_ref(py));
     // Keep a reference for ownership check in clear_current_task.
     let proxy_for_clear = proxy.as_ref().map(|p| p.clone_ref(py));
-    if let Err(e) = handle_drive_result(py, task, drive_result, call_soon, ready_queue, proxy) {
+    if let Err(e) = handle_drive_result(
+        py,
+        task,
+        drive_result,
+        call_soon_threadsafe,
+        ready_queue,
+        proxy,
+    ) {
         tracing::warn!(error = %e, "scheduler drive result handling failed");
     }
 

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
 use crossbeam_queue::SegQueue;
 use pyo3::prelude::*;
@@ -39,10 +39,6 @@ pub struct ReadyQueue {
     queue: SegQueue<ReadyTask>,
     /// Tokio notify for inline mode — signals drain task when items are pushed.
     notify_wake: OnceLock<Arc<tokio::sync::Notify>>,
-    /// Tokio notify for the asyncio loop pump task.
-    pump_notify: OnceLock<Arc<tokio::sync::Notify>>,
-    /// Number of tasks currently waiting on an asyncio Future.
-    pending_asyncio: AtomicUsize,
     enqueue_count: std::sync::atomic::AtomicU64,
     drain_count: std::sync::atomic::AtomicU64,
 }
@@ -62,8 +58,6 @@ impl ReadyQueue {
         Self {
             queue: SegQueue::new(),
             notify_wake: OnceLock::new(),
-            pump_notify: OnceLock::new(),
-            pending_asyncio: AtomicUsize::new(0),
             enqueue_count: std::sync::atomic::AtomicU64::new(0),
             drain_count: std::sync::atomic::AtomicU64::new(0),
         }
@@ -75,33 +69,6 @@ impl ReadyQueue {
     /// Used by [`InlineEventLoop`] to wake its drain task.
     pub fn set_notify_wake(&self, notify: Arc<tokio::sync::Notify>) {
         let _ = self.notify_wake.set(notify);
-    }
-
-    /// Install a tokio notify for the asyncio loop pump task.
-    pub fn set_pump_notify(&self, notify: Arc<tokio::sync::Notify>) {
-        let _ = self.pump_notify.set(notify);
-    }
-
-    /// Increment the count of tasks waiting on asyncio Futures.
-    pub fn inc_pending_asyncio(&self) {
-        self.pending_asyncio.fetch_add(1, Ordering::Release);
-    }
-
-    /// Decrement the count of tasks waiting on asyncio Futures.
-    pub fn dec_pending_asyncio(&self) {
-        self.pending_asyncio.fetch_sub(1, Ordering::Release);
-    }
-
-    /// Return the number of tasks waiting on asyncio Futures.
-    pub fn pending_asyncio_count(&self) -> usize {
-        self.pending_asyncio.load(Ordering::Acquire)
-    }
-
-    /// Signal the asyncio loop pump task to run a loop iteration.
-    pub fn signal_pump(&self) {
-        if let Some(notify) = self.pump_notify.get() {
-            notify.notify_one();
-        }
     }
 
     /// Enqueue a task and wake the drain task.
@@ -128,13 +95,13 @@ impl ReadyQueue {
         &self,
         py: Python<'_>,
         ops: &Arc<dyn CoroutineOps>,
-        call_soon: &Py<PyAny>,
+        call_soon_threadsafe: &Py<PyAny>,
         ready_queue: &Arc<ReadyQueue>,
     ) -> usize {
         let mut count = 0;
         while let Some(ready) = self.pop() {
             count += 1;
-            if let Err(e) = resume_task(py, ready, ops, call_soon, ready_queue) {
+            if let Err(e) = resume_task(py, ready, ops, call_soon_threadsafe, ready_queue) {
                 tracing::warn!(error = %e, "ready queue drain: resume failed");
             }
         }
