@@ -43,6 +43,10 @@ pub struct ReadyQueue {
     notify_wake: OnceLock<Arc<tokio::sync::Notify>>,
     enqueue_count: std::sync::atomic::AtomicU64,
     drain_count: std::sync::atomic::AtomicU64,
+    /// Set while a tokio thread is inside `drive_task` with `_enter_task` active.
+    /// When true, asyncio-thread drives (inline resume, drain) must defer to
+    /// avoid cross-thread A5 `_enter_task` collisions.
+    tokio_driving: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for ReadyQueue {
@@ -62,6 +66,7 @@ impl ReadyQueue {
             notify_wake: OnceLock::new(),
             enqueue_count: std::sync::atomic::AtomicU64::new(0),
             drain_count: std::sync::atomic::AtomicU64::new(0),
+            tokio_driving: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -87,6 +92,21 @@ impl ReadyQueue {
         }
     }
 
+    /// Signal that a tokio thread is inside `drive_task` with hooks active.
+    pub fn set_tokio_driving(&self, active: bool) {
+        self.tokio_driving.store(active, Ordering::Release);
+    }
+
+    /// Returns true while a tokio thread is driving with `_enter_task` active.
+    pub fn is_tokio_driving(&self) -> bool {
+        self.tokio_driving.load(Ordering::Acquire)
+    }
+
+    /// Returns `true` if the queue has pending tasks.
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
     /// Pop the next ready task, if any.
     pub fn pop(&self) -> Option<ReadyTask> {
         let item = self.queue.pop();
@@ -103,6 +123,10 @@ impl ReadyQueue {
     /// Returns the number of tasks drained. Tasks re-enqueued during
     /// driving (e.g. by `handle_drive_result`) are picked up in the
     /// same drain cycle.
+    ///
+    /// Skips the drain entirely if a tokio thread is currently inside
+    /// `drive_task` with `_enter_task` active — avoids cross-thread A5
+    /// collisions. The tasks stay queued for the next drain cycle.
     pub fn drain(
         &self,
         py: Python<'_>,
@@ -111,6 +135,11 @@ impl ReadyQueue {
         ready_queue: &Arc<ReadyQueue>,
         task_ops: &TaskOps,
     ) -> usize {
+        if self.is_tokio_driving() {
+            tracing::trace!("ready_queue_drain: deferred — tokio thread driving");
+            return 0;
+        }
+
         let mut count = 0;
         while let Some(ready) = self.pop() {
             count += 1;

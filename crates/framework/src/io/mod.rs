@@ -274,14 +274,14 @@ impl PokeOps {
             .unwrap_or(0)
     }
 
-    /// Poke only when `_ready` grew beyond the expected sentinel `__step`.
+    /// Poke only when `_ready` grew during the drive cycle.
     ///
-    /// On CPython: compares `_ready` length before/after the drive. If the
-    /// handler created extra asyncio tasks, `delta > 1` and we poke
-    /// synchronously with the cached noop.
+    /// `n_before` must be captured **after** `create_scheduler_task` so the
+    /// sentinel `__step` (3.11) is already reflected.  Any growth beyond
+    /// that means user code called `loop.create_task()` or similar.
     ///
-    /// On uvloop: signals the coalesced poke task via `Notify` (no GIL,
-    /// no syscall on the hot path).
+    /// On CPython: compares `_ready` length before/after the drive.
+    /// On uvloop: signals the coalesced poke task via `Notify`.
     pub fn maybe_poke(
         &self,
         py: Python<'_>,
@@ -291,10 +291,10 @@ impl PokeOps {
     ) {
         match &self.ready_deque {
             Some(_) => {
-                if n_after > n_before + 1 {
+                if n_after > n_before {
                     tracing::trace!(
                         delta = n_after.saturating_sub(n_before),
-                        "poke: _ready grew beyond sentinel, poking synchronously"
+                        "poke: _ready grew during drive, poking synchronously"
                     );
                     let _ = call_soon_threadsafe.call1(py, (&self.cached_noop,));
                 }

@@ -646,17 +646,14 @@ async def _await_rust_future():
 // Bug reproduction: _SchedulerTask sentinel conflicts with _enter_task
 // ---------------------------------------------------------------------------
 
-/// Verifies that the immediately-completing sentinel in `_SchedulerTask` does
-/// NOT produce "_enter_task" conflicts. With the old forever-suspended sentinel,
-/// `__step` would call `_enter_task(loop, task)` and yield, leaving the task
-/// "entered" — racing with the Rust driver's own `_enter_task` call.
+/// Verifies that `_SchedulerTask` cancels the sentinel `__step` from
+/// `_ready` on CPython 3.11, preventing A5 `_enter_task` collisions.
 ///
-/// With the fixed sentinel (empty body), `__step` enters → sentinel returns →
-/// `__step` leaves, all atomically in one synchronous callback. The race window
-/// collapses. Additionally, `self.cancel()` in `__init__` prevents the task
-/// from lingering in `asyncio.all_tasks()`.
+/// The test creates a task, enters it as current, releases the GIL so the
+/// asyncio thread can process `_ready`, then checks that no "Cannot enter
+/// into task" errors occurred — proving the sentinel `__step` was cancelled.
 #[test]
-fn scheduler_task_sentinel_conflicts_with_enter_task() {
+fn scheduler_task_sentinel_does_not_conflict_with_enter_task() {
     crate::integration_tests::ensure_python_env();
     Python::initialize();
 
@@ -711,11 +708,8 @@ def _capture_handler(loop, context):
         (harness, loop_obj, sched_task)
     });
 
-    // Phase 2: GIL released — asyncio thread processes the sentinel __step.
-    // Since we removed _ready cancellation (step 2), the sentinel __step WILL
-    // try _enter_task while we're holding it, producing a "Cannot enter into
-    // task" error. This is expected — in production, spawn_and_drive
-    // enters/drives/leaves before the asyncio thread processes __step.
+    // Phase 2: GIL released — asyncio thread processes _ready.
+    // With sentinel __step cancelled, no _enter_task collision should occur.
     std::thread::sleep(Duration::from_millis(200));
 
     // Phase 3: reacquire GIL, leave task, collect errors.
@@ -741,16 +735,11 @@ def _capture_handler(loop, context):
 
     harness.shutdown();
 
-    // The sentinel __step conflict is expected when manually holding
-    // _enter_task across a GIL release. The production flow (spawn_and_drive)
-    // avoids this because it enters/drives/leaves synchronously before the
-    // asyncio thread processes the scheduled __step callback.
     let errs = errors.lock().unwrap();
     let has_enter_conflict = errs.iter().any(|e| e.contains("Cannot enter into task"));
     assert!(
-        has_enter_conflict,
-        "Expected 'Cannot enter into task' conflict from sentinel __step \
-         (sentinel no longer cancelled via _ready), but got none.",
+        !has_enter_conflict,
+        "Sentinel __step should be cancelled from _ready, but got A5 collision: {errs:?}",
     );
 }
 

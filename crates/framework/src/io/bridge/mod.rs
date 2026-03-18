@@ -119,7 +119,7 @@ impl ResumeCallback {
 
         let sched_task = self.sched_task.take();
 
-        if self.drive_inline {
+        if self.drive_inline && !self.queue.is_tokio_driving() {
             tracing::trace!("resume_cb: drive inline on asyncio thread");
             return drive_on_loop(
                 py,
@@ -657,6 +657,7 @@ pub fn spawn_and_drive(
 
     let root_coro = task.root_coro(py);
     let state = create_scheduler_task(py, &root_coro, task_ops);
+    let n_ready_before = poke_ops.ready_len(py);
     let hook = state.as_ref().map(|(lo, st)| TaskContextHook {
         enter_task: &task_ops.enter_task,
         leave_task: &task_ops.leave_task,
@@ -673,6 +674,7 @@ pub fn spawn_and_drive(
         .as_ref()
         .map(|c| c.clone_ref(py))
         .and_then(ContextGuard::enter);
+    ready_queue.set_tokio_driving(true);
     let (drive_result, stats) = drive_task(
         py,
         &mut task,
@@ -681,6 +683,7 @@ pub fn spawn_and_drive(
         DEFAULT_TIME_BUDGET,
         step_hook,
     );
+    ready_queue.set_tokio_driving(false);
     drop(ctx_guard);
 
     tracing::trace!(
@@ -722,11 +725,14 @@ pub fn spawn_and_drive(
         Ok(HandleOutcome::Done) => {}
     }
 
-    // Poke the asyncio loop if the handler created tasks via create_task.
-    // With the singleton _SchedulerTask, there's no sentinel __step pollution,
-    // but user code may have added items to _ready via call_soon during the
-    // drive. The poke ensures the reactor processes them.
-    poke_ops.poke_notify.notify_one();
+    let n_ready_after = poke_ops.ready_len(py);
+    poke_ops.maybe_poke(py, n_ready_before, n_ready_after, call_soon_threadsafe);
+
+    // If tasks were deferred while we were driving, ensure the drain task
+    // wakes to process them now that the flag is cleared.
+    if !ready_queue.is_empty() {
+        poke_ops.poke_notify.notify_one();
+    }
 
     Some(stats)
 }

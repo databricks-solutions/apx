@@ -10,10 +10,10 @@ The user's actual coroutine is driven directly by the Rust scheduler via
   No ``__step`` callback ever reaches ``_ready``.
 
 - **Python 3.11:** ``eager_start`` is unavailable, so ``Task.__init__``
-  schedules a ``__step`` callback via ``call_soon``. The sentinel
-  completes on the first event loop iteration (~1µs overhead per request).
-  Safe because the Rust driver's ``_enter_task``/``_leave_task`` bracket
-  finishes before the event loop thread processes ``__step``.
+  schedules a ``__step`` callback via ``call_soon``.  We immediately
+  cancel that ``__step`` handle from ``_ready`` (CPython only) to prevent
+  A5 ``_enter_task`` collisions under concurrent load.  On uvloop the
+  sentinel completes atomically in libuv's callback queue.
 """
 from __future__ import annotations
 
@@ -43,7 +43,11 @@ class _SchedulerTask(asyncio.Task):
         if _PY312:
             init_kwargs["eager_start"] = True
         init_kwargs.update(kwargs)
+        ready = getattr(loop, "_ready", None)
+        n_before = len(ready) if ready is not None else 0
         super().__init__(_sentinel(), **init_kwargs)
+        if not _PY312 and ready is not None and len(ready) > n_before:
+            ready.pop()
         self._real_coro = coro
         self._log_destroy_pending = False
 

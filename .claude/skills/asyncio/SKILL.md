@@ -193,7 +193,7 @@ loop.close()
 "
 ```
 
-### Quick test — verify `_ready` grows (3.11, no eager_start)
+### Quick test — verify `_ready` grows and pop works (3.11, no eager_start)
 
 ```bash
 uv run python -c "
@@ -204,8 +204,9 @@ async def s(): pass
 t = asyncio.Task(s(), loop=loop)
 print(f'_ready grew by {len(loop._ready) - n}')   # 1
 print(f'handle: {loop._ready[-1]}')                # <Handle TaskStepMethWrapper>
-loop._ready[-1].cancel()                            # cancel __step
-print(f'cancelled: {loop._ready[-1].cancelled()}')  # True
+# pop() physically removes; cancel() only sets _cancelled flag
+loop._ready.pop()
+print(f'_ready after pop: {len(loop._ready) - n}')  # 0
 loop.close()
 "
 ```
@@ -248,10 +249,10 @@ The collision window from per-step `_enter_task` (~1us) is astronomically unlike
 
 **Fix: eliminate sentinel `__step` from `_run_once`.**
 
-- **Python 3.11:** Singleton `_SchedulerTask` per worker. Skip `Task.__init__()` entirely (granian-style). No sentinel, no `__step`, zero `_run_once` pollution. Per-step `_enter_task`/`_leave_task` uses the same singleton for all requests.
+- **Python 3.11:** Per-request `_SchedulerTask` with `ready.pop()` immediately after `super().__init__(_sentinel())`. This physically removes the sentinel `__step` handle from `_ready`. `Handle.cancel()` is **insufficient** under high concurrency — cancelled handles set `_cancelled=True` but remain in the deque; under load they still cause collisions (confirmed: `cancel()` reduced 60K collisions to 220, `pop()` reduced to 13). Guard with `getattr(loop, "_ready", None)` for uvloop compatibility. See [`src/apx/_task.py`](src/apx/_task.py).
 - **Python 3.12+:** Per-request `_SchedulerTask` with `eager_start=True`. The sentinel completes inline during `__init__` (via `_swap_current_task`, not `_enter_task`). No `__step` callback reaches `_ready`.
 
-With no sentinel `__step` in `_run_once`, per-step `_enter_task` on the tokio thread has zero collision targets for the initial drive. For continuations (drain task resumptions), driving on the asyncio thread eliminates the A5 risk entirely — `_run_once` processes callbacks sequentially.
+With no sentinel `__step` in `_run_once`, per-step `_enter_task` on the tokio thread has near-zero collision targets for the initial drive. For continuations (drain task resumptions), driving on the asyncio thread eliminates the A5 risk entirely — `_run_once` processes callbacks sequentially.
 
 ### Per-step `_enter_task` granularity
 
@@ -280,7 +281,36 @@ for step in budget:                          _enter_task(loop, task)
 | Tokio thread (drain task re-drive) | **No** | Handler-created asyncio tasks may collide |
 | Any thread (per-drive, not per-step) | **No** | 5ms window → near-certain collision under load |
 
-**Rule:** Initial drives on the tokio thread are safe (singleton eliminates collision targets). All continuations (drain task) must drive on the asyncio thread via `call_soon_threadsafe(DrainOnLoop)` to stay safe.
+**Rule:** Initial drives on the tokio thread are safe (sentinel removal eliminates collision targets). All continuations (drain task) must drive on the asyncio thread via `call_soon_threadsafe(DrainOnLoop)` to stay safe.
+
+### Cross-thread A5 mitigation: `tokio_driving` flag
+
+Even with sentinel `__step` removed, a residual A5 window remains: the tokio thread's per-step `_enter_task` during `spawn_and_drive` can collide with the asyncio thread's per-step `_enter_task` during `drive_on_loop` (inline resume from `ResumeCallback`) or `ReadyQueue::drain`, when the GIL switches during `coro.send()`.
+
+```
+Tokio thread:   _enter_task(A) → coro.send() → eval_breaker → GIL released
+Asyncio thread: acquires GIL → _run_once → ResumeCallback.__call__
+                → drive_on_loop → _enter_task(B) → COLLISION (A still entered)
+```
+
+**Mitigation:** An `AtomicBool` flag (`tokio_driving`) on `ReadyQueue` guards the window:
+
+1. `spawn_and_drive` sets the flag **before** `drive_task`, clears it **after**.
+2. `ResumeCallback::__call__` checks the flag. If set, enqueues to `ReadyQueue` instead of calling `drive_on_loop` — the task is driven later when the flag is cleared.
+3. `ReadyQueue::drain` checks the flag. If set, returns 0 — tasks stay queued.
+4. After clearing the flag, `spawn_and_drive` pokes unconditionally if the queue has deferred tasks (`!ready_queue.is_empty()`).
+
+**Ordering:** `Release` on store, `Acquire` on load. The GIL acquire/release provides the memory barrier between threads.
+
+**TOCTOU residual (~0.1% under heavy load):** The flag check and `_enter_task` are not atomic. A `ResumeCallback` may check the flag (`false`), then the tokio thread sets it and enters `drive_task`, then the asyncio thread proceeds to `_enter_task` — colliding. Under 100 concurrent connections / 10s load test, this produced 26 out of ~30K requests (0.087%). The per-step bracket (~1µs window) makes this near-negligible.
+
+| Mitigation layer | Collisions (50 conn, 5s) | Error rate |
+|---|---|---|
+| None (sentinel `__step` in `_ready`) | ~60,000 | 3.6% |
+| Sentinel `pop()` only | 220 | 2.3% |
+| Sentinel `pop()` + `tokio_driving` flag | 13 | 0.07% |
+
+**Implementation:** See `crates/framework/src/io/bridge/queue.rs` (`tokio_driving` field) and `crates/framework/src/io/bridge/mod.rs` (`spawn_and_drive`, `ResumeCallback::__call__`).
 
 ### `_enter_task` in free-threaded Python (3.13t+)
 
@@ -657,16 +687,19 @@ loop.close()
 
 ### Implication for `Task.__init__`
 
-Cancelling the auto-scheduled `__step` via `loop._ready[-1].cancel()` **does not work on uvloop**. The handle is in libuv's C callback queue, not in `_ready`. Use `getattr(loop, '_ready', None)` to detect this:
+Removing the auto-scheduled `__step` via `loop._ready` **does not work on uvloop** — `_ready` does not exist. The handle is in libuv's C callback queue. Use `getattr(loop, '_ready', None)` to detect this.
+
+**Use `pop()`, not `cancel()`:** `Handle.cancel()` only sets `_cancelled=True`; the handle remains in the deque and still causes A5 collisions under high concurrency (cancelled handles pile up in `_run_once`, each consuming a `popleft()` + `_cancelled` check cycle, and under extreme load the timing still allows collisions). `deque.pop()` physically removes the handle.
 
 ```python
 ready = getattr(loop, "_ready", None)
 n_before = len(ready) if ready is not None else 0
 super().__init__(sentinel, loop=loop)
-if ready is not None and len(ready) > n_before:
-    ready[-1].cancel()
-# On uvloop: __step will run. Use an immediately-completing
-# sentinel so __step enters/completes/leaves atomically.
+if not _PY312 and ready is not None and len(ready) > n_before:
+    ready.pop()  # physically remove — cancel() is insufficient
+# On uvloop: _ready is None, so __step stays in libuv's C queue.
+# Use an immediately-completing sentinel so __step enters/completes/
+# leaves atomically (~1us, no collision window).
 ```
 
 ## sniffio — Async Library Detection
@@ -793,7 +826,7 @@ This occurs when the handler creates asyncio tasks (e.g. `anyio.create_task_grou
 
 - **Inline completion** (`DriveResult::Completed` / `DriveResult::Error`): the coroutine finished synchronously — no pending asyncio work.
 - **Sync handlers run via thread pool** (e.g. FastAPI sync endpoints): the thread pool's own `call_soon_threadsafe` already wakes the event loop when the result future resolves. An extra poke is redundant.
-- **Handlers that only yield Rust Futures without creating asyncio tasks**: With the singleton `_SchedulerTask` (3.11) or `eager_start=True` (3.12+), no sentinel `__step` is added to `_ready`. Nothing new in `_ready` means no poke needed. The drain task's `call_soon_threadsafe(DrainOnLoop)` handles waking the reactor for continuations.
+- **Handlers that only yield Rust Futures without creating asyncio tasks**: With sentinel `__step` popped (3.11) or `eager_start=True` (3.12+), no sentinel pollution in `_ready`. Nothing new in `_ready` means no poke needed. The drain task's `call_soon_threadsafe(DrainOnLoop)` handles waking the reactor for continuations.
 
 ### The performance trap: unconditional poking
 
@@ -810,7 +843,7 @@ Benchmarks showed `resp_wait_p50 = 46ms` for trivial sync handlers like `/api/he
 Track `_ready` growth during the drive cycle:
 
 ```
-CPython:  loop._ready is accessible  → measure len() delta → poke only if delta > 1
+CPython:  loop._ready is accessible  → measure len() delta → poke only if delta > 0
 uvloop:   loop._ready does not exist → coalesced poke via dedicated tokio task + Notify
 Both:     skip poke entirely when DriveResult is Completed or Error
 ```
@@ -818,14 +851,19 @@ Both:     skip poke entirely when DriveResult is Completed or Error
 **CPython path** (definitive check):
 
 ```python
-n_before = len(loop._ready)          # snapshot before drive
+# n_before MUST be captured AFTER create_scheduler_task, so the
+# sentinel __step (3.11, popped) or eager completion (3.12+) is
+# already reflected. Only user-code additions matter.
+n_before = len(loop._ready)          # snapshot after scheduler task creation
 # ... drive cycle ...
 n_after = len(loop._ready)
 if n_after > n_before:               # handler created asyncio tasks
     loop.call_soon_threadsafe(noop)
 ```
 
-With the singleton `_SchedulerTask` (3.11) or `eager_start=True` (3.12+), there is no sentinel `__step` in `_ready`. Any growth means the handler itself called `loop.create_task()` or similar.
+**Critical:** capture `n_before` **after** `create_scheduler_task` returns, not before. On 3.11 with `ready.pop()`, the sentinel `__step` is already removed; on 3.12+ with `eager_start`, the sentinel completed inline. Either way, `n_before` reflects the clean baseline. Any growth during the drive is genuine user code (`loop.create_task()`, `anyio.create_task_group()`, etc.).
+
+**Bug history:** An earlier implementation used `n_after > n_before + 1` (accounting for the sentinel `__step`). This was incorrect — on 3.12+ with `eager_start`, no `__step` is added, so the `+1` offset meant user-created tasks were never poked. The correct threshold is `n_after > n_before` with `n_before` captured after scheduler task creation.
 
 **uvloop path** (no `_ready` introspection):
 
@@ -841,9 +879,9 @@ Since uvloop's callback queue is opaque, signal a dedicated coalesced poke task 
 | Scenario | Unconditional poke | Conditional poke |
 |---|---|---|
 | Inline completion (`yield_once`) | Poke (wasted) | No poke |
-| Sync handler, CPython | Poke (wasted) | No poke (`_ready` delta = 1) |
+| Sync handler, CPython | Poke (wasted) | No poke (`_ready` delta = 0 after sentinel pop) |
 | Sync handler, uvloop | Poke (wasted) | Coalesced async poke (minimal overhead) |
-| TaskGroup handler, CPython | Poke (correct) | Poke (correct, `_ready` delta > 1) |
+| TaskGroup handler, CPython | Poke (correct) | Poke (correct, `_ready` delta > 0) |
 | TaskGroup handler, uvloop | Poke (correct) | Coalesced poke (correct) |
 | Streaming | Poke (per-request overhead) | Conditional (poke only if asyncio tasks created) |
 
@@ -871,7 +909,7 @@ All tests use `uv run python -c "..."`. Copy-paste ready.
 | sniffio needs `current_task` | `_enter_task(loop, t); print(sniffio.current_async_library())` |
 | `_set_running_loop` is thread-local | See test in section above |
 | `_enter_task` conflict | `_enter_task(loop, t1); _enter_task(loop, t2)  # raises` |
-| Handle cancel works | `loop._ready[-1].cancel(); print(h.cancelled())` |
+| Sentinel `__step` pop works | `Task(s(), loop=l); l._ready.pop(); print(len(l._ready))` |
 | GIL switch interval | `sys.getswitchinterval()  # default 0.005` |
 | `eager_start` (3.12+) | `Task(s(), loop=l, eager_start=True); print(len(l._ready))  # 0` |
 | `fut.done()` before suspend | `fut.set_result(42); print(fut.done())  # True` |
@@ -911,3 +949,4 @@ Quick reference for asyncio contracts that external drivers must uphold:
 | I11 | `_set_running_loop` is thread-local | `get_running_loop()` returns None on other threads |
 | I12 | Native runtime context must be explicit on asyncio thread | `RuntimeError: no runtime for backpressure send` — drain callbacks run on the asyncio thread, which has no native runtime context unless explicitly set |
 | I13 | Stream channel capacity must exceed drive budget | Partial streaming response, then hang — producer fills channel within one GIL hold, backpressure resolution deadlocks on GIL |
+| I14 | Asyncio thread must not drive inline while tokio thread drives | 500 errors from `anyio.CapacityLimiter` / `CancelScope` — `current_task()` returns wrong task due to cross-thread A5 collision. Guard with `tokio_driving` `AtomicBool` on `ReadyQueue` |
