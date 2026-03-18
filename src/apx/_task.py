@@ -1,10 +1,26 @@
-"""Scheduler task proxy — a real asyncio.Task subclass for the Rust scheduler."""
+"""Scheduler task proxy — a real asyncio.Task subclass for the Rust scheduler.
+
+Per-request ``_SchedulerTask`` wrapping a no-op ``_sentinel()`` coroutine.
+The user's actual coroutine is driven directly by the Rust scheduler via
+``PyIter_Send`` — the ``_SchedulerTask`` exists only to satisfy
+``asyncio.current_task()`` and ``_enter_task``/``_leave_task``.
+
+- **Python 3.12+:** ``eager_start=True`` completes the sentinel inline
+  during ``__init__`` (via ``_swap_current_task``, not ``_enter_task``).
+  No ``__step`` callback ever reaches ``_ready``.
+
+- **Python 3.11:** ``eager_start`` is unavailable, so ``Task.__init__``
+  schedules a ``__step`` callback via ``call_soon``. The sentinel
+  completes on the first event loop iteration (~1µs overhead per request).
+  Safe because the Rust driver's ``_enter_task``/``_leave_task`` bracket
+  finishes before the event loop thread processes ``__step``.
+"""
 from __future__ import annotations
 
 import asyncio
 import sys
 
-_EAGER_START = sys.version_info >= (3, 12)
+_PY312 = sys.version_info >= (3, 12)
 
 
 async def _sentinel() -> None:
@@ -12,17 +28,7 @@ async def _sentinel() -> None:
 
 
 class _SchedulerTask(asyncio.Task):
-    """Lightweight Task stand-in for asyncio.current_task() during driving.
-
-    The sentinel coroutine completes immediately when __step runs on the
-    reactor thread. No private-API cancellation — works on CPython, uvloop,
-    and any future event loop implementation.
-
-    On Python 3.12+, ``eager_start=True`` causes the sentinel to complete
-    inline during ``__init__`` via ``__eager_start`` (uses ``_swap_current_task``,
-    not ``_enter_task`` — no collision check). No ``__step`` callback ever
-    reaches ``_ready``, eliminating the dominant I1/A5 collision source.
-    """
+    """Per-request proxy: wraps _sentinel(), stores the real coro for display."""
 
     def __init__(
         self,
@@ -33,10 +39,11 @@ class _SchedulerTask(asyncio.Task):
     ) -> None:
         if loop is None:
             loop = asyncio.get_running_loop()
-        if _EAGER_START:
-            super().__init__(_sentinel(), loop=loop, eager_start=True, **kwargs)
-        else:
-            super().__init__(_sentinel(), loop=loop, **kwargs)
+        init_kwargs: dict[str, object] = {"loop": loop}
+        if _PY312:
+            init_kwargs["eager_start"] = True
+        init_kwargs.update(kwargs)
+        super().__init__(_sentinel(), **init_kwargs)
         self._real_coro = coro
         self._log_destroy_pending = False
 

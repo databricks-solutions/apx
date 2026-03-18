@@ -131,13 +131,7 @@ pub async fn run_worker(
                 coroutine_ops: Arc::clone(el.coroutine_ops()),
                 ready_queue: Arc::clone(el.ready_queue()),
                 call_soon_threadsafe: el.call_soon_threadsafe().clone_ref(py),
-                task_ops: crate::io::reactor::TaskOps {
-                    enter_task: to.enter_task.clone_ref(py),
-                    leave_task: to.leave_task.clone_ref(py),
-                    scheduler_task_cls: to.scheduler_task_cls.clone_ref(py),
-                    call_soon: to.call_soon.clone_ref(py),
-                    loop_obj: to.loop_obj.clone_ref(py),
-                },
+                task_ops: to.clone_ref(py),
                 poke_ops: crate::io::PokeOps {
                     cached_noop: po.cached_noop.clone_ref(py),
                     ready_deque: po.ready_deque.as_ref().map(|d| d.clone_ref(py)),

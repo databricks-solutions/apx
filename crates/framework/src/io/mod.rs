@@ -105,40 +105,31 @@ impl EventLoop {
         // 8. Set notify-based wake on the ready queue.
         ready_queue.set_notify_wake(Arc::clone(&drain_notify));
 
-        // 9. Spawn the drain task on the current-thread tokio runtime.
-        let rq = Arc::clone(&ready_queue);
-        let ct = Arc::clone(&coroutine_ops);
-        let cs = reactor.call_soon_threadsafe().clone_ref(py);
+        // 9. Create DrainOnLoop callback — drives ready tasks on the asyncio thread.
+        let drain_on_loop = Py::new(
+            py,
+            DrainOnLoop {
+                queue: Arc::clone(&ready_queue),
+                ops: Arc::clone(&coroutine_ops),
+                call_soon_threadsafe: reactor.call_soon_threadsafe().clone_ref(py),
+                task_ops: reactor.task_ops().clone_ref(py),
+            },
+        )
+        .map_err(|e| format!("DrainOnLoop::new: {e}"))?;
+
+        // 10. Spawn the drain task — wakes on Notify, schedules DrainOnLoop
+        //     on the asyncio thread via call_soon_threadsafe.
+        let drain_cs = reactor.call_soon_threadsafe().clone_ref(py);
+        let drain_cb = drain_on_loop.clone_ref(py);
         let notify = Arc::clone(&drain_notify);
-        let drain_enter = reactor.task_ops().enter_task.clone_ref(py);
-        let drain_leave = reactor.task_ops().leave_task.clone_ref(py);
-        let drain_cls = reactor.task_ops().scheduler_task_cls.clone_ref(py);
-        let drain_call_soon = reactor.task_ops().call_soon.clone_ref(py);
-        let drain_loop_obj = reactor.task_ops().loop_obj.clone_ref(py);
-        let drain_poke = PokeOps {
-            cached_noop: poke_ops.cached_noop.clone_ref(py),
-            ready_deque: poke_ops.ready_deque.as_ref().map(|d| d.clone_ref(py)),
-            poke_notify: Arc::clone(&poke_notify),
-        };
         tokio::spawn(async move {
             loop {
                 notify.notified().await;
-                tracing::trace!("drain_task: woke up");
+                tracing::trace!("drain_task: woke up, scheduling on asyncio thread");
                 Python::attach(|py| {
-                    let drain_ops = TaskOps {
-                        enter_task: drain_enter.clone_ref(py),
-                        leave_task: drain_leave.clone_ref(py),
-                        scheduler_task_cls: drain_cls.clone_ref(py),
-                        call_soon: drain_call_soon.clone_ref(py),
-                        loop_obj: drain_loop_obj.clone_ref(py),
-                    };
-                    let n_before = drain_poke.ready_len(py);
-                    let count = rq.drain(py, &ct, &cs, &rq, &drain_ops);
-                    if count > 0 {
-                        let n_after = drain_poke.ready_len(py);
-                        drain_poke.maybe_poke(py, n_before, n_after, &cs);
+                    if let Err(e) = drain_cs.call1(py, (&drain_cb,)) {
+                        tracing::debug!(error = %e, "drain_task: call_soon_threadsafe failed");
                     }
-                    tracing::trace!(count, "drain_task: drained");
                 });
             }
         });
@@ -206,6 +197,47 @@ impl EventLoop {
 impl std::fmt::Debug for EventLoop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InlineEventLoop").finish_non_exhaustive()
+    }
+}
+
+// ── DrainOnLoop — drives ready tasks on the asyncio thread ───────────────
+
+/// Callback scheduled via `call_soon_threadsafe` that drains the
+/// [`ReadyQueue`] on the asyncio thread.
+///
+/// Running on the asyncio thread makes per-step `_enter_task`/`_leave_task`
+/// safe: `_run_once` processes callbacks sequentially, so there is no
+/// concurrent `_enter_task` from the reactor's own task stepping.
+#[pyclass(module = "apx._core")]
+struct DrainOnLoop {
+    queue: Arc<ReadyQueue>,
+    ops: Arc<dyn CoroutineOps>,
+    call_soon_threadsafe: Py<PyAny>,
+    task_ops: TaskOps,
+}
+
+#[pymethods]
+impl DrainOnLoop {
+    fn __call__(&self, py: Python<'_>) -> PyResult<()> {
+        let mut count: usize = 0;
+        while let Some(ready) = self.queue.pop() {
+            count += 1;
+            if let Err(e) = bridge::resume_task(
+                py,
+                ready,
+                &self.ops,
+                &self.call_soon_threadsafe,
+                &self.queue,
+                &self.task_ops,
+                true,
+            ) {
+                tracing::warn!(error = %e, "drain_on_loop: resume failed");
+            }
+        }
+        if count > 0 {
+            tracing::trace!(count, "drain_on_loop: drained on asyncio thread");
+        }
+        Ok(())
     }
 }
 

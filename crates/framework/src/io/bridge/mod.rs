@@ -336,15 +336,12 @@ pub fn handle_drive_result(
 }
 
 fn handle_completed(
-    py: Python<'_>,
+    _py: Python<'_>,
     task: &mut SchedulerTask,
     value: Py<PyAny>,
-    sched_task: Option<&Py<PyAny>>,
+    _sched_task: Option<&Py<PyAny>>,
 ) -> PyResult<()> {
     tracing::trace!("handle_result: completed");
-    if let Some(st) = sched_task {
-        let _ = st.call_method0(py, c"cancel");
-    }
     if let Some(tx) = task.take_result_tx() {
         let _ = tx.send(Ok(value));
     }
@@ -352,15 +349,12 @@ fn handle_completed(
 }
 
 fn handle_error(
-    py: Python<'_>,
+    _py: Python<'_>,
     task: &mut SchedulerTask,
     err: PyErr,
-    sched_task: Option<&Py<PyAny>>,
+    _sched_task: Option<&Py<PyAny>>,
 ) -> PyResult<()> {
     tracing::trace!(error = %err, "handle_result: error");
-    if let Some(st) = sched_task {
-        let _ = st.call_method0(py, c"cancel");
-    }
     if let Some(tx) = task.take_result_tx() {
         let _ = tx.send(Err(AppError::Internal(err.to_string())));
     }
@@ -661,8 +655,6 @@ pub fn spawn_and_drive(
         c.record_spawn();
     }
 
-    let n_ready_before = poke_ops.ready_len(py);
-
     let root_coro = task.root_coro(py);
     let state = create_scheduler_task(py, &root_coro, task_ops);
     let hook = state.as_ref().map(|(lo, st)| TaskContextHook {
@@ -709,11 +701,6 @@ pub fn spawn_and_drive(
         }
     }
 
-    let needs_poke = !matches!(
-        &drive_result,
-        DriveResult::Completed(_) | DriveResult::Error(_)
-    );
-
     let sched_task = state.as_ref().map(|(_, st)| st.clone_ref(py));
     match handle_drive_result(
         py,
@@ -735,10 +722,11 @@ pub fn spawn_and_drive(
         Ok(HandleOutcome::Done) => {}
     }
 
-    if needs_poke {
-        let n_ready_after = poke_ops.ready_len(py);
-        poke_ops.maybe_poke(py, n_ready_before, n_ready_after, call_soon_threadsafe);
-    }
+    // Poke the asyncio loop if the handler created tasks via create_task.
+    // With the singleton _SchedulerTask, there's no sentinel __step pollution,
+    // but user code may have added items to _ready via call_soon during the
+    // drive. The poke ensures the reactor processes them.
+    poke_ops.poke_notify.notify_one();
 
     Some(stats)
 }

@@ -238,7 +238,7 @@ if 'apx._task' not in sys.modules or not hasattr(sys.modules['apx._task'], '_Sch
 
 impl Drop for TaskTestHarness {
     fn drop(&mut self) {
-        if self.asyncio_thread.is_some() {
+        if self.asyncio_thread.is_some() && !std::thread::panicking() {
             self.shutdown();
         }
     }

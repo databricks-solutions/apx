@@ -242,9 +242,20 @@ Thread B (asyncio, acquires GIL):
     → RuntimeError: task_A is being executed!
 ```
 
-The collision window scales with how long `_enter_task` is held. A full drive loop (128 steps / 5ms budget) gives near-certain collisions under 50+ concurrent connections. A single `coro.send()` for a `yield None` step is ~1us — astronomically unlikely to collide.
+### Dominant collision source: sentinel `__step`
 
-**Fix: per-step granularity.** Wrap `_enter_task`/`_leave_task` around each individual `coro.send()` + result classification, not the entire drive loop. This is the pattern granian uses. The bracket must cover **all code that can execute Python bytecode** (see [PyObject_GetAttr executes Python](#pyobjectgetattr-can-execute-python-bytecode) below), leaving only pure-native budget checks outside.
+The collision window from per-step `_enter_task` (~1us) is astronomically unlikely to hit. The **real** A5 problem is the **sentinel `__step`** callback from `_SchedulerTask.__init__`. Each per-request `_SchedulerTask` calls `Task.__init__(_sentinel(), loop=loop)`, which schedules a `__step` callback. Under 50 connections, ~50 sentinel `__step` callbacks pile up in `_run_once`, each calling `_enter_task` — making collisions near-certain.
+
+**Fix: eliminate sentinel `__step` from `_run_once`.**
+
+- **Python 3.11:** Singleton `_SchedulerTask` per worker. Skip `Task.__init__()` entirely (granian-style). No sentinel, no `__step`, zero `_run_once` pollution. Per-step `_enter_task`/`_leave_task` uses the same singleton for all requests.
+- **Python 3.12+:** Per-request `_SchedulerTask` with `eager_start=True`. The sentinel completes inline during `__init__` (via `_swap_current_task`, not `_enter_task`). No `__step` callback reaches `_ready`.
+
+With no sentinel `__step` in `_run_once`, per-step `_enter_task` on the tokio thread has zero collision targets for the initial drive. For continuations (drain task resumptions), driving on the asyncio thread eliminates the A5 risk entirely — `_run_once` processes callbacks sequentially.
+
+### Per-step `_enter_task` granularity
+
+Wrap `_enter_task`/`_leave_task` around each individual `coro.send()` + result classification, not the entire drive loop. This is the pattern granian uses. The bracket must cover **all code that can execute Python bytecode** (see [PyObject_GetAttr executes Python](#pyobjectgetattr-can-execute-python-bytecode) below), leaving only pure-native budget checks outside.
 
 ```
 Per-step pattern (safe):                     Per-drive pattern (unsafe):
@@ -259,6 +270,17 @@ for step in budget:                          _enter_task(loop, task)
 **Cost:** 2 Python FFI calls per step (~1us). For a 4-step handler: +4us. For a 1-step handler: +1us. <1% of total request time.
 
 **Between steps:** `asyncio.current_task()` returns `None` during budget checks. This is safe because only native (non-Python) code runs during these phases — no GIL switch trigger, no Python library code observing `current_task()`.
+
+### Where `_enter_task` is safe
+
+| Context | Safe? | Why |
+|---|---|---|
+| Asyncio thread (during `_run_once`) | **Yes** | Sequential callbacks, no concurrent `_enter_task` |
+| Tokio thread (initial drive, no sentinel) | **Yes** | No collision targets in `_run_once` after singleton/eager fix |
+| Tokio thread (drain task re-drive) | **No** | Handler-created asyncio tasks may collide |
+| Any thread (per-drive, not per-step) | **No** | 5ms window → near-certain collision under load |
+
+**Rule:** Initial drives on the tokio thread are safe (singleton eliminates collision targets). All continuations (drain task) must drive on the asyncio thread via `call_soon_threadsafe(DrainOnLoop)` to stay safe.
 
 ### `_enter_task` in free-threaded Python (3.13t+)
 
@@ -651,7 +673,7 @@ This occurs when the handler creates asyncio tasks (e.g. `anyio.create_task_grou
 
 - **Inline completion** (`DriveResult::Completed` / `DriveResult::Error`): the coroutine finished synchronously — no pending asyncio work.
 - **Sync handlers run via thread pool** (e.g. FastAPI sync endpoints): the thread pool's own `call_soon_threadsafe` already wakes the event loop when the result future resolves. An extra poke is redundant.
-- **Handlers that only yield Rust Futures without creating asyncio tasks**: `_SchedulerTask.__init__` adds exactly 1 item to `_ready` (the sentinel `__step`). This is harmless — the sentinel completes immediately and doesn't require a poke for forward progress.
+- **Handlers that only yield Rust Futures without creating asyncio tasks**: With the singleton `_SchedulerTask` (3.11) or `eager_start=True` (3.12+), no sentinel `__step` is added to `_ready`. Nothing new in `_ready` means no poke needed. The drain task's `call_soon_threadsafe(DrainOnLoop)` handles waking the reactor for continuations.
 
 ### The performance trap: unconditional poking
 
@@ -676,14 +698,14 @@ Both:     skip poke entirely when DriveResult is Completed or Error
 **CPython path** (definitive check):
 
 ```python
-n_before = len(loop._ready)          # snapshot before create_scheduler_task
+n_before = len(loop._ready)          # snapshot before drive
 # ... drive cycle ...
 n_after = len(loop._ready)
-if n_after > n_before + 1:           # +1 accounts for _SchedulerTask sentinel __step
-    loop.call_soon_threadsafe(noop)   # handler created extra asyncio tasks
+if n_after > n_before:               # handler created asyncio tasks
+    loop.call_soon_threadsafe(noop)
 ```
 
-The `+ 1` threshold accounts for `_SchedulerTask.__init__` which always adds exactly one `__step` to `_ready`. A delta > 1 means the handler itself called `loop.create_task()` or similar.
+With the singleton `_SchedulerTask` (3.11) or `eager_start=True` (3.12+), there is no sentinel `__step` in `_ready`. Any growth means the handler itself called `loop.create_task()` or similar.
 
 **uvloop path** (no `_ready` introspection):
 

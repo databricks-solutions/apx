@@ -162,10 +162,13 @@ impl std::fmt::Debug for TaskOps {
 
 // ── Scheduler task registration ──────────────────────────────────────────
 
-/// Create a `_SchedulerTask` and register it as the current asyncio task.
+/// Create a per-request `_SchedulerTask` for `asyncio.current_task()` registration.
 ///
-/// Accepts the root coroutine directly so this function has no dependency on
-/// `SchedulerTask`. The caller extracts the coro before calling.
+/// The task wraps `_sentinel()` internally (not the user coroutine), so
+/// asyncio's `__step` never interferes with the Rust driver.
+///
+/// - **Python 3.12+:** `eager_start=True` completes the sentinel inline.
+/// - **Python 3.11:** sentinel `__step` runs on the next event loop iteration.
 pub fn create_scheduler_task(
     py: Python<'_>,
     coro: &Py<PyAny>,
@@ -177,7 +180,7 @@ pub fn create_scheduler_task(
         .scheduler_task_cls
         .call(py, (coro,), Some(&kwargs))
         .ok()?;
-    tracing::trace!("create_scheduler_task: created");
+    tracing::trace!("create_scheduler_task: created per-request");
     Some((ops.loop_obj.clone_ref(py), sched_task))
 }
 
@@ -290,6 +293,8 @@ impl Reactor {
             .getattr(c"_SchedulerTask")
             .map_err(|e| format!("missing _SchedulerTask: {e}"))?
             .unbind();
+
+        tracing::info!("scheduler task strategy: per-request (_sentinel wrapping)");
 
         // Cache call_soon_threadsafe (thread-safe variant, needed since
         // the asyncio loop now runs on a dedicated thread).

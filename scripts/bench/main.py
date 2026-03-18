@@ -1198,11 +1198,20 @@ local_app = typer.Typer(help="Run APX benchmark app locally via Docker")
 app.add_typer(local_app, name="local")
 
 
+def _default_cpuset(cpus: float) -> str:
+    """Pin to ceil(cpus) cores starting from 0 so nproc inside the container
+    matches the actual CPU budget and thread pools size correctly."""
+    import math
+    n = max(1, math.ceil(cpus))
+    return ",".join(str(i) for i in range(n))
+
+
 @local_app.command()
 def start(
     port: int = typer.Option(8000, "--port", help="Host port to expose"),
     workers: int = typer.Option(2, "--workers", "-w", help="Number of APX workers"),
     cpus: float = typer.Option(2.0, "--cpus", help="CPU limit for the container"),
+    cpuset_cpus: str = typer.Option("", "--cpuset-cpus", help="Pin to specific cores (e.g. '0,1'). Auto-derived from --cpus if empty."),
     memory: str = typer.Option("6g", "--memory", "-m", help="Memory limit (e.g. 512m, 2g, 6g)"),
     build_image: bool = typer.Option(True, "--build/--no-build", help="Build Docker image before starting"),
 ) -> None:
@@ -1233,14 +1242,20 @@ def start(
         capture_output=True, check=False,
     )
 
-    console.print(f"[bold blue]Starting container on port {port} (cpus={cpus}, memory={memory})...[/]")
+    pinned = cpuset_cpus or _default_cpuset(cpus)
+    console.print(
+        f"[bold blue]Starting container on port {port} "
+        f"(cpus={cpus}, cpuset-cpus={pinned}, memory={memory}, swap=disabled)...[/]"
+    )
     result = subprocess.run(
         [
             "docker", "run", "-d",
             "--platform", "linux/amd64",
             "--name", LOCAL_CONTAINER,
             "--cpus", str(cpus),
+            "--cpuset-cpus", pinned,
             "--memory", memory,
+            "--memory-swap", memory,
             "-p", f"{port}:8000",
             "-e", "APX_BENCH_SERVER=apx",
             "-e", "APX_BENCH_PROFILE=1",
