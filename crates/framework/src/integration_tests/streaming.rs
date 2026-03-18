@@ -99,10 +99,13 @@ if 'apx._task' not in sys.modules or not hasattr(sys.modules['apx._task'], '_Sch
         let leave_task = tasks_mod.getattr(c"_leave_task").unwrap().unbind();
         let task_mod = py.import(c"apx._task").unwrap();
         let scheduler_task_cls = task_mod.getattr(c"_SchedulerTask").unwrap().unbind();
+        let call_soon = event_loop.getattr(c"call_soon").unwrap().unbind();
         let task_ops = TaskOps {
             enter_task,
             leave_task,
             scheduler_task_cls,
+            call_soon,
+            loop_obj: event_loop.clone().unbind(),
         };
 
         let poke_ops = crate::io::PokeOps {
@@ -969,10 +972,13 @@ if 'apx._task' not in sys.modules or not hasattr(sys.modules['apx._task'], '_Sch
         let leave_task = tasks_mod.getattr(c"_leave_task").unwrap().unbind();
         let task_mod = py.import(c"apx._task").unwrap();
         let scheduler_task_cls = task_mod.getattr(c"_SchedulerTask").unwrap().unbind();
+        let call_soon = event_loop.getattr(c"call_soon").unwrap().unbind();
         let task_ops = TaskOps {
             enter_task,
             leave_task,
             scheduler_task_cls,
+            call_soon,
+            loop_obj: event_loop.clone().unbind(),
         };
 
         // Error capture.

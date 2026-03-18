@@ -114,8 +114,15 @@ impl ReadyQueue {
         let mut count = 0;
         while let Some(ready) = self.pop() {
             count += 1;
-            if let Err(e) = resume_task(py, ready, ops, call_soon_threadsafe, ready_queue, task_ops)
-            {
+            if let Err(e) = resume_task(
+                py,
+                ready,
+                ops,
+                call_soon_threadsafe,
+                ready_queue,
+                task_ops,
+                false,
+            ) {
                 tracing::warn!(error = %e, "ready queue drain: resume failed");
             }
         }

@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+
+_EAGER_START = sys.version_info >= (3, 12)
 
 
 async def _sentinel() -> None:
@@ -14,6 +17,11 @@ class _SchedulerTask(asyncio.Task):
     The sentinel coroutine completes immediately when __step runs on the
     reactor thread. No private-API cancellation — works on CPython, uvloop,
     and any future event loop implementation.
+
+    On Python 3.12+, ``eager_start=True`` causes the sentinel to complete
+    inline during ``__init__`` via ``__eager_start`` (uses ``_swap_current_task``,
+    not ``_enter_task`` — no collision check). No ``__step`` callback ever
+    reaches ``_ready``, eliminating the dominant I1/A5 collision source.
     """
 
     def __init__(
@@ -25,9 +33,10 @@ class _SchedulerTask(asyncio.Task):
     ) -> None:
         if loop is None:
             loop = asyncio.get_running_loop()
-        # Sentinel completes atomically: enter → send(None) → StopIteration → leave.
-        # No need to cancel __step — the cost is ~1μs and it's harmless.
-        super().__init__(_sentinel(), loop=loop, **kwargs)
+        if _EAGER_START:
+            super().__init__(_sentinel(), loop=loop, eager_start=True, **kwargs)
+        else:
+            super().__init__(_sentinel(), loop=loop, **kwargs)
         self._real_coro = coro
         self._log_destroy_pending = False
 

@@ -73,6 +73,32 @@ pub const DEFAULT_TIME_BUDGET: Duration = Duration::from_millis(5);
 const TIME_CHECK_INTERVAL: u32 = 16;
 
 // ---------------------------------------------------------------------------
+// StepHook — per-step callback for task context bracketing
+// ---------------------------------------------------------------------------
+
+/// Hook for per-step callbacks around Python bytecode execution.
+///
+/// Injected by the bridge to bracket each step+classify cycle with
+/// `_enter_task`/`_leave_task`. The driver has no dependency on reactor
+/// or asyncio types — this trait is the abstraction boundary.
+pub trait StepHook {
+    /// Called before each step+classify cycle (enters task context).
+    fn before_step(&self, py: Python<'_>);
+    /// Called after each step+classify cycle (leaves task context).
+    fn after_step(&self, py: Python<'_>);
+}
+
+/// Outcome of a single step+classify cycle within the drive loop.
+enum StepOutcome {
+    /// Internal continuation — coroutine push/pop, no budget check.
+    Continue,
+    /// Yielded None — budget check required before re-entering.
+    YieldedNone,
+    /// Terminal — exit drive loop with this result.
+    Done(DriveResult),
+}
+
+// ---------------------------------------------------------------------------
 // drive_task — the main drive loop
 // ---------------------------------------------------------------------------
 
@@ -81,6 +107,10 @@ const TIME_CHECK_INTERVAL: u32 = 16;
 /// This is the hot loop. When the yielded object is `None` (most common case),
 /// it immediately loops without suspending. Sub-coroutines are pushed onto the
 /// task's coroutine stack and driven inline.
+///
+/// When `step_hook` is provided, each step+classify cycle is bracketed by
+/// `before_step`/`after_step` calls. Budget checks (pure Rust) run outside
+/// the bracket — no `_enter_task` held during GIL-safe code.
 #[expect(
     clippy::needless_continue,
     reason = "explicit `continue` documents intent to re-enter the drive loop"
@@ -91,118 +121,159 @@ pub fn drive_task(
     ops: &dyn CoroutineOps,
     step_budget: usize,
     time_budget: Duration,
+    step_hook: Option<&dyn StepHook>,
 ) -> (DriveResult, DriveStats) {
     let start = Instant::now();
     let mut stats = DriveStats::default();
     loop {
-        // Clone the coro ref so the immutable borrow on `task` is released
-        // before we mutate it (take_throw_error / take_send_value).
-        let coro = match task.active_coro() {
-            Ok(c) => c.clone_ref(py),
-            Err(e) => return (DriveResult::Error(e), stats),
-        };
-        let step_result = if let Some(err) = task.take_throw_error() {
-            ops.step_throw(py, &coro, err)
-        } else {
-            let send_val = task.take_send_value();
-            ops.step(py, &coro, send_val.as_ref())
-        };
-
-        match step_result {
-            StepResult::Yielded(obj) => {
-                let kind = ops.classify(py, &obj);
-                match kind {
-                    AwaitableKind::YieldNone => {
-                        stats.steps += 1;
-                        stats.yield_none += 1;
-                        if stats.steps as usize >= step_budget {
-                            stats.budget_exhausted = true;
-                            tracing::trace!(
-                                steps = stats.steps,
-                                "drive: budget exhausted (step limit)"
-                            );
-                            return (DriveResult::BudgetExhausted, stats);
-                        }
-                        if stats.steps % TIME_CHECK_INTERVAL == 0 && start.elapsed() > time_budget {
-                            stats.budget_exhausted = true;
-                            stats.time_budget_exceeded = true;
-                            tracing::trace!(
-                                steps = stats.steps,
-                                elapsed_us = start.elapsed().as_micros() as u64,
-                                "drive: budget exhausted (time)"
-                            );
-                            return (DriveResult::BudgetExhausted, stats);
-                        }
-                        continue;
-                    }
-                    AwaitableKind::Future => {
-                        stats.yield_future += 1;
-                        tracing::trace!(steps = stats.steps, "drive: suspend on Future");
-                        return (DriveResult::WaitingOnFuture(obj), stats);
-                    }
-                    AwaitableKind::EventWaiter => {
-                        tracing::trace!(steps = stats.steps, "drive: suspend on EventWaiter");
-                        return (DriveResult::WaitingOnEvent(obj), stats);
-                    }
-                    AwaitableKind::Coroutine => {
-                        stats.yield_coroutine += 1;
-                        task.push_coro(obj);
-                        continue;
-                    }
-                    AwaitableKind::AsyncioFuture => {
-                        stats.yield_asyncio_future += 1;
-                        tracing::trace!(steps = stats.steps, "drive: suspend on AsyncioFuture");
-                        return (DriveResult::WaitingOnAsyncioFuture(obj), stats);
-                    }
-                    AwaitableKind::CustomAwaitable => match obj.call_method0(py, c"__await__") {
-                        Ok(iter) => {
-                            stats.yield_coroutine += 1;
-                            task.push_coro(iter);
-                            continue;
-                        }
-                        Err(e) => return (DriveResult::Error(e), stats),
-                    },
-                    AwaitableKind::Unknown => {
-                        stats.yield_unknown += 1;
-                        let type_name = obj
-                            .bind(py)
-                            .get_type()
-                            .name()
-                            .map_or_else(|_| "<unknown>".to_owned(), |n| n.to_string());
-                        tracing::trace!(steps = stats.steps, %type_name, "drive: unknown awaitable");
-                        return (
-                            DriveResult::Error(pyo3::exceptions::PyTypeError::new_err(format!(
-                                "unsupported awaitable type yielded: {type_name}"
-                            ))),
-                            stats,
-                        );
-                    }
+        if let Some(hook) = step_hook {
+            hook.before_step(py);
+        }
+        let outcome = step_and_classify(py, task, ops, &mut stats);
+        if let Some(hook) = step_hook {
+            hook.after_step(py);
+        }
+        match outcome {
+            StepOutcome::Continue => continue,
+            StepOutcome::YieldedNone => {
+                if budget_exceeded(&start, &mut stats, step_budget, time_budget) {
+                    return (DriveResult::BudgetExhausted, stats);
                 }
             }
-            StepResult::Completed(value) => {
-                if task.pop_coro() {
-                    task.set_send_value(value);
-                    continue;
-                }
-                tracing::trace!(
-                    steps = stats.steps,
-                    yield_none = stats.yield_none,
-                    yield_future = stats.yield_future,
-                    yield_asyncio_future = stats.yield_asyncio_future,
-                    "drive: completed"
-                );
-                return (DriveResult::Completed(value), stats);
-            }
-            StepResult::Error(e) => {
-                if task.pop_coro() {
-                    task.set_throw_error(e);
-                    continue;
-                }
-                tracing::trace!(steps = stats.steps, error = %e, "drive: error");
-                return (DriveResult::Error(e), stats);
-            }
+            StepOutcome::Done(result) => return (result, stats),
         }
     }
+}
+
+/// Execute one step + classify cycle. All Python bytecode runs here.
+fn step_and_classify(
+    py: Python<'_>,
+    task: &mut SchedulerTask,
+    ops: &dyn CoroutineOps,
+    stats: &mut DriveStats,
+) -> StepOutcome {
+    let coro = match task.active_coro() {
+        Ok(c) => c.clone_ref(py),
+        Err(e) => return StepOutcome::Done(DriveResult::Error(e)),
+    };
+    let step_result = if let Some(err) = task.take_throw_error() {
+        ops.step_throw(py, &coro, err)
+    } else {
+        let send_val = task.take_send_value();
+        ops.step(py, &coro, send_val.as_ref())
+    };
+    match step_result {
+        StepResult::Yielded(obj) => classify_yielded(py, ops, task, stats, obj),
+        StepResult::Completed(value) => route_completed(task, stats, value),
+        StepResult::Error(e) => route_error(task, stats, e),
+    }
+}
+
+/// Classify a yielded value and determine the step outcome.
+fn classify_yielded(
+    py: Python<'_>,
+    ops: &dyn CoroutineOps,
+    task: &mut SchedulerTask,
+    stats: &mut DriveStats,
+    obj: Py<PyAny>,
+) -> StepOutcome {
+    match ops.classify(py, &obj) {
+        AwaitableKind::YieldNone => {
+            stats.steps += 1;
+            stats.yield_none += 1;
+            StepOutcome::YieldedNone
+        }
+        AwaitableKind::Future => {
+            stats.yield_future += 1;
+            tracing::trace!(steps = stats.steps, "drive: suspend on Future");
+            StepOutcome::Done(DriveResult::WaitingOnFuture(obj))
+        }
+        AwaitableKind::EventWaiter => {
+            tracing::trace!(steps = stats.steps, "drive: suspend on EventWaiter");
+            StepOutcome::Done(DriveResult::WaitingOnEvent(obj))
+        }
+        AwaitableKind::Coroutine => {
+            stats.yield_coroutine += 1;
+            task.push_coro(obj);
+            StepOutcome::Continue
+        }
+        AwaitableKind::AsyncioFuture => {
+            stats.yield_asyncio_future += 1;
+            tracing::trace!(steps = stats.steps, "drive: suspend on AsyncioFuture");
+            StepOutcome::Done(DriveResult::WaitingOnAsyncioFuture(obj))
+        }
+        AwaitableKind::CustomAwaitable => match obj.call_method0(py, c"__await__") {
+            Ok(iter) => {
+                stats.yield_coroutine += 1;
+                task.push_coro(iter);
+                StepOutcome::Continue
+            }
+            Err(e) => StepOutcome::Done(DriveResult::Error(e)),
+        },
+        AwaitableKind::Unknown => {
+            stats.yield_unknown += 1;
+            let type_name = obj
+                .bind(py)
+                .get_type()
+                .name()
+                .map_or_else(|_| "<unknown>".to_owned(), |n| n.to_string());
+            tracing::trace!(steps = stats.steps, %type_name, "drive: unknown awaitable");
+            StepOutcome::Done(DriveResult::Error(pyo3::exceptions::PyTypeError::new_err(
+                format!("unsupported awaitable type yielded: {type_name}"),
+            )))
+        }
+    }
+}
+
+/// Route a completed step — pop coro stack or signal completion.
+fn route_completed(task: &mut SchedulerTask, stats: &DriveStats, value: Py<PyAny>) -> StepOutcome {
+    if task.pop_coro() {
+        task.set_send_value(value);
+        return StepOutcome::Continue;
+    }
+    tracing::trace!(
+        steps = stats.steps,
+        yield_none = stats.yield_none,
+        yield_future = stats.yield_future,
+        yield_asyncio_future = stats.yield_asyncio_future,
+        "drive: completed"
+    );
+    StepOutcome::Done(DriveResult::Completed(value))
+}
+
+/// Route an error step — pop coro stack or signal error.
+fn route_error(task: &mut SchedulerTask, stats: &DriveStats, err: PyErr) -> StepOutcome {
+    if task.pop_coro() {
+        task.set_throw_error(err);
+        return StepOutcome::Continue;
+    }
+    tracing::trace!(steps = stats.steps, error = %err, "drive: error");
+    StepOutcome::Done(DriveResult::Error(err))
+}
+
+/// Check if the step or time budget is exhausted.
+fn budget_exceeded(
+    start: &Instant,
+    stats: &mut DriveStats,
+    step_budget: usize,
+    time_budget: Duration,
+) -> bool {
+    if stats.steps as usize >= step_budget {
+        stats.budget_exhausted = true;
+        tracing::trace!(steps = stats.steps, "drive: budget exhausted (step limit)");
+        return true;
+    }
+    if stats.steps.is_multiple_of(TIME_CHECK_INTERVAL) && start.elapsed() > time_budget {
+        stats.budget_exhausted = true;
+        stats.time_budget_exceeded = true;
+        tracing::trace!(
+            steps = stats.steps,
+            elapsed_us = start.elapsed().as_micros() as u64,
+            "drive: budget exhausted (time)"
+        );
+        return true;
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +336,7 @@ pub fn first_drive(
         ops.as_ref(),
         DEFAULT_STEP_BUDGET,
         DEFAULT_TIME_BUDGET,
+        None,
     );
     drop(ctx_guard);
     route_first_drive(py, task, drive_result)
@@ -545,6 +617,7 @@ async def exhaust_budget():
                 ops.as_ref(),
                 DEFAULT_STEP_BUDGET,
                 DEFAULT_TIME_BUDGET,
+                None,
             );
             assert!(matches!(result, DriveResult::BudgetExhausted));
             assert!(stats.budget_exhausted);
@@ -581,6 +654,7 @@ async def wait_for_future():
                 ops.as_ref(),
                 DEFAULT_STEP_BUDGET,
                 DEFAULT_TIME_BUDGET,
+                None,
             );
             assert!(matches!(result, DriveResult::WaitingOnAsyncioFuture(_)));
             let _ = events.call_method1(c"_set_running_loop", (py.None(),));
@@ -617,6 +691,7 @@ async def wait_rust():
                 ops.as_ref(),
                 DEFAULT_STEP_BUDGET,
                 DEFAULT_TIME_BUDGET,
+                None,
             );
             assert!(
                 matches!(result, DriveResult::WaitingOnFuture(_)),
@@ -675,7 +750,8 @@ async def slow():
             let (tx, _rx) = oneshot::channel();
             let mut task = SchedulerTask::new(py, coro, tx).unwrap();
             let time_budget = Duration::from_millis(1);
-            let (result, stats) = drive_task(py, &mut task, ops.as_ref(), 10_000, time_budget);
+            let (result, stats) =
+                drive_task(py, &mut task, ops.as_ref(), 10_000, time_budget, None);
             assert!(matches!(result, DriveResult::BudgetExhausted));
             assert!(stats.time_budget_exceeded);
             // Should hit time budget well before the 10k step budget.
@@ -691,7 +767,8 @@ async def slow():
             let coro = py.eval(c"fast()", None, None).unwrap().unbind();
             let (tx, _rx) = oneshot::channel();
             let mut task = SchedulerTask::new(py, coro, tx).unwrap();
-            let (result, stats) = drive_task(py, &mut task, ops.as_ref(), 128, DEFAULT_TIME_BUDGET);
+            let (result, stats) =
+                drive_task(py, &mut task, ops.as_ref(), 128, DEFAULT_TIME_BUDGET, None);
             assert!(matches!(result, DriveResult::Completed(_)));
             assert!(!stats.time_budget_exceeded);
             assert!(!stats.budget_exhausted);

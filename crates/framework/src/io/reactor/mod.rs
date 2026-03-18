@@ -137,6 +137,21 @@ pub struct TaskOps {
     pub enter_task: Py<PyAny>,
     pub leave_task: Py<PyAny>,
     pub scheduler_task_cls: Py<PyAny>,
+    pub call_soon: Py<PyAny>,
+    pub loop_obj: Py<PyAny>,
+}
+
+impl TaskOps {
+    /// Clone all cached Python references under the current GIL.
+    pub fn clone_ref(&self, py: Python<'_>) -> Self {
+        Self {
+            enter_task: self.enter_task.clone_ref(py),
+            leave_task: self.leave_task.clone_ref(py),
+            scheduler_task_cls: self.scheduler_task_cls.clone_ref(py),
+            call_soon: self.call_soon.clone_ref(py),
+            loop_obj: self.loop_obj.clone_ref(py),
+        }
+    }
 }
 
 impl std::fmt::Debug for TaskOps {
@@ -156,49 +171,14 @@ pub fn create_scheduler_task(
     coro: &Py<PyAny>,
     ops: &TaskOps,
 ) -> Option<(Py<PyAny>, Py<PyAny>)> {
-    let asyncio = py.import(c"asyncio").ok()?;
-    let loop_obj = asyncio.call_method0(c"get_running_loop").ok()?;
     let kwargs = pyo3::types::PyDict::new(py);
-    kwargs.set_item("loop", &loop_obj).ok()?;
+    kwargs.set_item("loop", &ops.loop_obj).ok()?;
     let sched_task = ops
         .scheduler_task_cls
         .call(py, (coro,), Some(&kwargs))
         .ok()?;
-    ops.enter_task.call1(py, (&loop_obj, &sched_task)).ok()?;
-    tracing::trace!("create_scheduler_task: created + entered");
-    Some((loop_obj.unbind(), sched_task))
-}
-
-/// Re-enter an existing `_SchedulerTask` as the current asyncio task.
-pub fn enter_scheduler_task(
-    py: Python<'_>,
-    sched_task: Option<&Py<PyAny>>,
-    ops: &TaskOps,
-) -> Option<(Py<PyAny>, Py<PyAny>)> {
-    let sched_task = sched_task?;
-    let asyncio = py.import(c"asyncio").ok()?;
-    let loop_obj = asyncio.call_method0(c"get_running_loop").ok()?;
-    match ops.enter_task.call1(py, (&loop_obj, sched_task)) {
-        Ok(_) => {
-            tracing::trace!("enter_scheduler_task: ok");
-        }
-        Err(ref e) => {
-            tracing::warn!(error = %e, "enter_scheduler_task: _enter_task FAILED");
-            return None;
-        }
-    }
-    Some((loop_obj.unbind(), sched_task.clone_ref(py)))
-}
-
-/// Unregister the current `_SchedulerTask` via `_leave_task`.
-pub fn leave_scheduler_task(py: Python<'_>, state: Option<(Py<PyAny>, Py<PyAny>)>, ops: &TaskOps) {
-    let Some((loop_obj, sched_task)) = state else {
-        return;
-    };
-    match ops.leave_task.call1(py, (&loop_obj, &sched_task)) {
-        Ok(_) => tracing::trace!("leave_scheduler_task: ok"),
-        Err(e) => tracing::warn!(error = %e, "leave_scheduler_task: _leave_task FAILED"),
-    }
+    tracing::trace!("create_scheduler_task: created");
+    Some((ops.loop_obj.clone_ref(py), sched_task))
 }
 
 // ── Reactor ──────────────────────────────────────────────────────────────
@@ -310,11 +290,6 @@ impl Reactor {
             .getattr(c"_SchedulerTask")
             .map_err(|e| format!("missing _SchedulerTask: {e}"))?
             .unbind();
-        let task_ops = TaskOps {
-            enter_task,
-            leave_task,
-            scheduler_task_cls,
-        };
 
         // Cache call_soon_threadsafe (thread-safe variant, needed since
         // the asyncio loop now runs on a dedicated thread).
@@ -322,6 +297,17 @@ impl Reactor {
             .getattr(c"call_soon_threadsafe")
             .map_err(|e| format!("missing call_soon_threadsafe: {e}"))?
             .unbind();
+        let call_soon = event_loop
+            .getattr(c"call_soon")
+            .map_err(|e| format!("missing call_soon: {e}"))?
+            .unbind();
+        let task_ops = TaskOps {
+            enter_task,
+            leave_task,
+            scheduler_task_cls,
+            call_soon,
+            loop_obj: event_loop.clone().unbind(),
+        };
 
         // 13. Spawn dedicated asyncio thread running run_forever().
         // The loop processes call_soon_threadsafe callbacks naturally when

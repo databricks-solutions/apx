@@ -135,6 +135,8 @@ pub async fn run_worker(
                     enter_task: to.enter_task.clone_ref(py),
                     leave_task: to.leave_task.clone_ref(py),
                     scheduler_task_cls: to.scheduler_task_cls.clone_ref(py),
+                    call_soon: to.call_soon.clone_ref(py),
+                    loop_obj: to.loop_obj.clone_ref(py),
                 },
                 poke_ops: crate::io::PokeOps {
                     cached_noop: po.cached_noop.clone_ref(py),

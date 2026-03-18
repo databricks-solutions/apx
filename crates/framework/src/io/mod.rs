@@ -113,6 +113,8 @@ impl EventLoop {
         let drain_enter = reactor.task_ops().enter_task.clone_ref(py);
         let drain_leave = reactor.task_ops().leave_task.clone_ref(py);
         let drain_cls = reactor.task_ops().scheduler_task_cls.clone_ref(py);
+        let drain_call_soon = reactor.task_ops().call_soon.clone_ref(py);
+        let drain_loop_obj = reactor.task_ops().loop_obj.clone_ref(py);
         let drain_poke = PokeOps {
             cached_noop: poke_ops.cached_noop.clone_ref(py),
             ready_deque: poke_ops.ready_deque.as_ref().map(|d| d.clone_ref(py)),
@@ -127,6 +129,8 @@ impl EventLoop {
                         enter_task: drain_enter.clone_ref(py),
                         leave_task: drain_leave.clone_ref(py),
                         scheduler_task_cls: drain_cls.clone_ref(py),
+                        call_soon: drain_call_soon.clone_ref(py),
+                        loop_obj: drain_loop_obj.clone_ref(py),
                     };
                     let n_before = drain_poke.ready_len(py);
                     let count = rq.drain(py, &ct, &cs, &rq, &drain_ops);
@@ -223,11 +227,13 @@ pub struct PokeOps {
 
 impl PokeOps {
     /// Read `len(loop._ready)` when available (CPython); 0 on uvloop.
+    ///
+    /// Uses `PyObject_Length` FFI directly via `Bound::len()` for ~1-2us
+    /// savings over `__len__` method dispatch.
     pub fn ready_len(&self, py: Python<'_>) -> usize {
         self.ready_deque
             .as_ref()
-            .and_then(|d| d.call_method0(py, c"__len__").ok())
-            .and_then(|v| v.extract::<usize>(py).ok())
+            .and_then(|d| d.bind(py).len().ok())
             .unwrap_or(0)
     }
 
