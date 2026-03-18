@@ -23,6 +23,7 @@ dev = [
     "beautifulsoup4>=4.14.3",
     "databricks-sdk>=0.100.0",
     "diskcache>=5.6.3",
+    "docker>=7.1.0",
     "docutils>=0.22.4",
     "fastapi>=0.119.0",
     "httpx>=0.28.1",
@@ -58,8 +59,14 @@ dev = [
     "types-tqdm>=4.67.0.20250809",
     "types-ujson>=5.10.0.20250822",
     "uvloop>=0.22.1",
+    "websockets>=16.0",
 ]
 
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: integration tests requiring Docker",
+]
 
 [tool.mypy]
 exclude = ['venv', '.venv', 'src/apx/templates', 'node_modules', 'experiments']
