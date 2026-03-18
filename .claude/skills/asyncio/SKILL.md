@@ -1,11 +1,11 @@
 ---
 name: asyncio
-description: Use when debugging event loop hangs, task scheduling issues, call_soon vs call_soon_threadsafe confusion, Future callback timing, _enter_task/_leave_task conflicts, uvloop compatibility problems, or sniffio/anyio backend detection failures. Also use when verifying asyncio assumptions via quick Python one-liners.
+description: Use when debugging event loop hangs, task scheduling issues, call_soon vs call_soon_threadsafe confusion, Future callback timing, _enter_task/_leave_task conflicts, GIL contention patterns, per-step vs per-drive task context, uvloop compatibility problems, or sniffio/anyio backend detection failures. Also use when verifying asyncio assumptions via quick Python one-liners.
 ---
 
 # asyncio Internals Reference
 
-CPython 3.11 reference. Behavior may differ on 3.12+ (eager task factory) and 3.13+ (free-threaded).
+CPython 3.11 baseline. Version-specific differences noted for 3.12+ (eager task factory, `eager_start`) and 3.13+ (free-threaded, per-thread task state).
 
 ## The Event Loop Cycle: `_run_once`
 
@@ -119,6 +119,18 @@ loop.close()
 
 **Implication:** If you call `set_result()` on one thread and expect the callback to fire before the event loop runs `_run_once`, it won't. The callback sits in `_ready`.
 
+### Synchronous vs deferred callback dispatch
+
+Custom Future implementations (e.g., PyO3 `#[pyclass]` with `set_result`) can fire callbacks **synchronously** — under a lock, take all registered callbacks, release lock, fire them. This is faster (0 cycles to wake vs 1-2 for asyncio.Future) but callbacks must be GIL-safe and must not schedule asyncio work that depends on running before the next drive cycle.
+
+| | `asyncio.Future` | Custom synchronous Future |
+|---|---|---|
+| Callback dispatch | Deferred via `call_soon` | Immediate (under GIL) |
+| Cycles to wake | 1–2 `_run_once` cycles | 0 (instant) |
+| Thread requirement | Reactor must run `_run_once` | Any (GIL sufficient) |
+| Selector wake needed | Only if reactor in `select()` | No |
+| Callback safety | Runs during `_run_once` (normal Python) | Must be GIL-safe, must not re-enter driver |
+
 ## `Task.__init__` and `__step` Scheduling
 
 `_asyncio.Task.__init__` (C extension) calls `loop.call_soon(self.__step)`.
@@ -140,7 +152,48 @@ Task.__init__(coro, loop=loop)
               _leave_task(loop, self)
 ```
 
-### Quick test — verify `_ready` grows
+### Python 3.12+: `eager_start=True` and `_swap_current_task`
+
+On 3.12+, `Task.__init__` accepts `eager_start=True`:
+
+```python
+# CPython 3.12, tasks.py:
+if eager_start and self._loop.is_running():
+    self.__eager_start()       # runs coro inline, NO call_soon
+else:
+    self._loop.call_soon(self.__step, ...)  # queues __step to _ready
+```
+
+`__eager_start` uses `_swap_current_task` (NOT `_enter_task`). `_swap_current_task` does **not** check for conflicts — it atomically swaps the current task and returns the previous one. This means eager start can run while another task is "entered" without raising `RuntimeError`.
+
+For instantly-completing coroutines (like a sentinel `async def sentinel(): pass`), `eager_start=True` runs the entire lifecycle during `__init__`. **No `__step` callback ever reaches `_ready`.** This eliminates the dominant source of I1 collisions when using Task subclasses as sentinels.
+
+### 3.12+ C struct: `Task.__init__` MUST be called
+
+The C `TaskObj` struct in `_asynciomodule.c` has fields (`task_context`, `task_name`, `task_num_cancels_requested`) that are only initialized by `Task.__init__`. Skipping `__init__` (e.g., a singleton task reused across requests) leaves these fields uninitialized → **segfault** on any access. Granian confirmed this: their singleton `_CBSchedulerTask` falls back to `TaskImpl.asyncio` on 3.12+ for exactly this reason.
+
+**Rule:** Always call `super().__init__()` on Task subclasses. Use `eager_start=True` with an instantly-completing coroutine if you want to minimize `_ready` pollution.
+
+### Quick test — `eager_start` on 3.12+
+
+```bash
+uv run python -c "
+import sys, asyncio
+if sys.version_info < (3, 12):
+    print('eager_start requires 3.12+'); exit()
+loop = asyncio.new_event_loop()
+asyncio.events._set_running_loop(loop)
+n = len(loop._ready)
+async def s(): pass
+t = asyncio.Task(s(), loop=loop, eager_start=True)
+print(f'_ready grew by {len(loop._ready) - n}')  # 0 — completed inline!
+print(f'task done: {t.done()}')                    # True
+asyncio.events._set_running_loop(None)
+loop.close()
+"
+```
+
+### Quick test — verify `_ready` grows (3.11, no eager_start)
 
 ```bash
 uv run python -c "
@@ -173,6 +226,44 @@ asyncio.tasks._leave_task(loop, task)   # sets current_task() → None
 RuntimeError: Cannot enter into task <B> while another task <A> is being executed
 ```
 
+### Anti-pattern A5: `_enter_task` held across GIL release
+
+Holding `_enter_task` while executing Python bytecode that may release the GIL is the root cause of cross-thread I1 collisions. CPython's GIL switch interval (default 5ms, `sys.getswitchinterval()`) triggers `eval_breaker` checks periodically during `PyIter_Send`. When the GIL switches to the asyncio thread, any `__step` callback in `_run_once` will call `_enter_task` and collide with the task still "entered" on the other thread.
+
+```
+Thread A (GIL, running coro.send()):
+  _enter_task(loop, task_A)          ← current = task_A
+  PyIter_Send → Python bytecode...
+    → eval_breaker fires → GIL released
+
+Thread B (asyncio, acquires GIL):
+  _run_once → _ready.popleft():
+    task_B.__step → _enter_task(loop, task_B)
+    → RuntimeError: task_A is being executed!
+```
+
+The collision window scales with how long `_enter_task` is held. A full drive loop (128 steps / 5ms budget) gives near-certain collisions under 50+ concurrent connections. A single `coro.send()` for a `yield None` step is ~1us — astronomically unlikely to collide.
+
+**Fix: per-step granularity.** Wrap `_enter_task`/`_leave_task` around each individual `coro.send()` + result classification, not the entire drive loop. This is the pattern granian uses. The bracket must cover **all code that can execute Python bytecode** (see [PyObject_GetAttr executes Python](#pyobjectgetattr-can-execute-python-bytecode) below), leaving only pure-native budget checks outside.
+
+```
+Per-step pattern (safe):                     Per-drive pattern (unsafe):
+for step in budget:                          _enter_task(loop, task)
+    _enter_task(loop, task)                  for step in budget:
+    result = coro.send(None)  # ~1us             result = coro.send(None)
+    classify(result)          # may run Python    classify(result)
+    _leave_task(loop, task)                  _leave_task(loop, task)
+    # budget check — pure native, safe       # A5 window: entire loop (~5ms)
+```
+
+**Cost:** 2 Python FFI calls per step (~1us). For a 4-step handler: +4us. For a 1-step handler: +1us. <1% of total request time.
+
+**Between steps:** `asyncio.current_task()` returns `None` during budget checks. This is safe because only native (non-Python) code runs during these phases — no GIL switch trigger, no Python library code observing `current_task()`.
+
+### `_enter_task` in free-threaded Python (3.13t+)
+
+In free-threaded builds, `_enter_task`/`_leave_task` share `state->current_tasks` with borrowed references — they are **not thread-safe** ([CPython #120974](https://github.com/python/cpython/issues/120974)). Python 3.14 fixes this with per-thread circular doubly-linked lists. Until 3.14+, the GIL must be held continuously from `_enter_task` through `_leave_task`.
+
 ### Quick test
 
 ```bash
@@ -195,6 +286,28 @@ loop.close()
 "
 ```
 
+### Quick test — GIL switch interval
+
+```bash
+uv run python -c "
+import sys
+print(f'default switch interval: {sys.getswitchinterval()}s')
+sys.setswitchinterval(0.001)  # 1ms — useful for stress-testing A5
+print(f'stress interval: {sys.getswitchinterval()}s')
+"
+```
+
+## `contextvars` and Drive Cycles
+
+`asyncio.Task.__step` calls `Context.run(self.__step_run_and_handle_result)` on every step, entering the task's context. External drivers must do the same: `PyContext_Enter(ctx)` before each drive, `PyContext_Exit(ctx)` after.
+
+A task that suspends and resumes must re-enter its context because another task (or the reactor) may have entered a different context in between. Copy the context once at task creation (`contextvars.copy_context()`), then re-enter it on each drive.
+
+**Pitfalls:**
+- `contextvars.copy_context()` has measurable overhead even for empty contexts ([CPython #136157](https://github.com/python/cpython/issues/136157)) — copy once, re-enter many
+- CPython 3.13/3.14 has a bug where context variables can leak across tasks during I/O pauses ([CPython #140947](https://github.com/python/cpython/issues/140947)) — explicit enter/exit per drive protects against this
+- In free-threaded builds, `ContextVar` itself is not fully thread-safe ([CPython #121546](https://github.com/python/cpython/issues/121546))
+
 ## `_set_running_loop` — Thread-Local State
 
 `asyncio.events._set_running_loop(loop)` sets a **thread-local** variable. `asyncio.get_running_loop()` reads it.
@@ -204,6 +317,8 @@ loop.close()
 - `loop.run_forever()` calls `_set_running_loop(self)` at start, `_set_running_loop(None)` at end
 - Each OS thread has its own running loop
 - `set_event_loop()` is **process-global** (different from `_set_running_loop`)
+
+**Multi-thread implication:** If a driver thread calls `_set_running_loop(loop)` at init, code executing during drive cycles on that thread sees the loop. The asyncio thread also sees it (via `run_forever()`). But a third thread (e.g., a thread pool executor callback) calling `get_running_loop()` gets `RuntimeError: no running event loop`. Libraries that call `get_running_loop()` from thread pool callbacks will break.
 
 ### Quick test
 
@@ -222,6 +337,157 @@ asyncio.events._set_running_loop(None)
 loop.close()
 "
 ```
+
+## `PyObject_GetAttr` Can Execute Python Bytecode
+
+Attribute access via `PyObject_GetAttr` (used by `getattr()`, `.` notation, and PyO3's `getattr`) can trigger `__getattribute__` or `__getattr__` descriptors on custom types. This means C/Rust code classifying yielded values by probing attributes is **executing Python bytecode** and is subject to GIL switch.
+
+Concrete cases in coroutine drivers:
+- Probing `_asyncio_future_blocking` to detect `asyncio.Future` — safe on builtin Future (C slot), but custom Future subclasses may have Python-level descriptors
+- Probing `__await__` to detect custom awaitables — always a Python attribute lookup
+- Calling `.call_method0("__await__")` — full Python method dispatch
+
+**Rule:** Any code path that calls `PyObject_GetAttr` on user-controlled types must be inside the `_enter_task` bracket. Leaving it outside creates an A5 window identical to `PyIter_Send`.
+
+## Done Callback Thread Identity
+
+Where a done callback fires determines what scheduling APIs are safe to call from it:
+
+| Future type | Callback fires on | `call_soon` safe? | `call_soon_threadsafe` safe? |
+|---|---|---|---|
+| `asyncio.Future` | asyncio thread (during `_run_once`) | **Yes** (on-loop) | Yes (redundant wake) |
+| Custom Future (synchronous dispatch) | Whatever thread called `set_result()` | **Only if on asyncio thread** | Yes |
+
+**Key insight:** `asyncio.Future` done callbacks fire during `_run_once` step 3 (processing `_ready`). Code in these callbacks is on the asyncio thread. `call_soon` (not threadsafe) is correct and ~200ns cheaper than `call_soon_threadsafe` (avoids self-pipe write).
+
+This distinction matters when resuming suspended coroutines from done callbacks. If the callback is known to fire on the asyncio thread (e.g., from `asyncio.Future`), the coroutine can be driven inline — serialized with `_run_once`, no cross-thread scheduling needed. If the callback may fire on another thread, cross-thread mechanisms (`call_soon_threadsafe`, `ReadyQueue`) are required.
+
+### Inline driving from done callbacks
+
+When a done callback fires on the asyncio thread, driving the coroutine directly avoids the cost of enqueuing → waking a drain task → GIL acquisition:
+
+```
+Standard path (cross-thread):                Inline path (on asyncio thread):
+done_callback fires                           done_callback fires (during _run_once)
+  → push to ReadyQueue                          → extract future result
+  → Notify drain task                            → drive_task() directly
+  → drain acquires GIL                           → (budget exhausted? call_soon to yield)
+  → resume_task()
+```
+
+When driving inline and the step budget is exhausted, use `call_soon(resume_callback)` to yield back to the event loop. This keeps the task on the asyncio thread but lets `_run_once` process I/O events and other callbacks between drive batches. Do NOT use `call_soon_threadsafe` here — it would write to the self-pipe unnecessarily since you're already on the loop thread.
+
+## GIL Relay Bottleneck
+
+When multiple threads each need the GIL sequentially for a single request, GIL contention serializes them into a latency queue:
+
+```
+Request lifecycle requiring 3 GIL hops:
+  Thread 1 (tokio): GIL → drive coro → release
+  Thread 2 (asyncio): GIL → process _run_once → fire callback → release
+  Thread 3 (drain): GIL → resume_task → drive continuation → release
+
+Under N concurrent connections:
+  Each hop waits for up to N-1 other threads' GIL holds
+  Latency ≈ N × hops × avg_hold_time
+```
+
+With 50 concurrent connections and 3 hops per request, `resp_wait_p50` can reach ~17ms even for trivial handlers — 96% of total latency is GIL relay, not actual computation.
+
+**Fix:** Minimize cross-thread GIL hops. Drive continuations on the same thread that receives the done callback (inline driving). This reduces 3 hops to 2 for asyncio Future resumptions, eliminating the drain task from the critical path.
+
+| Pattern | GIL hops/request | Threads involved |
+|---|---|---|
+| Standard (drain task) | 3 | tokio + asyncio + drain |
+| Inline driving (asyncio Future) | 2 | tokio + asyncio |
+| Inline completion (no suspension) | 1 | tokio only |
+
+## `asyncio.Future.done()` Fast Path
+
+When handling a yielded `asyncio.Future`, check `fut.done()` before attaching a done callback. If the future is already resolved, extract the result and continue driving — no suspension, no callback overhead, no GIL relay.
+
+```python
+# Pseudo-code for the optimization:
+if fut.done():
+    result = fut.result()       # immediate
+    task.set_send_value(result)
+    continue                    # re-enter drive loop
+else:
+    fut.add_done_callback(resume_cb)  # standard suspend path
+```
+
+This is especially relevant on Python 3.12+ with eager task factory, where futures from eagerly-started tasks may already be resolved by the time the parent coroutine inspects them.
+
+**Avoid recursion.** If the re-drive after an already-done future yields another already-done future, naive recursive calls grow the stack. Use a loop instead: `handle_drive_result` returns a "continue driving" signal, and the caller loops back into `drive_task`.
+
+## Cancellation Semantics
+
+### Edge-triggered, not level-triggered
+
+`task.cancel()` delivers `CancelledError` **once** at the next `await` point. If the coroutine catches it and `await`s again, cancellation is forgotten:
+
+```python
+async def sticky():
+    try:
+        await asyncio.sleep(10)
+    except asyncio.CancelledError:
+        print("caught cancel")
+        await asyncio.sleep(1)     # succeeds! cancellation is gone
+        print("continued normally")
+```
+
+This differs from Trio's level-triggered model. `Task.uncancel()` (3.11+) and `Task.cancelling()` manage nesting depth but add their own edge cases.
+
+### Known cancellation bugs
+
+- `asyncio.wait_for()` can raise `CancelledError` instead of `TimeoutError` in race conditions ([CPython #114496](https://github.com/python/cpython/issues/114496))
+- `asyncio.timeout(0)` catches and processes a prior **unrelated** cancellation of the enclosing task ([CPython #134471](https://github.com/python/cpython/issues/134471))
+- `Task.uncancel()` interacts poorly with `TaskGroup`: the internal cancellation counter can become corrupted ([CPython #95289](https://github.com/python/cpython/issues/95289))
+- `TaskGroup._abort()` runs once — tasks created after abort are never cancelled ([CPython #94398](https://github.com/python/cpython/issues/94398))
+- Bare `except:` silently swallows `CancelledError` since Python 3.8 changed it from `Exception` to `BaseException` ([CPython #76709](https://github.com/python/cpython/issues/76709))
+
+## Tasks Are Weakly Referenced
+
+`asyncio._all_tasks` is a `WeakSet`. Tasks without external strong references can be garbage-collected while pending:
+
+```python
+async def fire_and_forget():
+    await asyncio.sleep(10)
+
+asyncio.create_task(fire_and_forget())  # no strong ref saved!
+# GC may collect → "Task was destroyed but it is pending!" warning
+```
+
+**Implication for drivers:** Between suspension and resumption, the only strong reference to a driven task may be inside the done callback object. If the future holding the callback is GC'd without resolution, the task silently disappears. Ensure at least one strong reference exists for the entire driven lifecycle (e.g., inside the callback struct or a dedicated pending-tasks collection).
+
+### Quick test
+
+```bash
+uv run python -c "
+import asyncio, gc
+loop = asyncio.new_event_loop()
+async def never_finishes(): await asyncio.sleep(999)
+t = asyncio.Task(never_finishes(), loop=loop)
+print(f'all_tasks: {len(asyncio.all_tasks(loop))}')   # 1
+del t
+gc.collect()
+print(f'all_tasks after del: {len(asyncio.all_tasks(loop))}')  # 0 — collected!
+loop.close()
+"
+```
+
+## Signal Handling Requires Main Thread
+
+`loop.add_signal_handler()` only works on the main thread. When the asyncio loop runs on a non-main thread (common in Rust-embedded architectures):
+
+```
+asyncio thread: loop.add_signal_handler(SIGINT, handler)
+  → RuntimeError: "set_wakeup_fd only works in main thread"
+```
+
+Python's `signal` module requires handlers to run on the main thread. `Ctrl-C` sets a CPython flag checked only when control returns to the Python interpreter — not during Rust execution ([PyO3 #3795](https://github.com/PyO3/pyo3/discussions/3795)). uvloop also has hangs after `KeyboardInterrupt` ([uvloop #335](https://github.com/MagicStack/uvloop/issues/335)).
+
+**Workaround:** Handle signals in the native runtime (e.g., `tokio::signal::ctrl_c()`) and broadcast shutdown to the asyncio loop via `call_soon_threadsafe`. Libraries like Uvicorn that call `add_signal_handler` will fail on non-main-thread loops.
 
 ## uvloop Differences
 
@@ -464,6 +730,11 @@ All tests use `uv run python -c "..."`. Copy-paste ready.
 | `_set_running_loop` is thread-local | See test in section above |
 | `_enter_task` conflict | `_enter_task(loop, t1); _enter_task(loop, t2)  # raises` |
 | Handle cancel works | `loop._ready[-1].cancel(); print(h.cancelled())` |
+| GIL switch interval | `sys.getswitchinterval()  # default 0.005` |
+| `eager_start` (3.12+) | `Task(s(), loop=l, eager_start=True); print(len(l._ready))  # 0` |
+| `fut.done()` before suspend | `fut.set_result(42); print(fut.done())  # True` |
+| Tasks are weakly held | `del task; gc.collect(); print(len(all_tasks(loop)))  # 0` |
+| Cancel is edge-triggered | catch CancelledError, then await again — succeeds |
 
 ## Key Source Files
 
@@ -471,8 +742,26 @@ All tests use `uv run python -c "..."`. Copy-paste ready.
 |---|---|
 | [`Lib/asyncio/base_events.py`](https://github.com/python/cpython/blob/v3.11.14/Lib/asyncio/base_events.py) | `_run_once`, `call_soon`, `call_soon_threadsafe`, `create_task` |
 | [`Lib/asyncio/futures.py`](https://github.com/python/cpython/blob/v3.11.14/Lib/asyncio/futures.py) | Pure-Python Future (C version in `_asyncio`) |
-| [`Lib/asyncio/tasks.py`](https://github.com/python/cpython/blob/v3.11.14/Lib/asyncio/tasks.py) | `_enter_task`, `_leave_task`, `current_task` |
-| [`Modules/_asynciomodule.c`](https://github.com/python/cpython/blob/v3.11.14/Modules/_asynciomodule.c) | C Task/Future (production code path) |
+| [`Lib/asyncio/tasks.py`](https://github.com/python/cpython/blob/v3.11.14/Lib/asyncio/tasks.py) | `_enter_task`, `_leave_task`, `_swap_current_task` (3.12+), `current_task` |
+| [`Modules/_asynciomodule.c`](https://github.com/python/cpython/blob/v3.11.14/Modules/_asynciomodule.c) | C Task/Future, `TaskObj` struct fields, `eager_start` (3.12+) |
 | [`Lib/asyncio/events.py`](https://github.com/python/cpython/blob/v3.11.14/Lib/asyncio/events.py) | `_set_running_loop`, `get_running_loop` |
 | [`sniffio/_impl.py`](https://github.com/python-trio/sniffio/blob/master/sniffio/_impl.py) | `current_async_library` detection |
 | [`anyio/_backends/_asyncio.py`](https://github.com/agronholm/anyio/blob/4.11.0/anyio/_backends/_asyncio.py) | TaskGroup, CancelScope, `_task_states` |
+
+## Invariant Summary
+
+Quick reference for asyncio contracts that external drivers must uphold:
+
+| ID | Invariant | Violation symptom |
+|---|---|---|
+| I1 | One current task per loop | `RuntimeError: Cannot enter into task X while Y...` |
+| I2 | Context entered per drive cycle | `contextvars` return stale values after suspension |
+| I3 | `Task.__init__` must be called (3.12+) | Segfault (uninitialized C struct fields) |
+| I4 | Cross-thread scheduling needs `call_soon_threadsafe` | Reactor stuck in `select()`, tasks never stepped |
+| I5 | `asyncio.Future` callbacks are deferred | Assuming callback fires immediately → missing wake |
+| I6 | `_ready` is CPython-specific | `AttributeError` on uvloop, sentinel crash |
+| I7 | `Task.__init__` has side effects (`call_soon`) | Sentinel `__step` pollutes `_ready` or C callback queue |
+| I8 | Cancellation is edge-triggered | Task survives cancel, cleanup hangs |
+| I9 | Tasks are weakly referenced | Silent task disappearance, "destroyed but pending" |
+| I10 | Signal handling requires main thread | `RuntimeError: set_wakeup_fd only works in main thread` |
+| I11 | `_set_running_loop` is thread-local | `get_running_loop()` returns None on other threads |
