@@ -1213,6 +1213,7 @@ def start(
     cpus: float = typer.Option(2.0, "--cpus", help="CPU limit for the container"),
     cpuset_cpus: str = typer.Option("", "--cpuset-cpus", help="Pin to specific cores (e.g. '0,1'). Auto-derived from --cpus if empty."),
     memory: str = typer.Option("6g", "--memory", "-m", help="Memory limit (e.g. 512m, 2g, 6g)"),
+    max_concurrent: int = typer.Option(0, "--max-concurrent", help="Max concurrent requests per worker (0 = framework default 256)"),
     build_image: bool = typer.Option(True, "--build/--no-build", help="Build Docker image before starting"),
 ) -> None:
     """Build the Docker image and start the APX bench app locally."""
@@ -1264,6 +1265,7 @@ def start(
             "apx", "serve", "app.main",
             "--host", "0.0.0.0",
             "--workers", str(workers),
+            *(["--max-concurrent", str(max_concurrent)] if max_concurrent > 0 else []),
         ],
         check=False,
     )

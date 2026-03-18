@@ -419,7 +419,13 @@ impl ResolvedAwaitableWithValue {
 // ── AsgiSend ─────────────────────────────────────────────────────────────
 
 /// Channel capacity for streaming body chunks after the first.
-const STREAM_CHANNEL_CAPACITY: usize = 8;
+///
+/// Must be at least as large as the drive step budget (128) so that a
+/// streaming handler producing many small chunks never blocks during a
+/// single drive cycle. Backpressure still engages for very large
+/// responses — the driver suspends and the drain task resumes once hyper
+/// drains the channel.
+const STREAM_CHANNEL_CAPACITY: usize = 256;
 
 /// Internal state for [`AsgiSend`] — HTTP vs WebSocket mode.
 enum SendInner {

@@ -164,7 +164,7 @@ async def upload(request: Request):
 @router.get("/stream/{chunks}")
 async def stream_response(chunks: int):
     """Streaming response with yields between chunks."""
-    chunks = min(chunks, 100)
+    chunks = min(chunks, 10_000)
 
     async def generate():
         for i in range(chunks):

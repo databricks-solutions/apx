@@ -26,6 +26,8 @@ pub struct SupervisorConfig {
     pub app_dir: PathBuf,
     /// Per-request timeout passed to workers.
     pub request_timeout: Duration,
+    /// Maximum concurrent requests per worker (`None` → framework default).
+    pub max_concurrent: Option<usize>,
     /// Event loop policy: `"asyncio"` or `"uvloop"`.
     pub loop_policy: String,
 }
@@ -269,6 +271,7 @@ async fn spawn_worker(
         port: config.port,
         app_module: config.app_module.clone(),
         request_timeout_secs: config.request_timeout.as_secs(),
+        max_concurrent: config.max_concurrent,
         nonce: nonce.clone(),
         loop_policy: config.loop_policy.clone(),
     };
@@ -525,6 +528,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
+            max_concurrent: None,
             loop_policy: "uvloop".to_owned(),
         };
         assert!(validate_config(&config).is_ok());
@@ -539,6 +543,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
+            max_concurrent: None,
             loop_policy: "uvloop".to_owned(),
         };
         let err = validate_config(&config).unwrap_err();
@@ -557,6 +562,7 @@ mod tests {
             app_module: AppModule::new("backend.app").unwrap(),
             app_dir: PathBuf::from("/app"),
             request_timeout: Duration::from_secs(30),
+            max_concurrent: None,
             loop_policy: "uvloop".to_owned(),
         };
         let err = validate_config(&config).unwrap_err();

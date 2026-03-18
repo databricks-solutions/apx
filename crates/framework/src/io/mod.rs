@@ -106,6 +106,8 @@ impl EventLoop {
         ready_queue.set_notify_wake(Arc::clone(&drain_notify));
 
         // 9. Create DrainOnLoop callback — drives ready tasks on the asyncio thread.
+        let tokio_handle = tokio::runtime::Handle::try_current()
+            .map_err(|e| format!("DrainOnLoop needs tokio context: {e}"))?;
         let drain_on_loop = Py::new(
             py,
             DrainOnLoop {
@@ -113,6 +115,7 @@ impl EventLoop {
                 ops: Arc::clone(&coroutine_ops),
                 call_soon_threadsafe: reactor.call_soon_threadsafe().clone_ref(py),
                 task_ops: reactor.task_ops().clone_ref(py),
+                tokio_handle,
             },
         )
         .map_err(|e| format!("DrainOnLoop::new: {e}"))?;
@@ -214,11 +217,13 @@ struct DrainOnLoop {
     ops: Arc<dyn CoroutineOps>,
     call_soon_threadsafe: Py<PyAny>,
     task_ops: TaskOps,
+    tokio_handle: tokio::runtime::Handle,
 }
 
 #[pymethods]
 impl DrainOnLoop {
     fn __call__(&self, py: Python<'_>) -> PyResult<()> {
+        set_tokio_handle(self.tokio_handle.clone());
         let mut count: usize = 0;
         while let Some(ready) = self.queue.pop() {
             count += 1;
@@ -325,10 +330,20 @@ pub fn set_tokio_handle(handle: tokio::runtime::Handle) {
     TOKIO_HANDLE.with(|cell| *cell.borrow_mut() = Some(handle));
 }
 
-/// Run a closure with the thread-local tokio handle, if available.
+/// Run a closure with a tokio runtime handle.
+///
+/// Checks the thread-local first (set via [`set_tokio_handle`]), then
+/// falls back to [`tokio::runtime::Handle::try_current`] which succeeds
+/// when a `Handle::enter` guard is active (e.g. on the asyncio thread
+/// during [`DrainOnLoop::__call__`]).
 pub fn with_tokio_handle<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&tokio::runtime::Handle) -> R,
 {
-    TOKIO_HANDLE.with(|cell| cell.borrow().as_ref().map(f))
+    TOKIO_HANDLE.with(|cell| {
+        if let Some(h) = cell.borrow().as_ref() {
+            return Some(f(h));
+        }
+        tokio::runtime::Handle::try_current().ok().map(|h| f(&h))
+    })
 }

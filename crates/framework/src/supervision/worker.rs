@@ -146,10 +146,13 @@ pub async fn run_worker(
         Python::attach(|py| ModuleImport::new(bootstrap.app_module.as_str()).build(py, ctx))?;
 
     // Build HTTP service.
-    let config = ServiceConfig {
+    let mut config = ServiceConfig {
         timeout: Duration::from_secs(bootstrap.request_timeout_secs),
         ..ServiceConfig::default()
     };
+    if let Some(mc) = bootstrap.max_concurrent {
+        config.max_concurrent = mc;
+    }
     let server_addr = runtime.listener.local_addr();
     let service = ApxService::new(dispatch, server_addr, &config);
 

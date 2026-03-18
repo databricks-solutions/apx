@@ -29,6 +29,10 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = 30)]
     timeout: u64,
 
+    /// Maximum concurrent requests per worker (0 = default 256).
+    #[arg(long, default_value_t = 0)]
+    max_concurrent: usize,
+
     /// Event loop policy: "asyncio" (stdlib) or "uvloop" (default).
     #[arg(long = "loop", default_value = "uvloop")]
     loop_policy: String,
@@ -75,6 +79,11 @@ pub async fn run(args: ServeArgs) -> i32 {
                 app_module,
                 app_dir,
                 request_timeout: Duration::from_secs(args.timeout),
+                max_concurrent: if args.max_concurrent == 0 {
+                    None
+                } else {
+                    Some(args.max_concurrent)
+                },
                 loop_policy: args.loop_policy,
             };
 

@@ -208,6 +208,7 @@ mod tests {
             app_module: AppModule::new("backend.app")
                 .unwrap_or_else(|e| unreachable!("valid module: {e}")),
             request_timeout_secs: 30,
+            max_concurrent: None,
             nonce,
             loop_policy: "uvloop".to_owned(),
         };

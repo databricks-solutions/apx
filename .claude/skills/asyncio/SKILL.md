@@ -1,6 +1,6 @@
 ---
 name: asyncio
-description: Use when debugging event loop hangs, task scheduling issues, call_soon vs call_soon_threadsafe confusion, Future callback timing, _enter_task/_leave_task conflicts, GIL contention patterns, per-step vs per-drive task context, uvloop compatibility problems, or sniffio/anyio backend detection failures. Also use when verifying asyncio assumptions via quick Python one-liners.
+description: Use when debugging event loop hangs, task scheduling issues, call_soon vs call_soon_threadsafe confusion, Future callback timing, _enter_task/_leave_task conflicts, GIL contention patterns, per-step vs per-drive task context, uvloop compatibility problems, sniffio/anyio backend detection failures, streaming backpressure deadlocks, or native runtime context issues on the asyncio thread. Also use when verifying asyncio assumptions via quick Python one-liners.
 ---
 
 # asyncio Internals Reference
@@ -424,6 +424,126 @@ With 50 concurrent connections and 3 hops per request, `resp_wait_p50` can reach
 | Inline driving (asyncio Future) | 2 | tokio + asyncio |
 | Inline completion (no suspension) | 1 | tokio only |
 
+## Native Runtime Context on the asyncio Thread
+
+When a drain callback (e.g., `DrainOnLoop`) runs on the asyncio thread via `call_soon_threadsafe`, it executes inside `_run_once` step 3 — on the asyncio thread, **not** on a native async runtime (Tokio, etc.) worker thread. Any code driven from that callback that needs to interact with the native runtime (spawn tasks, send on channels, resolve backpressure) requires the runtime context to be explicitly available.
+
+### The `enter()` guard pitfall
+
+The natural approach is to call `runtime_handle.enter()` at the top of the callback, which sets the runtime's own thread-local. Downstream code then calls `Runtime::try_current()` to find it:
+
+```
+DrainOnLoop.__call__:
+    let _guard = handle.enter();      // sets tokio's thread-local
+    drive_task(...)
+      → Python coro.send()
+        → ASGI send() → try_send() → Full → backpressure
+          → with_runtime_handle(|h| h.spawn(...))
+            → check custom thread-local: None
+            → check Runtime::try_current(): ???
+```
+
+The problem: if the consumer uses a **two-tier lookup** (custom thread-local first, then `try_current()` as fallback), the `enter()` guard only populates the runtime's own thread-local — it does **not** populate the custom one. If the `try_current()` fallback fails for any reason (e.g., called inside a `thread_local!().with()` closure that interferes with the runtime's own thread-local access, or the guard was dropped prematurely), the lookup returns `None`.
+
+### The reliable fix: explicit thread-local setting
+
+Instead of relying on `enter()` + `try_current()`, explicitly set the custom thread-local at the start of every callback invocation:
+
+```
+DrainOnLoop.__call__:
+    set_runtime_handle(self.handle.clone());  // sets custom thread-local directly
+    drive_task(...)
+      → with_runtime_handle(|h| h.spawn(...))
+        → check custom thread-local: Some(handle) ✓
+```
+
+This is idempotent, costs one thread-local write (~10ns), and eliminates all ambiguity about which thread-local is populated.
+
+### When this matters
+
+| Callback context | Native runtime available? | Action needed |
+|---|---|---|
+| Tokio worker thread | **Yes** (inherently) | None |
+| asyncio thread (via `call_soon_threadsafe`) | **No** | Explicit `set_runtime_handle()` |
+| Thread pool thread | **No** | Explicit `set_runtime_handle()` or `handle.enter()` |
+
+**Symptom when missing:** `RuntimeError: no runtime for backpressure send` or `RuntimeError: no tokio runtime found` — the driven Python code hits a path that needs the native runtime, but the asyncio thread has no runtime context.
+
+## Streaming Backpressure and GIL Deadlock
+
+ASGI streaming responses produce body chunks through a bounded channel. When the producer (Python coroutine under GIL) fills the channel faster than the HTTP layer drains it, backpressure engages. The interaction between backpressure resolution and the GIL creates a specific deadlock pattern.
+
+### The deadlock pattern
+
+```
+Thread A (asyncio, GIL held via DrainOnLoop):
+  1. Drive Python coroutine: coro.send(None)
+  2. Coroutine calls ASGI send({type: "http.response.body", more_body: True})
+  3. Rust handler: try_send(chunk) → channel full → BACKPRESSURE
+  4. Need to spawn native async task to await channel space
+  5. Task spawned → task needs to resolve a Python Future when space available
+  6. Resolving the Future requires GIL → Python::attach() blocks
+  7. DEADLOCK: step 1 holds GIL, step 6 waits for GIL
+
+Thread B (tokio, HTTP layer):
+  - Draining the channel by sending bytes to the client
+  - Making space, but the spawned task can't signal completion (GIL blocked)
+```
+
+### Why it manifests under load
+
+At low concurrency or with small payloads, the HTTP layer drains the channel between drive cycles, so `try_send()` rarely fails. Under load:
+
+- **Drive budget amplification:** A single drive cycle may produce 128+ chunks without yielding. With a channel capacity of 8, backpressure is guaranteed after 8 chunks.
+- **CPU starvation:** On constrained CPU (e.g., 0.5 cores), the HTTP layer can't drain fast enough between chunks produced within a single drive's GIL hold.
+- **Cascading:** Once one request deadlocks, the GIL is stuck. All other requests waiting for the GIL also stall, creating a total server freeze.
+
+### Channel sizing as a mitigation
+
+Size the channel so that a single drive cycle cannot fill it:
+
+```
+channel_capacity > drive_budget
+```
+
+If the drive budget is 128 steps, a channel capacity of 256 means a single drive cycle can produce up to 128 chunks without hitting backpressure. The HTTP layer then drains the buffer between drive cycles (when the GIL is released).
+
+| Channel capacity | Drive budget | Backpressure within single drive? | Risk |
+|---|---|---|---|
+| 8 | 128 | **Yes** (after 8 steps) | **High** — GIL deadlock |
+| 128 | 128 | Possible (edge case) | Medium |
+| 256 | 128 | **No** | Low |
+| 1024 | 128 | **No** | Negligible (more memory) |
+
+**Trade-off:** Larger channels use more memory per stream. For 1000 concurrent streams with 1KB chunks and capacity 256, that's ~250MB of buffered data. Size according to expected concurrency and chunk size.
+
+### The fundamental tension
+
+The deadlock arises from a circular dependency:
+
+1. **Producer** (Python, GIL-holding) wants to write to the channel
+2. **Channel** is full, resolution requires native async task
+3. **Native task** needs GIL to signal Python Future completion
+4. **GIL** is held by the producer → cycle
+
+Breaking any link in this chain fixes the deadlock:
+
+- **Larger channel** → step 2 doesn't occur within a single GIL hold (mitigation, not elimination)
+- **GIL-free signaling** → step 3 doesn't need the GIL (requires custom Future with synchronous dispatch; see [Synchronous vs deferred callback dispatch](#synchronous-vs-deferred-callback-dispatch))
+- **Yield on backpressure** → step 1 releases GIL before retrying (adds latency, requires coroutine cooperation)
+- **Flow control at the ASGI layer** → limit how many chunks the coroutine can produce per drive cycle (application-level, not always possible)
+
+### Diagnostic pattern
+
+```
+TRACE asgi::scope: stream chunk BACKPRESSURE (channel full) body_len=N more_body=true
+TRACE io::driver: drive: error steps=0 error=RuntimeError: no runtime for backpressure send
+```
+
+The `steps=0` indicates the very first step of a continuation drive hit backpressure — the channel was still full from the previous drive. Combined with "no runtime" (missing native runtime context on the asyncio thread, see section above), this produces an immediate drive error.
+
+If the runtime context IS available but the spawned task still deadlocks (no error, just a hang), the symptom is a stream that stops mid-way through. The HTTP client receives partial data, then the connection times out. Server-side, the drive trace shows the last successful chunk followed by silence.
+
 ## `asyncio.Future.done()` Fast Path
 
 When handling a yielded `asyncio.Future`, check `fut.done()` before attaching a done callback. If the future is already resolved, extract the result and continue driving — no suspension, no callback overhead, no GIL relay.
@@ -757,6 +877,8 @@ All tests use `uv run python -c "..."`. Copy-paste ready.
 | `fut.done()` before suspend | `fut.set_result(42); print(fut.done())  # True` |
 | Tasks are weakly held | `del task; gc.collect(); print(len(all_tasks(loop)))  # 0` |
 | Cancel is edge-triggered | catch CancelledError, then await again — succeeds |
+| `handle.enter()` sets tokio TL | `let _g = handle.enter(); Handle::try_current().is_ok()` |
+| Backpressure on small channel | Fill mpsc(8) from sync code, observe send blocks |
 
 ## Key Source Files
 
@@ -787,3 +909,5 @@ Quick reference for asyncio contracts that external drivers must uphold:
 | I9 | Tasks are weakly referenced | Silent task disappearance, "destroyed but pending" |
 | I10 | Signal handling requires main thread | `RuntimeError: set_wakeup_fd only works in main thread` |
 | I11 | `_set_running_loop` is thread-local | `get_running_loop()` returns None on other threads |
+| I12 | Native runtime context must be explicit on asyncio thread | `RuntimeError: no runtime for backpressure send` — drain callbacks run on the asyncio thread, which has no native runtime context unless explicitly set |
+| I13 | Stream channel capacity must exceed drive budget | Partial streaming response, then hang — producer fills channel within one GIL hold, backpressure resolution deadlocks on GIL |

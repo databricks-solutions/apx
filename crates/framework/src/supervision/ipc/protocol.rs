@@ -213,6 +213,9 @@ pub struct WorkerBootstrap {
     pub app_module: AppModule,
     /// Request timeout in seconds (converted to `Duration` at the worker boundary).
     pub request_timeout_secs: u64,
+    /// Maximum concurrent requests per worker (`None` → framework default).
+    #[serde(default)]
+    pub max_concurrent: Option<usize>,
     /// One-time nonce — verified against `APX_WORKER_NONCE` env var.
     pub nonce: Nonce,
     /// Event loop policy: `"asyncio"` (default stdlib) or `"uvloop"`.
@@ -300,6 +303,7 @@ mod tests {
             app_module: AppModule::new("backend.app")
                 .unwrap_or_else(|e| unreachable!("hardcoded valid module: {e}")),
             request_timeout_secs: 30,
+            max_concurrent: None,
             nonce: Nonce::generate(),
             loop_policy: "uvloop".to_owned(),
         };
@@ -413,6 +417,7 @@ mod tests {
             port: 8000,
             app_module: AppModule::new("backend.app").unwrap(),
             request_timeout_secs: 30,
+            max_concurrent: None,
             nonce: Nonce::from_string("abc123".to_owned()),
             loop_policy: "uvloop".to_owned(),
         };
@@ -429,6 +434,7 @@ mod tests {
             port: 8000,
             app_module: AppModule::new("backend.app").unwrap(),
             request_timeout_secs: 30,
+            max_concurrent: None,
             nonce: Nonce::from_string("abc123".to_owned()),
             loop_policy: default_loop_policy(),
         };
