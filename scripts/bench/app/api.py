@@ -190,13 +190,21 @@ async def telemetry_test():
     """Exercise all OTEL telemetry surfaces for integration testing."""
     import logging
 
-    from apx._core import SpanHandle, create_counter
+    from apx.telemetry import Counter, Gauge, Histogram, log, span
 
-    with SpanHandle("test.custom_span", {"surface": "span"}):
+    with span("test.custom_span", surface="span"):
         pass
 
-    counter = create_counter("test.custom_counter", "integration test counter", "1")
+    counter = Counter("test.custom_counter", description="integration test counter", unit="1")
     counter.inc(1)
+
+    histogram = Histogram("test.custom_histogram", description="integration test histogram", unit="ms")
+    histogram.observe(42.0)
+
+    gauge = Gauge("test.custom_gauge", description="integration test gauge")
+    gauge.set(7.0)
+
+    log.info("integration test log message")
 
     logging.getLogger("test.telemetry").info("integration test log message")
 

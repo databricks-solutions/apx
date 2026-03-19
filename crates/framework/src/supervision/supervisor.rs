@@ -243,6 +243,7 @@ async fn spawn_worker(
     cmd.current_dir(&config.app_dir)
         .env("APX_WORKER_NONCE", nonce.as_str())
         .env("APX_WORKER_SOCK", sock_str)
+        .env("APX_WORKER_ID", index.to_string())
         .env("PYTHONPATH", &config.app_dir);
 
     // Propagate OTEL env vars.

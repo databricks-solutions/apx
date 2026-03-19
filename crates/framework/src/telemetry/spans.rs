@@ -150,6 +150,41 @@ impl SpanHandle {
             span.set_attribute(opentelemetry::KeyValue::new(key, value));
         }
     }
+
+    /// Set the span status.
+    ///
+    /// ``code`` must be ``"error"`` or ``"ok"``; anything else is ignored.
+    #[pyo3(signature = (code, description=""))]
+    fn set_status(&mut self, code: &str, description: &str) {
+        let Some(ref mut span) = self.span else {
+            return;
+        };
+        let status = match code {
+            "error" => opentelemetry::trace::Status::error(description.to_owned()),
+            "ok" => opentelemetry::trace::Status::Ok,
+            _ => return,
+        };
+        span.set_status(status);
+    }
+
+    /// Record an exception as a span event with OTEL semantic attributes.
+    #[pyo3(signature = (message, type_name="Exception", stacktrace=""))]
+    fn record_exception(&mut self, message: &str, type_name: &str, stacktrace: &str) {
+        let Some(ref mut span) = self.span else {
+            return;
+        };
+        let mut attrs = vec![
+            opentelemetry::KeyValue::new("exception.type", type_name.to_owned()),
+            opentelemetry::KeyValue::new("exception.message", message.to_owned()),
+        ];
+        if !stacktrace.is_empty() {
+            attrs.push(opentelemetry::KeyValue::new(
+                "exception.stacktrace",
+                stacktrace.to_owned(),
+            ));
+        }
+        span.add_event("exception", attrs);
+    }
 }
 
 // ── Serialized trace context ──────────────────────────────────────────

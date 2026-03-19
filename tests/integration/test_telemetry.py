@@ -297,7 +297,7 @@ class TestTelemetry:
         )
 
     def test_metrics_collected(self, otlp_collector: OtlpCollector) -> None:
-        """HTTP and custom metrics arrive."""
+        """HTTP and custom metrics (counter, histogram, gauge) arrive."""
         all_metric_names: set[str] = set()
         for rm in otlp_collector.metrics.resource_metrics:
             for sm in rm.scope_metrics:
@@ -310,6 +310,12 @@ class TestTelemetry:
         assert "test.custom_counter" in all_metric_names, (
             f"expected 'test.custom_counter'; got {all_metric_names}"
         )
+        assert "test.custom_histogram" in all_metric_names, (
+            f"expected 'test.custom_histogram'; got {all_metric_names}"
+        )
+        assert "test.custom_gauge" in all_metric_names, (
+            f"expected 'test.custom_gauge'; got {all_metric_names}"
+        )
 
     def test_logs_collected(self, otlp_collector: OtlpCollector) -> None:
         """Python log messages forwarded via tracing arrive as OTLP logs."""
@@ -321,6 +327,28 @@ class TestTelemetry:
 
         assert any("integration test log message" in b for b in all_log_bodies), (
             f"expected log containing 'integration test log message'; got {all_log_bodies[:20]}"
+        )
+
+    def test_log_level_spans_collected(self, otlp_collector: OtlpCollector) -> None:
+        """log.info() produces an instant span with log.level attribute."""
+        for rs in otlp_collector.traces.resource_spans:
+            for ss in rs.scope_spans:
+                for s in ss.spans:
+                    if s.name == "integration test log message":
+                        attrs = {a.key: a.value.string_value for a in s.attributes}
+                        assert attrs.get("log.level") == "info", (
+                            f"expected log.level='info'; got {attrs}"
+                        )
+                        return
+
+        all_span_names = {
+            s.name
+            for rs in otlp_collector.traces.resource_spans
+            for ss in rs.scope_spans
+            for s in ss.spans
+        }
+        pytest.fail(
+            f"expected span 'integration test log message'; got {all_span_names}"
         )
 
     def test_resource_attributes(self, otlp_collector: OtlpCollector) -> None:

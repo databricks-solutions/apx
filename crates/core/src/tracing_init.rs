@@ -117,6 +117,13 @@ fn build_resource(app_dir: Option<&str>) -> Resource {
         attrs.push(KeyValue::new("apx.app_path", path.to_owned()));
     }
 
+    if let Ok(worker_id) = std::env::var("APX_WORKER_ID") {
+        attrs.push(KeyValue::new("apx.role", "worker"));
+        attrs.push(KeyValue::new("apx.worker.id", worker_id));
+    } else if std::env::var_os("APX_WORKER_NONCE").is_none() {
+        attrs.push(KeyValue::new("apx.role", "supervisor"));
+    }
+
     Resource::builder().with_attributes(attrs).build()
 }
 
