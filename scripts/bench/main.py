@@ -1260,7 +1260,7 @@ def start(
             "-p", f"{port}:8000",
             "-e", "APX_BENCH_SERVER=apx",
             "-e", "APX_BENCH_PROFILE=1",
-            "-e", "APX_BENCH_TRACE=1",
+            "-e", "APX_PERF=1",
             LOCAL_IMAGE,
             "apx", "serve", "app.main",
             "--host", "0.0.0.0",

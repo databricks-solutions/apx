@@ -80,9 +80,9 @@ def create_db() -> None:
 
 def _migrate(engine) -> None:
     """Apply incremental schema migrations for columns added after initial deploy."""
-    migrations = [
-        ("profile_results", "rust_trace_jsonl", "VARCHAR"),
-    ]
+    migrations = []
+    if not migrations:
+        return
     with engine.connect() as conn:
         for table, column, col_type in migrations:
             result = conn.execute(text(

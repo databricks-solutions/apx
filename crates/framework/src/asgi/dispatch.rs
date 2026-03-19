@@ -8,10 +8,7 @@
 //! status/headers from `ResponseStart` and builds the complete
 //! `OutboundResponse` on the first body chunk.
 
-use crate::asgi::bench_trace::{self, RequestTraceBuilder};
-use crate::asgi::scope::{
-    AsgiReceive, AsgiSend, ScopeInterns, SendCache, build_http_scope, build_http_scope_traced,
-};
+use crate::asgi::scope::{AsgiReceive, AsgiSend, ScopeInterns, SendCache, build_http_scope};
 use crate::dispatch::Dispatch;
 use crate::protocol::http::error::AppError;
 use crate::supervision::worker_context::WorkerContext;
@@ -85,7 +82,6 @@ impl Dispatch for AsgiDispatch {
     ) -> Pin<Box<dyn Future<Output = OutboundResponse> + Send>> {
         let body_stream = request.take_body();
         let body_limit = self.body_limit;
-        let trace = super::bench_trace_enabled();
 
         let app = Arc::clone(&self.app);
         let interns = Arc::clone(&self.scope_interns);
@@ -94,31 +90,17 @@ impl Dispatch for AsgiDispatch {
         let ctx = Arc::clone(&self.ctx);
 
         Box::pin(async move {
-            let result = if trace {
-                dispatch_traced(
-                    request,
-                    body_stream,
-                    body_limit,
-                    app,
-                    interns,
-                    recv_tpl,
-                    send_cache,
-                    ctx,
-                )
-                .await
-            } else {
-                dispatch_inner(
-                    request,
-                    body_stream,
-                    body_limit,
-                    app,
-                    interns,
-                    recv_tpl,
-                    send_cache,
-                    ctx,
-                )
-                .await
-            };
+            let result = dispatch_inner(
+                request,
+                body_stream,
+                body_limit,
+                app,
+                interns,
+                recv_tpl,
+                send_cache,
+                ctx,
+            )
+            .await;
             result.unwrap_or_else(error_response)
         })
     }
@@ -162,6 +144,9 @@ impl Dispatch for AsgiDispatch {
 
 /// Full dispatch pipeline: collect body → build scope → submit to asyncio
 /// → await oneshot response.
+///
+/// When `APX_PERF=1`, emits per-phase timing events under the `apx.perf`
+/// tracing target. Zero overhead when disabled.
 #[expect(clippy::too_many_arguments, reason = "dispatch args are all required")]
 async fn dispatch_inner(
     request: InboundRequest,
@@ -173,17 +158,34 @@ async fn dispatch_inner(
     send_cache: Arc<SendCache>,
     ctx: Arc<WorkerContext>,
 ) -> Result<OutboundResponse, AppError> {
+    let perf = crate::telemetry::perf_enabled();
+    let t_total = perf.then(Instant::now);
+
+    let t0 = perf.then(Instant::now);
     let body_bytes = body_stream
         .collect(body_limit)
         .await
         .map_err(|e| AppError::Internal(format!("body collect: {e}")))?;
+    if let Some(t) = t0 {
+        tracing::info!(target: "apx.perf", phase = "body_collect", elapsed_us = t.elapsed().as_micros() as u64);
+    }
 
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel::<()>();
 
+    let t_gil = perf.then(Instant::now);
     Python::attach(|py| -> Result<(), AppError> {
+        if let Some(t) = t_gil {
+            tracing::info!(target: "apx.perf", phase = "gil_acquire", elapsed_us = t.elapsed().as_micros() as u64);
+        }
+
+        let t0 = perf.then(Instant::now);
         let scope = build_http_scope(py, &request, None, &interns)
             .map_err(|e| AppError::Internal(format!("scope build: {e}")))?;
+        if let Some(t) = t0 {
+            tracing::info!(target: "apx.perf", phase = "scope_build", elapsed_us = t.elapsed().as_micros() as u64);
+        }
+
         let tpl = recv_tpl.clone_ref(py);
         let receive = if body_bytes.is_empty() {
             AsgiReceive::empty(disconnect_rx, tpl)
@@ -192,13 +194,24 @@ async fn dispatch_inner(
         };
         let receive_obj =
             Py::new(py, receive).map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
-        let send = AsgiSend::http(response_tx, disconnect_tx, &send_cache, py);
+        let scope_ref = Some(scope.clone_ref(py));
+        let send = AsgiSend::http(response_tx, disconnect_tx, &send_cache, py, scope_ref);
         let send_obj =
             Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
+
+        if let Some(trace_ctx) = crate::telemetry::context::extract_trace_context() {
+            let _ = crate::telemetry::context::set_python_context(py, &trace_ctx);
+        }
+
+        let t0 = perf.then(Instant::now);
         let coro = app
             .call1(py, (scope, receive_obj, &send_obj))
             .map_err(|e| AppError::Internal(format!("ASGI app call: {e}")))?;
+        if let Some(t) = t0 {
+            tracing::info!(target: "apx.perf", phase = "app_call", elapsed_us = t.elapsed().as_micros() as u64);
+        }
 
+        let t0 = perf.then(Instant::now);
         let guarded = ctx
             .guarded_fn
             .call1(py, (&coro, &send_obj))
@@ -206,127 +219,34 @@ async fn dispatch_inner(
         ctx.call_soon_threadsafe
             .call1(py, (&ctx.create_task, &guarded))
             .map_err(|e| AppError::Internal(format!("submit to asyncio: {e}")))?;
+        if let Some(t) = t0 {
+            tracing::info!(target: "apx.perf", phase = "submit", elapsed_us = t.elapsed().as_micros() as u64);
+        }
+
         Ok(())
     })?;
 
-    response_rx
-        .await
-        .map_err(|_| AppError::Internal("response channel closed".to_owned()))?
-}
-
-// ── Traced dispatch ─────────────────────────────────────────────────────
-
-/// Dispatch with per-phase bench tracing.
-#[expect(clippy::too_many_arguments, reason = "dispatch args are all required")]
-async fn dispatch_traced(
-    request: InboundRequest,
-    body_stream: BodyStream,
-    body_limit: usize,
-    app: Arc<Py<PyAny>>,
-    interns: Arc<ScopeInterns>,
-    recv_tpl: Arc<Py<PyDict>>,
-    send_cache: Arc<SendCache>,
-    ctx: Arc<WorkerContext>,
-) -> Result<OutboundResponse, AppError> {
-    let t_total = Instant::now();
-    let mut builder = RequestTraceBuilder::new(request.method.to_string(), request.path.clone());
-
-    let t0 = Instant::now();
-    let body_bytes = body_stream
-        .collect(body_limit)
-        .await
-        .map_err(|e| AppError::Internal(format!("body collect: {e}")))?;
-    builder = builder.body_collect(t0.elapsed().as_micros() as u64);
-
-    let (response_rx, gil_us, scope_us, call_us, submit_us) = dispatch_gil_block(
-        &request,
-        body_bytes,
-        &app,
-        &interns,
-        &recv_tpl,
-        &send_cache,
-        &ctx,
-    )?;
-    builder = builder
-        .gil_acquire(gil_us)
-        .scope_build(scope_us)
-        .app_call(call_us)
-        .submit(submit_us);
-
-    let t0 = Instant::now();
+    let t0 = perf.then(Instant::now);
     let response = response_rx
         .await
         .map_err(|_| AppError::Internal("response channel closed".to_owned()))?;
-    builder = builder.response_wait(t0.elapsed().as_micros() as u64);
+    if let Some(t) = t0 {
+        tracing::info!(target: "apx.perf", phase = "response_wait", elapsed_us = t.elapsed().as_micros() as u64);
+    }
 
-    let status = response.as_ref().map(|r| r.status.as_u16()).unwrap_or(500);
-    let trace = builder.build(t_total.elapsed().as_micros() as u64, status);
-    bench_trace::write(&trace);
+    if let Some(t) = t_total {
+        let status = response.as_ref().map(|r| r.status.as_u16()).unwrap_or(500);
+        tracing::info!(
+            target: "apx.perf",
+            phase = "dispatch",
+            elapsed_us = t.elapsed().as_micros() as u64,
+            status,
+            method = %request.method,
+            path = %request.path,
+        );
+    }
 
     response
-}
-
-/// GIL block output: (response_rx, gil_us, scope_us, call_us, submit_us).
-type GilBlockOutput = (
-    tokio::sync::oneshot::Receiver<Result<OutboundResponse, AppError>>,
-    u64,
-    u64,
-    u64,
-    u64,
-);
-
-/// Execute the GIL-bound dispatch phases, returning per-phase timings.
-fn dispatch_gil_block(
-    request: &InboundRequest,
-    body_bytes: Bytes,
-    app: &Py<PyAny>,
-    interns: &ScopeInterns,
-    recv_tpl: &Py<PyDict>,
-    send_cache: &SendCache,
-    ctx: &WorkerContext,
-) -> Result<GilBlockOutput, AppError> {
-    let t_gil = Instant::now();
-    Python::attach(|py| {
-        let gil_us = t_gil.elapsed().as_micros() as u64;
-
-        let t0 = Instant::now();
-        let scope = build_http_scope_traced(py, request, interns)
-            .map_err(|e| AppError::Internal(format!("scope build: {e}")))?;
-        let scope_us = t0.elapsed().as_micros() as u64;
-
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel::<()>();
-
-        let tpl = recv_tpl.clone_ref(py);
-        let receive = if body_bytes.is_empty() {
-            AsgiReceive::empty(disconnect_rx, tpl)
-        } else {
-            AsgiReceive::http(body_bytes, disconnect_rx, tpl)
-        };
-        let receive_obj =
-            Py::new(py, receive).map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
-        let send = AsgiSend::http(response_tx, disconnect_tx, send_cache, py);
-        let send_obj =
-            Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
-
-        let t0 = Instant::now();
-        let coro = app
-            .call1(py, (scope, receive_obj, &send_obj))
-            .map_err(|e| AppError::Internal(format!("ASGI app call: {e}")))?;
-        let call_us = t0.elapsed().as_micros() as u64;
-
-        let t0 = Instant::now();
-        let guarded = ctx
-            .guarded_fn
-            .call1(py, (&coro, &send_obj))
-            .map_err(|e| AppError::Internal(format!("wrap in _guarded: {e}")))?;
-        ctx.call_soon_threadsafe
-            .call1(py, (&ctx.create_task, &guarded))
-            .map_err(|e| AppError::Internal(format!("submit to asyncio: {e}")))?;
-        let submit_us = t0.elapsed().as_micros() as u64;
-
-        Ok((response_rx, gil_us, scope_us, call_us, submit_us))
-    })
 }
 
 /// Client-visible body for internal errors.
@@ -358,6 +278,7 @@ fn error_response(err: AppError) -> OutboundResponse {
             h
         },
         body: ResponseBody::Fixed(Bytes::from_static(body)),
+        server_route: None,
     }
 }
 

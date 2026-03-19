@@ -229,37 +229,6 @@ async def _reset_profiling(url: str, token: str) -> None:
             pass
 
 
-async def _extract_rust_trace(url: str, token: str) -> str | None:
-    """Download Rust-side bench trace JSONL from a benchmark app."""
-    logger.info("Extracting Rust trace from %s", url)
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient() as client:
-        try:
-            resp = await client.get(
-                f"{url}/api/rust-trace/dump", headers=headers, timeout=30.0
-            )
-            if resp.status_code == 200:
-                lines = resp.text.strip().count("\n") + 1 if resp.text.strip() else 0
-                logger.info("Got %d Rust trace lines from %s", lines, url)
-                return resp.text
-        except httpx.HTTPError as exc:
-            logger.warning("Error fetching Rust trace from %s: %s", url, exc)
-    return None
-
-
-async def _reset_rust_trace(url: str, token: str) -> None:
-    """Reset Rust-side bench trace data."""
-    logger.info("Resetting Rust trace on %s", url)
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient() as client:
-        try:
-            await client.delete(
-                f"{url}/api/rust-trace/reset", headers=headers, timeout=10.0
-            )
-        except httpx.HTTPError:
-            pass
-
-
 async def _collect_scheduler_stats(url: str, token: str) -> dict | None:
     """Collect scheduler counters from a benchmark app."""
     logger.info("Collecting scheduler stats from %s", url)
@@ -435,7 +404,6 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
 
                 await _reset_items(url, token)
                 await _reset_profiling(url, token)
-                await _reset_rust_trace(url, token)
 
                 for scenario in PROFILE_SCENARIOS:
                     if _is_cancelled(run_id):
@@ -454,7 +422,6 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
 
                 # Extract profiling JSONL.
                 jsonl_text = await _extract_profiling(url, token)
-                rust_trace_text = await _extract_rust_trace(url, token)
                 scheduler_stats = await _collect_scheduler_stats(url, token)
 
                 if jsonl_text:
@@ -462,7 +429,6 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
                         run_id=run_id,
                         environment=env_name,
                         raw_jsonl=jsonl_text,
-                        rust_trace_jsonl=rust_trace_text,
                     )
                     with Session(get_engine()) as session:
                         session.add(pr)

@@ -34,22 +34,10 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
 
-    // Bench trace + request stats
-    m.add_function(pyo3::wrap_pyfunction!(bench_trace_dump, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(bench_trace_reset, m)?)?;
+    // Request stats
     m.add_function(pyo3::wrap_pyfunction!(request_stats_json, m)?)?;
 
     Ok(())
-}
-
-#[pyfunction]
-fn bench_trace_dump() -> Option<String> {
-    crate::asgi::bench_trace::read()
-}
-
-#[pyfunction]
-fn bench_trace_reset() {
-    crate::asgi::bench_trace::reset();
 }
 
 #[pyfunction]

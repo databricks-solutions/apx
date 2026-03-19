@@ -234,30 +234,6 @@ def profile_reset():
     return {"status": "reset"}
 
 
-@router.get("/rust-trace/dump")
-def rust_trace_dump():
-    """Return Rust-side bench trace JSONL."""
-    try:
-        from apx._core import bench_trace_dump
-    except ImportError:
-        raise HTTPException(status_code=404, detail="not running under APX")
-    data = bench_trace_dump()
-    if data is None:
-        raise HTTPException(status_code=404, detail="no Rust trace data")
-    return Response(content=data, media_type="application/x-ndjson")
-
-
-@router.delete("/rust-trace/reset")
-def rust_trace_reset():
-    """Clear Rust-side bench trace data."""
-    try:
-        from apx._core import bench_trace_reset
-        bench_trace_reset()
-    except ImportError:
-        pass
-    return {"status": "reset"}
-
-
 @router.get("/_bench/scheduler-stats")
 def scheduler_stats():
     """Return scheduler counters as JSON."""

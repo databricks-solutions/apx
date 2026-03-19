@@ -382,14 +382,14 @@ impl AsgiReceive {
             .take();
 
         if let Some(bytes) = taken {
-            let t0 = super::bench_trace_enabled().then(std::time::Instant::now);
+            let t0 = crate::telemetry::perf_enabled().then(std::time::Instant::now);
             let event = self.receive_template.bind(py).copy()?;
             event.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, &bytes))?;
             if let Some(t0) = t0 {
                 tracing::info!(
-                    target: "bench_trace",
+                    target: "apx.perf",
                     phase = "receive_dict_build",
-                    elapsed_us = t0.elapsed().as_micros(),
+                    elapsed_us = t0.elapsed().as_micros() as u64,
                     body_len = bytes.len(),
                 );
             }
@@ -509,6 +509,7 @@ enum SendInner {
         response_tx: Option<oneshot::Sender<Result<OutboundResponse, AppError>>>,
         disconnect_tx: Option<oneshot::Sender<()>>,
         stream_tx: Option<mpsc::Sender<AsgiEvent>>,
+        scope: Option<Py<PyDict>>,
     },
     /// WebSocket mode — forwards events via mpsc (unchanged).
     Ws { tx: mpsc::Sender<AsgiEvent> },
@@ -543,6 +544,7 @@ impl AsgiSend {
         disconnect_tx: oneshot::Sender<()>,
         send_cache: &SendCache,
         py: Python<'_>,
+        scope: Option<Py<PyDict>>,
     ) -> Self {
         Self {
             inner: SendInner::Http {
@@ -551,6 +553,7 @@ impl AsgiSend {
                 response_tx: Some(response_tx),
                 disconnect_tx: Some(disconnect_tx),
                 stream_tx: None,
+                scope,
             },
             resolved: Some(send_cache.resolved.clone_ref(py)),
         }
@@ -585,13 +588,13 @@ impl AsgiSend {
         py: Python<'py>,
         event: Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let t0 = super::bench_trace_enabled().then(std::time::Instant::now);
+        let t0 = crate::telemetry::perf_enabled().then(std::time::Instant::now);
         let parsed = parse_asgi_send_event(&event)?;
         if let Some(t0) = t0 {
             tracing::info!(
-                target: "bench_trace",
-                phase = "parse_asgi_send_event",
-                elapsed_us = t0.elapsed().as_micros(),
+                target: "apx.perf",
+                phase = "parse_send_event",
+                elapsed_us = t0.elapsed().as_micros() as u64,
             );
         }
 
@@ -603,6 +606,7 @@ impl AsgiSend {
                 response_tx,
                 disconnect_tx,
                 stream_tx,
+                scope,
             } => Self::handle_http(
                 py,
                 parsed,
@@ -612,6 +616,7 @@ impl AsgiSend {
                 disconnect_tx,
                 stream_tx,
                 resolved,
+                scope.as_ref(),
             ),
             SendInner::Ws { tx } => Self::handle_ws(py, parsed, tx, resolved),
         }
@@ -645,6 +650,7 @@ impl AsgiSend {
         disconnect_tx: &mut Option<oneshot::Sender<()>>,
         stream_tx: &mut Option<mpsc::Sender<AsgiEvent>>,
         resolved: Option<&Py<ResolvedAwaitable>>,
+        scope: Option<&Py<PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         match event {
             AsgiEvent::ResponseStart {
@@ -665,6 +671,7 @@ impl AsgiSend {
                 let resp_headers = headers.take().unwrap_or_default();
                 let http_status = http::StatusCode::from_u16(raw_status)
                     .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+                let server_route = scope.and_then(|s| extract_route_from_scope(s, py));
 
                 if more_body {
                     let (stx, srx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
@@ -676,6 +683,7 @@ impl AsgiSend {
                             status: http_status,
                             headers: resp_headers,
                             body: ResponseBody::Stream(Box::pin(stream)),
+                            server_route,
                         }));
                     }
                     *stream_tx = Some(stx);
@@ -688,6 +696,7 @@ impl AsgiSend {
                             status: http_status,
                             headers: resp_headers,
                             body: ResponseBody::Fixed(body),
+                            server_route,
                         }));
                     }
                     tracing::trace!(body_len, "asgi_send: fixed body (complete)");
@@ -867,6 +876,20 @@ fn build_ws_receive_event(py: Python<'_>, event: Option<WsIncomingEvent>) -> PyR
         }
     }
     Ok(dict.into_any().unbind())
+}
+
+/// Extract the matched route template from the ASGI scope dict.
+///
+/// After Starlette routing, `scope["route"]` is set with a `.path`
+/// attribute containing the template (e.g., `/users/{user_id}`).
+/// Returns `None` if the scope has no route or extraction fails.
+fn extract_route_from_scope(scope: &Py<PyDict>, py: Python<'_>) -> Option<String> {
+    let scope_ref = scope.bind(py);
+    let route_obj = scope_ref.get_item(pyo3::intern!(py, "route")).ok()??;
+    route_obj
+        .getattr(pyo3::intern!(py, "path"))
+        .ok()
+        .and_then(|p| p.extract::<String>().ok())
 }
 
 // ── Parse helpers ────────────────────────────────────────────────────────
@@ -1100,56 +1123,6 @@ pub fn build_http_scope(
             app.bind(py).getattr(c"router")?,
         )?;
     }
-    Ok(dict.unbind())
-}
-
-/// Construct an ASGI HTTP scope dict with per-sub-phase timing.
-///
-/// Same as [`build_http_scope`] but emits `tracing::info!` events for each
-/// sub-phase (metadata, request_fields, headers, addresses, path_params).
-/// Used only in the traced dispatch path (`APX_BENCH_TRACE=1`).
-pub fn build_http_scope_traced(
-    py: Python<'_>,
-    request: &InboundRequest,
-    interns: &ScopeInterns,
-) -> PyResult<Py<PyDict>> {
-    use std::time::Instant;
-
-    let dict = PyDict::new(py);
-
-    let t = Instant::now();
-    set_scope_metadata(py, &dict, interns)?;
-    let metadata_ns = t.elapsed().as_nanos();
-
-    let t = Instant::now();
-    set_scope_request_fields(py, &dict, request, interns)?;
-    let request_fields_ns = t.elapsed().as_nanos();
-
-    let t = Instant::now();
-    set_scope_headers(py, &dict, request, interns)?;
-    let headers_ns = t.elapsed().as_nanos();
-
-    let t = Instant::now();
-    set_scope_addresses(py, &dict, request, interns)?;
-    let addresses_ns = t.elapsed().as_nanos();
-
-    let t = Instant::now();
-    set_scope_path_params(py, &dict, request, interns)?;
-    let path_params_ns = t.elapsed().as_nanos();
-
-    dict.set_item(interns.keys.state.bind(py), PyDict::new(py))?;
-
-    tracing::info!(
-        target: "bench_trace",
-        phase = "scope_build_breakdown",
-        metadata_ns = metadata_ns,
-        request_fields_ns = request_fields_ns,
-        headers_ns = headers_ns,
-        addresses_ns = addresses_ns,
-        path_params_ns = path_params_ns,
-        path = %request.path,
-    );
-
     Ok(dict.unbind())
 }
 
@@ -1422,7 +1395,7 @@ mod tests {
             let (tx, _rx) = oneshot::channel();
             let (dtx, _drx) = oneshot::channel();
             let cache = SendCache::new(py).unwrap();
-            let send = AsgiSend::http(tx, dtx, &cache, py);
+            let send = AsgiSend::http(tx, dtx, &cache, py, None);
             let dbg = format!("{send:?}");
             assert!(dbg.contains("AsgiSend::Http"));
         });
@@ -1772,7 +1745,7 @@ mod tests {
 
         with_py(|py| {
             let cache = SendCache::new(py).unwrap();
-            let mut send = AsgiSend::http(response_tx, disconnect_tx, &cache, py);
+            let mut send = AsgiSend::http(response_tx, disconnect_tx, &cache, py, None);
 
             let start_dict = PyDict::new(py);
             start_dict.set_item("type", "http.response.start").unwrap();
@@ -1805,7 +1778,7 @@ mod tests {
 
         with_py(|py| {
             let cache = SendCache::new(py).unwrap();
-            let mut send = AsgiSend::http(response_tx, disconnect_tx, &cache, py);
+            let mut send = AsgiSend::http(response_tx, disconnect_tx, &cache, py, None);
 
             let start_dict = PyDict::new(py);
             start_dict.set_item("type", "http.response.start").unwrap();

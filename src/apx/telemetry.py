@@ -29,11 +29,14 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import enum
 import functools
 import os
 import sys
 import traceback
-from typing import Any, Callable, ClassVar, TypeVar
+from typing import Annotated, Any, Callable, ClassVar, Literal, TypeVar, Union
+
+from pydantic import BaseModel, Discriminator, Field, Tag
 
 from apx._core import (
     RustCounter,
@@ -71,6 +74,14 @@ __all__ = [
     "Counter",
     "Histogram",
     "Gauge",
+    "configure",
+    "Configuration",
+    "HttpInstrumentation",
+    "FastAPIInstrumentation",
+    "SystemInstrumentation",
+    "SystemMetric",
+    "CaptureHeaders",
+    "Instrumentation",
 ]
 
 
@@ -311,3 +322,137 @@ class Gauge:
     ) -> None:
         """Set the gauge value."""
         self._instrument.set(value, labels)
+
+
+# ── Instrumentation configuration ────────────────────────────────────────
+
+
+class SystemMetric(str, enum.Enum):
+    """Available system metrics following OTEL semantic conventions."""
+
+    PROCESS_CPU = "process.cpu.utilization"
+    SYSTEM_CPU = "system.cpu.simple_utilization"
+    SYSTEM_MEMORY = "system.memory.utilization"
+    SYSTEM_SWAP = "system.swap.utilization"
+    PROCESS_MEMORY = "process.memory.usage"
+    PROCESS_THREADS = "process.thread.count"
+    SYSTEM_DISK_IO = "system.disk.io"
+    SYSTEM_NETWORK_IO = "system.network.io"
+
+
+_DEFAULT_SYSTEM_METRICS: frozenset[SystemMetric] = frozenset({
+    SystemMetric.PROCESS_CPU,
+    SystemMetric.SYSTEM_CPU,
+    SystemMetric.SYSTEM_MEMORY,
+})
+
+
+class CaptureHeaders(BaseModel):
+    """HTTP header capture rules."""
+
+    request: list[str] = Field(default_factory=list)
+    response: list[str] = Field(default_factory=list)
+    sanitize: list[str] = Field(default_factory=list)
+
+
+class HttpInstrumentation(BaseModel):
+    """Transport-level HTTP instrumentation (header capture, sanitization)."""
+
+    type: Literal["http"] = "http"
+    enabled: bool = True
+    capture_headers: CaptureHeaders = Field(default_factory=CaptureHeaders)
+
+
+class FastAPIInstrumentation(BaseModel):
+    """FastAPI/Starlette framework instrumentation (route extraction)."""
+
+    type: Literal["fastapi"] = "fastapi"
+    enabled: bool = True
+    excluded_routes: list[str] = Field(default_factory=list)
+    record_route: bool = True
+
+
+class SystemInstrumentation(BaseModel):
+    """System metrics collection (CPU, memory, disk, network)."""
+
+    type: Literal["system"] = "system"
+    enabled: bool = True
+    collect: set[SystemMetric] = Field(default_factory=lambda: set(_DEFAULT_SYSTEM_METRICS))
+    interval_seconds: float = Field(default=15.0, gt=0)
+
+
+def _instrumentation_type(v: Any) -> str:
+    if isinstance(v, dict):
+        return v.get("type", "")
+    return getattr(v, "type", "")
+
+
+Instrumentation = Annotated[
+    Union[
+        Annotated[HttpInstrumentation, Tag("http")],
+        Annotated[FastAPIInstrumentation, Tag("fastapi")],
+        Annotated[SystemInstrumentation, Tag("system")],
+    ],
+    Discriminator(_instrumentation_type),
+]
+
+_DEFAULT_INSTRUMENTATIONS: list[Instrumentation] = [
+    HttpInstrumentation(),
+    FastAPIInstrumentation(),
+    SystemInstrumentation(),
+]
+
+
+class Configuration(BaseModel):
+    """Telemetry instrumentation configuration.
+
+    Defaults enable HTTP, FastAPI, and system instrumentation automatically.
+    Call ``configure()`` only to override specific instrumentations::
+
+        from apx.telemetry import configure, Configuration, SystemInstrumentation
+
+        configure(Configuration(
+            instrumentations=[SystemInstrumentation(enabled=False)],
+        ))
+    """
+
+    instrumentations: list[Instrumentation] = Field(default_factory=list)
+
+
+_config: Configuration = Configuration()
+
+
+def configure(config: Configuration) -> None:
+    """Override the default telemetry configuration.
+
+    User-provided instrumentations are merged with defaults by ``type``:
+    same type replaces the default, new types are appended, omitted
+    defaults are kept as-is.
+    """
+    global _config  # noqa: PLW0603
+    _config = config
+
+
+def _effective_instrumentations() -> list[Instrumentation]:
+    """Merge user instrumentations with defaults by type key."""
+    user_by_type: dict[str, Instrumentation] = {
+        i.type: i for i in _config.instrumentations
+    }
+    result: list[Instrumentation] = []
+    seen: set[str] = set()
+    for default in _DEFAULT_INSTRUMENTATIONS:
+        key = default.type
+        seen.add(key)
+        result.append(user_by_type.get(key, default))
+    for key, instr in user_by_type.items():
+        if key not in seen:
+            result.append(instr)
+    return result
+
+
+def _get_config() -> dict[str, Any]:
+    """Serialize the effective config (defaults + overrides) for Rust."""
+    effective = _effective_instrumentations()
+    return {
+        "instrumentations": [i.model_dump() for i in effective],
+    }

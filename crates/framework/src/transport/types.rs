@@ -291,6 +291,8 @@ pub struct OutboundResponse {
     pub headers: HeaderMap,
     /// Response body.
     pub body: ResponseBody,
+    /// Matched route template extracted from the ASGI scope (e.g. `/users/{user_id}`).
+    pub server_route: Option<String>,
 }
 
 impl std::fmt::Debug for OutboundResponse {
@@ -460,6 +462,7 @@ mod tests {
             status: http::StatusCode::OK,
             headers: HeaderMap::new(),
             body: ResponseBody::Fixed(Bytes::from_static(b"ok")),
+            server_route: None,
         };
         assert_eq!(resp.status, http::StatusCode::OK);
     }
@@ -569,6 +572,7 @@ mod tests {
             status: http::StatusCode::OK,
             headers: HeaderMap::new(),
             body: ResponseBody::Fixed(Bytes::from("ok")),
+            server_route: None,
         };
         let dbg = format!("{resp:?}");
         assert!(dbg.contains("OutboundResponse"));

@@ -335,7 +335,7 @@ def apx_container(apx_image: str) -> Generator[str]:
         ports={"8000/tcp": None},
         environment={
             "APX_BENCH_PROFILE": "1",
-            "APX_BENCH_TRACE": "1",
+            "APX_PERF": "1",
         },
         detach=True,
     )

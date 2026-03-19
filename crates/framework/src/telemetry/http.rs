@@ -12,7 +12,7 @@ use opentelemetry::metrics::MeterProvider;
 ///
 /// Uses the configured provider if available, falls back to the global
 /// (which may be noop when OTEL is disabled — zero overhead).
-fn framework_meter() -> opentelemetry::metrics::Meter {
+pub(crate) fn framework_meter() -> opentelemetry::metrics::Meter {
     apx_core::tracing_init::meter_provider().map_or_else(
         || opentelemetry::global::meter("apx.framework"),
         |mp| mp.meter("apx.framework"),
@@ -95,4 +95,75 @@ pub fn protocol_version(version: http::Version) -> &'static str {
         http::Version::HTTP_3 => "3",
         _ => "1.1",
     }
+}
+
+// ── Header capture ───────────────────────────────────────────────────────
+
+use super::config::HttpConfig;
+
+/// Captured header attribute following OTEL semconv `http.{request,response}.header.<name>`.
+fn header_attr_name(direction: &str, name: &str) -> String {
+    let normalized = name.to_lowercase().replace('-', "_");
+    format!("http.{direction}.header.{normalized}")
+}
+
+fn is_sanitized(name: &str, patterns: &[String]) -> bool {
+    let lower = name.to_lowercase();
+    patterns.iter().any(|p| lower.contains(&p.to_lowercase()))
+}
+
+const REDACTED: &str = "[REDACTED]";
+
+/// Extract request header values as OTEL span attributes.
+pub fn capture_request_headers(headers: &http::HeaderMap, config: &HttpConfig) -> Vec<KeyValue> {
+    let mut attrs = Vec::new();
+    for name in &config.capture_request_headers {
+        let lower = name.to_lowercase();
+        let values: Vec<&str> = headers
+            .get_all(
+                http::header::HeaderName::from_bytes(lower.as_bytes())
+                    .unwrap_or(http::header::HeaderName::from_static("x-unknown")),
+            )
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        if values.is_empty() {
+            continue;
+        }
+        let attr_name = header_attr_name("request", name);
+        let value = if is_sanitized(name, &config.sanitize_headers) {
+            REDACTED.to_owned()
+        } else {
+            values.join(", ")
+        };
+        attrs.push(KeyValue::new(attr_name, value));
+    }
+    attrs
+}
+
+/// Extract response header values as OTEL span attributes.
+pub fn capture_response_headers(headers: &http::HeaderMap, config: &HttpConfig) -> Vec<KeyValue> {
+    let mut attrs = Vec::new();
+    for name in &config.capture_response_headers {
+        let lower = name.to_lowercase();
+        let values: Vec<&str> = headers
+            .get_all(
+                http::header::HeaderName::from_bytes(lower.as_bytes())
+                    .unwrap_or(http::header::HeaderName::from_static("x-unknown")),
+            )
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect();
+        if values.is_empty() {
+            continue;
+        }
+        let attr_name = header_attr_name("response", name);
+        let value = if is_sanitized(name, &config.sanitize_headers) {
+            REDACTED.to_owned()
+        } else {
+            values.join(", ")
+        };
+        attrs.push(KeyValue::new(attr_name, value));
+    }
+    attrs
 }

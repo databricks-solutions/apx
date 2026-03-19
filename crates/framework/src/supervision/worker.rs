@@ -141,6 +141,22 @@ pub async fn run_worker(
         ModuleImport::new(bootstrap.app_module.as_str()).build(py, ctx, server_addr)
     })?;
 
+    // Read telemetry config from Python (after app load, so user configure() ran).
+    let telemetry_config = Python::attach(|py| {
+        crate::telemetry::bootstrap_python_telemetry(py)
+            .map_err(|e| WorkerError::PythonInit(format!("telemetry bootstrap: {e}")))?;
+        crate::telemetry::config::read_python_config(py)
+            .map_err(|e| WorkerError::PythonInit(format!("telemetry config: {e}")))
+    })?;
+
+    let _system_metrics_handle = if telemetry_config.system.enabled {
+        Some(crate::telemetry::system_metrics::spawn_system_metrics(
+            &telemetry_config.system,
+        ))
+    } else {
+        None
+    };
+
     // Build HTTP service.
     let mut config = ServiceConfig {
         timeout: Duration::from_secs(bootstrap.request_timeout_secs),

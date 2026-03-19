@@ -168,8 +168,9 @@ impl ApxService {
         // Timeout-wrapped dispatch.
         let result = tokio::time::timeout(self.timeout, self.dispatch.dispatch(inbound)).await;
 
-        let response = match result {
+        let (response, server_route) = match result {
             Ok(mut outbound) => {
+                let route = outbound.server_route.take();
                 if let ResponseBody::Stream(stream) = outbound.body {
                     outbound.body = ResponseBody::Stream(Box::pin(PermitGuardedStream {
                         inner: stream,
@@ -178,14 +179,18 @@ impl ApxService {
                 } else {
                     drop(permit);
                 }
-                outbound_to_hyper(outbound)
+                (outbound_to_hyper(outbound), route)
             }
             Err(_elapsed) => {
                 drop(permit);
-                error_response(hyper::StatusCode::REQUEST_TIMEOUT, "request timeout")
+                (
+                    error_response(hyper::StatusCode::REQUEST_TIMEOUT, "request timeout"),
+                    None,
+                )
             }
         };
 
+        let route = server_route.as_deref().unwrap_or(&path);
         let status = response.status().as_u16();
         let elapsed = start.elapsed().as_secs_f64();
         let error_type = if status >= 400 {
@@ -198,7 +203,7 @@ impl ApxService {
             &method,
             scheme,
             status,
-            &path,
+            route,
             error_type.as_deref(),
         );
 
@@ -395,6 +400,7 @@ mod tests {
                     status: hyper::StatusCode::OK,
                     headers: HeaderMap::new(),
                     body: ResponseBody::Fixed(Bytes::from_static(b"ok")),
+                    server_route: None,
                 }
             })
         }
@@ -480,6 +486,7 @@ mod tests {
             status: hyper::StatusCode::CREATED,
             headers,
             body: ResponseBody::Fixed(Bytes::from_static(b"{}")),
+            server_route: None,
         };
 
         let resp = outbound_to_hyper(outbound);
@@ -537,6 +544,7 @@ mod tests {
             status: hyper::StatusCode::OK,
             headers: HeaderMap::new(),
             body: ResponseBody::Fixed(Bytes::from_static(b"ok")),
+            server_route: None,
         };
 
         // Fixed body — permit is dropped immediately.

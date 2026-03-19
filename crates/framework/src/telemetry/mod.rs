@@ -3,13 +3,25 @@
 //! All telemetry flows through the Rust `tracing` + OpenTelemetry SDK.
 //! Python code uses thin PyO3 wrappers — no Python OTEL SDK required.
 
+pub mod config;
 pub mod context;
 pub mod http;
 pub mod logging;
 pub mod metrics;
 pub mod spans;
+pub mod system_metrics;
 
 use pyo3::prelude::*;
+
+/// Check whether performance instrumentation is enabled (`APX_PERF=1`).
+///
+/// Evaluated once on first call; zero cost thereafter (single atomic load).
+/// When enabled, per-phase timing spans are emitted under the `apx.perf`
+/// tracing target and flow through the OTEL pipeline.
+pub fn perf_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("APX_PERF").is_ok())
+}
 
 /// Bootstrap Python-side telemetry: install log handler + init context var.
 ///
