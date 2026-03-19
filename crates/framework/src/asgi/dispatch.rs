@@ -159,6 +159,14 @@ async fn dispatch_inner(
     send_cache: Arc<SendCache>,
     ctx: Arc<WorkerContext>,
 ) -> Result<OutboundResponse, AppError> {
+    if let Some(id) = request
+        .headers
+        .get(&crate::protocol::http::service::REQUEST_ID_HEADER)
+        && let Ok(val) = id.to_str()
+    {
+        tracing::Span::current().record("request.id", val);
+    }
+
     let perf = crate::telemetry::perf_enabled();
     let t_total = perf.then(Instant::now);
 

@@ -12,6 +12,7 @@ use crate::transport::tcp::TcpListener;
 use crate::transport::types::{
     BodyStream, InboundRequest, OutboundResponse, ProtocolVersion, ResponseBody, TransportKind,
 };
+use ::http::header::{HeaderMap, HeaderName, HeaderValue};
 use bytes::Bytes;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -43,6 +44,23 @@ const HEALTH_READY: &[u8] = br#"{"status":"ready"}"#;
 
 /// JSON content type for health responses.
 const JSON_CONTENT_TYPE: &str = "application/json";
+
+/// Databricks Apps `X-Request-Id` header.
+pub const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
+
+/// Ensure every request carries an `X-Request-Id` header.
+///
+/// Databricks Apps always sets this header. For local dev (no proxy),
+/// a UUID v4 is generated so downstream telemetry can always rely on it.
+pub fn ensure_request_id(headers: &mut HeaderMap) {
+    if headers.contains_key(&REQUEST_ID_HEADER) {
+        return;
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    if let Ok(val) = HeaderValue::from_str(&id) {
+        headers.insert(REQUEST_ID_HEADER, val);
+    }
+}
 
 // ── Config ───────────────────────────────────────────────────────────────
 
@@ -249,7 +267,8 @@ fn inbound_from_hyper(
         .query()
         .map(|q| Bytes::copy_from_slice(q.as_bytes()))
         .unwrap_or_default();
-    let headers = parts.headers;
+    let mut headers = parts.headers;
+    ensure_request_id(&mut headers);
 
     let protocol = match parts.version {
         hyper::Version::HTTP_10 => ProtocolVersion::Http10,

@@ -57,6 +57,12 @@ def echo() -> dict[str, bool]:
     return {"echo": True}
 
 
+@router.get("/request-id")
+def request_id(request: Request) -> dict[str, str | None]:
+    """Return the X-Request-Id seen by the ASGI app."""
+    return {"request_id": request.headers.get("x-request-id")}
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}

@@ -51,6 +51,7 @@ tokio-stream.workspace = true
 hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 hyper-tungstenite = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

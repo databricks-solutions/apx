@@ -95,7 +95,8 @@ fn extract_request_info<B>(
         .query()
         .map(|q| Bytes::copy_from_slice(q.as_bytes()))
         .unwrap_or_default();
-    let headers = req.headers().clone();
+    let mut headers = req.headers().clone();
+    crate::protocol::http::service::ensure_request_id(&mut headers);
     let method = req.method().clone();
 
     let protocol = match req.version() {

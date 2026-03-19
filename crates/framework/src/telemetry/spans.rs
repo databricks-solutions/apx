@@ -275,47 +275,36 @@ fn read_context_var_raw(py: Python<'_>) -> Option<SerializedContext> {
 
 /// Build an OTEL `Context` from the Python ContextVar.
 fn resolve_parent_context(py: Python<'_>) -> Context {
-    let Some(raw) = read_context_var_raw(py) else {
-        return Context::new();
-    };
-    context_from_raw(&raw.trace_id_hex, &raw.span_id_hex, raw.flags)
+    read_context_var_raw(py)
+        .as_ref()
+        .and_then(parse_span_context)
+        .map(|sc| Context::new().with_remote_span_context(sc))
+        .unwrap_or_default()
 }
 
-/// Parse hex trace/span ids into an OTEL `Context`.
+/// Parse hex-encoded trace/span IDs into an OTEL `SpanContext`.
 ///
-/// Returns an empty `Context` (no parent) when the IDs are invalid (all
-/// zeros). In opentelemetry 0.29, `with_remote_span_context` sets the
-/// span as active, so an invalid context with `flags=0` (not sampled)
-/// would cause the `ParentBased` sampler to drop all child spans.
-fn context_from_raw(trace_id_hex: &str, span_id_hex: &str, flags: u8) -> Context {
-    let Ok(tid_bytes) = hex::decode(trace_id_hex) else {
-        return Context::new();
-    };
-    let Ok(sid_bytes) = hex::decode(span_id_hex) else {
-        return Context::new();
-    };
-    if tid_bytes.len() != 16 || sid_bytes.len() != 8 {
-        return Context::new();
-    }
-    let mut tid = [0u8; 16];
-    tid.copy_from_slice(&tid_bytes);
-    let mut sid = [0u8; 8];
-    sid.copy_from_slice(&sid_bytes);
+/// Returns `None` for any malformed or invalid (all-zeros) identifiers.
+/// Invalid contexts must not be attached — in opentelemetry 0.29,
+/// `with_remote_span_context` marks the context as active, so an invalid
+/// one with `flags=0` would cause `ParentBased` to drop all child spans.
+fn parse_span_context(raw: &SerializedContext) -> Option<SpanContext> {
+    let tid: [u8; 16] = hex::decode(&raw.trace_id_hex).ok()?.try_into().ok()?;
+    let sid: [u8; 8] = hex::decode(&raw.span_id_hex).ok()?.try_into().ok()?;
 
     let trace_id = TraceId::from_bytes(tid);
     let span_id = SpanId::from_bytes(sid);
     if trace_id == TraceId::INVALID || span_id == SpanId::INVALID {
-        return Context::new();
+        return None;
     }
 
-    let sc = SpanContext::new(
+    Some(SpanContext::new(
         trace_id,
         span_id,
-        TraceFlags::new(flags),
-        true, // remote parent
+        TraceFlags::new(raw.flags),
+        true,
         TraceState::default(),
-    );
-    Context::new().with_remote_span_context(sc)
+    ))
 }
 
 /// Write a `SpanContext` into the Python ContextVar.
