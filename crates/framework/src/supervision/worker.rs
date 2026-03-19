@@ -12,7 +12,7 @@ use crate::asgi::app::{AppSource, ModuleImport};
 use crate::io::EventLoop;
 use crate::protocol::http::service::{ApxService, ServiceConfig, serve_tcp};
 use crate::transport::{Listener, TransportConfig, TransportError};
-use pyo3::Python;
+use pyo3::prelude::*;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,7 +50,7 @@ pub struct WorkerRuntime {
     pub listener: crate::transport::TcpListener,
     /// IPC channel to supervisor — stays open for the worker's lifetime.
     pub channel: WorkerChannel,
-    /// Inline asyncio event loop (dormant — driven by Rust scheduler).
+    /// Asyncio event loop (dedicated thread, asyncio delegation).
     pub event_loop: EventLoop,
 }
 
@@ -62,8 +62,8 @@ impl std::fmt::Debug for WorkerRuntime {
 
 /// Phase 1: Create TCP listener and initialize the Python interpreter.
 ///
-/// Uses `io::EventLoop` — the asyncio loop is installed as dormant and
-/// all coroutine driving happens inline on the tokio thread.
+/// Uses `io::EventLoop` — creates the asyncio loop on a dedicated thread.
+/// Coroutines are submitted via `call_soon_threadsafe(create_task, coro)`.
 ///
 /// # Errors
 ///
@@ -86,9 +86,9 @@ pub async fn init_worker(
     // IMPORTANT: must only be called once per process, only in worker processes.
     Python::initialize();
 
-    // Initialize inline event loop (dormant asyncio + Rust scheduler).
+    // Initialize asyncio event loop (dedicated thread, asyncio delegation).
     let event_loop = Python::attach(|py| EventLoop::init(py, &bootstrap.loop_policy))
-        .map_err(|e| WorkerError::PythonInit(format!("inline event loop: {e}")))?;
+        .map_err(|e| WorkerError::PythonInit(format!("event loop: {e}")))?;
 
     Ok(WorkerRuntime {
         listener,
@@ -121,24 +121,18 @@ pub async fn run_worker(
     let mut runtime = init_worker(&bootstrap, channel).await?;
     signal_readiness(&mut runtime.channel).await?;
 
-    // Build WorkerContext from the inline event loop.
+    // Build WorkerContext from the event loop.
     let ctx = {
         let el = &runtime.event_loop;
-        Python::attach(|py| {
-            let to = el.task_ops();
-            let po = el.poke_ops();
-            Arc::new(WorkerContext {
-                coroutine_ops: Arc::clone(el.coroutine_ops()),
-                ready_queue: Arc::clone(el.ready_queue()),
+        Python::attach(|py| -> Result<Arc<WorkerContext>, WorkerError> {
+            let guarded_fn = register_guarded(py)
+                .map_err(|e| WorkerError::PythonInit(format!("register _guarded: {e}")))?;
+            Ok(Arc::new(WorkerContext {
                 call_soon_threadsafe: el.call_soon_threadsafe().clone_ref(py),
-                task_ops: to.clone_ref(py),
-                poke_ops: crate::io::PokeOps {
-                    cached_noop: po.cached_noop.clone_ref(py),
-                    ready_deque: po.ready_deque.as_ref().map(|d| d.clone_ref(py)),
-                    poke_notify: Arc::clone(&po.poke_notify),
-                },
-            })
-        })
+                create_task: el.create_task().clone_ref(py),
+                guarded_fn,
+            }))
+        })?
     };
 
     // Load app and build dispatch pipeline.
@@ -242,6 +236,41 @@ pub async fn connect_to_supervisor()
     }
 
     Ok(Some((channel, bootstrap)))
+}
+
+// ── _guarded wrapper ────────────────────────────────────────────────────
+
+/// Python source for the `_guarded` error-forwarding wrapper.
+///
+/// Wraps an ASGI coroutine so that unhandled exceptions are forwarded
+/// through `AsgiSend.send_error()` before re-raising. Without this,
+/// exceptions in asyncio tasks are silently lost and `response_rx`
+/// receives `RecvError` instead of a proper error response.
+const GUARDED_SOURCE: &str = r#"
+import traceback as _tb
+
+async def _guarded(coro, send):
+    try:
+        await coro
+    except BaseException as exc:
+        tb = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
+        send.send_error(tb)
+        raise
+"#;
+
+/// Register the `_guarded` Python function and return a reference to it.
+fn register_guarded(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let globals = pyo3::types::PyDict::new(py);
+    let source = std::ffi::CString::new(GUARDED_SOURCE).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid guarded source: {e}"))
+    })?;
+    py.run(&source, Some(&globals), None)?;
+    globals
+        .get_item("_guarded")?
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("_guarded function not found after exec")
+        })
+        .map(|f| f.unbind())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

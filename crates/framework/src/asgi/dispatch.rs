@@ -1,8 +1,8 @@
 //! ASGI dispatch — calls `app(scope, receive, send)` and collects response.
 //!
 //! Implements the [`Dispatch`] trait for ASGI applications. The hot path
-//! collects the request body, then builds scope + calls app + drives the
-//! coroutine inline on the tokio thread via the Rust scheduler.
+//! collects the request body, builds scope, wraps the ASGI coroutine in
+//! `_guarded`, and submits it to asyncio via `call_soon_threadsafe(create_task, ...)`.
 //!
 //! The response flows through a oneshot channel: `AsgiSend` accumulates
 //! status/headers from `ResponseStart` and builds the complete
@@ -11,8 +11,6 @@
 use crate::asgi::bench_trace::{self, RequestTraceBuilder};
 use crate::asgi::scope::{AsgiReceive, AsgiSend, ScopeInterns, build_http_scope};
 use crate::dispatch::Dispatch;
-use crate::io::bridge::spawn_and_drive;
-use crate::io::driver::DriveStats;
 use crate::protocol::http::error::AppError;
 use crate::supervision::worker_context::WorkerContext;
 use crate::transport::types::{BodyStream, InboundRequest, OutboundResponse, ResponseBody};
@@ -41,7 +39,7 @@ pub struct AsgiDispatch {
     scope_interns: Arc<ScopeInterns>,
     /// Template dict for `AsgiReceive` (Arc-wrapped to avoid per-request GIL).
     receive_template: Arc<Py<PyDict>>,
-    /// Shared worker infrastructure (scheduler state).
+    /// Shared worker infrastructure (asyncio submission state).
     ctx: Arc<WorkerContext>,
     /// Maximum request body size in bytes.
     body_limit: usize,
@@ -79,12 +77,10 @@ impl Dispatch for AsgiDispatch {
         &self,
         mut request: InboundRequest,
     ) -> Pin<Box<dyn Future<Output = OutboundResponse> + Send>> {
-        // Take body before moving request into the async block.
         let body_stream = request.take_body();
         let body_limit = self.body_limit;
         let trace = super::bench_trace_enabled();
 
-        // Arc clones — no GIL needed on the tokio thread.
         let app = Arc::clone(&self.app);
         let template = Arc::clone(&self.receive_template);
         let interns = Arc::clone(&self.scope_interns);
@@ -155,8 +151,8 @@ impl Dispatch for AsgiDispatch {
 
 // ── Dispatch internals ───────────────────────────────────────────────────
 
-/// Full dispatch pipeline: collect body → build scope → call app → drive
-/// coroutine inline → await oneshot response.
+/// Full dispatch pipeline: collect body → build scope → submit to asyncio
+/// → await oneshot response.
 async fn dispatch_inner(
     request: InboundRequest,
     body_stream: BodyStream,
@@ -166,17 +162,14 @@ async fn dispatch_inner(
     template: Arc<Py<PyDict>>,
     ctx: Arc<WorkerContext>,
 ) -> Result<OutboundResponse, AppError> {
-    // Step 1: Collect body (async, no GIL).
     let body_bytes = body_stream
         .collect(body_limit)
         .await
         .map_err(|e| AppError::Internal(format!("body collect: {e}")))?;
 
-    // Step 2: Create oneshot response channel + disconnect channel.
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel::<()>();
 
-    // Step 3: Build scope, call app, drive coroutine — all inline.
     Python::attach(|py| -> Result<(), AppError> {
         let scope = build_http_scope(py, &request, None, &interns)
             .map_err(|e| AppError::Internal(format!("scope build: {e}")))?;
@@ -192,27 +185,19 @@ async fn dispatch_inner(
         let send_obj =
             Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
         let coro = app
-            .call1(py, (scope, receive_obj, send_obj))
+            .call1(py, (scope, receive_obj, &send_obj))
             .map_err(|e| AppError::Internal(format!("ASGI app call: {e}")))?;
 
-        // Drive coroutine inline via spawn_and_drive.
-        // For simple handlers: completes here, response sent via oneshot.
-        // For suspending handlers: ResumeCallback enqueued to ready_queue.
-        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
-        spawn_and_drive(
-            py,
-            coro,
-            result_tx,
-            &ctx.coroutine_ops,
-            &ctx.call_soon_threadsafe,
-            &ctx.ready_queue,
-            &ctx.task_ops,
-            &ctx.poke_ops,
-        );
+        let guarded = ctx
+            .guarded_fn
+            .call1(py, (&coro, &send_obj))
+            .map_err(|e| AppError::Internal(format!("_guarded wrap: {e}")))?;
+        ctx.call_soon_threadsafe
+            .call1(py, (&ctx.create_task, &guarded))
+            .map_err(|e| AppError::Internal(format!("submit to asyncio: {e}")))?;
         Ok(())
     })?;
 
-    // Step 4: Await response from the oneshot channel.
     response_rx
         .await
         .map_err(|_| AppError::Internal("response channel closed".to_owned()))?
@@ -220,7 +205,7 @@ async fn dispatch_inner(
 
 // ── Traced dispatch ─────────────────────────────────────────────────────
 
-/// Dispatch with per-phase bench tracing. Delegates to phase helpers.
+/// Dispatch with per-phase bench tracing.
 async fn dispatch_traced(
     request: InboundRequest,
     body_stream: BodyStream,
@@ -233,7 +218,6 @@ async fn dispatch_traced(
     let t_total = Instant::now();
     let mut builder = RequestTraceBuilder::new(request.method.to_string(), request.path.clone());
 
-    // Phase 1: body collection (async, no GIL).
     let t0 = Instant::now();
     let body_bytes = body_stream
         .collect(body_limit)
@@ -241,16 +225,14 @@ async fn dispatch_traced(
         .map_err(|e| AppError::Internal(format!("body collect: {e}")))?;
     builder = builder.body_collect(t0.elapsed().as_micros() as u64);
 
-    // Phase 2-5: GIL block (scope, app call, drive).
-    let (response_rx, drive_stats, gil_us, scope_us, call_us, drive_us) =
+    let (response_rx, gil_us, scope_us, call_us, submit_us) =
         dispatch_gil_block(&request, body_bytes, &app, &interns, &template, &ctx)?;
     builder = builder
         .gil_acquire(gil_us)
         .scope_build(scope_us)
         .app_call(call_us)
-        .drive(drive_us, drive_stats);
+        .submit(submit_us);
 
-    // Phase 6: await response.
     let t0 = Instant::now();
     let response = response_rx
         .await
@@ -264,10 +246,9 @@ async fn dispatch_traced(
     response
 }
 
-/// GIL block output: (response_rx, drive_stats, gil_us, scope_us, call_us, drive_us).
+/// GIL block output: (response_rx, gil_us, scope_us, call_us, submit_us).
 type GilBlockOutput = (
     tokio::sync::oneshot::Receiver<Result<OutboundResponse, AppError>>,
-    DriveStats,
     u64,
     u64,
     u64,
@@ -309,26 +290,21 @@ fn dispatch_gil_block(
 
         let t0 = Instant::now();
         let coro = app
-            .call1(py, (scope, receive_obj, send_obj))
+            .call1(py, (scope, receive_obj, &send_obj))
             .map_err(|e| AppError::Internal(format!("ASGI app call: {e}")))?;
         let call_us = t0.elapsed().as_micros() as u64;
 
         let t0 = Instant::now();
-        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
-        let stats = spawn_and_drive(
-            py,
-            coro,
-            result_tx,
-            &ctx.coroutine_ops,
-            &ctx.call_soon_threadsafe,
-            &ctx.ready_queue,
-            &ctx.task_ops,
-            &ctx.poke_ops,
-        )
-        .unwrap_or_default();
-        let drive_us = t0.elapsed().as_micros() as u64;
+        let guarded = ctx
+            .guarded_fn
+            .call1(py, (&coro, &send_obj))
+            .map_err(|e| AppError::Internal(format!("_guarded wrap: {e}")))?;
+        ctx.call_soon_threadsafe
+            .call1(py, (&ctx.create_task, &guarded))
+            .map_err(|e| AppError::Internal(format!("submit to asyncio: {e}")))?;
+        let submit_us = t0.elapsed().as_micros() as u64;
 
-        Ok((response_rx, stats, gil_us, scope_us, call_us, drive_us))
+        Ok((response_rx, gil_us, scope_us, call_us, submit_us))
     })
 }
 
@@ -364,8 +340,6 @@ fn error_response(err: AppError) -> OutboundResponse {
 #[expect(clippy::panic, reason = "test code uses unwrap/assert for clarity")]
 mod tests {
     use super::*;
-
-    // ── error_response tests ────────────────────────────────────────────
 
     #[test]
     fn error_response_internal() {

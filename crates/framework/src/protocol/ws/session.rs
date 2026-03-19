@@ -11,7 +11,6 @@
 use crate::asgi::scope::{
     AsgiEvent, AsgiSend, AsgiWsReceive, ScopeInterns, WsIncomingEvent, build_ws_scope,
 };
-use crate::io::bridge::spawn_and_drive;
 use crate::protocol::http::error::AppError;
 use crate::supervision::worker_context::WorkerContext;
 use crate::transport::types::{
@@ -157,7 +156,7 @@ async fn ws_session(
     let recv_handle = tokio::spawn(forward_incoming(stream, incoming_tx));
     let send_handle = tokio::spawn(forward_outgoing(outgoing_rx, sink));
 
-    // Build scope, call app, and drive coroutine inline.
+    // Build scope, call app, submit to asyncio.
     let schedule_result = Python::attach(|py| -> Result<(), AppError> {
         let scope = build_ws_scope(py, &request, &interns)
             .map_err(|e| AppError::Internal(format!("ws scope build: {e}")))?;
@@ -169,17 +168,9 @@ async fn ws_session(
             .call1(py, (scope, receive, send))
             .map_err(|e| AppError::Internal(format!("ASGI app call (ws): {e}")))?;
 
-        let (result_tx, _result_rx) = tokio::sync::oneshot::channel();
-        spawn_and_drive(
-            py,
-            coro,
-            result_tx,
-            &ctx.coroutine_ops,
-            &ctx.call_soon_threadsafe,
-            &ctx.ready_queue,
-            &ctx.task_ops,
-            &ctx.poke_ops,
-        );
+        ctx.call_soon_threadsafe
+            .call1(py, (&ctx.create_task, &coro))
+            .map_err(|e| AppError::Internal(format!("submit ws to asyncio: {e}")))?;
         Ok(())
     });
     if let Err(e) = schedule_result {

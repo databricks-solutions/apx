@@ -11,11 +11,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::asgi::scope::AsgiReceive>()?;
     m.add_class::<crate::asgi::scope::AsgiSend>()?;
 
-    // Primitives
-    m.add_class::<crate::io::driver::primitives::Event>()?;
-    m.add_class::<crate::io::driver::primitives::EventWaiter>()?;
-    m.add_class::<crate::io::driver::primitives::Future>()?;
-
     // Telemetry
     m.add_class::<crate::telemetry::spans::SpanHandle>()?;
     m.add_class::<crate::telemetry::metrics::RustCounter>()?;
@@ -38,10 +33,10 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
 
-    // Bench trace + scheduler stats
+    // Bench trace + request stats
     m.add_function(pyo3::wrap_pyfunction!(bench_trace_dump, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(bench_trace_reset, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(scheduler_stats_json, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(request_stats_json, m)?)?;
 
     Ok(())
 }
@@ -57,7 +52,7 @@ fn bench_trace_reset() {
 }
 
 #[pyfunction]
-fn scheduler_stats_json() -> Option<String> {
+fn request_stats_json() -> Option<String> {
     let counters = crate::io::counters::get()?;
     let snapshot = counters.snapshot();
     serde_json::to_string(&snapshot).ok()

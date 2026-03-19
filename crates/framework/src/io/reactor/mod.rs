@@ -1,8 +1,8 @@
-//! Asyncio event loop lifecycle — init, shutdown, task registration.
+//! Asyncio event loop lifecycle — init, shutdown, task submission.
 //!
 //! The [`Reactor`] manages the Python asyncio event loop on a dedicated
-//! thread. It owns the loop object, `call_soon_threadsafe`, and the
-//! `_enter_task`/`_leave_task` registration API.
+//! thread. It owns the loop object, `call_soon_threadsafe`, and
+//! `create_task` for coroutine submission.
 
 use std::sync::Mutex;
 use std::thread::JoinHandle;
@@ -42,12 +42,9 @@ fn install_loop_policy(py: Python<'_>, policy: &str) {
     }
 }
 
-/// Create an asyncio event loop as the I/O reactor (socket ops, DNS).
-///
-/// The Rust scheduler drives all coroutine scheduling; asyncio only
-/// resolves `asyncio.Future`s from network I/O libraries.
+/// Create an asyncio event loop.
 fn create_event_loop(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-    tracing::info!("creating asyncio I/O reactor");
+    tracing::info!("creating asyncio event loop");
     py.import(c"asyncio")?.call_method0(c"new_event_loop")
 }
 
@@ -63,8 +60,6 @@ fn cancel_pending_tasks(py: Python<'_>, event_loop: &Bound<'_, PyAny>) {
     let Ok(tasks) = asyncio.call_method1(c"all_tasks", (event_loop,)) else {
         return;
     };
-    // Snapshot to list — all_tasks() returns a set backed by WeakSet.
-    // Items can be GC'd during iteration, causing RuntimeError.
     let Ok(task_list) = pyo3::types::PyList::new(
         py,
         tasks
@@ -79,7 +74,6 @@ fn cancel_pending_tasks(py: Python<'_>, event_loop: &Bound<'_, PyAny>) {
     for task in task_list.iter() {
         let _ = task.call_method0(c"cancel");
     }
-    // Drive cancelled tasks so their CancelledError propagates.
     let Ok(gather) = asyncio.call_method(c"gather", (&task_list,), Some(&gather_kwargs(py))) else {
         return;
     };
@@ -94,9 +88,6 @@ fn gather_kwargs(py: Python<'_>) -> Bound<'_, pyo3::types::PyDict> {
 }
 
 /// Shut down all async generators — run their `aclose()` finalizers.
-///
-/// Without this, async generators abandoned without `aclose()` leak
-/// their `finally` blocks. Matches `asyncio.run()` cleanup behavior.
 fn shutdown_asyncgens(_py: Python<'_>, event_loop: &Bound<'_, PyAny>) {
     let Ok(coro) = event_loop.call_method0(c"shutdown_asyncgens") else {
         return;
@@ -128,77 +119,19 @@ fn shutdown_default_executor(py: Python<'_>, event_loop: &Bound<'_, PyAny>) {
     }
 }
 
-// ── TaskOps — cached Python callables for scheduler task lifecycle ────────
-
-/// Cached Python callables for the scheduler task lifecycle.
-///
-/// Resolved once at worker init, passed by reference to avoid per-call imports.
-pub struct TaskOps {
-    pub enter_task: Py<PyAny>,
-    pub leave_task: Py<PyAny>,
-    pub scheduler_task_cls: Py<PyAny>,
-    pub call_soon: Py<PyAny>,
-    pub loop_obj: Py<PyAny>,
-}
-
-impl TaskOps {
-    /// Clone all cached Python references under the current GIL.
-    pub fn clone_ref(&self, py: Python<'_>) -> Self {
-        Self {
-            enter_task: self.enter_task.clone_ref(py),
-            leave_task: self.leave_task.clone_ref(py),
-            scheduler_task_cls: self.scheduler_task_cls.clone_ref(py),
-            call_soon: self.call_soon.clone_ref(py),
-            loop_obj: self.loop_obj.clone_ref(py),
-        }
-    }
-}
-
-impl std::fmt::Debug for TaskOps {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TaskOps").finish_non_exhaustive()
-    }
-}
-
-// ── Scheduler task registration ──────────────────────────────────────────
-
-/// Create a per-request `_SchedulerTask` for `asyncio.current_task()` registration.
-///
-/// The task wraps `_sentinel()` internally (not the user coroutine), so
-/// asyncio's `__step` never interferes with the Rust driver.
-///
-/// - **Python 3.12+:** `eager_start=True` completes the sentinel inline.
-/// - **Python 3.11:** sentinel `__step` runs on the next event loop iteration.
-pub fn create_scheduler_task(
-    py: Python<'_>,
-    coro: &Py<PyAny>,
-    ops: &TaskOps,
-) -> Option<(Py<PyAny>, Py<PyAny>)> {
-    let kwargs = pyo3::types::PyDict::new(py);
-    kwargs.set_item("loop", &ops.loop_obj).ok()?;
-    let sched_task = ops
-        .scheduler_task_cls
-        .call(py, (coro,), Some(&kwargs))
-        .ok()?;
-    tracing::trace!("create_scheduler_task: created per-request");
-    Some((ops.loop_obj.clone_ref(py), sched_task))
-}
-
 // ── Reactor ──────────────────────────────────────────────────────────────
 
 /// Asyncio event loop lifecycle manager.
 ///
 /// Owns the Python asyncio event loop running on a dedicated OS thread,
-/// the cached `call_soon_threadsafe` bound method, and the `TaskOps`
-/// for `_enter_task`/`_leave_task` registration.
+/// the cached `call_soon_threadsafe` and `create_task` bound methods.
 pub struct Reactor {
     /// Python asyncio event loop object.
     event_loop: Py<PyAny>,
-    /// Cached `loop.call_soon_threadsafe` bound method (thread-safe variant,
-    /// needed since the asyncio loop runs on a dedicated thread).
+    /// Cached `loop.call_soon_threadsafe` bound method.
     call_soon_threadsafe: Py<PyAny>,
-    /// Cached Python callables for scheduler task lifecycle.
-    task_ops: TaskOps,
+    /// Cached `loop.create_task` bound method.
+    create_task: Py<PyAny>,
     /// Dedicated OS thread running `loop.run_forever()`.
     asyncio_thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -207,20 +140,17 @@ impl Reactor {
     /// Initialize the reactor on the current thread.
     ///
     /// Sets up the asyncio event loop, marks it as running, enables eager
-    /// task factory (Python 3.12+), caches task lifecycle callables, and
+    /// task factory (Python 3.12+), caches submission callables, and
     /// spawns a dedicated OS thread running `run_forever()`.
     ///
     /// # Errors
     ///
     /// Returns an error if Python initialization fails.
     pub fn init(py: Python<'_>, loop_policy: &str) -> Result<Self, String> {
-        // 1. Install loop policy (uvloop or asyncio).
         install_loop_policy(py, loop_policy);
 
-        // 2. Create asyncio event loop.
         let event_loop = create_event_loop(py).map_err(|e| format!("create_event_loop: {e}"))?;
 
-        // 3. Set as current event loop.
         let asyncio = py
             .import(c"asyncio")
             .map_err(|e| format!("import asyncio: {e}"))?;
@@ -228,9 +158,8 @@ impl Reactor {
             .call_method1(c"set_event_loop", (&event_loop,))
             .map_err(|e| format!("set_event_loop: {e}"))?;
 
-        // 4. Mark as running loop WITHOUT calling run_forever().
-        // This makes asyncio.get_running_loop() work for libraries
-        // (Starlette middleware, DB drivers, etc.).
+        // Mark as running loop so asyncio.get_running_loop() works for
+        // libraries (Starlette middleware, DB drivers, etc.).
         let events = py
             .import(c"asyncio.events")
             .map_err(|e| format!("import asyncio.events: {e}"))?;
@@ -239,7 +168,7 @@ impl Reactor {
             .map_err(|e| format!("_set_running_loop: {e}"))?;
         tracing::info!("reactor: _set_running_loop installed");
 
-        // 5. Set eager task factory (Python 3.12+).
+        // Eager task factory (Python 3.12+).
         if let Ok(eager_factory) = asyncio.getattr(c"eager_task_factory") {
             match event_loop.call_method1(c"set_task_factory", (eager_factory,)) {
                 Ok(_) => tracing::info!("eager task factory enabled (Python 3.12+)"),
@@ -247,80 +176,24 @@ impl Reactor {
             }
         }
 
-        // 5b. Cache _enter_task / _leave_task / _SchedulerTask for task lifecycle.
-        //
-        // -- Private API: _enter_task / _leave_task --
-        //
-        // The ONLY way to set asyncio.current_task(). CPython's own
-        // Task.__step calls them. No public alternative exists.
-        //
-        // Python-level API: asyncio.tasks._enter_task(loop, task)
-        // C-level: _PyTask_Enter / _PyTask_Leave (not exposed to Python)
-        //
-        // Version history:
-        //   3.7-3.13: updates a global dict (state->current_tasks)
-        //   3.14+: writes to PyThreadState.asyncio_current_task
-        //   Python-level signature unchanged across all versions.
-        //
-        // If removed: check for loop._current_task (proposed public alt).
-        // Tracking: https://github.com/python/cpython/issues/120974
-        //           https://discuss.python.org/t/store-current-task-on-the-loop/75926
-        let tasks_mod = py
-            .import(c"asyncio.tasks")
-            .map_err(|e| format!("import asyncio.tasks: {e}"))?;
-        let enter_task = tasks_mod
-            .getattr(c"_enter_task")
-            .map_err(|e| {
-                format!(
-                    "missing asyncio.tasks._enter_task — asyncio internals changed? \
-                     See https://github.com/python/cpython/issues/120974: {e}"
-                )
-            })?
-            .unbind();
-        let leave_task = tasks_mod
-            .getattr(c"_leave_task")
-            .map_err(|e| {
-                format!(
-                    "missing asyncio.tasks._leave_task — asyncio internals changed? \
-                     See https://github.com/python/cpython/issues/120974: {e}"
-                )
-            })?
-            .unbind();
-        let task_mod = py
-            .import(c"apx._task")
-            .map_err(|e| format!("import apx._task: {e}"))?;
-        let scheduler_task_cls = task_mod
-            .getattr(c"_SchedulerTask")
-            .map_err(|e| format!("missing _SchedulerTask: {e}"))?
-            .unbind();
-
-        tracing::info!("scheduler task strategy: per-request (_sentinel wrapping)");
-
-        // Cache call_soon_threadsafe (thread-safe variant, needed since
-        // the asyncio loop now runs on a dedicated thread).
         let call_soon_threadsafe = event_loop
             .getattr(c"call_soon_threadsafe")
             .map_err(|e| format!("missing call_soon_threadsafe: {e}"))?
             .unbind();
-        let call_soon = event_loop
-            .getattr(c"call_soon")
-            .map_err(|e| format!("missing call_soon: {e}"))?
+        let create_task = event_loop
+            .getattr(c"create_task")
+            .map_err(|e| format!("missing create_task: {e}"))?
             .unbind();
-        let task_ops = TaskOps {
-            enter_task,
-            leave_task,
-            scheduler_task_cls,
-            call_soon,
-            loop_obj: event_loop.clone().unbind(),
-        };
 
-        // 13. Spawn dedicated asyncio thread running run_forever().
-        // The loop processes call_soon_threadsafe callbacks naturally when
-        // woken by thread pool completions (uv_async_send / self-pipe).
+        // Spawn dedicated asyncio thread with tokio handle for I/O.
         let el_for_thread = event_loop.clone().unbind();
+        let tokio_handle = tokio::runtime::Handle::try_current().ok();
         let asyncio_thread = std::thread::Builder::new()
             .name("apx-asyncio".to_owned())
             .spawn(move || {
+                if let Some(handle) = tokio_handle {
+                    super::set_tokio_handle(handle);
+                }
                 Python::attach(|py| {
                     let el = el_for_thread.bind(py);
                     if let Err(e) = el.call_method0(c"run_forever") {
@@ -330,29 +203,24 @@ impl Reactor {
             })
             .map_err(|e| format!("spawn asyncio thread: {e}"))?;
 
-        tracing::info!("reactor initialized (dedicated asyncio thread)");
+        tracing::info!("reactor initialized (asyncio delegation)");
 
         Ok(Self {
             event_loop: event_loop.unbind(),
             call_soon_threadsafe,
-            task_ops,
+            create_task,
             asyncio_thread: Mutex::new(Some(asyncio_thread)),
         })
     }
 
-    /// Get the cached `call_soon_threadsafe` method.
+    /// Cached `loop.call_soon_threadsafe` bound method.
     pub fn call_soon_threadsafe(&self) -> &Py<PyAny> {
         &self.call_soon_threadsafe
     }
 
-    /// Get the cached task lifecycle operations.
-    pub fn task_ops(&self) -> &TaskOps {
-        &self.task_ops
-    }
-
-    /// Get a reference to the Python asyncio event loop object.
-    pub fn event_loop_ref(&self) -> &Py<PyAny> {
-        &self.event_loop
+    /// Cached `loop.create_task` bound method.
+    pub fn create_task(&self) -> &Py<PyAny> {
+        &self.create_task
     }
 
     /// Shut down the reactor.
@@ -361,7 +229,6 @@ impl Reactor {
     /// 2. Joins the dedicated asyncio thread.
     /// 3. Cancels pending tasks and closes the loop.
     pub fn shutdown(&self) {
-        // 1. Stop the asyncio loop (wakes run_forever via call_soon_threadsafe).
         Python::attach(|py| {
             let el = self.event_loop.bind(py);
             if let Ok(stop) = el.getattr(c"stop") {
@@ -369,7 +236,6 @@ impl Reactor {
             }
         });
 
-        // 2. Join the asyncio thread (run_forever returns after stop).
         let handle = self
             .asyncio_thread
             .lock()
@@ -381,7 +247,6 @@ impl Reactor {
             tracing::warn!("asyncio thread panicked: {e:?}");
         }
 
-        // 3. Clean up: async generators → executor → pending tasks → close.
         Python::attach(|py| {
             let el = self.event_loop.bind(py);
             if let Ok(events) = py.import(c"asyncio.events") {

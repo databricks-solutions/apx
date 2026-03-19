@@ -6,7 +6,6 @@
 //! These types enable Starlette's `Request`, `StreamingResponse`, and `WebSocket`
 //! to work unmodified against a Rust-backed ASGI server.
 
-use crate::io::driver::ffi::new_presized_dict;
 use crate::protocol::http::error::AppError;
 use crate::transport::types::{InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
@@ -318,10 +317,6 @@ impl AsgiReceive {
             Py::new(py, ResolvedAwaitableWithValue { value: Some(event) })
                 .map(|obj| obj.into_bound(py).into_any())
         } else {
-            // Deliver http.disconnect when the response stream ends.
-            let py_future = Py::new(py, crate::io::driver::primitives::Future::pending())?;
-            let fut_ref = py_future.clone_ref(py);
-
             let maybe_disconnect = self
                 .disconnect_rx
                 .lock()
@@ -329,33 +324,27 @@ impl AsgiReceive {
                     pyo3::exceptions::PyRuntimeError::new_err("disconnect mutex poisoned")
                 })?
                 .take();
+            let handle = crate::io::with_tokio_handle(|h| h.clone()).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("no tokio runtime for disconnect watch")
+            })?;
+            let _guard = handle.enter();
             if let Some(disconnect_rx) = maybe_disconnect {
                 let disconnect_type = pyo3::intern!(py, "http.disconnect").clone().unbind();
                 let type_key = pyo3::intern!(py, "type").clone().unbind();
-                crate::io::with_tokio_handle(|handle| {
-                    handle.spawn(async move {
-                        let _ = disconnect_rx.await;
-                        Python::attach(|py| {
-                            let event = PyDict::new(py);
-                            event.set_item(&type_key, &disconnect_type).ok();
-                            let _ = crate::io::driver::primitives::Future::set_result(
-                                fut_ref,
-                                py,
-                                event.unbind().into_any(),
-                            );
-                        });
-                    });
+                pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                    let _ = disconnect_rx.await;
+                    Python::attach(|py| -> PyResult<Py<PyAny>> {
+                        let event = PyDict::new(py);
+                        event.set_item(&type_key, &disconnect_type)?;
+                        Ok(event.unbind().into_any())
+                    })
                 })
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(
-                        "no tokio runtime for disconnect watch",
-                    )
-                })?;
+            } else {
+                pyo3_async_runtimes::tokio::future_into_py(
+                    py,
+                    std::future::pending::<PyResult<Py<PyAny>>>(),
+                )
             }
-            // If disconnect_rx already taken (third+ call), the Future's sender drops
-            // → Future raises RuntimeError. Only one receive() should block for disconnect.
-
-            Ok(py_future.into_bound(py).into_any())
         }
     }
 }
@@ -489,6 +478,18 @@ impl AsgiSend {
 
 #[pymethods]
 impl AsgiSend {
+    /// Forward an unhandled exception through the response channel as a 500.
+    ///
+    /// Called by the `_guarded` wrapper when the ASGI app raises. Without
+    /// this, `response_tx` drops silently and `response_rx` gets `RecvError`.
+    fn send_error(&mut self, traceback: String) {
+        if let SendInner::Http { response_tx, .. } = &mut self.inner
+            && let Some(tx) = response_tx.take()
+        {
+            let _ = tx.send(Err(AppError::Internal(traceback)));
+        }
+    }
+
     /// Python: `await send({"type": "http.response.start", ...})`
     fn __call__<'py>(
         &mut self,
@@ -610,35 +611,23 @@ impl AsgiSend {
                             more_body,
                             "asgi_send: stream chunk BACKPRESSURE (channel full)"
                         );
-                        let py_future =
-                            Py::new(py, crate::io::driver::primitives::Future::pending())?;
-                        let fut_ref = py_future.clone_ref(py);
                         let tx = tx.clone();
                         let drop_stream = !more_body;
-                        crate::io::with_tokio_handle(|handle| {
-                            handle.spawn(async move {
-                                let _ = tx.send(event).await;
-                                tracing::trace!(
-                                    "asgi_send: backpressure resolved, setting future result"
-                                );
-                                Python::attach(|py| {
-                                    let _ = crate::io::driver::primitives::Future::set_result(
-                                        fut_ref,
-                                        py,
-                                        py.None(),
-                                    );
-                                });
-                            });
-                        })
-                        .ok_or_else(|| {
-                            pyo3::exceptions::PyRuntimeError::new_err(
-                                "no tokio runtime for backpressure send",
-                            )
-                        })?;
+                        let handle =
+                            crate::io::with_tokio_handle(|h| h.clone()).ok_or_else(|| {
+                                pyo3::exceptions::PyRuntimeError::new_err(
+                                    "no tokio runtime for backpressure send",
+                                )
+                            })?;
+                        let _guard = handle.enter();
                         if drop_stream {
                             *stream_tx = None;
                         }
-                        Ok(py_future.into_bound(py).into_any())
+                        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                            let _ = tx.send(event).await;
+                            tracing::trace!("asgi_send: backpressure resolved");
+                            Ok(Python::attach(|py| py.None()))
+                        })
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
                         tracing::trace!("asgi_send: stream channel CLOSED");
@@ -664,27 +653,17 @@ impl AsgiSend {
         match tx.try_send(event) {
             Ok(()) => Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any()),
             Err(mpsc::error::TrySendError::Full(event)) => {
-                let py_future = Py::new(py, crate::io::driver::primitives::Future::pending())?;
-                let fut_ref = py_future.clone_ref(py);
                 let tx = tx.clone();
-                crate::io::with_tokio_handle(|handle| {
-                    handle.spawn(async move {
-                        let _ = tx.send(event).await;
-                        Python::attach(|py| {
-                            let _ = crate::io::driver::primitives::Future::set_result(
-                                fut_ref,
-                                py,
-                                py.None(),
-                            );
-                        });
-                    });
-                })
-                .ok_or_else(|| {
+                let handle = crate::io::with_tokio_handle(|h| h.clone()).ok_or_else(|| {
                     pyo3::exceptions::PyRuntimeError::new_err(
                         "no tokio runtime for backpressure send",
                     )
                 })?;
-                Ok(py_future.into_bound(py).into_any())
+                let _guard = handle.enter();
+                pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                    let _ = tx.send(event).await;
+                    Ok(Python::attach(|py| py.None()))
+                })
             }
             Err(mpsc::error::TrySendError::Closed(_)) => Err(
                 pyo3::exceptions::PyRuntimeError::new_err("response channel closed"),
@@ -984,14 +963,6 @@ fn extract_bytes_field(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
 
 // ── build_http_scope ─────────────────────────────────────────────────────
 
-/// Expected key count for HTTP scope dicts (type, asgi, http_version, method,
-/// path, raw_path, query_string, headers, server, client, scheme, root_path,
-/// state, path_params + optional app, router).
-const HTTP_SCOPE_KEY_COUNT: isize = 14;
-
-/// Expected key count for WebSocket scope dicts.
-const WS_SCOPE_KEY_COUNT: isize = 12;
-
 /// Construct an ASGI HTTP scope dict from an [`InboundRequest`].
 ///
 /// This is the bridge between the transport-neutral request abstraction
@@ -1005,7 +976,7 @@ pub fn build_http_scope(
     fastapi_app: Option<&Py<PyAny>>,
     interns: &ScopeInterns,
 ) -> PyResult<Py<PyDict>> {
-    let dict = new_presized_dict(py, HTTP_SCOPE_KEY_COUNT);
+    let dict = PyDict::new(py);
     set_scope_metadata(py, &dict, interns)?;
     set_scope_request_fields(py, &dict, request, interns)?;
     set_scope_headers(py, &dict, request, interns)?;
@@ -1031,7 +1002,7 @@ pub fn build_ws_scope(
     request: &InboundRequest,
     interns: &ScopeInterns,
 ) -> PyResult<Py<PyDict>> {
-    let dict = new_presized_dict(py, WS_SCOPE_KEY_COUNT);
+    let dict = PyDict::new(py);
     set_ws_scope_metadata(py, &dict, interns)?;
     set_ws_scope_request_fields(py, &dict, request, interns)?;
     set_scope_headers(py, &dict, request, interns)?;

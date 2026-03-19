@@ -8,7 +8,6 @@
     reason = "test code uses unwrap/assert for clarity"
 )]
 
-mod scheduler_task;
 mod shutdown;
 mod streaming;
 mod supervision;

@@ -8,8 +8,6 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::Mutex;
 
-use crate::io::driver::DriveStats;
-
 /// Path for Rust-side bench traces.
 const TRACE_PATH: &str = "/tmp/bench_rust_trace.jsonl";
 
@@ -34,11 +32,8 @@ pub struct RequestTrace {
     gil_acquire_us: u64,
     scope_build_us: u64,
     app_call_us: u64,
-    drive_us: u64,
+    submit_us: u64,
     response_wait_us: u64,
-    /// Scheduler drive statistics for this request.
-    #[serde(flatten)]
-    drive: DriveStats,
 }
 
 // ---------------------------------------------------------------------------
@@ -54,8 +49,7 @@ pub struct RequestTraceBuilder {
     gil_acquire_us: u64,
     scope_build_us: u64,
     app_call_us: u64,
-    drive_us: u64,
-    drive_stats: DriveStats,
+    submit_us: u64,
     response_wait_us: u64,
 }
 
@@ -68,8 +62,7 @@ impl RequestTraceBuilder {
             gil_acquire_us: 0,
             scope_build_us: 0,
             app_call_us: 0,
-            drive_us: 0,
-            drive_stats: DriveStats::default(),
+            submit_us: 0,
             response_wait_us: 0,
         }
     }
@@ -94,9 +87,8 @@ impl RequestTraceBuilder {
         self
     }
 
-    pub fn drive(mut self, us: u64, stats: DriveStats) -> Self {
-        self.drive_us = us;
-        self.drive_stats = stats;
+    pub fn submit(mut self, us: u64) -> Self {
+        self.submit_us = us;
         self
     }
 
@@ -116,9 +108,8 @@ impl RequestTraceBuilder {
             gil_acquire_us: self.gil_acquire_us,
             scope_build_us: self.scope_build_us,
             app_call_us: self.app_call_us,
-            drive_us: self.drive_us,
+            submit_us: self.submit_us,
             response_wait_us: self.response_wait_us,
-            drive: self.drive_stats,
         }
     }
 }
@@ -174,7 +165,7 @@ mod tests {
             .gil_acquire(20)
             .scope_build(30)
             .app_call(40)
-            .drive(50, DriveStats::default())
+            .submit(50)
             .response_wait(60)
             .build(210, 200);
 
@@ -186,6 +177,6 @@ mod tests {
         assert_eq!(parsed["status"], 200);
         assert_eq!(parsed["total_us"], 210);
         assert_eq!(parsed["body_collect_us"], 10);
-        assert_eq!(parsed["steps"], 0);
+        assert_eq!(parsed["submit_us"], 50);
     }
 }
