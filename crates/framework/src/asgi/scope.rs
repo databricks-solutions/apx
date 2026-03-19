@@ -570,10 +570,11 @@ impl AsgiSend {
 
 #[pymethods]
 impl AsgiSend {
-    /// Forward an unhandled exception through the response channel as a 500.
+    /// Forward an unhandled app exception through the response channel as a 500.
     ///
-    /// Called by the `_guarded` wrapper when the ASGI app raises. Without
-    /// this, `response_tx` drops silently and `response_rx` gets `RecvError`.
+    /// Called by the `_guarded` wrapper when the ASGI app raises an
+    /// `Exception`. Without this, `response_tx` drops silently and
+    /// `response_rx` gets `RecvError`.
     fn send_error(&mut self, traceback: String) {
         if let SendInner::Http { response_tx, .. } = &mut self.inner
             && let Some(tx) = response_tx.take()

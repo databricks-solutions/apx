@@ -374,6 +374,13 @@ def apx_container(apx_image: str) -> Generator[str]:
 
 
 @pytest.fixture(scope="session")
+def container(apx_container: str) -> docker.models.containers.Container:  # noqa: ARG001
+    """Expose the running Docker container for log inspection."""
+    assert _container is not None, "container not started"
+    return _container
+
+
+@pytest.fixture(scope="session")
 def client(apx_container: str) -> Generator[httpx.Client]:
     """Session-scoped httpx client pointed at the APX container."""
     with httpx.Client(base_url=apx_container, timeout=30.0) as c:

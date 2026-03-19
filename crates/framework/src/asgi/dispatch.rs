@@ -2,7 +2,8 @@
 //!
 //! Implements the [`Dispatch`] trait for ASGI applications. The hot path
 //! collects the request body, builds scope, wraps the ASGI coroutine in
-//! `_guarded`, and submits it to asyncio via `call_soon_threadsafe(create_task, ...)`.
+//! `_guarded` (which catches `Exception` and forwards it as a 500 without
+//! re-raising), and submits it to asyncio via `call_soon_threadsafe(create_task, ...)`.
 //!
 //! The response flows through a oneshot channel: `AsgiSend` accumulates
 //! status/headers from `ResponseStart` and builds the complete

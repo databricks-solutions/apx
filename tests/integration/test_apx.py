@@ -6,6 +6,7 @@ session-scoped ``apx_container`` fixture in conftest.py.
 
 from __future__ import annotations
 
+import docker.models.containers
 import httpx
 import pytest
 
@@ -224,3 +225,48 @@ class TestStatic:
         r = client.get("/")
         assert r.status_code == 200
         assert "<html" in r.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Container log hygiene
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestLogHygiene:
+    """Verify the container logs are free of asyncio task-leak noise.
+
+    The ``_guarded`` wrapper must forward app exceptions through the
+    response channel *without* re-raising. Re-raising causes asyncio to
+    log "Task exception was never retrieved" on every error — the exact
+    spam observed in production bench-apx logs.
+
+    This test deliberately exercises the stream-cap path (which closes
+    the stream channel while the Python side is still sending) and then
+    inspects the container logs.
+    """
+
+    def test_no_task_exception_never_retrieved(
+        self,
+        client: httpx.Client,
+        container: docker.models.containers.Container,
+    ) -> None:
+        # Hit stream cap — Python side gets "stream channel closed"
+        # when it tries to send more chunks than the cap allows.
+        for _ in range(3):
+            r = client.get("/api/stream/20000")
+            assert r.status_code == 200
+
+        import time
+        time.sleep(1)
+
+        logs = container.logs(tail=500).decode("utf-8", errors="replace")
+        leaks = [
+            line
+            for line in logs.splitlines()
+            if "Task exception was never retrieved" in line
+        ]
+        assert leaks == [], (
+            f"_guarded is re-raising exceptions, causing asyncio log spam "
+            f"({len(leaks)} occurrences):\n" + "\n".join(leaks[:5])
+        )

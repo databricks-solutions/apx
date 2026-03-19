@@ -92,7 +92,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "beautifulsoup4", specifier = ">=4.14.3" },
-    { name = "databricks-sdk", specifier = ">=0.100.0" },
+    { name = "databricks-sdk", specifier = ">=0.102.0" },
     { name = "diskcache", specifier = ">=5.6.3" },
     { name = "docker", specifier = ">=7.1.0" },
     { name = "docutils", specifier = ">=0.22.4" },
@@ -271,16 +271,16 @@ wheels = [
 
 [[package]]
 name = "databricks-sdk"
-version = "0.100.0"
+version = "0.102.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "google-auth" },
     { name = "protobuf" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/07/da/8530163775e0e4d6a3adbf49f55bbb6b7f26891424e16f1bc22dbb6c81e5/databricks_sdk-0.100.0.tar.gz", hash = "sha256:c74fbecda21f65d5994e430f81eb37ffad1e715dcb2bc67a6c5d76a161d2878f", size = 882062, upload-time = "2026-03-16T08:27:08.903Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ab/b3/41ff1c3afe092df9085e084e0dc81c45bca5ed65f7b60dc59df0ade43c76/databricks_sdk-0.102.0.tar.gz", hash = "sha256:8fa5f82317ee27cc46323c6e2543d2cfefb4468653f92ba558271043c6f72fb9", size = 887450, upload-time = "2026-03-19T08:15:54.428Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/74/c9/cc371454276fdb5ee840655b573972c0829c9b55eb7b672be2b0ff3c093a/databricks_sdk-0.100.0-py3-none-any.whl", hash = "sha256:9335f57bb82804a52f4f37af81555968041b014eaf2f48a9132c4ad750acf254", size = 832802, upload-time = "2026-03-16T08:27:07.266Z" },
+    { url = "https://files.pythonhosted.org/packages/02/8c/d082bd5f72d7613524d5b35dfe1f71732b2246be2704fad68cd0e3fdd020/databricks_sdk-0.102.0-py3-none-any.whl", hash = "sha256:75d1253276ee8f3dd5e7b00d62594b7051838435e618f74a8570a6dbd723ec12", size = 838533, upload-time = "2026-03-19T08:15:52.248Z" },
 ]
 
 [[package]]

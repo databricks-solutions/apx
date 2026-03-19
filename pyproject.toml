@@ -21,7 +21,7 @@ apx = "apx:_main"
 [dependency-groups]
 dev = [
     "beautifulsoup4>=4.14.3",
-    "databricks-sdk>=0.100.0",
+    "databricks-sdk>=0.102.0",
     "diskcache>=5.6.3",
     "docker>=7.1.0",
     "docutils>=0.22.4",
