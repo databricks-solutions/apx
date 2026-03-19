@@ -20,6 +20,14 @@ pub fn spawn_system_metrics(config: &SystemConfig) -> tokio::task::JoinHandle<()
     let interval = Duration::from_secs_f64(config.interval_secs);
     let pid = Pid::from_u32(std::process::id());
 
+    tracing::trace!(
+        target: "apx::telemetry",
+        metric_count = metrics.len(),
+        interval_secs = config.interval_secs,
+        pid = pid.as_u32(),
+        "spawning system metrics collection task"
+    );
+
     tokio::spawn(async move {
         collection_loop(metrics, interval, pid).await;
     })
@@ -40,6 +48,18 @@ struct Instruments {
 impl Instruments {
     fn new(metrics: &std::collections::HashSet<SystemMetricKind>) -> Self {
         let meter = framework_meter();
+        tracing::trace!(
+            target: "apx::telemetry",
+            process_cpu = metrics.contains(&SystemMetricKind::ProcessCpu),
+            system_cpu = metrics.contains(&SystemMetricKind::SystemCpu),
+            system_memory = metrics.contains(&SystemMetricKind::SystemMemory),
+            system_swap = metrics.contains(&SystemMetricKind::SystemSwap),
+            process_memory = metrics.contains(&SystemMetricKind::ProcessMemory),
+            process_threads = metrics.contains(&SystemMetricKind::ProcessThreads),
+            disk_io = metrics.contains(&SystemMetricKind::SystemDiskIo),
+            network_io = metrics.contains(&SystemMetricKind::SystemNetworkIo),
+            "creating system metric instruments"
+        );
         Self {
             process_cpu: metrics.contains(&SystemMetricKind::ProcessCpu).then(|| {
                 meter
@@ -127,9 +147,18 @@ async fn collection_loop(
     };
 
     let no_attrs: &[KeyValue] = &[];
+    let mut first_tick = true;
 
     loop {
         tokio::time::sleep(interval).await;
+        if first_tick {
+            tracing::trace!(
+                target: "apx::telemetry",
+                interval_ms = interval.as_millis(),
+                "system metrics collection loop running — first tick"
+            );
+            first_tick = false;
+        }
         collect_once(
             &mut sys,
             &instruments,

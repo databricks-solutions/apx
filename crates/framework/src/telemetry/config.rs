@@ -86,6 +86,8 @@ pub struct FastApiConfig {
 /// Calls `apx.telemetry._get_config()` which returns the merged effective
 /// configuration (defaults + user overrides) as a dict.
 pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
+    tracing::trace!(target: "apx::telemetry", "reading telemetry config from apx.telemetry._get_config()");
+
     let module = py.import(c"apx.telemetry")?;
     let get_config = module.getattr(c"_get_config")?;
     let config_obj = get_config.call0()?;
@@ -95,6 +97,12 @@ pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
         .get_item("instrumentations")?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("instrumentations"))?;
     let instrumentations: &Bound<'_, PyList> = instrumentations_obj.cast()?;
+
+    tracing::trace!(
+        target: "apx::telemetry",
+        count = instrumentations.len(),
+        "instrumentations found in Python telemetry config"
+    );
 
     let mut system = SystemConfig {
         enabled: true,
@@ -117,14 +125,46 @@ pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
         let dict: &Bound<'_, PyDict> = item.cast()?;
         let type_str: String = extract_string(dict, "type")?;
         match type_str.as_str() {
-            "system" => system = parse_system_config(dict)?,
-            "http" => http = parse_http_config(dict)?,
-            "fastapi" => fastapi = parse_fastapi_config(dict)?,
+            "system" => {
+                system = parse_system_config(dict)?;
+                tracing::trace!(
+                    target: "apx::telemetry",
+                    enabled = system.enabled,
+                    interval_secs = system.interval_secs,
+                    metric_count = system.metrics.len(),
+                    "parsed system instrumentation config"
+                );
+            }
+            "http" => {
+                http = parse_http_config(dict)?;
+                tracing::trace!(
+                    target: "apx::telemetry",
+                    enabled = http.enabled,
+                    "parsed http instrumentation config"
+                );
+            }
+            "fastapi" => {
+                fastapi = parse_fastapi_config(dict)?;
+                tracing::trace!(
+                    target: "apx::telemetry",
+                    enabled = fastapi.enabled,
+                    record_route = fastapi.record_route,
+                    "parsed fastapi instrumentation config"
+                );
+            }
             _ => {
                 tracing::debug!(instrumentation_type = %type_str, "unknown instrumentation type, skipping");
             }
         }
     }
+
+    tracing::trace!(
+        target: "apx::telemetry",
+        system_enabled = system.enabled,
+        http_enabled = http.enabled,
+        fastapi_enabled = fastapi.enabled,
+        "telemetry config resolved"
+    );
 
     Ok(TelemetryConfig {
         system,

@@ -13,10 +13,18 @@ use opentelemetry::metrics::MeterProvider;
 /// Uses the configured provider if available, falls back to the global
 /// (which may be noop when OTEL is disabled — zero overhead).
 pub(crate) fn framework_meter() -> opentelemetry::metrics::Meter {
-    apx_core::tracing_init::meter_provider().map_or_else(
-        || opentelemetry::global::meter("apx.framework"),
-        |mp| mp.meter("apx.framework"),
-    )
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    if let Some(mp) = apx_core::tracing_init::meter_provider() {
+        LOGGED.call_once(|| {
+            tracing::trace!(target: "apx::telemetry", meter = "apx.framework", "framework meter: using configured SdkMeterProvider");
+        });
+        mp.meter("apx.framework")
+    } else {
+        LOGGED.call_once(|| {
+            tracing::trace!(target: "apx::telemetry", meter = "apx.framework", "framework meter: SdkMeterProvider not initialized, using global noop");
+        });
+        opentelemetry::global::meter("apx.framework")
+    }
 }
 
 /// RAII guard that decrements `http.server.active_requests` on drop.

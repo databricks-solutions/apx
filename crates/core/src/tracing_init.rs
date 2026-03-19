@@ -79,20 +79,30 @@ pub fn init_tracing() {
 
 /// Flush pending spans, metrics, and logs. Call before process exit.
 pub fn shutdown_telemetry() {
-    if let Some(tp) = TRACER_PROVIDER.get()
-        && let Err(e) = tp.shutdown()
-    {
-        tracing::warn!("tracer provider shutdown: {e}");
+    tracing::trace!(target: "apx::telemetry", "flushing OTLP providers");
+    if let Some(tp) = TRACER_PROVIDER.get() {
+        match tp.shutdown() {
+            Ok(()) => tracing::trace!(target: "apx::telemetry", "tracer provider flushed"),
+            Err(e) => tracing::warn!("tracer provider shutdown: {e}"),
+        }
+    } else {
+        tracing::trace!(target: "apx::telemetry", "tracer provider not initialized, skipping flush");
     }
-    if let Some(mp) = METER_PROVIDER.get()
-        && let Err(e) = mp.shutdown()
-    {
-        tracing::warn!("meter provider shutdown: {e}");
+    if let Some(mp) = METER_PROVIDER.get() {
+        match mp.shutdown() {
+            Ok(()) => tracing::trace!(target: "apx::telemetry", "meter provider flushed"),
+            Err(e) => tracing::warn!("meter provider shutdown: {e}"),
+        }
+    } else {
+        tracing::trace!(target: "apx::telemetry", "meter provider not initialized, skipping flush");
     }
-    if let Some(lp) = LOGGER_PROVIDER.get()
-        && let Err(e) = lp.shutdown()
-    {
-        tracing::warn!("logger provider shutdown: {e}");
+    if let Some(lp) = LOGGER_PROVIDER.get() {
+        match lp.shutdown() {
+            Ok(()) => tracing::trace!(target: "apx::telemetry", "logger provider flushed"),
+            Err(e) => tracing::warn!("logger provider shutdown: {e}"),
+        }
+    } else {
+        tracing::trace!(target: "apx::telemetry", "logger provider not initialized, skipping flush");
     }
 }
 
@@ -140,6 +150,12 @@ fn init_tracing_fmt_only(filter: &str) {
         .is_err()
     {
         eprintln!("Warning: tracing subscriber already initialized");
+    } else {
+        tracing::trace!(
+            target: "apx::telemetry",
+            filter,
+            "fmt-only tracing active (OTEL_EXPORTER_OTLP_ENDPOINT not set)"
+        );
     }
 }
 
@@ -151,6 +167,8 @@ fn init_tracing_with_otel(
     use opentelemetry_otlp::WithExportConfig;
 
     let resource = build_resource(app_dir);
+    let resource_clone = resource.clone();
+    let resource_attrs: Vec<_> = resource_clone.iter().collect();
 
     let registry = tracing_subscriber::registry();
 
@@ -225,6 +243,14 @@ fn init_tracing_with_otel(
         .is_err()
     {
         eprintln!("Warning: tracing subscriber already initialized");
+    } else {
+        tracing::trace!(
+            target: "apx::telemetry",
+            endpoint,
+            filter,
+            resource = ?resource_attrs,
+            "OTLP pipeline active: traces + metrics + logs (10s metric interval)"
+        );
     }
 
     Ok(())

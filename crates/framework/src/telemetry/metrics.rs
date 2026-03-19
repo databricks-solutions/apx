@@ -10,10 +10,18 @@ use std::collections::HashMap;
 
 /// Obtain the user-facing meter (backed by configured provider or global noop).
 fn user_meter() -> Meter {
-    apx_core::tracing_init::meter_provider().map_or_else(
-        || opentelemetry::global::meter("apx.user"),
-        |mp| mp.meter("apx.user"),
-    )
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    if let Some(mp) = apx_core::tracing_init::meter_provider() {
+        LOGGED.call_once(|| {
+            tracing::trace!(target: "apx::telemetry", meter = "apx.user", "user meter: using configured SdkMeterProvider");
+        });
+        mp.meter("apx.user")
+    } else {
+        LOGGED.call_once(|| {
+            tracing::trace!(target: "apx::telemetry", meter = "apx.user", "user meter: SdkMeterProvider not initialized, using global noop");
+        });
+        opentelemetry::global::meter("apx.user")
+    }
 }
 
 // ── Counter ─────────────────────────────────────────────────────────────
@@ -94,6 +102,7 @@ impl RustGauge {
 #[pyfunction]
 #[pyo3(signature = (name, description=String::new(), unit=String::new()))]
 pub fn create_counter(name: String, description: String, unit: String) -> RustCounter {
+    tracing::trace!(target: "apx::telemetry", name, unit, "creating user counter");
     let meter = user_meter();
     let mut builder = meter.u64_counter(name);
     if !description.is_empty() {
@@ -111,6 +120,7 @@ pub fn create_counter(name: String, description: String, unit: String) -> RustCo
 #[pyfunction]
 #[pyo3(signature = (name, description=String::new(), unit=String::new()))]
 pub fn create_histogram(name: String, description: String, unit: String) -> RustHistogram {
+    tracing::trace!(target: "apx::telemetry", name, unit, "creating user histogram");
     let meter = user_meter();
     let mut builder = meter.f64_histogram(name);
     if !description.is_empty() {
@@ -128,6 +138,7 @@ pub fn create_histogram(name: String, description: String, unit: String) -> Rust
 #[pyfunction]
 #[pyo3(signature = (name, description=String::new(), unit=String::new()))]
 pub fn create_gauge(name: String, description: String, unit: String) -> RustGauge {
+    tracing::trace!(target: "apx::telemetry", name, unit, "creating user gauge");
     let meter = user_meter();
     let mut builder = meter.f64_gauge(name);
     if !description.is_empty() {

@@ -29,6 +29,7 @@ pub fn init_context_var(py: Python<'_>) -> PyResult<()> {
     let contextvars = py.import(c"contextvars")?;
     let cv = contextvars.call_method1(c"ContextVar", ("_apx_trace_ctx",))?;
     let _ = CONTEXT_VAR.set(cv.unbind());
+    tracing::trace!(target: "apx::telemetry", var = "_apx_trace_ctx", "Python trace context ContextVar initialized");
     Ok(())
 }
 
