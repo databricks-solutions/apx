@@ -282,6 +282,11 @@ fn resolve_parent_context(py: Python<'_>) -> Context {
 }
 
 /// Parse hex trace/span ids into an OTEL `Context`.
+///
+/// Returns an empty `Context` (no parent) when the IDs are invalid (all
+/// zeros). In opentelemetry 0.29, `with_remote_span_context` sets the
+/// span as active, so an invalid context with `flags=0` (not sampled)
+/// would cause the `ParentBased` sampler to drop all child spans.
 fn context_from_raw(trace_id_hex: &str, span_id_hex: &str, flags: u8) -> Context {
     let Ok(tid_bytes) = hex::decode(trace_id_hex) else {
         return Context::new();
@@ -297,9 +302,15 @@ fn context_from_raw(trace_id_hex: &str, span_id_hex: &str, flags: u8) -> Context
     let mut sid = [0u8; 8];
     sid.copy_from_slice(&sid_bytes);
 
+    let trace_id = TraceId::from_bytes(tid);
+    let span_id = SpanId::from_bytes(sid);
+    if trace_id == TraceId::INVALID || span_id == SpanId::INVALID {
+        return Context::new();
+    }
+
     let sc = SpanContext::new(
-        TraceId::from_bytes(tid),
-        SpanId::from_bytes(sid),
+        trace_id,
+        span_id,
         TraceFlags::new(flags),
         true, // remote parent
         TraceState::default(),
@@ -339,25 +350,17 @@ fn restore_context_var(py: Python<'_>, saved: Option<SerializedContext>) {
 /// Cached Python function that builds an immediately-resolved coroutine.
 static RESOLVED_FN: std::sync::OnceLock<Py<PyAny>> = std::sync::OnceLock::new();
 
-/// Compile and cache the `_resolved` async function. Called once.
+/// Import and cache the `resolved` async function from `apx._bridge`.
 fn init_resolved_fn(py: Python<'_>) -> PyResult<&'static Py<PyAny>> {
     if let Some(f) = RESOLVED_FN.get() {
         return Ok(f);
     }
-    let code = c"
-async def _resolved(val):
-    return val
-";
-    let globals = pyo3::types::PyDict::new(py);
-    py.run(code, Some(&globals), None)?;
-    let f = globals
-        .get_item("_resolved")?
-        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("_resolved not found"))?
-        .unbind();
+    let bridge = py.import(c"apx._bridge")?;
+    let f = bridge.getattr(c"resolved")?.unbind();
     let _ = RESOLVED_FN.set(f);
     RESOLVED_FN
         .get()
-        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("failed to cache _resolved"))
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("failed to cache resolved"))
 }
 
 /// Build a Python coroutine that immediately resolves to the given value.

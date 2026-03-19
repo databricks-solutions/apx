@@ -86,6 +86,11 @@ resources:
       name: "bench-apx"
       description: "Benchmark: APX + asyncio"
       source_code_path: ./.build/bench-apx
+      telemetry_export_destinations:
+        - unity_catalog:
+            logs_table: "apx_perf.default.otel_logs"
+            metrics_table: "apx_perf.default.otel_metrics"
+            traces_table: "apx_perf.default.otel_spans"
       config:
         command:
           - "apx"

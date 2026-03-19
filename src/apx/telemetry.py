@@ -142,9 +142,14 @@ class span:
         self._handle.__enter__()
         return self._handle
 
-    def __exit__(self, *args: object) -> bool:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: object | None = None,
+    ) -> bool:
         if self._handle is not None:
-            return self._handle.__exit__(*args)
+            return self._handle.__exit__(exc_type, exc_val, exc_tb)
         return False
 
     async def __aenter__(self) -> SpanHandle:
@@ -152,9 +157,14 @@ class span:
         self._handle.__enter__()
         return self._handle
 
-    async def __aexit__(self, *args: object) -> bool:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_val: BaseException | None = None,
+        exc_tb: object | None = None,
+    ) -> bool:
         if self._handle is not None:
-            return self._handle.__exit__(*args)
+            return self._handle.__exit__(exc_type, exc_val, exc_tb)
         return False
 
     def __call__(self, fn: _F) -> _F:

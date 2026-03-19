@@ -181,9 +181,13 @@ fn init_tracing_with_otel(
         .build()
         .map_err(|e| format!("metric exporter: {e}"))?;
 
+    let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(exporter)
+        .with_interval(std::time::Duration::from_secs(10))
+        .build();
+
     let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
         .with_resource(resource.clone())
-        .with_periodic_exporter(exporter)
+        .with_reader(reader)
         .build();
 
     opentelemetry::global::set_meter_provider(provider.clone());

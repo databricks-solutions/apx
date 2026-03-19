@@ -258,7 +258,7 @@ pub async fn connect_to_supervisor()
 
 // ── _guarded wrapper ────────────────────────────────────────────────────
 
-/// Python source for the `_guarded` error-forwarding wrapper.
+/// Import the `guarded` error-forwarding wrapper from `apx._bridge`.
 ///
 /// Wraps an ASGI coroutine so that application exceptions (`Exception`)
 /// are forwarded through `AsgiSend.send_error()` as 500 responses.
@@ -268,30 +268,9 @@ pub async fn connect_to_supervisor()
 ///
 /// `CancelledError` and other `BaseException` subclasses propagate
 /// naturally — they are control flow signals, not app errors.
-const GUARDED_SOURCE: &str = r#"
-import traceback as _tb
-
-async def _guarded(coro, send):
-    try:
-        await coro
-    except Exception as exc:
-        tb = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
-        send.send_error(tb)
-"#;
-
-/// Register the `_guarded` Python function and return a reference to it.
 fn register_guarded(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let globals = pyo3::types::PyDict::new(py);
-    let source = std::ffi::CString::new(GUARDED_SOURCE).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("invalid guarded source: {e}"))
-    })?;
-    py.run(&source, Some(&globals), None)?;
-    globals
-        .get_item("_guarded")?
-        .ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("_guarded function not found after exec")
-        })
-        .map(|f| f.unbind())
+    let bridge = py.import(c"apx._bridge")?;
+    bridge.getattr(c"guarded").map(|f| f.unbind())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────

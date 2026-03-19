@@ -21,10 +21,10 @@ const DEBUG: i32 = 10;
 #[pyo3(name = "_emit_log")]
 pub fn emit_log(level: i32, message: String, logger_name: String) {
     match level {
-        ERROR.. => tracing::error!(target: "python", logger = logger_name, "{}", message),
-        WARNING.. => tracing::warn!(target: "python", logger = logger_name, "{}", message),
-        INFO.. => tracing::info!(target: "python", logger = logger_name, "{}", message),
-        DEBUG.. => tracing::debug!(target: "python", logger = logger_name, "{}", message),
-        _ => tracing::trace!(target: "python", logger = logger_name, "{}", message),
+        ERROR.. => tracing::error!(target: "apx::python", logger = logger_name, "{}", message),
+        WARNING.. => tracing::warn!(target: "apx::python", logger = logger_name, "{}", message),
+        INFO.. => tracing::info!(target: "apx::python", logger = logger_name, "{}", message),
+        DEBUG.. => tracing::debug!(target: "apx::python", logger = logger_name, "{}", message),
+        _ => tracing::trace!(target: "apx::python", logger = logger_name, "{}", message),
     }
 }

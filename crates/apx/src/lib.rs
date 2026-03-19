@@ -23,6 +23,5 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// Returns the process exit code.
 #[pyfunction]
 fn run_cli(py: Python<'_>, args: Vec<String>) -> i32 {
-    apx_core::tracing_init::init_tracing();
     py.detach(|| apx_cli::run_cli(args))
 }

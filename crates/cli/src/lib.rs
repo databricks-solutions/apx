@@ -159,6 +159,8 @@ pub fn run_cli(args: Vec<String>) -> i32 {
 }
 
 async fn run_cli_async(args: Vec<String>) -> i32 {
+    apx_core::tracing_init::init_tracing();
+
     // Handle Ctrl+C at the top level instead of in a spawned background task.
     //
     // `tokio::signal::ctrl_c()` permanently replaces the OS default SIGINT handler,

@@ -36,29 +36,7 @@ pub fn bootstrap_python_telemetry(py: Python<'_>) -> PyResult<()> {
 /// Install a Python `logging.Handler` that forwards records to Rust `tracing`.
 fn install_log_handler(py: Python<'_>) -> PyResult<()> {
     let emit_fn = pyo3::wrap_pyfunction!(logging::emit_log, py)?;
-    let code = c"
-import logging
-
-class _ApxHandler(logging.Handler):
-    def __init__(self, emit_fn):
-        super().__init__()
-        self._emit = emit_fn
-
-    def emit(self, record):
-        try:
-            self._emit(record.levelno, record.getMessage(), record.name)
-        except Exception:
-            pass
-
-def _install(emit_fn):
-    handler = _ApxHandler(emit_fn)
-    logging.root.addHandler(handler)
-";
-    let globals = pyo3::types::PyDict::new(py);
-    py.run(code, Some(&globals), None)?;
-    let install_fn = globals
-        .get_item("_install")?
-        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("_install not found"))?;
-    install_fn.call1((emit_fn,))?;
+    let bridge = py.import(c"apx._bridge")?;
+    bridge.call_method1(c"install_log_handler", (emit_fn,))?;
     Ok(())
 }
