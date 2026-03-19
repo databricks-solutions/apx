@@ -8,10 +8,11 @@
 //! will provide pre-built dispatch pipelines.
 
 use crate::asgi::dispatch::AsgiDispatch;
-use crate::asgi::scope::{ScopeInterns, build_receive_template};
+use crate::asgi::scope::{ScopeInterns, SendCache, build_receive_template};
 use crate::dispatch::Dispatch;
 use crate::supervision::worker_context::WorkerContext;
 use pyo3::prelude::*;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 // ── Constants ────────────────────────────────────────────────────────────
@@ -121,6 +122,7 @@ pub trait AppSource: Send + Sync + std::fmt::Debug {
         &self,
         py: Python<'_>,
         ctx: Arc<WorkerContext>,
+        server_addr: SocketAddr,
     ) -> Result<Arc<dyn Dispatch>, AppLoadError>;
 }
 
@@ -188,14 +190,23 @@ impl AppSource for ModuleImport {
         &self,
         py: Python<'_>,
         ctx: Arc<WorkerContext>,
+        server_addr: SocketAddr,
     ) -> Result<Arc<dyn Dispatch>, AppLoadError> {
         let app = self.load_callable(py)?;
-        let interns = ScopeInterns::new(py);
-        let template = build_receive_template(py);
+        let interns = ScopeInterns::new(py, server_addr);
+        let recv_tpl = build_receive_template(py).map_err(|e| AppLoadError::ImportFailed {
+            module: "receive_template".to_owned(),
+            source: e,
+        })?;
+        let send_cache = SendCache::new(py).map_err(|e| AppLoadError::ImportFailed {
+            module: "SendCache".to_owned(),
+            source: e,
+        })?;
         let dispatch = AsgiDispatch::new(
             app.inner().clone_ref(py),
             Arc::new(interns),
-            template,
+            recv_tpl,
+            Arc::new(send_cache),
             ctx,
             DEFAULT_BODY_LIMIT,
         );

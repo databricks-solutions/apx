@@ -163,14 +163,13 @@ impl ApxService {
         }
 
         let path = req.uri().path().to_owned();
-        let inbound = inbound_from_hyper(req, self.server_addr, self.client_addr);
+        let inbound = inbound_from_hyper(req, path.clone(), self.server_addr, self.client_addr);
 
         // Timeout-wrapped dispatch.
         let result = tokio::time::timeout(self.timeout, self.dispatch.dispatch(inbound)).await;
 
         let response = match result {
             Ok(mut outbound) => {
-                // For streaming, hold the permit for the stream's lifetime.
                 if let ResponseBody::Stream(stream) = outbound.body {
                     outbound.body = ResponseBody::Stream(Box::pin(PermitGuardedStream {
                         inner: stream,
@@ -226,15 +225,20 @@ fn probe_response(path: &str) -> Option<Response<ResponseBody>> {
 }
 
 /// Convert a hyper request to an `InboundRequest`.
+///
+/// Accepts a pre-extracted `path` to avoid re-extracting from the URI
+/// (the caller already needs the path for metrics recording).
 fn inbound_from_hyper(
     req: Request<Incoming>,
+    path: String,
     server_addr: SocketAddr,
     client_addr: Option<SocketAddr>,
 ) -> InboundRequest {
+    use http_body::Body as _;
+
     let (parts, body) = req.into_parts();
 
     let method = parts.method;
-    let path = parts.uri.path().to_owned();
     let query_string = parts
         .uri
         .query()
@@ -248,14 +252,17 @@ fn inbound_from_hyper(
         _ => ProtocolVersion::Http11,
     };
 
-    // Wrap Incoming as a BodyStream::Stream via http_body_util::BodyStream.
-    let stream = http_body_util::BodyStream::new(body);
-    let mapped = futures_util::StreamExt::map(stream, |result| {
-        result
-            .map(|frame| frame.into_data().unwrap_or_default())
-            .map_err(|e| std::io::Error::other(e.to_string()))
-    });
-    let body_stream = BodyStream::Stream(Box::pin(mapped));
+    let body_stream = if body.is_end_stream() {
+        BodyStream::Empty
+    } else {
+        let stream = http_body_util::BodyStream::new(body);
+        let mapped = futures_util::StreamExt::map(stream, |result| {
+            result
+                .map(|frame| frame.into_data().unwrap_or_default())
+                .map_err(|e| std::io::Error::other(e.to_string()))
+        });
+        BodyStream::Stream(Box::pin(mapped))
+    };
 
     InboundRequest::new(
         method,
@@ -348,10 +355,14 @@ pub async fn serve_tcp(
 
 /// Serve a single connection using HTTP/1 auto-detection.
 async fn serve_connection(stream: tokio::net::TcpStream, service: ApxService) {
+    if let Err(e) = stream.set_nodelay(true) {
+        tracing::debug!(error = %e, "failed to set TCP_NODELAY");
+    }
     let io = TokioIo::new(stream);
     let result = http1::Builder::new()
+        .pipeline_flush(true)
         .serve_connection(io, service)
-        .with_upgrades() // Required for HTTP upgrade (WebSocket) protocol.
+        .with_upgrades()
         .await;
     if let Err(e) = result {
         tracing::debug!(error = %e, "connection error");

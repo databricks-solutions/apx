@@ -7,13 +7,14 @@
 //! to work unmodified against a Rust-backed ASGI server.
 
 use crate::protocol::http::error::AppError;
-use crate::transport::types::{InboundRequest, OutboundResponse, ResponseBody};
+use crate::transport::types::{InboundRequest, OutboundResponse, ProtocolVersion, ResponseBody};
 use bytes::Bytes;
 use http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::{PyBytes, PyDict, PyDictMethods, PyList, PyString, PyTuple};
 use std::borrow::Cow;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -42,12 +43,21 @@ impl std::fmt::Debug for ScopeInterns {
 }
 
 pub struct ScopeInterns {
+    // ── Scope dict keys ──
     /// Fixed keys used in every ASGI scope dict.
     pub(crate) keys: ScopeKeys,
+    // ── Scope dict fixed values ──
     /// Fixed values (type strings, version strings, empty root_path).
     pub(crate) vals: ScopeValues,
+    // ── Header name cache ──
     /// Cached `PyBytes` for common HTTP header names.
     pub(crate) headers: HeaderInterns,
+    // ── Per-worker address cache ──
+    /// Pre-built `(host_str, port)` tuple for the server address.
+    pub(crate) server_tuple: Py<PyTuple>,
+    // ── HTTP version interns ──
+    /// Cached `PyString` for HTTP protocol versions.
+    pub(crate) versions: VersionInterns,
 }
 
 /// Fixed dict keys used in ASGI scope construction.
@@ -130,16 +140,96 @@ impl HeaderInterns {
     }
 }
 
+/// Pre-interned `PyString` for common HTTP methods.
+///
+/// Uses pointer comparison on `http::Method` constants for O(1) lookup.
+/// Pre-interned `PyString` for HTTP protocol versions ("1.0", "1.1", "2").
+pub struct VersionInterns {
+    http10: Py<PyString>,
+    http11: Py<PyString>,
+    h2: Py<PyString>,
+}
+
+impl VersionInterns {
+    /// Create cached `PyString` for protocol versions. Call once at worker startup.
+    fn new(py: Python<'_>) -> Self {
+        Self {
+            http10: PyString::intern(py, "1.0").clone().unbind(),
+            http11: PyString::intern(py, "1.1").clone().unbind(),
+            h2: PyString::intern(py, "2").clone().unbind(),
+        }
+    }
+
+    /// Get the interned `PyString` for a protocol version.
+    pub fn get<'py>(&self, py: Python<'py>, version: ProtocolVersion) -> Bound<'py, PyString> {
+        match version {
+            ProtocolVersion::Http10 => self.http10.bind(py).clone(),
+            ProtocolVersion::Http11 => self.http11.bind(py).clone(),
+            ProtocolVersion::H2 => self.h2.bind(py).clone(),
+        }
+    }
+}
+
+// ── SendCache ────────────────────────────────────────────────────────────
+
+/// Cached Python objects for the ASGI send path.
+///
+/// Separate from `ScopeInterns` (smallest possible scope): scope-building
+/// code never touches these, and send code never touches scope interns.
+pub struct SendCache {
+    /// Singleton `ResolvedAwaitable` — stateless, reused via `clone_ref`.
+    pub(crate) resolved: Py<ResolvedAwaitable>,
+}
+
+impl std::fmt::Debug for SendCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendCache").finish_non_exhaustive()
+    }
+}
+
+impl SendCache {
+    /// Create the send cache. Call once at worker startup with GIL held.
+    pub fn new(py: Python<'_>) -> PyResult<Self> {
+        Ok(Self {
+            resolved: Py::new(py, ResolvedAwaitable)?,
+        })
+    }
+}
+
 impl ScopeInterns {
-    /// Create all interned strings. Call once at worker startup with GIL held.
-    pub(crate) fn new(py: Python<'_>) -> Self {
+    /// Create all interned strings and cached objects.
+    ///
+    /// Call once at worker startup with GIL held.
+    /// Accepts `server_addr` to pre-build the server address tuple.
+    #[expect(
+        clippy::expect_used,
+        reason = "infallible Python conversions at startup"
+    )]
+    pub(crate) fn new(py: Python<'_>, server_addr: SocketAddr) -> Self {
         let s = |v: &str| PyString::intern(py, v).clone().unbind();
 
-        // Pre-build the ASGI inner dict once instead of per-request.
         let asgi_dict = PyDict::new(py);
-        // These set_item calls are infallible for interned string keys/values.
         let _ = asgi_dict.set_item(s("version").bind(py), s(ASGI_VERSION).bind(py));
         let _ = asgi_dict.set_item(s("spec_version").bind(py), s(ASGI_SPEC_VERSION).bind(py));
+
+        let server_tuple = PyTuple::new(
+            py,
+            [
+                server_addr
+                    .ip()
+                    .to_string()
+                    .into_pyobject(py)
+                    .expect("ip string")
+                    .into_any(),
+                server_addr
+                    .port()
+                    .into_pyobject(py)
+                    .expect("port int")
+                    .into_any(),
+            ],
+        )
+        .expect("server tuple")
+        .unbind();
 
         Self {
             keys: ScopeKeys {
@@ -169,21 +259,10 @@ impl ScopeInterns {
                 asgi_dict: asgi_dict.unbind(),
             },
             headers: HeaderInterns::new(py),
+            server_tuple,
+            versions: VersionInterns::new(py),
         }
     }
-}
-
-/// Build the ASGI receive template dict: `{"type": "http.request", "body": b"", "more_body": false}`.
-///
-/// Created once at worker startup, stored in `AsgiDispatch`. Each request
-/// copies this dict (inside `AsgiReceive::__call__`) and patches the `body` field.
-pub fn build_receive_template(py: Python<'_>) -> Py<PyDict> {
-    let dict = PyDict::new(py);
-    // These set_item calls are infallible for interned string keys.
-    let _ = dict.set_item(pyo3::intern!(py, "type"), pyo3::intern!(py, "http.request"));
-    let _ = dict.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, b""));
-    let _ = dict.set_item(pyo3::intern!(py, "more_body"), false);
-    dict.unbind()
 }
 
 // ── AsgiEvent ────────────────────────────────────────────────────────────
@@ -232,6 +311,18 @@ pub enum AsgiEvent {
 
 // ── AsgiReceive ──────────────────────────────────────────────────────────
 
+/// Build the `receive` template dict: `{"type": "http.request", "body": b"", "more_body": False}`.
+///
+/// Created once per worker, cloned per-request via `PyDict::copy`. This is
+/// faster than building 3 dict keys from scratch each time.
+pub fn build_receive_template(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item(pyo3::intern!(py, "type"), pyo3::intern!(py, "http.request"))?;
+    d.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, b""))?;
+    d.set_item(pyo3::intern!(py, "more_body"), false)?;
+    Ok(d.unbind())
+}
+
 /// ASGI `receive` callable backed by Rust.
 ///
 /// For HTTP: first call returns `http.request` with the pre-buffered body
@@ -241,8 +332,8 @@ pub enum AsgiEvent {
 #[pyclass(module = "apx._core", freelist = 64)]
 pub struct AsgiReceive {
     body: std::sync::Mutex<Option<Bytes>>,
-    receive_template: Py<PyDict>,
     disconnect_rx: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    receive_template: Py<PyDict>,
 }
 
 impl std::fmt::Debug for AsgiReceive {
@@ -255,22 +346,22 @@ impl AsgiReceive {
     /// Create for an HTTP request with a known body.
     pub fn http(
         body: Bytes,
-        receive_template: Py<PyDict>,
         disconnect_rx: oneshot::Receiver<()>,
+        receive_template: Py<PyDict>,
     ) -> Self {
         Self {
             body: std::sync::Mutex::new(Some(body)),
-            receive_template,
             disconnect_rx: std::sync::Mutex::new(Some(disconnect_rx)),
+            receive_template,
         }
     }
 
     /// Create for an HTTP request with no body (GET, HEAD, DELETE).
-    pub fn empty(receive_template: Py<PyDict>, disconnect_rx: oneshot::Receiver<()>) -> Self {
+    pub fn empty(disconnect_rx: oneshot::Receiver<()>, receive_template: Py<PyDict>) -> Self {
         Self {
             body: std::sync::Mutex::new(Some(Bytes::new())),
-            receive_template,
             disconnect_rx: std::sync::Mutex::new(Some(disconnect_rx)),
+            receive_template,
         }
     }
 }
@@ -292,23 +383,12 @@ impl AsgiReceive {
 
         if let Some(bytes) = taken {
             let t0 = super::bench_trace_enabled().then(std::time::Instant::now);
-            let event: Bound<'_, PyDict> = self
-                .receive_template
-                .bind(py)
-                .call_method0(pyo3::intern!(py, "copy"))?
-                .cast_into()?;
-            // NOTE: this copy is unavoidable — `PyBytes::new` always memcpys because
-            // CPython's allocator owns `bytes` object memory. There is no PyO3 API to
-            // make a Python `bytes` point into a Rust-owned buffer, and ASGI requires
-            // `isinstance(body, bytes)` (frameworks like Starlette depend on this).
-            // A `#[pyclass]` implementing `__buffer__` could avoid the copy, but would
-            // break the ASGI contract.
-            // See: https://pyo3.rs/v0.23.4/types#pybytes
+            let event = self.receive_template.bind(py).copy()?;
             event.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, &bytes))?;
             if let Some(t0) = t0 {
                 tracing::info!(
                     target: "bench_trace",
-                    phase = "receive_dict_copy",
+                    phase = "receive_dict_build",
                     elapsed_us = t0.elapsed().as_micros(),
                     body_len = bytes.len(),
                 );
@@ -356,8 +436,12 @@ impl AsgiReceive {
 /// Used by buffered `AsgiSend` to avoid `pyo3_async_runtimes::future_into_py`
 /// and its tokio task overhead. Implements the Python iterator protocol
 /// so `await resolved_awaitable` returns `None` with no scheduling.
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "visible to sibling modules in asgi/"
+)]
 #[pyclass(module = "apx._core", freelist = 128)]
-struct ResolvedAwaitable;
+pub(crate) struct ResolvedAwaitable;
 
 #[pymethods]
 impl ResolvedAwaitable {
@@ -440,6 +524,7 @@ enum SendInner {
 #[pyclass(module = "apx._core", freelist = 64)]
 pub struct AsgiSend {
     inner: SendInner,
+    resolved: Option<Py<ResolvedAwaitable>>,
 }
 
 impl std::fmt::Debug for AsgiSend {
@@ -456,6 +541,8 @@ impl AsgiSend {
     pub fn http(
         response_tx: oneshot::Sender<Result<OutboundResponse, AppError>>,
         disconnect_tx: oneshot::Sender<()>,
+        send_cache: &SendCache,
+        py: Python<'_>,
     ) -> Self {
         Self {
             inner: SendInner::Http {
@@ -465,6 +552,7 @@ impl AsgiSend {
                 disconnect_tx: Some(disconnect_tx),
                 stream_tx: None,
             },
+            resolved: Some(send_cache.resolved.clone_ref(py)),
         }
     }
 
@@ -472,6 +560,7 @@ impl AsgiSend {
     pub fn new(tx: mpsc::Sender<AsgiEvent>) -> Self {
         Self {
             inner: SendInner::Ws { tx },
+            resolved: None,
         }
     }
 }
@@ -506,6 +595,7 @@ impl AsgiSend {
             );
         }
 
+        let resolved = self.resolved.as_ref();
         match &mut self.inner {
             SendInner::Http {
                 status,
@@ -521,14 +611,31 @@ impl AsgiSend {
                 response_tx,
                 disconnect_tx,
                 stream_tx,
+                resolved,
             ),
-            SendInner::Ws { tx } => Self::handle_ws(py, parsed, tx),
+            SendInner::Ws { tx } => Self::handle_ws(py, parsed, tx, resolved),
         }
     }
 }
 
 impl AsgiSend {
+    /// Return a `ResolvedAwaitable` from the cached singleton or a fresh allocation.
+    fn resolved_awaitable<'py>(
+        resolved: Option<&Py<ResolvedAwaitable>>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(cached) = resolved {
+            Ok(cached.clone_ref(py).into_bound(py).into_any())
+        } else {
+            Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
+        }
+    }
+
     /// Handle an event in HTTP mode.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mutable refs to send state fields"
+    )]
     fn handle_http<'py>(
         py: Python<'py>,
         event: AsgiEvent,
@@ -537,6 +644,7 @@ impl AsgiSend {
         response_tx: &mut Option<oneshot::Sender<Result<OutboundResponse, AppError>>>,
         disconnect_tx: &mut Option<oneshot::Sender<()>>,
         stream_tx: &mut Option<mpsc::Sender<AsgiEvent>>,
+        resolved: Option<&Py<ResolvedAwaitable>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         match event {
             AsgiEvent::ResponseStart {
@@ -546,7 +654,7 @@ impl AsgiSend {
                 tracing::trace!(status = s, "asgi_send: response_start");
                 *status = Some(s);
                 *headers = Some(h);
-                Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
+                Self::resolved_awaitable(resolved, py)
             }
             AsgiEvent::ResponseBody { body, more_body } if stream_tx.is_none() => {
                 let Some(raw_status) = status.take() else {
@@ -584,7 +692,7 @@ impl AsgiSend {
                     }
                     tracing::trace!(body_len, "asgi_send: fixed body (complete)");
                 }
-                Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
+                Self::resolved_awaitable(resolved, py)
             }
             AsgiEvent::ResponseBody { body, more_body } => {
                 let Some(tx) = stream_tx.as_ref() else {
@@ -603,7 +711,7 @@ impl AsgiSend {
                         if !more_body {
                             *stream_tx = None;
                         }
-                        Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any())
+                        Self::resolved_awaitable(resolved, py)
                     }
                     Err(mpsc::error::TrySendError::Full(event)) => {
                         tracing::trace!(
@@ -649,9 +757,10 @@ impl AsgiSend {
         py: Python<'py>,
         event: AsgiEvent,
         tx: &mpsc::Sender<AsgiEvent>,
+        resolved: Option<&Py<ResolvedAwaitable>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         match tx.try_send(event) {
-            Ok(()) => Py::new(py, ResolvedAwaitable).map(|obj| obj.into_bound(py).into_any()),
+            Ok(()) => Self::resolved_awaitable(resolved, py),
             Err(mpsc::error::TrySendError::Full(event)) => {
                 let tx = tx.clone();
                 let handle = crate::io::with_tokio_handle(|h| h.clone()).ok_or_else(|| {
@@ -892,11 +1001,12 @@ fn parse_header_map(event: &Bound<'_, PyDict>) -> PyResult<HeaderMap> {
     let Some(list) = event.get_item(pyo3::intern!(py, "headers"))? else {
         return Ok(HeaderMap::new());
     };
-    let iter = list.try_iter()?;
-    let size_hint = iter.size_hint().0;
-    let mut headers = HeaderMap::with_capacity(size_hint);
-    for item in iter {
-        let tuple = item?;
+    // Direct C-API indexing (PyList_GET_ITEM) avoids Python iterator protocol overhead.
+    let list: &Bound<'_, PyList> = list.cast()?;
+    let len = list.len();
+    let mut headers = HeaderMap::with_capacity(len);
+    for i in 0..len {
+        let tuple = list.get_item(i)?;
         let name = header_name_from_py(&tuple.get_item(0)?)?;
         let value = header_value_from_py(&tuple.get_item(1)?)?;
         headers.insert(name, value);
@@ -990,6 +1100,56 @@ pub fn build_http_scope(
             app.bind(py).getattr(c"router")?,
         )?;
     }
+    Ok(dict.unbind())
+}
+
+/// Construct an ASGI HTTP scope dict with per-sub-phase timing.
+///
+/// Same as [`build_http_scope`] but emits `tracing::info!` events for each
+/// sub-phase (metadata, request_fields, headers, addresses, path_params).
+/// Used only in the traced dispatch path (`APX_BENCH_TRACE=1`).
+pub fn build_http_scope_traced(
+    py: Python<'_>,
+    request: &InboundRequest,
+    interns: &ScopeInterns,
+) -> PyResult<Py<PyDict>> {
+    use std::time::Instant;
+
+    let dict = PyDict::new(py);
+
+    let t = Instant::now();
+    set_scope_metadata(py, &dict, interns)?;
+    let metadata_ns = t.elapsed().as_nanos();
+
+    let t = Instant::now();
+    set_scope_request_fields(py, &dict, request, interns)?;
+    let request_fields_ns = t.elapsed().as_nanos();
+
+    let t = Instant::now();
+    set_scope_headers(py, &dict, request, interns)?;
+    let headers_ns = t.elapsed().as_nanos();
+
+    let t = Instant::now();
+    set_scope_addresses(py, &dict, request, interns)?;
+    let addresses_ns = t.elapsed().as_nanos();
+
+    let t = Instant::now();
+    set_scope_path_params(py, &dict, request, interns)?;
+    let path_params_ns = t.elapsed().as_nanos();
+
+    dict.set_item(interns.keys.state.bind(py), PyDict::new(py))?;
+
+    tracing::info!(
+        target: "bench_trace",
+        phase = "scope_build_breakdown",
+        metadata_ns = metadata_ns,
+        request_fields_ns = request_fields_ns,
+        headers_ns = headers_ns,
+        addresses_ns = addresses_ns,
+        path_params_ns = path_params_ns,
+        path = %request.path,
+    );
+
     Ok(dict.unbind())
 }
 
@@ -1088,7 +1248,7 @@ fn set_scope_request_fields(
 ) -> PyResult<()> {
     dict.set_item(
         interns.keys.http_version.bind(py),
-        request.protocol.as_asgi_version(),
+        interns.versions.get(py, request.protocol),
     )?;
     dict.set_item(interns.keys.method.bind(py), request.method.as_str())?;
     // ASGI spec: "path" is the decoded URL path, "raw_path" is the raw bytes.
@@ -1136,13 +1296,7 @@ fn set_scope_addresses(
     request: &InboundRequest,
     interns: &ScopeInterns,
 ) -> PyResult<()> {
-    dict.set_item(
-        interns.keys.server.bind(py),
-        (
-            request.server_addr.ip().to_string(),
-            request.server_addr.port(),
-        ),
-    )?;
+    dict.set_item(interns.keys.server.bind(py), interns.server_tuple.bind(py))?;
     match request.client_addr {
         Some(addr) => {
             dict.set_item(
@@ -1232,6 +1386,9 @@ mod tests {
     use crate::transport::types::{BodyStream, ProtocolVersion, TransportKind};
     use crate::with_py;
     use http::header::HeaderMap;
+
+    const TEST_SERVER_ADDR: SocketAddr =
+        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080);
     use std::net::SocketAddr;
 
     // ── Pure Rust tests ──────────────────────────────────────────────────
@@ -1261,11 +1418,14 @@ mod tests {
 
     #[test]
     fn asgi_send_debug_http() {
-        let (tx, _rx) = oneshot::channel();
-        let (dtx, _drx) = oneshot::channel();
-        let send = AsgiSend::http(tx, dtx);
-        let dbg = format!("{send:?}");
-        assert!(dbg.contains("AsgiSend::Http"));
+        with_py(|py| {
+            let (tx, _rx) = oneshot::channel();
+            let (dtx, _drx) = oneshot::channel();
+            let cache = SendCache::new(py).unwrap();
+            let send = AsgiSend::http(tx, dtx, &cache, py);
+            let dbg = format!("{send:?}");
+            assert!(dbg.contains("AsgiSend::Http"));
+        });
     }
 
     #[test]
@@ -1314,7 +1474,7 @@ mod tests {
             Some(SocketAddr::from(([10, 0, 0, 1], 5555))),
         );
         with_py(|py| {
-            let interns = ScopeInterns::new(py);
+            let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
             let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             assert_eq!(
@@ -1402,7 +1562,7 @@ mod tests {
                     Vec::new(),
                     http::Extensions::new(),
                 );
-                let interns = ScopeInterns::new(py);
+                let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
                 let scope = build_http_scope(py, &req, None, &interns).unwrap();
                 let scope = scope.bind(py);
                 let http_version: String = scope
@@ -1427,7 +1587,7 @@ mod tests {
             None,
         );
         with_py(|py| {
-            let interns = ScopeInterns::new(py);
+            let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
             let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let qs: Vec<u8> = scope
@@ -1447,7 +1607,7 @@ mod tests {
         headers.insert("x-custom", "value".parse().unwrap());
         let req = make_inbound_request(http::Method::POST, "/api", b"", headers, Vec::new(), None);
         with_py(|py| {
-            let interns = ScopeInterns::new(py);
+            let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
             let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let headers_list = scope.get_item("headers").unwrap().unwrap();
@@ -1467,7 +1627,7 @@ mod tests {
             None,
         );
         with_py(|py| {
-            let interns = ScopeInterns::new(py);
+            let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
             let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let pp = scope.get_item("path_params").unwrap().unwrap();
@@ -1487,7 +1647,7 @@ mod tests {
             Some(SocketAddr::from(([192, 168, 1, 100], 12345))),
         );
         with_py(|py| {
-            let interns = ScopeInterns::new(py);
+            let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
             let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let client = scope.get_item("client").unwrap().unwrap();
@@ -1509,7 +1669,7 @@ mod tests {
             None,
         );
         with_py(|py| {
-            let interns = ScopeInterns::new(py);
+            let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
             let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let client = scope.get_item("client").unwrap().unwrap();
@@ -1528,7 +1688,7 @@ mod tests {
             None,
         );
         with_py(|py| {
-            let interns = ScopeInterns::new(py);
+            let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
             let scope = build_http_scope(py, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let server = scope.get_item("server").unwrap().unwrap();
@@ -1609,10 +1769,11 @@ mod tests {
     async fn asgi_send_http_fixed_response() {
         let (response_tx, response_rx) = oneshot::channel();
         let (disconnect_tx, _disconnect_rx) = oneshot::channel();
-        let mut send = AsgiSend::http(response_tx, disconnect_tx);
 
         with_py(|py| {
-            // Send ResponseStart.
+            let cache = SendCache::new(py).unwrap();
+            let mut send = AsgiSend::http(response_tx, disconnect_tx, &cache, py);
+
             let start_dict = PyDict::new(py);
             start_dict.set_item("type", "http.response.start").unwrap();
             start_dict.set_item("status", 200u16).unwrap();
@@ -1620,7 +1781,6 @@ mod tests {
             start_dict.set_item("headers", headers).unwrap();
             send.__call__(py, start_dict.clone()).unwrap();
 
-            // Send ResponseBody (more_body=false).
             let body_dict = PyDict::new(py);
             body_dict.set_item("type", "http.response.body").unwrap();
             body_dict
@@ -1642,10 +1802,11 @@ mod tests {
     async fn asgi_send_http_streaming_response() {
         let (response_tx, response_rx) = oneshot::channel();
         let (disconnect_tx, _disconnect_rx) = oneshot::channel();
-        let mut send = AsgiSend::http(response_tx, disconnect_tx);
 
         with_py(|py| {
-            // Send ResponseStart.
+            let cache = SendCache::new(py).unwrap();
+            let mut send = AsgiSend::http(response_tx, disconnect_tx, &cache, py);
+
             let start_dict = PyDict::new(py);
             start_dict.set_item("type", "http.response.start").unwrap();
             start_dict.set_item("status", 200u16).unwrap();
@@ -1653,7 +1814,6 @@ mod tests {
             start_dict.set_item("headers", headers).unwrap();
             send.__call__(py, start_dict.clone()).unwrap();
 
-            // Send ResponseBody (more_body=true → streaming).
             let body_dict = PyDict::new(py);
             body_dict.set_item("type", "http.response.body").unwrap();
             body_dict
@@ -1831,7 +1991,7 @@ mod tests {
             Some(SocketAddr::from(([10, 0, 0, 1], 5555))),
         );
         with_py(|py| {
-            let interns = ScopeInterns::new(py);
+            let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
             let scope = build_ws_scope(py, &req, &interns).unwrap();
             let scope = scope.bind(py);
 
@@ -1971,6 +2131,195 @@ mod tests {
                 }
                 other => panic!("expected WsAccept, got {other:?}"),
             }
+        });
+    }
+
+    // ── Microbenchmarks ─────────────────────────────────────────────────
+    //
+    // Run with: cargo test -p apx-framework -- --nocapture microbench
+    //
+    // These are not assert-based tests — they print timing comparisons
+    // for manual inspection. They isolate specific operations to validate
+    // (or refute) performance hypotheses.
+
+    const MICROBENCH_ITERATIONS: usize = 100_000;
+
+    fn bench_loop<F: FnMut()>(label: &str, mut f: F) -> std::time::Duration {
+        // Warmup
+        for _ in 0..1000 {
+            f();
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..MICROBENCH_ITERATIONS {
+            f();
+        }
+        let elapsed = start.elapsed();
+        let per_op = elapsed / MICROBENCH_ITERATIONS as u32;
+        eprintln!("  {label:40} {per_op:>8?}  ({elapsed:?} / {MICROBENCH_ITERATIONS})");
+        elapsed
+    }
+
+    #[test]
+    fn microbench_version_intern_vs_direct_str() {
+        eprintln!("\n=== VersionInterns.get() vs direct as_asgi_version() ===");
+        with_py(|py| {
+            let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
+            let key = interns.keys.http_version.bind(py);
+            let dict = PyDict::new(py);
+            let protocol = ProtocolVersion::Http11;
+
+            bench_loop("VersionInterns.get(Http11) + set_item", || {
+                dict.set_item(key, interns.versions.get(py, protocol))
+                    .unwrap();
+            });
+
+            bench_loop("as_asgi_version() + set_item", || {
+                dict.set_item(key, protocol.as_asgi_version()).unwrap();
+            });
+        });
+    }
+
+    #[test]
+    fn microbench_server_tuple_cached_vs_dynamic() {
+        eprintln!("\n=== Cached server_tuple vs dynamic ip().to_string() ===");
+        with_py(|py| {
+            let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
+            let key = interns.keys.server.bind(py);
+            let dict = PyDict::new(py);
+
+            bench_loop("cached server_tuple + set_item", || {
+                dict.set_item(key, interns.server_tuple.bind(py)).unwrap();
+            });
+
+            bench_loop("dynamic (ip.to_string(), port) + set_item", || {
+                dict.set_item(
+                    key,
+                    (TEST_SERVER_ADDR.ip().to_string(), TEST_SERVER_ADDR.port()),
+                )
+                .unwrap();
+            });
+        });
+    }
+
+    #[test]
+    fn microbench_resolved_awaitable_singleton_vs_freelist() {
+        eprintln!("\n=== ResolvedAwaitable: clone_ref (singleton) vs Py::new (freelist) ===");
+        with_py(|py| {
+            let cache = SendCache::new(py).unwrap();
+
+            bench_loop("clone_ref (singleton)", || {
+                let _ = cache.resolved.clone_ref(py);
+            });
+
+            bench_loop("Py::new (freelist=128)", || {
+                let _ = Py::new(py, ResolvedAwaitable).unwrap();
+            });
+        });
+    }
+
+    #[test]
+    fn microbench_receive_dict_build_vs_template_copy() {
+        eprintln!("\n=== Receive dict: direct build vs template.copy() ===");
+        with_py(|py| {
+            let body = PyBytes::new(py, b"hello world");
+
+            // NEW: direct dict construction with interned keys
+            bench_loop("direct PyDict + 3x set_item (interned)", || {
+                let event = PyDict::new(py);
+                event
+                    .set_item(pyo3::intern!(py, "type"), pyo3::intern!(py, "http.request"))
+                    .unwrap();
+                event.set_item(pyo3::intern!(py, "body"), &body).unwrap();
+                event
+                    .set_item(pyo3::intern!(py, "more_body"), false)
+                    .unwrap();
+                std::hint::black_box(&event);
+            });
+
+            // OLD: template.copy() + set_item(body)
+            let template = PyDict::new(py);
+            template
+                .set_item(pyo3::intern!(py, "type"), pyo3::intern!(py, "http.request"))
+                .unwrap();
+            template
+                .set_item(pyo3::intern!(py, "body"), PyBytes::new(py, b""))
+                .unwrap();
+            template
+                .set_item(pyo3::intern!(py, "more_body"), false)
+                .unwrap();
+            let template = template.unbind();
+
+            bench_loop("template.copy() + set_item(body)", || {
+                let event: Bound<'_, PyDict> = template
+                    .bind(py)
+                    .call_method0(pyo3::intern!(py, "copy"))
+                    .unwrap()
+                    .cast_into()
+                    .unwrap();
+                event.set_item(pyo3::intern!(py, "body"), &body).unwrap();
+                std::hint::black_box(&event);
+            });
+        });
+    }
+
+    #[test]
+    fn microbench_full_scope_build() {
+        eprintln!("\n=== Full build_http_scope (new interns) ===");
+        with_py(|py| {
+            let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
+            let req = make_inbound_request(
+                http::Method::GET,
+                "/api/health",
+                b"",
+                HeaderMap::new(),
+                Vec::new(),
+                Some(SocketAddr::from(([10, 0, 0, 1], 5555))),
+            );
+
+            bench_loop("build_http_scope (current)", || {
+                let _ = build_http_scope(py, &req, None, &interns).unwrap();
+            });
+        });
+    }
+
+    #[test]
+    fn microbench_pylist_direct_index_vs_iterator() {
+        eprintln!("\n=== PyList: direct index vs try_iter() ===");
+        with_py(|py| {
+            let items: Vec<Bound<'_, PyAny>> = (0..20i32)
+                .map(|i| {
+                    PyTuple::new(
+                        py,
+                        [
+                            PyBytes::new(py, format!("header-{i}").as_bytes()).into_any(),
+                            PyBytes::new(py, format!("value-{i}").as_bytes()).into_any(),
+                        ],
+                    )
+                    .unwrap()
+                    .into_any()
+                })
+                .collect();
+            let list = PyList::new(py, &items).unwrap();
+
+            bench_loop("direct index: list.get_item(i)", || {
+                let mut count = 0usize;
+                for i in 0..list.len() {
+                    let tuple = list.get_item(i).unwrap();
+                    std::hint::black_box(&tuple);
+                    count += 1;
+                }
+                std::hint::black_box(count);
+            });
+
+            bench_loop("try_iter() protocol", || {
+                let mut count = 0usize;
+                for item in list.try_iter().unwrap() {
+                    let tuple = item.unwrap();
+                    std::hint::black_box(&tuple);
+                    count += 1;
+                }
+                std::hint::black_box(count);
+            });
         });
     }
 }

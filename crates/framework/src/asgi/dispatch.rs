@@ -9,7 +9,9 @@
 //! `OutboundResponse` on the first body chunk.
 
 use crate::asgi::bench_trace::{self, RequestTraceBuilder};
-use crate::asgi::scope::{AsgiReceive, AsgiSend, ScopeInterns, build_http_scope};
+use crate::asgi::scope::{
+    AsgiReceive, AsgiSend, ScopeInterns, SendCache, build_http_scope, build_http_scope_traced,
+};
 use crate::dispatch::Dispatch;
 use crate::protocol::http::error::AppError;
 use crate::supervision::worker_context::WorkerContext;
@@ -37,8 +39,10 @@ pub struct AsgiDispatch {
     app: Arc<Py<PyAny>>,
     /// Pre-interned scope strings, shared across all requests.
     scope_interns: Arc<ScopeInterns>,
-    /// Template dict for `AsgiReceive` (Arc-wrapped to avoid per-request GIL).
+    /// Pre-built receive dict template, cloned per-request via `PyDict::copy`.
     receive_template: Arc<Py<PyDict>>,
+    /// Cached Python objects for the send path.
+    send_cache: Arc<SendCache>,
     /// Shared worker infrastructure (asyncio submission state).
     ctx: Arc<WorkerContext>,
     /// Maximum request body size in bytes.
@@ -51,6 +55,7 @@ impl AsgiDispatch {
         app: Py<PyAny>,
         scope_interns: Arc<ScopeInterns>,
         receive_template: Py<PyDict>,
+        send_cache: Arc<SendCache>,
         ctx: Arc<WorkerContext>,
         body_limit: usize,
     ) -> Self {
@@ -58,6 +63,7 @@ impl AsgiDispatch {
             app: Arc::new(app),
             scope_interns,
             receive_template: Arc::new(receive_template),
+            send_cache,
             ctx,
             body_limit,
         }
@@ -82,8 +88,9 @@ impl Dispatch for AsgiDispatch {
         let trace = super::bench_trace_enabled();
 
         let app = Arc::clone(&self.app);
-        let template = Arc::clone(&self.receive_template);
         let interns = Arc::clone(&self.scope_interns);
+        let recv_tpl = Arc::clone(&self.receive_template);
+        let send_cache = Arc::clone(&self.send_cache);
         let ctx = Arc::clone(&self.ctx);
 
         Box::pin(async move {
@@ -94,7 +101,8 @@ impl Dispatch for AsgiDispatch {
                     body_limit,
                     app,
                     interns,
-                    template,
+                    recv_tpl,
+                    send_cache,
                     ctx,
                 )
                 .await
@@ -105,7 +113,8 @@ impl Dispatch for AsgiDispatch {
                     body_limit,
                     app,
                     interns,
-                    template,
+                    recv_tpl,
+                    send_cache,
                     ctx,
                 )
                 .await
@@ -153,13 +162,15 @@ impl Dispatch for AsgiDispatch {
 
 /// Full dispatch pipeline: collect body → build scope → submit to asyncio
 /// → await oneshot response.
+#[expect(clippy::too_many_arguments, reason = "dispatch args are all required")]
 async fn dispatch_inner(
     request: InboundRequest,
     body_stream: BodyStream,
     body_limit: usize,
     app: Arc<Py<PyAny>>,
     interns: Arc<ScopeInterns>,
-    template: Arc<Py<PyDict>>,
+    recv_tpl: Arc<Py<PyDict>>,
+    send_cache: Arc<SendCache>,
     ctx: Arc<WorkerContext>,
 ) -> Result<OutboundResponse, AppError> {
     let body_bytes = body_stream
@@ -173,15 +184,15 @@ async fn dispatch_inner(
     Python::attach(|py| -> Result<(), AppError> {
         let scope = build_http_scope(py, &request, None, &interns)
             .map_err(|e| AppError::Internal(format!("scope build: {e}")))?;
-        let tmpl = (*template).clone_ref(py);
+        let tpl = recv_tpl.clone_ref(py);
         let receive = if body_bytes.is_empty() {
-            AsgiReceive::empty(tmpl, disconnect_rx)
+            AsgiReceive::empty(disconnect_rx, tpl)
         } else {
-            AsgiReceive::http(body_bytes, tmpl, disconnect_rx)
+            AsgiReceive::http(body_bytes, disconnect_rx, tpl)
         };
         let receive_obj =
             Py::new(py, receive).map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
-        let send = AsgiSend::http(response_tx, disconnect_tx);
+        let send = AsgiSend::http(response_tx, disconnect_tx, &send_cache, py);
         let send_obj =
             Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
         let coro = app
@@ -191,7 +202,7 @@ async fn dispatch_inner(
         let guarded = ctx
             .guarded_fn
             .call1(py, (&coro, &send_obj))
-            .map_err(|e| AppError::Internal(format!("_guarded wrap: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("wrap in _guarded: {e}")))?;
         ctx.call_soon_threadsafe
             .call1(py, (&ctx.create_task, &guarded))
             .map_err(|e| AppError::Internal(format!("submit to asyncio: {e}")))?;
@@ -206,13 +217,15 @@ async fn dispatch_inner(
 // ── Traced dispatch ─────────────────────────────────────────────────────
 
 /// Dispatch with per-phase bench tracing.
+#[expect(clippy::too_many_arguments, reason = "dispatch args are all required")]
 async fn dispatch_traced(
     request: InboundRequest,
     body_stream: BodyStream,
     body_limit: usize,
     app: Arc<Py<PyAny>>,
     interns: Arc<ScopeInterns>,
-    template: Arc<Py<PyDict>>,
+    recv_tpl: Arc<Py<PyDict>>,
+    send_cache: Arc<SendCache>,
     ctx: Arc<WorkerContext>,
 ) -> Result<OutboundResponse, AppError> {
     let t_total = Instant::now();
@@ -225,8 +238,15 @@ async fn dispatch_traced(
         .map_err(|e| AppError::Internal(format!("body collect: {e}")))?;
     builder = builder.body_collect(t0.elapsed().as_micros() as u64);
 
-    let (response_rx, gil_us, scope_us, call_us, submit_us) =
-        dispatch_gil_block(&request, body_bytes, &app, &interns, &template, &ctx)?;
+    let (response_rx, gil_us, scope_us, call_us, submit_us) = dispatch_gil_block(
+        &request,
+        body_bytes,
+        &app,
+        &interns,
+        &recv_tpl,
+        &send_cache,
+        &ctx,
+    )?;
     builder = builder
         .gil_acquire(gil_us)
         .scope_build(scope_us)
@@ -261,7 +281,8 @@ fn dispatch_gil_block(
     body_bytes: Bytes,
     app: &Py<PyAny>,
     interns: &ScopeInterns,
-    template: &Py<PyDict>,
+    recv_tpl: &Py<PyDict>,
+    send_cache: &SendCache,
     ctx: &WorkerContext,
 ) -> Result<GilBlockOutput, AppError> {
     let t_gil = Instant::now();
@@ -269,22 +290,22 @@ fn dispatch_gil_block(
         let gil_us = t_gil.elapsed().as_micros() as u64;
 
         let t0 = Instant::now();
-        let scope = build_http_scope(py, request, None, interns)
+        let scope = build_http_scope_traced(py, request, interns)
             .map_err(|e| AppError::Internal(format!("scope build: {e}")))?;
         let scope_us = t0.elapsed().as_micros() as u64;
 
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let tmpl = template.clone_ref(py);
+        let tpl = recv_tpl.clone_ref(py);
         let receive = if body_bytes.is_empty() {
-            AsgiReceive::empty(tmpl, disconnect_rx)
+            AsgiReceive::empty(disconnect_rx, tpl)
         } else {
-            AsgiReceive::http(body_bytes, tmpl, disconnect_rx)
+            AsgiReceive::http(body_bytes, disconnect_rx, tpl)
         };
         let receive_obj =
             Py::new(py, receive).map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
-        let send = AsgiSend::http(response_tx, disconnect_tx);
+        let send = AsgiSend::http(response_tx, disconnect_tx, send_cache, py);
         let send_obj =
             Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
 
@@ -298,7 +319,7 @@ fn dispatch_gil_block(
         let guarded = ctx
             .guarded_fn
             .call1(py, (&coro, &send_obj))
-            .map_err(|e| AppError::Internal(format!("_guarded wrap: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("wrap in _guarded: {e}")))?;
         ctx.call_soon_threadsafe
             .call1(py, (&ctx.create_task, &guarded))
             .map_err(|e| AppError::Internal(format!("submit to asyncio: {e}")))?;
@@ -308,16 +329,22 @@ fn dispatch_gil_block(
     })
 }
 
+/// Client-visible body for internal errors.
+const INTERNAL_ERROR_BODY: &[u8] = b"Internal Server Error";
+
+/// Client-visible body for request timeout.
+const TIMEOUT_BODY: &[u8] = b"request timeout";
+
 /// Map an [`AppError`] to a generic HTTP error response.
 ///
 /// The error detail is logged but NOT leaked to the client.
 fn error_response(err: AppError) -> OutboundResponse {
     let status = err.status_code();
     let body = match &err {
-        AppError::Timeout => "request timeout",
+        AppError::Timeout => TIMEOUT_BODY,
         AppError::Internal(msg) => {
             tracing::error!(error = %msg, "internal dispatch error");
-            "Internal Server Error"
+            INTERNAL_ERROR_BODY
         }
     };
     OutboundResponse {
@@ -330,7 +357,7 @@ fn error_response(err: AppError) -> OutboundResponse {
             );
             h
         },
-        body: ResponseBody::Fixed(Bytes::copy_from_slice(body.as_bytes())),
+        body: ResponseBody::Fixed(Bytes::from_static(body)),
     }
 }
 

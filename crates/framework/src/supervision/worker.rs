@@ -136,8 +136,10 @@ pub async fn run_worker(
     };
 
     // Load app and build dispatch pipeline.
-    let dispatch =
-        Python::attach(|py| ModuleImport::new(bootstrap.app_module.as_str()).build(py, ctx))?;
+    let server_addr = runtime.listener.local_addr();
+    let dispatch = Python::attach(|py| {
+        ModuleImport::new(bootstrap.app_module.as_str()).build(py, ctx, server_addr)
+    })?;
 
     // Build HTTP service.
     let mut config = ServiceConfig {
