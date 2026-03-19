@@ -181,6 +181,29 @@ async def deps_endpoint(a: str = Depends(dep_level_a)):
 
 
 # ---------------------------------------------------------------------------
+# Telemetry test endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.get("/telemetry/test")
+async def telemetry_test():
+    """Exercise all OTEL telemetry surfaces for integration testing."""
+    import logging
+
+    from apx._core import SpanHandle, create_counter
+
+    with SpanHandle("test.custom_span", {"surface": "span"}):
+        pass
+
+    counter = create_counter("test.custom_counter", "integration test counter", "1")
+    counter.inc(1)
+
+    logging.getLogger("test.telemetry").info("integration test log message")
+
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
 # Profiling / trace endpoints
 # ---------------------------------------------------------------------------
 

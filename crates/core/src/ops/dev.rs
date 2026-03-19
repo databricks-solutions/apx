@@ -347,7 +347,6 @@ async fn spawn_detached_child(
 
     let child = tool_cmd
         .cwd(app_dir)
-        .env("APX_OTEL_LOGS", "1")
         .env("APX_APP_DIR", &server.canonical_app_dir)
         .env(token::DEV_TOKEN_ENV, &server.dev_token)
         .stdin(Stdio::null())

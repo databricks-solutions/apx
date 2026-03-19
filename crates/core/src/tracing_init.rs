@@ -1,16 +1,18 @@
-//! Tracing / OTLP initialization with optional traces, metrics, and logs.
+//! Tracing / OTLP initialization — gRPC only.
+//!
+//! Telemetry is enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+//! All three signals (traces, metrics, logs) are exported to that
+//! endpoint via gRPC (tonic). The only supported value for
+//! `OTEL_EXPORTER_OTLP_PROTOCOL` is `grpc` (default when unset).
 //!
 //! | Env var | Purpose |
 //! |---------|---------|
-//! | `APX_OTEL=1` | Master enable for all signals |
-//! | `APX_OTEL_TRACES=1` | Enable trace export |
-//! | `APX_OTEL_METRICS=1` | Enable metric export |
-//! | `APX_OTEL_LOGS=1` | Enable log export |
-//! | `OTEL_EXPORTER_OTLP_ENDPOINT` | Base OTLP endpoint |
-//! | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Override for traces |
-//! | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Override for metrics |
-//! | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Override for logs |
+//! | `OTEL_EXPORTER_OTLP_ENDPOINT` | Base gRPC endpoint (enables OTEL) |
+//! | `OTEL_EXPORTER_OTLP_PROTOCOL` | Must be `grpc` or absent |
 //! | `OTEL_SERVICE_NAME` | Service name resource attribute |
+//! | `OTEL_RESOURCE_ATTRIBUTES` | Comma-separated `key=value` pairs |
+//! | `OTEL_BSP_*` | Batch span processor tuning (SDK-native) |
+//! | `OTEL_BLRP_*` | Batch log record processor tuning (SDK-native) |
 
 use apx_common::tracing_fmt::{DevAwareFormatter, build_apx_filter};
 use opentelemetry::KeyValue;
@@ -22,9 +24,6 @@ use tracing_subscriber::prelude::*;
 
 pub use apx_common::tracing_fmt::enable_dev_format;
 
-/// Default OTLP base endpoint when none is configured.
-const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4318";
-
 /// Stored tracer provider — kept alive for the process lifetime.
 static TRACER_PROVIDER: OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> = OnceLock::new();
 
@@ -34,26 +33,42 @@ static METER_PROVIDER: OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> = 
 /// Stored logger provider — kept alive for the process lifetime.
 static LOGGER_PROVIDER: OnceLock<opentelemetry_sdk::logs::SdkLoggerProvider> = OnceLock::new();
 
-/// Access the global tracer provider (if OTEL traces are enabled).
+/// Access the global tracer provider (if OTEL is enabled).
 pub fn tracer_provider() -> Option<&'static opentelemetry_sdk::trace::SdkTracerProvider> {
     TRACER_PROVIDER.get()
 }
 
-/// Access the global meter provider (if OTEL metrics are enabled).
+/// Access the global meter provider (if OTEL is enabled).
 pub fn meter_provider() -> Option<&'static opentelemetry_sdk::metrics::SdkMeterProvider> {
     METER_PROVIDER.get()
 }
 
 /// Initialize the tracing subscriber with optional OTLP export.
 ///
-/// Reads `APX_LOG` for the log filter and `APX_OTEL*` env vars for OTLP signals.
+/// OTEL is enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` is set and
+/// `OTEL_EXPORTER_OTLP_PROTOCOL` is `grpc` (or absent).
 pub fn init_tracing() {
     let filter = build_apx_filter("apx");
     let app_dir = std::env::var("APX_APP_DIR").ok();
-    let signals = OtelSignals::from_env();
 
-    if signals.any_enabled() {
-        if let Err(e) = init_tracing_with_otel(&filter, app_dir.as_deref(), &signals) {
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .filter(|v| !v.is_empty());
+
+    if let Some(endpoint) = endpoint {
+        let protocol =
+            std::env::var("OTEL_EXPORTER_OTLP_PROTOCOL").unwrap_or_else(|_| "grpc".to_owned());
+
+        if protocol != "grpc" {
+            eprintln!(
+                "Warning: OTEL_EXPORTER_OTLP_PROTOCOL={protocol:?} is not supported (only \"grpc\"); \
+                 falling back to fmt-only logging"
+            );
+            init_tracing_fmt_only(&filter);
+            return;
+        }
+
+        if let Err(e) = init_tracing_with_otel(&filter, app_dir.as_deref(), &endpoint) {
             eprintln!("Warning: Failed to initialize OTLP: {e}");
             init_tracing_fmt_only(&filter);
         }
@@ -83,51 +98,26 @@ pub fn shutdown_telemetry() {
 
 // ── Internal ────────────────────────────────────────────────────────────
 
-/// Which OTEL signals are enabled.
-struct OtelSignals {
-    traces: bool,
-    metrics: bool,
-    logs: bool,
-}
+/// Build the OTEL resource from `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
+/// and the optional `APX_APP_DIR`.
+fn build_resource(app_dir: Option<&str>) -> Resource {
+    let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "apx".to_owned());
+    let mut attrs = vec![KeyValue::new("service.name", service_name)];
 
-impl OtelSignals {
-    fn from_env() -> Self {
-        let master = env_flag("APX_OTEL");
-        Self {
-            traces: master || env_flag("APX_OTEL_TRACES"),
-            metrics: master || env_flag("APX_OTEL_METRICS"),
-            logs: master || env_flag("APX_OTEL_LOGS"),
+    if let Ok(raw) = std::env::var("OTEL_RESOURCE_ATTRIBUTES") {
+        for pair in raw.split(',') {
+            let pair = pair.trim();
+            if let Some((k, v)) = pair.split_once('=') {
+                attrs.push(KeyValue::new(k.to_owned(), v.to_owned()));
+            }
         }
     }
 
-    fn any_enabled(&self) -> bool {
-        self.traces || self.metrics || self.logs
-    }
-}
-
-/// Check if an env var is set to "1".
-fn env_flag(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|v| v == "1")
-}
-
-/// Read an env var with a fallback.
-fn env_or(name: &str, default: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| default.to_owned())
-}
-
-/// Build the OTEL resource with service name and optional app path.
-fn build_resource(app_dir: Option<&str>) -> Resource {
-    let service_name = env_or("OTEL_SERVICE_NAME", "apx");
-    let mut attrs = vec![KeyValue::new("service.name", service_name)];
     if let Some(path) = app_dir {
         attrs.push(KeyValue::new("apx.app_path", path.to_owned()));
     }
-    Resource::builder().with_attributes(attrs).build()
-}
 
-/// Resolve the base OTLP endpoint.
-fn base_endpoint() -> String {
-    env_or("OTEL_EXPORTER_OTLP_ENDPOINT", DEFAULT_OTLP_ENDPOINT)
+    Resource::builder().with_attributes(attrs).build()
 }
 
 fn init_tracing_fmt_only(filter: &str) {
@@ -149,86 +139,65 @@ fn init_tracing_fmt_only(filter: &str) {
 fn init_tracing_with_otel(
     filter: &str,
     app_dir: Option<&str>,
-    signals: &OtelSignals,
+    endpoint: &str,
 ) -> Result<(), String> {
     use opentelemetry_otlp::WithExportConfig;
 
     let resource = build_resource(app_dir);
-    let base = base_endpoint();
 
     let registry = tracing_subscriber::registry();
 
     // ── Traces ──────────────────────────────────────────────────────
-    let otel_trace_layer = if signals.traces {
-        let endpoint = env_or(
-            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-            &format!("{base}/v1/traces"),
-        );
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_http()
-            .with_endpoint(&endpoint)
-            .build()
-            .map_err(|e| format!("span exporter: {e}"))?;
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()
+        .map_err(|e| format!("span exporter: {e}"))?;
 
-        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-            .with_resource(resource.clone())
-            .with_batch_exporter(exporter)
-            .build();
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_resource(resource.clone())
+        .with_batch_exporter(exporter)
+        .build();
 
-        let tracer = provider.tracer("apx-framework");
-        let _ = TRACER_PROVIDER.set(provider);
+    let tracer = provider.tracer("apx-framework");
+    opentelemetry::global::set_tracer_provider(provider.clone());
+    let _ = TRACER_PROVIDER.set(provider);
 
-        Some(
-            tracing_opentelemetry::layer()
-                .with_tracer(tracer)
-                .with_filter(EnvFilter::new(filter)),
-        )
-    } else {
-        None
-    };
+    let otel_trace_layer = tracing_opentelemetry::layer()
+        .with_tracer(tracer)
+        .with_filter(EnvFilter::new(filter));
 
     // ── Metrics ─────────────────────────────────────────────────────
-    if signals.metrics {
-        let endpoint = env_or(
-            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
-            &format!("{base}/v1/metrics"),
-        );
-        let exporter = opentelemetry_otlp::MetricExporter::builder()
-            .with_http()
-            .with_endpoint(&endpoint)
-            .build()
-            .map_err(|e| format!("metric exporter: {e}"))?;
+    let exporter = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()
+        .map_err(|e| format!("metric exporter: {e}"))?;
 
-        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-            .with_resource(resource.clone())
-            .with_periodic_exporter(exporter)
-            .build();
+    let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+        .with_resource(resource.clone())
+        .with_periodic_exporter(exporter)
+        .build();
 
-        let _ = METER_PROVIDER.set(provider);
-    }
+    opentelemetry::global::set_meter_provider(provider.clone());
+    let _ = METER_PROVIDER.set(provider);
 
     // ── Logs ────────────────────────────────────────────────────────
-    let otel_log_layer = if signals.logs {
-        let endpoint = env_or("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", &flux_logs_endpoint());
-        let exporter = opentelemetry_otlp::LogExporter::builder()
-            .with_http()
-            .with_endpoint(&endpoint)
-            .build()
-            .map_err(|e| format!("log exporter: {e}"))?;
+    let exporter = opentelemetry_otlp::LogExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()
+        .map_err(|e| format!("log exporter: {e}"))?;
 
-        let provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
-            .with_resource(resource)
-            .with_batch_exporter(exporter)
-            .build();
+    let provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
+        .with_resource(resource)
+        .with_batch_exporter(exporter)
+        .build();
 
-        let layer =
-            opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&provider)
-                .with_filter(EnvFilter::new(filter));
-        let _ = LOGGER_PROVIDER.set(provider);
-        Some(layer)
-    } else {
-        None
-    };
+    let otel_log_layer =
+        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&provider)
+            .with_filter(EnvFilter::new(filter));
+    let _ = LOGGER_PROVIDER.set(provider);
 
     // ── Fmt (always) ────────────────────────────────────────────────
     let fmt_layer = tracing_subscriber::fmt::layer()
@@ -248,13 +217,4 @@ fn init_tracing_with_otel(
     }
 
     Ok(())
-}
-
-/// Default logs endpoint — Flux collector on localhost.
-fn flux_logs_endpoint() -> String {
-    format!(
-        "http://{}:{}/v1/logs",
-        apx_common::hosts::CLIENT_HOST,
-        crate::flux::FLUX_PORT
-    )
 }

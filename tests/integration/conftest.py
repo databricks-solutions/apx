@@ -1,8 +1,8 @@
 """APX integration test fixtures.
 
 Builds the APX wheel for Linux via Docker cross-compilation, creates a Docker
-image, and manages a single container for the entire test session. Docker logs
-are collected and printed on test failure.
+image, and manages containers for the test session. Docker logs are collected
+and printed on test failure.
 """
 
 from __future__ import annotations
@@ -229,18 +229,16 @@ def _assemble_bench_app(wheel_path: Path, build_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Session-scoped fixtures
+# Shared image build fixture
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="session")
-def apx_container(request: pytest.FixtureRequest) -> Generator[str]:
-    """Build APX, create Docker image, start container, yield base URL."""
-    global _container
+def apx_image(request: pytest.FixtureRequest) -> str:
+    """Build the APX Docker image once per session. Returns the image tag."""
     skip_build = request.config.getoption("--skip-build")
-    client = docker.from_env()
+    dk = docker.from_env()
 
-    # ── Build ──
     if not skip_build:
         t0 = time.monotonic()
         print("\n[build] Cross-compiling APX wheel for linux/amd64...")
@@ -256,7 +254,7 @@ def apx_container(request: pytest.FixtureRequest) -> Generator[str]:
 
         t2 = time.monotonic()
         print(f"[build] Building Docker image {TEST_IMAGE}...")
-        client.images.build(
+        dk.images.build(
             path=str(build_dir),
             dockerfile="Dockerfile",
             tag=TEST_IMAGE,
@@ -267,18 +265,70 @@ def apx_container(request: pytest.FixtureRequest) -> Generator[str]:
     else:
         print("\n[build] --skip-build: reusing existing image")
 
+    return TEST_IMAGE
+
+
+# ---------------------------------------------------------------------------
+# Container helpers
+# ---------------------------------------------------------------------------
+
+
+def wait_for_healthy(base_url: str, *, timeout: float = 120) -> None:
+    """Poll the health endpoint until the container is ready."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            r = httpx.get(f"{base_url}/api/health", timeout=2.0)
+            if r.status_code == 200:
+                return
+        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
+            pass
+        time.sleep(1.0)
+    pytest.fail(f"Container did not become healthy within {timeout}s (url={base_url})")
+
+
+def print_container_logs(
+    container: docker.models.containers.Container,
+    *,
+    tail: int | Literal["all"] = "all",
+    header: str = "Container logs",
+) -> None:
+    """Print Docker container logs."""
+    try:
+        logs = container.logs(tail=tail).decode("utf-8", errors="replace")
+    except Exception:
+        return
+    separator = "=" * 72
+    print(f"\n{separator}")
+    print(f"  {header}")
+    print(separator)
+    print(logs)
+    print(separator)
+
+
+# ---------------------------------------------------------------------------
+# Session-scoped fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def apx_container(apx_image: str) -> Generator[str]:
+    """Start the APX container, yield base URL."""
+    global _container
+    dk = docker.from_env()
+
     # ── Remove stale container ──
     try:
-        stale = client.containers.get(CONTAINER_NAME)
+        stale = dk.containers.get(CONTAINER_NAME)
         stale.remove(force=True)
     except docker.errors.NotFound:
         pass
 
     # ── Start container ──
     print("[container] Starting APX container...")
-    t3 = time.monotonic()
-    container = client.containers.run(
-        TEST_IMAGE,
+    t0 = time.monotonic()
+    container = dk.containers.run(
+        apx_image,
         command=["apx", "serve", "app.main", "--host", "0.0.0.0", "--workers", "2"],
         name=CONTAINER_NAME,
         platform="linux/amd64",
@@ -299,26 +349,16 @@ def apx_container(request: pytest.FixtureRequest) -> Generator[str]:
 
     # ── Wait for readiness ──
     print("[container] Waiting for health check...")
-    deadline = time.monotonic() + 120
-    ready = False
-    while time.monotonic() < deadline:
-        try:
-            r = httpx.get(f"{base_url}/api/health", timeout=2.0)
-            if r.status_code == 200:
-                ready = True
-                break
-        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
-            pass
-        time.sleep(1.0)
-
-    if not ready:
+    try:
+        wait_for_healthy(base_url)
+    except Exception:
         _print_container_logs(header="Container logs (startup failed)")
         container.stop(timeout=5)
         container.remove()
         _container = None
-        pytest.fail(f"Container did not become healthy within 120s (url={base_url})")
+        raise
 
-    elapsed = time.monotonic() - t3
+    elapsed = time.monotonic() - t0
     print(f"[container] Ready in {elapsed:.1f}s at {base_url}")
 
     yield base_url
