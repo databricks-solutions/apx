@@ -5,6 +5,7 @@
 //! `tracing` crate at downstream use sites.
 
 use std::fmt;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Local;
@@ -77,6 +78,10 @@ where
             let level = event.metadata().level();
             write!(writer, " {level:>5} ")?;
 
+            if let Some(id) = worker_id() {
+                write!(writer, "[worker-{id}] ")?;
+            }
+
             let target = event.metadata().target();
             write!(writer, "{target}: ")?;
 
@@ -88,6 +93,13 @@ where
             writeln!(writer)
         }
     }
+}
+
+/// Return the `APX_WORKER_ID` env var value, cached after the first call.
+fn worker_id() -> Option<&'static str> {
+    static ID: OnceLock<Option<String>> = OnceLock::new();
+    ID.get_or_init(|| std::env::var("APX_WORKER_ID").ok())
+        .as_deref()
 }
 
 /// Visitor that extracts the message field from a tracing event.
