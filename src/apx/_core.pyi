@@ -39,6 +39,12 @@ class Future:
 
 # ── Telemetry ────────────────────────────────────────────────────────────
 
+import enum
+
+class StatusCode(enum.IntEnum):
+    Ok = 0
+    Error = 1
+
 class SpanHandle:
     """OTEL span usable as sync/async context manager."""
     def __init__(
@@ -62,7 +68,7 @@ class SpanHandle:
         self, name: str, attributes: dict[str, str] | None = None
     ) -> None: ...
     def set_attribute(self, key: str, value: str) -> None: ...
-    def set_status(self, code: str, description: str = "") -> None: ...
+    def set_status(self, code: StatusCode, description: str = "") -> None: ...
     def record_exception(
         self, message: str, type_name: str = "Exception", stacktrace: str = ""
     ) -> None: ...

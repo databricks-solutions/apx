@@ -474,6 +474,93 @@ fn span_handle_async_context_manager() {
     );
 }
 
+// ── Exception capture tests ─────────────────────────────────────────────
+
+#[test]
+fn span_handle_exit_with_exception_records_error() {
+    let tt = setup();
+    let _lock = EXPORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    tt.span_exporter.reset();
+
+    with_py(|py| {
+        let handle = pyo3::Py::new(
+            py,
+            crate::telemetry::spans::SpanHandle::create("erroring.span".to_owned(), None),
+        )
+        .unwrap();
+
+        let obj = handle.bind(py);
+        obj.call_method0("__enter__").unwrap();
+
+        // Raise a ValueError inside Python and capture exc_info, then pass
+        // the triple to __exit__ exactly like Python's `with` statement.
+        let code = c"
+import sys
+try:
+    raise ValueError('something broke')
+except:
+    exc_info = sys.exc_info()
+";
+        let locals = pyo3::types::PyDict::new(py);
+        py.run(code, None, Some(&locals)).unwrap();
+
+        let exc_info = locals.get_item("exc_info").unwrap().unwrap();
+        let exc_type = exc_info.get_item(0).unwrap();
+        let exc_val = exc_info.get_item(1).unwrap();
+        let exc_tb = exc_info.get_item(2).unwrap();
+
+        obj.call_method1("__exit__", (&exc_type, &exc_val, &exc_tb))
+            .unwrap();
+    });
+
+    tt.tracer_provider.force_flush().unwrap();
+    let spans = tt.span_exporter.get_finished_spans().unwrap();
+
+    let span = spans
+        .iter()
+        .find(|s| s.name == "erroring.span")
+        .expect("expected 'erroring.span' in exported spans");
+
+    assert_eq!(
+        span.status,
+        opentelemetry::trace::Status::error("something broke"),
+        "span status should be Error with the exception message"
+    );
+
+    let exc_event = span
+        .events
+        .events
+        .iter()
+        .find(|e| e.name == "exception")
+        .expect("expected an 'exception' event on the span");
+
+    let attr = |key: &str| -> Option<String> {
+        exc_event.attributes.iter().find_map(|kv| {
+            if kv.key.as_str() == key {
+                Some(kv.value.to_string())
+            } else {
+                None
+            }
+        })
+    };
+
+    assert_eq!(
+        attr("exception.type").as_deref(),
+        Some("ValueError"),
+        "exception.type should be ValueError"
+    );
+    assert!(
+        attr("exception.message")
+            .as_ref()
+            .is_some_and(|m| m.contains("something broke")),
+        "exception.message should contain 'something broke'"
+    );
+    assert!(
+        attr("exception.stacktrace").is_some(),
+        "exception.stacktrace should be present"
+    );
+}
+
 // ── Additional metrics tests ───────────────────────────────────────────
 
 #[test]

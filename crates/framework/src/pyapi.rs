@@ -12,6 +12,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::asgi::scope::AsgiSend>()?;
 
     // Telemetry
+    m.add_class::<crate::telemetry::spans::StatusCode>()?;
     m.add_class::<crate::telemetry::spans::SpanHandle>()?;
     m.add_class::<crate::telemetry::metrics::RustCounter>()?;
     m.add_class::<crate::telemetry::metrics::RustHistogram>()?;

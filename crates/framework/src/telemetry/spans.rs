@@ -17,6 +17,16 @@ use opentelemetry::{Context, trace::Span};
 use pyo3::prelude::*;
 use std::collections::HashMap;
 
+/// OTEL span status code exposed as a Python enum.
+#[pyclass(module = "apx._core", eq, eq_int, from_py_object)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusCode {
+    /// The span completed successfully.
+    Ok = 0,
+    /// The span recorded an error.
+    Error = 1,
+}
+
 /// Python-visible span wrapper backed by OpenTelemetry.
 #[pyclass(module = "apx._core")]
 pub struct SpanHandle {
@@ -93,6 +103,9 @@ impl SpanHandle {
     }
 
     /// End the span, restore previous context.
+    ///
+    /// If the block raised an exception the span is automatically marked
+    /// as errored and the traceback is recorded as an event.
     #[pyo3(signature = (exc_type=None, exc_val=None, exc_tb=None))]
     fn __exit__(
         &mut self,
@@ -101,11 +114,14 @@ impl SpanHandle {
         exc_val: Option<&Bound<'_, PyAny>>,
         exc_tb: Option<&Bound<'_, PyAny>>,
     ) -> bool {
-        let _ = (exc_type, exc_val, exc_tb);
+        if let Some(ref mut span) = self.span
+            && let Some(exc) = exc_val
+        {
+            record_python_exception(span, exc_type, exc, exc_tb);
+        }
         if let Some(mut span) = self.span.take() {
             span.end();
         }
-        // Restore the parent's context in the ContextVar.
         restore_context_var(py, self.saved_parent.take());
         false
     }
@@ -152,17 +168,14 @@ impl SpanHandle {
     }
 
     /// Set the span status.
-    ///
-    /// ``code`` must be ``"error"`` or ``"ok"``; anything else is ignored.
     #[pyo3(signature = (code, description=""))]
-    fn set_status(&mut self, code: &str, description: &str) {
+    fn set_status(&mut self, code: StatusCode, description: &str) {
         let Some(ref mut span) = self.span else {
             return;
         };
         let status = match code {
-            "error" => opentelemetry::trace::Status::error(description.to_owned()),
-            "ok" => opentelemetry::trace::Status::Ok,
-            _ => return,
+            StatusCode::Error => opentelemetry::trace::Status::error(description.to_owned()),
+            StatusCode::Ok => opentelemetry::trace::Status::Ok,
         };
         span.set_status(status);
     }
@@ -185,6 +198,51 @@ impl SpanHandle {
         }
         span.add_event("exception", attrs);
     }
+}
+
+// ── Exception capture ────────────────────────────────────────────────
+
+/// Record a Python exception on the span: add an ``exception`` event and
+/// set the span status to Error.
+fn record_python_exception(
+    span: &mut opentelemetry::global::BoxedSpan,
+    exc_type: Option<&Bound<'_, PyAny>>,
+    exc_val: &Bound<'_, PyAny>,
+    exc_tb: Option<&Bound<'_, PyAny>>,
+) {
+    let type_name = exc_type
+        .and_then(|t| t.getattr("__qualname__").ok())
+        .and_then(|n| n.extract::<String>().ok())
+        .unwrap_or_else(|| "Exception".to_owned());
+
+    let message = exc_val.str().map(|s| s.to_string()).unwrap_or_default();
+
+    let stacktrace = exc_tb
+        .and_then(|tb| format_traceback(tb).ok())
+        .unwrap_or_default();
+
+    let mut attrs = vec![
+        opentelemetry::KeyValue::new("exception.type", type_name),
+        opentelemetry::KeyValue::new("exception.message", message.clone()),
+    ];
+    if !stacktrace.is_empty() {
+        attrs.push(opentelemetry::KeyValue::new(
+            "exception.stacktrace",
+            stacktrace,
+        ));
+    }
+    span.add_event("exception", attrs);
+    span.set_status(opentelemetry::trace::Status::error(message));
+}
+
+/// Format a Python traceback object into a string via ``traceback.format_tb``.
+fn format_traceback(tb: &Bound<'_, PyAny>) -> PyResult<String> {
+    let py = tb.py();
+    let tb_mod = py.import(pyo3::intern!(py, "traceback"))?;
+    let lines: Vec<String> = tb_mod
+        .call_method1(pyo3::intern!(py, "format_tb"), (tb,))?
+        .extract()?;
+    Ok(lines.join(""))
 }
 
 // ── Serialized trace context ──────────────────────────────────────────

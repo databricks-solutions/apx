@@ -40,6 +40,7 @@ from apx._core import (
     RustGauge,
     RustHistogram,
     SpanHandle,
+    StatusCode,
     create_counter as _create_counter,
     create_gauge as _create_gauge,
     create_histogram as _create_histogram,
@@ -65,6 +66,7 @@ _IDENTITY_ATTRS: dict[str, str] = _resolve_identity()
 __all__ = [
     "span",
     "log",
+    "StatusCode",
     "Unit",
     "Counter",
     "Histogram",
