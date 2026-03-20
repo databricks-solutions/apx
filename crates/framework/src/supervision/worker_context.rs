@@ -15,8 +15,8 @@ pub struct WorkerContext {
     pub call_soon_threadsafe: Py<pyo3::PyAny>,
     /// Cached `loop.create_task` for asyncio task creation.
     pub create_task: Py<pyo3::PyAny>,
-    /// Cached `_guarded` Python function for error forwarding.
-    pub guarded_fn: Py<pyo3::PyAny>,
+    /// Cached `_bridge.launch` — creates ASGI task on the asyncio thread.
+    pub launch_fn: Py<pyo3::PyAny>,
 }
 
 impl std::fmt::Debug for WorkerContext {

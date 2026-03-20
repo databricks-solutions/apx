@@ -54,13 +54,37 @@ pub fn ensure_python_env() {
         // normal `python` invocation does, so venv site-packages aren't
         // automatically added to `sys.path`. Discover and export via
         // `PYTHONPATH` so that packages like `uvloop` are importable.
+        //
+        // Also process `.pth` files — editable installs (e.g. `uv pip
+        // install -e .`) create a `.pth` file that `site.py` would
+        // normally process to add the source tree to `sys.path`.
         let lib_dir = venv.join("lib");
         if let Ok(entries) = std::fs::read_dir(&lib_dir) {
             for entry in entries.flatten() {
                 let sp = entry.path().join("site-packages");
                 if sp.is_dir() {
+                    let mut paths = vec![sp.to_string_lossy().into_owned()];
+                    // Read .pth files and append their entries.
+                    if let Ok(pth_entries) = std::fs::read_dir(&sp) {
+                        for pth in pth_entries.flatten() {
+                            let p = pth.path();
+                            if p.extension().is_some_and(|e| e == "pth")
+                                && let Ok(content) = std::fs::read_to_string(&p)
+                            {
+                                for line in content.lines() {
+                                    let line = line.trim();
+                                    if !line.is_empty()
+                                        && !line.starts_with('#')
+                                        && Path::new(line).is_dir()
+                                    {
+                                        paths.push(line.to_owned());
+                                    }
+                                }
+                            }
+                        }
+                    }
                     unsafe {
-                        std::env::set_var("PYTHONPATH", &sp);
+                        std::env::set_var("PYTHONPATH", paths.join(":"));
                     }
                     break;
                 }

@@ -1,6 +1,6 @@
 //! ASGI protocol primitives backed by Rust.
 //!
-//! Provides `AsgiReceive`, `AsgiSend` (Python callables), `build_http_scope`,
+//! Provides `AsgiReceive`, `AsgiSend` (Python callables), `scope_from_template`,
 //! and `build_ws_scope` for constructing ASGI scope dicts from [`InboundRequest`].
 //!
 //! These types enable Starlette's `Request`, `StreamingResponse`, and `WebSocket`
@@ -58,6 +58,9 @@ pub struct ScopeInterns {
     // ── HTTP version interns ──
     /// Cached `PyString` for HTTP protocol versions.
     pub(crate) versions: VersionInterns,
+    // ── Scope template ──
+    /// Pre-built HTTP scope dict with fixed fields. `dict.copy()` per request.
+    pub(crate) scope_template: Py<PyDict>,
 }
 
 /// Fixed dict keys used in ASGI scope construction.
@@ -231,36 +234,53 @@ impl ScopeInterns {
         .expect("server tuple")
         .unbind();
 
+        let keys = ScopeKeys {
+            r#type: s("type"),
+            asgi: s("asgi"),
+            http_version: s("http_version"),
+            method: s("method"),
+            path: s("path"),
+            raw_path: s("raw_path"),
+            query_string: s("query_string"),
+            headers: s("headers"),
+            server: s("server"),
+            client: s("client"),
+            scheme: s("scheme"),
+            root_path: s("root_path"),
+            state: s("state"),
+            path_params: s("path_params"),
+            app: s("app"),
+            router: s("router"),
+        };
+        let vals = ScopeValues {
+            type_http: s("http"),
+            type_websocket: s("websocket"),
+            scheme_http: s(DEFAULT_SCHEME),
+            scheme_ws: s(WS_SCHEME),
+            root_path_empty: s(""),
+            asgi_dict: asgi_dict.unbind(),
+        };
+        let versions = VersionInterns::new(py);
+
+        // Build scope template with fixed HTTP fields pre-populated.
+        let scope_template = {
+            let tpl = PyDict::new(py);
+            let _ = tpl.set_item(keys.r#type.bind(py), vals.type_http.bind(py));
+            let _ = tpl.set_item(keys.asgi.bind(py), vals.asgi_dict.bind(py));
+            let _ = tpl.set_item(keys.scheme.bind(py), vals.scheme_http.bind(py));
+            let _ = tpl.set_item(keys.root_path.bind(py), vals.root_path_empty.bind(py));
+            let _ = tpl.set_item(keys.http_version.bind(py), versions.http11.bind(py));
+            let _ = tpl.set_item(keys.server.bind(py), server_tuple.bind(py));
+            tpl.unbind()
+        };
+
         Self {
-            keys: ScopeKeys {
-                r#type: s("type"),
-                asgi: s("asgi"),
-                http_version: s("http_version"),
-                method: s("method"),
-                path: s("path"),
-                raw_path: s("raw_path"),
-                query_string: s("query_string"),
-                headers: s("headers"),
-                server: s("server"),
-                client: s("client"),
-                scheme: s("scheme"),
-                root_path: s("root_path"),
-                state: s("state"),
-                path_params: s("path_params"),
-                app: s("app"),
-                router: s("router"),
-            },
-            vals: ScopeValues {
-                type_http: s("http"),
-                type_websocket: s("websocket"),
-                scheme_http: s(DEFAULT_SCHEME),
-                scheme_ws: s(WS_SCHEME),
-                root_path_empty: s(""),
-                asgi_dict: asgi_dict.unbind(),
-            },
+            keys,
+            vals,
             headers: HeaderInterns::new(py),
             server_tuple,
-            versions: VersionInterns::new(py),
+            versions,
+            scope_template,
         }
     }
 }
@@ -509,7 +529,6 @@ enum SendInner {
         response_tx: Option<oneshot::Sender<Result<OutboundResponse, AppError>>>,
         disconnect_tx: Option<oneshot::Sender<()>>,
         stream_tx: Option<mpsc::Sender<AsgiEvent>>,
-        scope: Option<Py<PyDict>>,
     },
     /// WebSocket mode — forwards events via mpsc (unchanged).
     Ws { tx: mpsc::Sender<AsgiEvent> },
@@ -544,7 +563,6 @@ impl AsgiSend {
         disconnect_tx: oneshot::Sender<()>,
         send_cache: &SendCache,
         py: Python<'_>,
-        scope: Option<Py<PyDict>>,
     ) -> Self {
         Self {
             inner: SendInner::Http {
@@ -553,7 +571,6 @@ impl AsgiSend {
                 response_tx: Some(response_tx),
                 disconnect_tx: Some(disconnect_tx),
                 stream_tx: None,
-                scope,
             },
             resolved: Some(send_cache.resolved.clone_ref(py)),
         }
@@ -607,7 +624,6 @@ impl AsgiSend {
                 response_tx,
                 disconnect_tx,
                 stream_tx,
-                scope,
             } => Self::handle_http(
                 py,
                 parsed,
@@ -617,7 +633,6 @@ impl AsgiSend {
                 disconnect_tx,
                 stream_tx,
                 resolved,
-                scope.as_ref(),
             ),
             SendInner::Ws { tx } => Self::handle_ws(py, parsed, tx, resolved),
         }
@@ -651,7 +666,6 @@ impl AsgiSend {
         disconnect_tx: &mut Option<oneshot::Sender<()>>,
         stream_tx: &mut Option<mpsc::Sender<AsgiEvent>>,
         resolved: Option<&Py<ResolvedAwaitable>>,
-        scope: Option<&Py<PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         match event {
             AsgiEvent::ResponseStart {
@@ -672,7 +686,7 @@ impl AsgiSend {
                 let resp_headers = headers.take().unwrap_or_default();
                 let http_status = http::StatusCode::from_u16(raw_status)
                     .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-                let server_route = scope.and_then(|s| extract_route_from_scope(s, py));
+                let server_route = None;
 
                 if more_body {
                     let (stx, srx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
@@ -879,20 +893,6 @@ fn build_ws_receive_event(py: Python<'_>, event: Option<WsIncomingEvent>) -> PyR
     Ok(dict.into_any().unbind())
 }
 
-/// Extract the matched route template from the ASGI scope dict.
-///
-/// After Starlette routing, `scope["route"]` is set with a `.path`
-/// attribute containing the template (e.g., `/users/{user_id}`).
-/// Returns `None` if the scope has no route or extraction fails.
-fn extract_route_from_scope(scope: &Py<PyDict>, py: Python<'_>) -> Option<String> {
-    let scope_ref = scope.bind(py);
-    let route_obj = scope_ref.get_item(pyo3::intern!(py, "route")).ok()??;
-    route_obj
-        .getattr(pyo3::intern!(py, "path"))
-        .ok()
-        .and_then(|p| p.extract::<String>().ok())
-}
-
 // ── Parse helpers ────────────────────────────────────────────────────────
 
 /// Parse an ASGI send event dict into a typed [`AsgiEvent`].
@@ -1095,36 +1095,47 @@ fn extract_bytes_field(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     }
 }
 
-// ── build_http_scope ─────────────────────────────────────────────────────
+// ── scope_from_template ──────────────────────────────────────────────────
 
-/// Construct an ASGI HTTP scope dict from an [`InboundRequest`].
+/// Build an HTTP scope from the pre-populated template.
 ///
-/// This is the bridge between the transport-neutral request abstraction
-/// and the ASGI protocol. It must never receive hyper/axum types directly.
-///
-/// When `fastapi_app` is provided, `scope["app"]` and `scope["router"]` are
-/// set so that FastAPI/Starlette routing and dependency injection work.
-pub fn build_http_scope(
+/// `dict.copy()` + per-request fields only. For HTTP/1.1 (>95% of traffic),
+/// the `http_version` field is already correct from the template.
+pub fn scope_from_template(
     py: Python<'_>,
+    template: &Py<PyDict>,
     request: &InboundRequest,
     fastapi_app: Option<&Py<PyAny>>,
     interns: &ScopeInterns,
 ) -> PyResult<Py<PyDict>> {
-    let dict = PyDict::new(py);
-    set_scope_metadata(py, &dict, interns)?;
-    set_scope_request_fields(py, &dict, request, interns)?;
-    set_scope_headers(py, &dict, request, interns)?;
-    set_scope_addresses(py, &dict, request, interns)?;
-    set_scope_path_params(py, &dict, request, interns)?;
-    dict.set_item(interns.keys.state.bind(py), PyDict::new(py))?;
+    let scope = template
+        .bind(py)
+        .call_method0(pyo3::intern!(py, "copy"))?
+        .cast_into::<PyDict>()
+        .map_err(|e| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "scope template copy returned non-dict: {e}"
+            ))
+        })?;
+    if request.protocol != ProtocolVersion::Http11 {
+        scope.set_item(
+            interns.keys.http_version.bind(py),
+            interns.versions.get(py, request.protocol),
+        )?;
+    }
+    set_scope_request_fields(py, &scope, request, interns)?;
+    set_scope_headers(py, &scope, request, interns)?;
+    set_scope_addresses(py, &scope, request, interns)?;
+    set_scope_path_params(py, &scope, request, interns)?;
+    scope.set_item(interns.keys.state.bind(py), PyDict::new(py))?;
     if let Some(app) = fastapi_app {
-        dict.set_item(interns.keys.app.bind(py), app.bind(py))?;
-        dict.set_item(
+        scope.set_item(interns.keys.app.bind(py), app.bind(py))?;
+        scope.set_item(
             interns.keys.router.bind(py),
             app.bind(py).getattr(c"router")?,
         )?;
     }
-    Ok(dict.unbind())
+    Ok(scope.unbind())
 }
 
 /// Construct an ASGI WebSocket scope dict from an [`InboundRequest`].
@@ -1187,28 +1198,6 @@ fn set_ws_scope_request_fields(
     dict.set_item(
         interns.keys.query_string.bind(py),
         PyBytes::new(py, &request.query_string),
-    )?;
-    Ok(())
-}
-
-/// Set ASGI scope metadata fields: type, asgi, http_version, scheme, root_path.
-fn set_scope_metadata(
-    py: Python<'_>,
-    dict: &Bound<'_, PyDict>,
-    interns: &ScopeInterns,
-) -> PyResult<()> {
-    dict.set_item(
-        interns.keys.r#type.bind(py),
-        interns.vals.type_http.bind(py),
-    )?;
-    dict.set_item(interns.keys.asgi.bind(py), interns.vals.asgi_dict.bind(py))?;
-    dict.set_item(
-        interns.keys.scheme.bind(py),
-        interns.vals.scheme_http.bind(py),
-    )?;
-    dict.set_item(
-        interns.keys.root_path.bind(py),
-        interns.vals.root_path_empty.bind(py),
     )?;
     Ok(())
 }
@@ -1396,7 +1385,7 @@ mod tests {
             let (tx, _rx) = oneshot::channel();
             let (dtx, _drx) = oneshot::channel();
             let cache = SendCache::new(py).unwrap();
-            let send = AsgiSend::http(tx, dtx, &cache, py, None);
+            let send = AsgiSend::http(tx, dtx, &cache, py);
             let dbg = format!("{send:?}");
             assert!(dbg.contains("AsgiSend::Http"));
         });
@@ -1449,7 +1438,8 @@ mod tests {
         );
         with_py(|py| {
             let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
-            let scope = build_http_scope(py, &req, None, &interns).unwrap();
+            let scope =
+                scope_from_template(py, &interns.scope_template, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             assert_eq!(
                 scope
@@ -1537,7 +1527,8 @@ mod tests {
                     http::Extensions::new(),
                 );
                 let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
-                let scope = build_http_scope(py, &req, None, &interns).unwrap();
+                let scope =
+                    scope_from_template(py, &interns.scope_template, &req, None, &interns).unwrap();
                 let scope = scope.bind(py);
                 let http_version: String = scope
                     .get_item("http_version")
@@ -1562,7 +1553,8 @@ mod tests {
         );
         with_py(|py| {
             let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
-            let scope = build_http_scope(py, &req, None, &interns).unwrap();
+            let scope =
+                scope_from_template(py, &interns.scope_template, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let qs: Vec<u8> = scope
                 .get_item("query_string")
@@ -1582,7 +1574,8 @@ mod tests {
         let req = make_inbound_request(http::Method::POST, "/api", b"", headers, Vec::new(), None);
         with_py(|py| {
             let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
-            let scope = build_http_scope(py, &req, None, &interns).unwrap();
+            let scope =
+                scope_from_template(py, &interns.scope_template, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let headers_list = scope.get_item("headers").unwrap().unwrap();
             let len = headers_list.len().unwrap();
@@ -1602,7 +1595,8 @@ mod tests {
         );
         with_py(|py| {
             let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
-            let scope = build_http_scope(py, &req, None, &interns).unwrap();
+            let scope =
+                scope_from_template(py, &interns.scope_template, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let pp = scope.get_item("path_params").unwrap().unwrap();
             let val: String = pp.get_item("item_id").unwrap().extract().unwrap();
@@ -1622,7 +1616,8 @@ mod tests {
         );
         with_py(|py| {
             let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
-            let scope = build_http_scope(py, &req, None, &interns).unwrap();
+            let scope =
+                scope_from_template(py, &interns.scope_template, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let client = scope.get_item("client").unwrap().unwrap();
             let host: String = client.get_item(0).unwrap().extract().unwrap();
@@ -1644,7 +1639,8 @@ mod tests {
         );
         with_py(|py| {
             let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
-            let scope = build_http_scope(py, &req, None, &interns).unwrap();
+            let scope =
+                scope_from_template(py, &interns.scope_template, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let client = scope.get_item("client").unwrap().unwrap();
             assert!(client.is_none());
@@ -1663,7 +1659,8 @@ mod tests {
         );
         with_py(|py| {
             let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
-            let scope = build_http_scope(py, &req, None, &interns).unwrap();
+            let scope =
+                scope_from_template(py, &interns.scope_template, &req, None, &interns).unwrap();
             let scope = scope.bind(py);
             let server = scope.get_item("server").unwrap().unwrap();
             let host: String = server.get_item(0).unwrap().extract().unwrap();
@@ -1746,7 +1743,7 @@ mod tests {
 
         with_py(|py| {
             let cache = SendCache::new(py).unwrap();
-            let mut send = AsgiSend::http(response_tx, disconnect_tx, &cache, py, None);
+            let mut send = AsgiSend::http(response_tx, disconnect_tx, &cache, py);
 
             let start_dict = PyDict::new(py);
             start_dict.set_item("type", "http.response.start").unwrap();
@@ -1779,7 +1776,7 @@ mod tests {
 
         with_py(|py| {
             let cache = SendCache::new(py).unwrap();
-            let mut send = AsgiSend::http(response_tx, disconnect_tx, &cache, py, None);
+            let mut send = AsgiSend::http(response_tx, disconnect_tx, &cache, py);
 
             let start_dict = PyDict::new(py);
             start_dict.set_item("type", "http.response.start").unwrap();
@@ -2238,7 +2235,7 @@ mod tests {
 
     #[test]
     fn microbench_full_scope_build() {
-        eprintln!("\n=== Full build_http_scope (new interns) ===");
+        eprintln!("\n=== Full scope_from_template (new interns) ===");
         with_py(|py| {
             let interns = ScopeInterns::new(py, TEST_SERVER_ADDR);
             let req = make_inbound_request(
@@ -2250,8 +2247,9 @@ mod tests {
                 Some(SocketAddr::from(([10, 0, 0, 1], 5555))),
             );
 
-            bench_loop("build_http_scope (current)", || {
-                let _ = build_http_scope(py, &req, None, &interns).unwrap();
+            bench_loop("scope_from_template", || {
+                let _ =
+                    scope_from_template(py, &interns.scope_template, &req, None, &interns).unwrap();
             });
         });
     }

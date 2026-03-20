@@ -9,7 +9,7 @@
 //! status/headers from `ResponseStart` and builds the complete
 //! `OutboundResponse` on the first body chunk.
 
-use crate::asgi::scope::{AsgiReceive, AsgiSend, ScopeInterns, SendCache, build_http_scope};
+use crate::asgi::scope::{AsgiReceive, AsgiSend, ScopeInterns, SendCache, scope_from_template};
 use crate::dispatch::Dispatch;
 use crate::protocol::http::error::AppError;
 use crate::supervision::worker_context::WorkerContext;
@@ -189,7 +189,7 @@ async fn dispatch_inner(
         }
 
         let t0 = perf.then(Instant::now);
-        let scope = build_http_scope(py, &request, None, &interns)
+        let scope = scope_from_template(py, &interns.scope_template, &request, None, &interns)
             .map_err(|e| AppError::Internal(format!("scope build: {e}")))?;
         if let Some(t) = t0 {
             tracing::info!(target: "apx.perf", phase = "scope_build", elapsed_us = t.elapsed().as_micros() as u64);
@@ -203,8 +203,7 @@ async fn dispatch_inner(
         };
         let receive_obj =
             Py::new(py, receive).map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
-        let scope_ref = Some(scope.clone_ref(py));
-        let send = AsgiSend::http(response_tx, disconnect_tx, &send_cache, py, scope_ref);
+        let send = AsgiSend::http(response_tx, disconnect_tx, &send_cache, py);
         let send_obj =
             Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
 
@@ -213,20 +212,8 @@ async fn dispatch_inner(
         }
 
         let t0 = perf.then(Instant::now);
-        let coro = app
-            .call1(py, (scope, receive_obj, &send_obj))
-            .map_err(|e| AppError::Internal(format!("ASGI app call: {e}")))?;
-        if let Some(t) = t0 {
-            tracing::info!(target: "apx.perf", phase = "app_call", elapsed_us = t.elapsed().as_micros() as u64);
-        }
-
-        let t0 = perf.then(Instant::now);
-        let guarded = ctx
-            .guarded_fn
-            .call1(py, (&coro, &send_obj))
-            .map_err(|e| AppError::Internal(format!("wrap in _guarded: {e}")))?;
         ctx.call_soon_threadsafe
-            .call1(py, (&ctx.create_task, &guarded))
+            .call1(py, (&ctx.launch_fn, &*app, &scope, &receive_obj, &send_obj))
             .map_err(|e| AppError::Internal(format!("submit to asyncio: {e}")))?;
         if let Some(t) = t0 {
             tracing::info!(target: "apx.perf", phase = "submit", elapsed_us = t.elapsed().as_micros() as u64);

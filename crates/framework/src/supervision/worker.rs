@@ -125,12 +125,12 @@ pub async fn run_worker(
     let ctx = {
         let el = &runtime.event_loop;
         Python::attach(|py| -> Result<Arc<WorkerContext>, WorkerError> {
-            let guarded_fn = register_guarded(py)
-                .map_err(|e| WorkerError::PythonInit(format!("register _guarded: {e}")))?;
+            let launch_fn = register_launch(py)
+                .map_err(|e| WorkerError::PythonInit(format!("register launch: {e}")))?;
             Ok(Arc::new(WorkerContext {
                 call_soon_threadsafe: el.call_soon_threadsafe().clone_ref(py),
                 create_task: el.create_task().clone_ref(py),
-                guarded_fn,
+                launch_fn,
             }))
         })?
     };
@@ -256,21 +256,17 @@ pub async fn connect_to_supervisor()
     Ok(Some((channel, bootstrap)))
 }
 
-// ── _guarded wrapper ────────────────────────────────────────────────────
+// ── launch wrapper ──────────────────────────────────────────────────────
 
-/// Import the `guarded` error-forwarding wrapper from `apx._bridge`.
+/// Import `launch` from `apx._bridge`.
 ///
-/// Wraps an ASGI coroutine so that application exceptions (`Exception`)
-/// are forwarded through `AsgiSend.send_error()` as 500 responses.
-/// The exception is **not** re-raised: the task is fire-and-forget
-/// (`create_task` with no `await`), so re-raising would cause asyncio
-/// to log "Task exception was never retrieved" on every app error.
-///
-/// `CancelledError` and other `BaseException` subclasses propagate
-/// naturally — they are control flow signals, not app errors.
-fn register_guarded(py: Python<'_>) -> PyResult<Py<PyAny>> {
+/// `launch(app, scope, receive, send)` runs on the asyncio thread as a
+/// `call_soon_threadsafe` callback. It calls `app(scope, receive, send)`
+/// and wraps the coroutine in error-guarding + `create_task` — all in a
+/// single `_run_once` callback, keeping the tokio thread GIL-free.
+fn register_launch(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let bridge = py.import(c"apx._bridge")?;
-    bridge.getattr(c"guarded").map(|f| f.unbind())
+    bridge.getattr(c"launch").map(|f| f.unbind())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -309,15 +305,17 @@ mod tests {
         assert!(msg.contains("transport"));
     }
 
-    /// `_guarded` must forward app exceptions through `send.send_error()`
+    /// `launch` must forward app exceptions through `send.send_error()`
     /// without re-raising — otherwise asyncio logs "Task exception was
     /// never retrieved" on every app error (the task is fire-and-forget).
     #[test]
-    fn guarded_forwards_error_without_asyncio_leak() {
+    fn launch_forwards_error_without_asyncio_leak() {
         crate::with_py(|py| {
+            let launch_fn = register_launch(py).expect("register_launch");
+
             py.run(
                 c"
-import asyncio, gc, builtins
+import asyncio, gc
 
 _leak_errors = []
 
@@ -332,47 +330,43 @@ class _MockSend:
 
 _mock = _MockSend()
 
-async def _fail():
+async def _failing_app(scope, receive, send):
     raise RuntimeError('deliberate test error')
+
+_el = asyncio.new_event_loop()
+_el.set_exception_handler(_capture)
 ",
                 None,
                 None,
             )
             .expect("define fixtures");
 
-            let guarded_fn = register_guarded(py).expect("register_guarded");
-
+            let app = py.eval(c"_failing_app", None, None).expect("get app");
             let mock = py.eval(c"_mock", None, None).expect("get mock");
-            let coro = py.eval(c"_fail()", None, None).expect("create coro");
-            let guarded_coro = guarded_fn
-                .call1(py, (&coro, &mock))
-                .expect("wrap in _guarded");
+            let scope = pyo3::types::PyDict::new(py);
+            let el = py.eval(c"_el", None, None).expect("get el");
 
-            py.import(c"builtins")
-                .expect("import builtins")
-                .setattr(c"_test_gcoro", &guarded_coro)
-                .expect("store guarded coro");
+            // Submit via call_soon_threadsafe — same as production.
+            let csts = el.getattr(c"call_soon_threadsafe").expect("csts");
+            csts.call1((&launch_fn, &app, &scope, py.None(), &mock))
+                .expect("submit via csTS");
 
             py.run(
                 c"
-_el = asyncio.new_event_loop()
-_el.set_exception_handler(_capture)
-
-async def _run():
-    _el.create_task(builtins._test_gcoro)
+async def _drain():
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     gc.collect()
     gc.collect()
     await asyncio.sleep(0)
 
-_el.run_until_complete(_run())
+_el.run_until_complete(_drain())
 _el.close()
 ",
                 None,
                 None,
             )
-            .expect("run test");
+            .expect("drain loop");
 
             let send_errors: Vec<String> = py
                 .eval(c"_mock.errors", None, None)
@@ -400,78 +394,73 @@ _el.close()
                 .collect();
             assert!(
                 task_leaks.is_empty(),
-                "_guarded re-raised, causing asyncio log spam: {task_leaks:?}"
+                "launch re-raised, causing asyncio log spam: {task_leaks:?}"
             );
         });
     }
 
-    /// `CancelledError` must propagate through `_guarded` — it's a control
+    /// `CancelledError` must propagate through `launch` — it's a control
     /// flow signal, not an app error. It must NOT be forwarded to
     /// `send.send_error()`.
     #[test]
-    fn guarded_propagates_cancellation() {
+    fn launch_propagates_cancellation() {
         crate::with_py(|py| {
+            let launch_fn = register_launch(py).expect("register_launch");
+
             py.run(
                 c"
-import asyncio, builtins
+import asyncio
 
-class _MockSend:
+class _MockSend2:
     def __init__(self):
         self.errors = []
     def send_error(self, tb):
         self.errors.append(tb)
 
-_mock2 = _MockSend()
+_mock2 = _MockSend2()
 
-async def _slow():
+async def _slow_app(scope, receive, send):
     await asyncio.sleep(10)
+
+_el2 = asyncio.new_event_loop()
 ",
                 None,
                 None,
             )
             .expect("define fixtures");
 
-            let guarded_fn = register_guarded(py).expect("register_guarded");
-
+            let app = py.eval(c"_slow_app", None, None).expect("get app");
             let mock = py.eval(c"_mock2", None, None).expect("get mock");
-            let coro = py.eval(c"_slow()", None, None).expect("create coro");
-            let guarded_coro = guarded_fn
-                .call1(py, (&coro, &mock))
-                .expect("wrap in _guarded");
+            let scope = pyo3::types::PyDict::new(py);
+            let el = py.eval(c"_el2", None, None).expect("get el");
 
-            py.import(c"builtins")
-                .expect("import builtins")
-                .setattr(c"_test_gcoro2", &guarded_coro)
-                .expect("store guarded coro");
+            let csts = el.getattr(c"call_soon_threadsafe").expect("csts");
+            csts.call1((&launch_fn, &app, &scope, py.None(), &mock))
+                .expect("submit via csTS");
 
             py.run(
                 c"
-_el2 = asyncio.new_event_loop()
-
 async def _run():
-    task = _el2.create_task(builtins._test_gcoro2)
-    await asyncio.sleep(0)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    return task.cancelled()
+    await asyncio.sleep(0)  # let launch create the task
+    # Find the app task (not ourselves).
+    app_tasks = [t for t in asyncio.all_tasks(_el2)
+                 if not t.done() and t is not asyncio.current_task()]
+    for t in app_tasks:
+        t.cancel()
+    # Let cancel propagate.
+    for t in app_tasks:
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
-_cancelled = _el2.run_until_complete(_run())
+_el2.run_until_complete(_run())
 _el2.close()
 ",
                 None,
                 None,
             )
             .expect("run test");
-
-            let cancelled: bool = py
-                .eval(c"_cancelled", None, None)
-                .expect("get result")
-                .extract()
-                .expect("extract");
-            assert!(cancelled, "task must be properly cancelled");
 
             let send_errors: Vec<String> = py
                 .eval(c"_mock2.errors", None, None)

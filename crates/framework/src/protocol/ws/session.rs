@@ -165,12 +165,8 @@ async fn ws_session(
             .map_err(|e| AppError::Internal(format!("wrap ws receive: {e}")))?;
         let send = Py::new(py, AsgiSend::new(outgoing_tx))
             .map_err(|e| AppError::Internal(format!("wrap ws send: {e}")))?;
-        let coro = app
-            .call1(py, (scope, receive, send))
-            .map_err(|e| AppError::Internal(format!("ASGI app call (ws): {e}")))?;
-
         ctx.call_soon_threadsafe
-            .call1(py, (&ctx.create_task, &coro))
+            .call1(py, (&ctx.launch_fn, &*app, &scope, &receive, &send))
             .map_err(|e| AppError::Internal(format!("submit ws to asyncio: {e}")))?;
         Ok(())
     });
