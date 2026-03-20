@@ -168,6 +168,16 @@ pub async fn run_worker(
         None
     };
 
+    tracing::info!(
+        target: "apx::telemetry",
+        system_metrics = telemetry_config.system.enabled,
+        http_instrumentation = telemetry_config.http.enabled,
+        fastapi_instrumentation = telemetry_config.fastapi.enabled,
+        otel_endpoint = %std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").unwrap_or_default(),
+        meter_provider = apx_core::tracing_init::meter_provider().is_some(),
+        "telemetry bootstrap complete"
+    );
+
     // Build HTTP service.
     let mut config = ServiceConfig {
         timeout: Duration::from_secs(bootstrap.request_timeout_secs),

@@ -16,12 +16,12 @@ pub(crate) fn framework_meter() -> opentelemetry::metrics::Meter {
     static LOGGED: std::sync::Once = std::sync::Once::new();
     if let Some(mp) = apx_core::tracing_init::meter_provider() {
         LOGGED.call_once(|| {
-            tracing::trace!(target: "apx::telemetry", meter = "apx.framework", "framework meter: using configured SdkMeterProvider");
+            tracing::info!(target: "apx::telemetry", meter = "apx.framework", "framework meter: using configured SdkMeterProvider");
         });
         mp.meter("apx.framework")
     } else {
         LOGGED.call_once(|| {
-            tracing::trace!(target: "apx::telemetry", meter = "apx.framework", "framework meter: SdkMeterProvider not initialized, using global noop");
+            tracing::warn!(target: "apx::telemetry", meter = "apx.framework", "framework meter: SdkMeterProvider not initialized, using global noop");
         });
         opentelemetry::global::meter("apx.framework")
     }
@@ -69,6 +69,8 @@ pub fn record_duration(
     route: &str,
     error_type: Option<&str>,
 ) {
+    static FIRST: std::sync::Once = std::sync::Once::new();
+
     let mut attrs = vec![
         KeyValue::new("http.request.method", method.to_owned()),
         KeyValue::new("url.scheme", scheme.to_owned()),
@@ -84,6 +86,17 @@ pub fn record_duration(
         .with_unit("s")
         .build()
         .record(duration_secs, &attrs);
+
+    FIRST.call_once(|| {
+        tracing::info!(
+            target: "apx::telemetry",
+            method,
+            status_code,
+            route,
+            duration_ms = format_args!("{:.1}", duration_secs * 1000.0),
+            "http metrics: first request duration recorded"
+        );
+    });
 }
 
 /// Map an `AppError` variant to an OTEL semconv `error.type` value.

@@ -78,6 +78,8 @@ impl SpanHandle {
 
     /// Start the span as a child of the current Python trace context.
     fn __enter__(mut slf: PyRefMut<'_, Self>) -> Py<Self> {
+        static FIRST: std::sync::Once = std::sync::Once::new();
+
         let py = slf.py();
         let parent_cx = resolve_parent_context(py);
 
@@ -97,6 +99,17 @@ impl SpanHandle {
         // Push this span's context into the Python ContextVar.
         let sc = span.span_context().clone();
         write_context_var(py, &sc);
+
+        FIRST.call_once(|| {
+            let has_provider = apx_core::tracing_init::tracer_provider().is_some();
+            tracing::info!(
+                target: "apx::telemetry",
+                span_name = slf.name.as_str(),
+                trace_id = %hex::encode(sc.trace_id().to_bytes()),
+                tracer_provider = has_provider,
+                "spans: first user span created"
+            );
+        });
 
         slf.span = Some(span);
         slf.into()

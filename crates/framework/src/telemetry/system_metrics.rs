@@ -151,14 +151,6 @@ async fn collection_loop(
 
     loop {
         tokio::time::sleep(interval).await;
-        if first_tick {
-            tracing::trace!(
-                target: "apx::telemetry",
-                interval_ms = interval.as_millis(),
-                "system metrics collection loop running — first tick"
-            );
-            first_tick = false;
-        }
         collect_once(
             &mut sys,
             &instruments,
@@ -167,6 +159,20 @@ async fn collection_loop(
             &mut disks,
             &mut networks,
         );
+        if first_tick {
+            sys.refresh_cpu_all();
+            sys.refresh_memory();
+            let cpu_pct = sys.global_cpu_usage();
+            let mem_used_mb = (sys.total_memory() - sys.available_memory()) / (1024 * 1024);
+            tracing::info!(
+                target: "apx::telemetry",
+                interval_ms = interval.as_millis(),
+                cpu_pct = format_args!("{cpu_pct:.1}"),
+                mem_used_mb,
+                "system metrics: first collection recorded"
+            );
+            first_tick = false;
+        }
     }
 }
 

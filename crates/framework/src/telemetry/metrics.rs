@@ -13,12 +13,12 @@ fn user_meter() -> Meter {
     static LOGGED: std::sync::Once = std::sync::Once::new();
     if let Some(mp) = apx_core::tracing_init::meter_provider() {
         LOGGED.call_once(|| {
-            tracing::trace!(target: "apx::telemetry", meter = "apx.user", "user meter: using configured SdkMeterProvider");
+            tracing::info!(target: "apx::telemetry", meter = "apx.user", "user meter: using configured SdkMeterProvider");
         });
         mp.meter("apx.user")
     } else {
         LOGGED.call_once(|| {
-            tracing::trace!(target: "apx::telemetry", meter = "apx.user", "user meter: SdkMeterProvider not initialized, using global noop");
+            tracing::warn!(target: "apx::telemetry", meter = "apx.user", "user meter: SdkMeterProvider not initialized, using global noop");
         });
         opentelemetry::global::meter("apx.user")
     }
