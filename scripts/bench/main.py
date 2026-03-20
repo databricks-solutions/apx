@@ -39,6 +39,21 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.apps import AppAccessControlRequest, AppPermissionLevel
 from databricks.sdk.service.postgres import Role, RoleIdentityType, RoleMembershipRole, RoleRoleSpec
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parent))
+from app_deploy import (  # noqa: E402
+    DATABRICKS_APPS,
+    LOCAL_CONTAINER,
+    LOCAL_DOCKERFILE,
+    LOCAL_IMAGE,
+    assemble_databricks_apps,
+    build_apx_wheel,
+    deploy_apx_app,
+    ensure_apx_app_exists,
+    upload_apx_app,
+    wait_for_apx_app_active,
+)
+
 
 @app.callback()
 def _main(
@@ -158,12 +173,7 @@ PROFILE_SCENARIOS = [
              body={"name": "bench-item", "price": 9.99, "tags": ["test"]}),
 ]
 
-DATABRICKS_APPS = {
-    "bench_uvicorn": "bench-uvicorn",
-    "bench_granian": "bench-granian",
-    "bench_apx": "bench-apx",
-    "bench_bencher": "bench-bencher",
-}
+# DATABRICKS_APPS imported from app_deploy.
 
 # Apps that are benchmarkable targets (excludes the bencher itself).
 BENCHABLE_APPS = {
@@ -267,190 +277,10 @@ def wait_for_app_active(ws: WorkspaceClient, app_name: str, timeout: float = 600
 
 
 # ---------------------------------------------------------------------------
-# Wheel build (maturin cross-compilation)
+# Databricks deployment helpers
 # ---------------------------------------------------------------------------
-
-
-def _stamp_wheel(wheel_path: Path, new_version: str) -> Path:
-    """Repack a wheel with *new_version* baked into filename + metadata.
-
-    Wheels are zip archives.  We rewrite three things:
-    1. The ``Version:`` header inside ``METADATA``
-    2. The ``RECORD`` manifest (SHA-256 digests of every file)
-    3. The outer filename itself
-
-    Returns the path to the new wheel (old one is deleted).
-    """
-    import base64
-    import csv
-    import hashlib
-    import io
-    import re
-    import zipfile
-
-    tmp_dir = wheel_path.parent / "_repack"
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
-
-    # ── unzip ──
-    with zipfile.ZipFile(wheel_path, "r") as zf:
-        zf.extractall(tmp_dir)
-
-    # ── locate dist-info ──
-    dist_infos = list(tmp_dir.glob("*.dist-info"))
-    assert len(dist_infos) == 1, f"Expected 1 dist-info, found {len(dist_infos)}"
-    old_di = dist_infos[0]
-
-    # ── patch METADATA ──
-    meta_path = old_di / "METADATA"
-    meta_text = meta_path.read_text()
-    meta_text = re.sub(r"(?m)^Version: .+$", f"Version: {new_version}", meta_text)
-    meta_path.write_text(meta_text)
-
-    # ── rename dist-info dir ──
-    old_name = old_di.name  # e.g. apx-0.3.8.dist-info
-    new_di_name = re.sub(r"-[\d][^-]*\.dist-info$", f"-{new_version}.dist-info", old_name)
-    new_di = old_di.rename(old_di.parent / new_di_name)
-
-    # ── regenerate RECORD ──
-    record_path = new_di / "RECORD"
-    record_rows: list[list[str]] = []
-    for fpath in sorted(tmp_dir.rglob("*")):
-        if fpath.is_dir():
-            continue
-        rel = fpath.relative_to(tmp_dir).as_posix()
-        if rel == f"{new_di_name}/RECORD":
-            record_rows.append([rel, "", ""])
-            continue
-        data = fpath.read_bytes()
-        digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
-        record_rows.append([rel, f"sha256={digest}", str(len(data))])
-
-    buf = io.StringIO()
-    csv.writer(buf).writerows(record_rows)
-    record_path.write_text(buf.getvalue())
-
-    # ── repack into new .whl ──
-    old_stem = wheel_path.stem  # apx-0.3.8-cp311-cp311-...
-    new_stem = re.sub(r"^(apx)-[\d][^-]*", rf"\1-{new_version}", old_stem)
-    new_wheel = wheel_path.parent / f"{new_stem}.whl"
-
-    with zipfile.ZipFile(new_wheel, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fpath in sorted(tmp_dir.rglob("*")):
-            if fpath.is_dir():
-                continue
-            zf.write(fpath, fpath.relative_to(tmp_dir).as_posix())
-
-    # cleanup
-    shutil.rmtree(tmp_dir)
-    if wheel_path != new_wheel:
-        wheel_path.unlink()
-
-    return new_wheel
-
-
-DOCKER_IMAGE = "apx-cross-bench:latest"
-LOCAL_IMAGE = "apx-local:latest"
-LOCAL_CONTAINER = "apx-local-bench"
-LOCAL_DOCKERFILE = PROJECT_ROOT / "docker" / "Dockerfile.apx-local"
-
-
-def build_apx_wheel(dest_dir: Path) -> Path:
-    """Cross-compile APX wheel for linux/amd64 using Docker."""
-    import re
-
-    # Stub the agent binary — crates/core/build.rs copies it and resources.rs
-    # embeds it via include_bytes!(). The bench wheel only uses `apx serve`,
-    # never the agent, so a zero-byte stub is fine.
-    agent_stub = PROJECT_ROOT / ".bins" / "agent" / "apx-agent-linux-x64"
-    agent_stub.parent.mkdir(parents=True, exist_ok=True)
-    agent_stub.touch()
-    console.print(f"[dim]Stubbed agent binary:[/] {agent_stub}")
-
-    console.print("\n[bold blue]Building APX wheel via maturin (Docker)...[/]")
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    for old in dest_dir.glob("apx-*.whl"):
-        old.unlink()
-
-    sccache_dir = Path.home() / "Library" / "Caches" / "Mozilla.sccache"
-    sccache_dir.mkdir(parents=True, exist_ok=True)
-    cargo_home = Path.home() / ".cargo"
-
-    result = subprocess.run(
-        [
-            "docker", "run", "--rm",
-            "-v", f"{PROJECT_ROOT}:/io",
-            "-v", f"{sccache_dir}:/cache/sccache",
-            "-v", f"{cargo_home / 'registry'}:/root/.cargo/registry",
-            "-v", f"{cargo_home / 'git'}:/root/.cargo/git",
-            DOCKER_IMAGE,
-            "maturin", "build", "--release",
-            "--target", CROSS_TARGET,
-            "-i", "python3.11",
-            "--out", str(Path("/io") / dest_dir.relative_to(PROJECT_ROOT)),
-            "--manifest-path", "crates/apx/Cargo.toml",
-        ],
-        cwd=str(PROJECT_ROOT),
-        check=False,
-    )
-    if result.returncode != 0:
-        console.print("[red]Error:[/] maturin build failed")
-        raise typer.Exit(1)
-
-    wheels = sorted(dest_dir.glob("apx-*.whl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    assert wheels, "No APX wheel found after maturin build"
-
-    # Read base version from the built wheel's metadata, stamp with timestamp.
-    cargo_toml = PROJECT_ROOT / "crates" / "apx" / "Cargo.toml"
-    m = re.search(r'^version\s*=\s*"([^"]+)"', cargo_toml.read_text(), re.MULTILINE)
-    assert m, "Could not find version in crates/apx/Cargo.toml"
-    base_version = m.group(1)
-    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d%H%M%S")
-    build_version = f"{base_version}+bench.{ts}"
-
-    stamped = _stamp_wheel(wheels[0], build_version)
-    console.print(f"[green]Built wheel:[/] {stamped.name}  (version {build_version})")
-    return stamped
-
-
-# ---------------------------------------------------------------------------
-# Databricks assembly & deployment
-# ---------------------------------------------------------------------------
-
-
-def assemble_databricks_apps(wheel_path: Path | None) -> None:
-    """Copy shared app code + per-app configs → .build/{app-name}/."""
-    build_dir = DATABRICKS_DIR / ".build"
-    app_src = BENCH_DIR / "app"
-    bencher_src = BENCH_DIR / "bencher"
-
-    for resource_key, app_name in DATABRICKS_APPS.items():
-        app_build = build_dir / app_name
-        if app_build.exists():
-            shutil.rmtree(app_build)
-        app_build.mkdir(parents=True)
-
-        if app_name == "bench-bencher":
-            # Bencher app: copy bencher package + supporting files.
-            shutil.copytree(bencher_src, app_build / "bencher")
-            shutil.copy2(BENCH_DIR / "profile_analysis.py", app_build / "profile_analysis.py")
-            shutil.copy2(BENCH_DIR / "scenarios.json", app_build / "scenarios.json")
-        else:
-            # Benchmarkable apps: copy shared app code.
-            shutil.copytree(app_src, app_build / "app")
-
-        # Copy per-app requirements.txt.
-        src_reqs = DATABRICKS_DIR / "apps" / app_name / "requirements.txt"
-        dest_reqs = app_build / "requirements.txt"
-        shutil.copy2(src_reqs, dest_reqs)
-
-        # For bench-apx, copy wheel and append to requirements.txt.
-        if app_name == "bench-apx" and wheel_path is not None:
-            shutil.copy2(wheel_path, app_build / wheel_path.name)
-            with open(dest_reqs, "a") as f:
-                f.write(f"./{wheel_path.name}\n")
-
-        console.print(f"[green]Assembled:[/] {app_build}")
+# _stamp_wheel, build_apx_wheel, assemble_databricks_apps, DOCKER_IMAGE,
+# LOCAL_IMAGE, LOCAL_CONTAINER, LOCAL_DOCKERFILE all live in app_deploy.py.
 
 
 def deploy_databricks_bundle(profile: str) -> None:
@@ -797,14 +627,25 @@ def deploy() -> None:
     """Deploy Databricks bundle and start apps."""
     check_databricks_cli()
 
+    ws = get_workspace_client(_profile)
+
+    # bench-apx is deployed via SDK (DABs lack telemetry support).
+    bundle_resource_keys = [k for k in DATABRICKS_APPS if k != "bench_apx"]
+    bundle_app_names = [DATABRICKS_APPS[k] for k in bundle_resource_keys]
+
     deploy_databricks_bundle(_profile)
 
-    for resource_key in DATABRICKS_APPS:
+    for resource_key in bundle_resource_keys:
         run_databricks_app(_profile, resource_key)
 
-    ws = get_workspace_client(_profile)
-    for app_name in DATABRICKS_APPS.values():
+    for app_name in bundle_app_names:
         wait_for_app_active(ws, app_name)
+
+    # ── bench-apx: custom SDK-based deploy ───────────────────────────────────
+    ensure_apx_app_exists(ws)
+    source_code_path = upload_apx_app(ws)
+    deploy_apx_app(ws, source_code_path)
+    wait_for_apx_app_active(ws)
 
     # Print app URLs.
     console.print("\n[bold green]All apps ACTIVE:[/]")

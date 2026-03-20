@@ -74,43 +74,43 @@ resources:
           - name: APX_BENCH_PROFILE
             value: "1"
 
-    # Tuning rationale (2 CPU / 6 GB):
-    #   --workers 2: APX uses a multi-process model where each worker runs a
-    #     single-threaded Tokio runtime + dormant asyncio loop driven by a Rust
-    #     scheduler. Architecturally similar to granian (Rust-backed), so the optimal
-    #     count is 1 worker per CPU core — not cores+1, because the Rust scheduler
-    #     minimises GIL-held time and an extra worker would just cause contention.
-    #   TOKIO_WORKER_THREADS removed: workers use new_current_thread() Tokio runtime,
-    #     so this env var had no effect on per-worker performance.
-    bench_apx:
-      name: "bench-apx"
-      description: "Benchmark: APX + asyncio"
-      source_code_path: ./.build/bench-apx
-      telemetry_export_destinations:
-        - unity_catalog:
-            logs_table: "apx_perf.default.otel_logs"
-            metrics_table: "apx_perf.default.otel_metrics"
-            traces_table: "apx_perf.default.otel_spans"
-      config:
-        command:
-          - "apx"
-          - "serve"
-          - "app.main"
-          - "--host"
-          - "0.0.0.0"
-          - "--workers"
-          - "2"
-        env:
-          - name: APX_BENCH_SERVER
-            value: apx
-          - name: APX_BENCH_PROFILE
-            value: "1"
-          - name: APX_PERF
-            value: "1"
-          - name: APX_LOG
-            value: "trace"
-          - name: OTEL_TRACES_SAMPLER
-            value: "always_on"
+    # # Tuning rationale (2 CPU / 6 GB):
+    # #   --workers 2: APX uses a multi-process model where each worker runs a
+    # #     single-threaded Tokio runtime + dormant asyncio loop driven by a Rust
+    # #     scheduler. Architecturally similar to granian (Rust-backed), so the optimal
+    # #     count is 1 worker per CPU core — not cores+1, because the Rust scheduler
+    # #     minimises GIL-held time and an extra worker would just cause contention.
+    # #   TOKIO_WORKER_THREADS removed: workers use new_current_thread() Tokio runtime,
+    # #     so this env var had no effect on per-worker performance.
+    # bench_apx:
+    #   name: "bench-apx"
+    #   description: "Benchmark: APX + asyncio"
+    #   source_code_path: ./.build/bench-apx
+    #   telemetry_export_destinations:
+    #     - unity_catalog:
+    #         logs_table: "apx_perf.default.otel_logs"
+    #         metrics_table: "apx_perf.default.otel_metrics"
+    #         traces_table: "apx_perf.default.otel_spans"
+    #   config:
+    #     command:
+    #       - "apx"
+    #       - "serve"
+    #       - "app.main"
+    #       - "--host"
+    #       - "0.0.0.0"
+    #       - "--workers"
+    #       - "2"
+    #     env:
+    #       - name: APX_BENCH_SERVER
+    #         value: apx
+    #       - name: APX_BENCH_PROFILE
+    #         value: "1"
+    #       - name: APX_PERF
+    #         value: "1"
+    #       - name: APX_LOG
+    #         value: "trace"
+    #       - name: OTEL_TRACES_SAMPLER
+    #         value: "always_on"
 
     bench_bencher:
       name: "bench-bencher"
