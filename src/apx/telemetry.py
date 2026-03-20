@@ -29,7 +29,6 @@ Usage::
 from __future__ import annotations
 
 import asyncio
-import enum
 import functools
 import os
 import sys
@@ -79,9 +78,12 @@ __all__ = [
     "configure",
     "Configuration",
     "HttpInstrumentation",
-    "FastAPIInstrumentation",
+    "HttpMetrics",
     "SystemInstrumentation",
-    "SystemMetric",
+    "SystemMetrics",
+    "ApxInstrumentation",
+    "ApxMetrics",
+    "Metric",
     "CaptureHeaders",
     "Instrumentation",
 ]
@@ -329,26 +331,152 @@ class Gauge:
 # ── Instrumentation configuration ────────────────────────────────────────
 
 
-class SystemMetric(str, enum.Enum):
-    """Available system metrics following OTEL semantic conventions."""
+class Metric(BaseModel):
+    """A single observable metric descriptor.
 
-    PROCESS_CPU = "process.cpu.utilization"
-    SYSTEM_CPU = "system.cpu.simple_utilization"
-    SYSTEM_MEMORY = "system.memory.utilization"
-    SYSTEM_SWAP = "system.swap.utilization"
-    PROCESS_MEMORY = "process.memory.usage"
-    PROCESS_THREADS = "process.thread.count"
-    SYSTEM_DISK_IO = "system.disk.io"
-    SYSTEM_NETWORK_IO = "system.network.io"
+    Carries the OTEL metric name, a human-readable description, the logical
+    group it belongs to (``"system"``, ``"http"``, or ``"apx"``), and whether
+    it is enabled (``default=True``) or disabled (``default=False``)::
+
+        SystemInstrumentation(metrics=SystemMetrics(
+            system_disk_io=Metric(
+                title="system.disk.io",
+                description="Cumulative disk I/O in bytes",
+                group="system",
+                default=True,
+            )
+        ))
+    """
+
+    title: str
+    description: str = ""
+    group: str
+    default: bool
 
 
-_DEFAULT_SYSTEM_METRICS: frozenset[SystemMetric] = frozenset(
-    {
-        SystemMetric.PROCESS_CPU,
-        SystemMetric.SYSTEM_CPU,
-        SystemMetric.SYSTEM_MEMORY,
-    }
-)
+class SystemMetrics(BaseModel):
+    """Per-metric descriptors for system instrumentation.
+
+    Override individual fields to enable or disable metrics::
+
+        SystemInstrumentation(metrics=SystemMetrics(
+            system_disk_io=SystemMetrics().system_disk_io.model_copy(update={"default": True})
+        ))
+    """
+
+    process_cpu: Metric = Metric(
+        title="process.cpu.utilization",
+        description="APX worker process CPU utilization as a fraction of one core",
+        group="system",
+        default=True,
+    )
+    process_memory: Metric = Metric(
+        title="process.memory.usage",
+        description="APX worker process resident memory usage in bytes",
+        group="system",
+        default=False,
+    )
+    process_threads: Metric = Metric(
+        title="process.thread.count",
+        description="Number of threads in the APX worker process",
+        group="system",
+        default=False,
+    )
+    system_cpu: Metric = Metric(
+        title="system.cpu.simple_utilization",
+        description="System-wide CPU utilization as a fraction",
+        group="system",
+        default=True,
+    )
+    system_memory: Metric = Metric(
+        title="system.memory.utilization",
+        description="System memory utilization as a fraction",
+        group="system",
+        default=True,
+    )
+    system_swap: Metric = Metric(
+        title="system.swap.utilization",
+        description="System swap utilization as a fraction",
+        group="system",
+        default=False,
+    )
+
+    system_disk_io: Metric = Metric(
+        title="system.disk.io",
+        description="Cumulative disk I/O in bytes",
+        group="system",
+        default=False,
+    )
+    system_network_io: Metric = Metric(
+        title="system.network.io",
+        description="Cumulative network I/O in bytes",
+        group="system",
+        default=False,
+    )
+
+
+class HttpMetrics(BaseModel):
+    """Per-metric descriptors for HTTP server instrumentation.
+
+    All HTTP metrics are enabled by default.
+    """
+
+    server_request_duration: Metric = Metric(
+        title="http.server.request.duration",
+        description="HTTP server request duration",
+        group="http",
+        default=True,
+    )
+    server_active_requests: Metric = Metric(
+        title="http.server.active_requests",
+        description="Number of in-flight HTTP server requests",
+        group="http",
+        default=True,
+    )
+
+
+class ApxMetrics(BaseModel):
+    """Per-metric descriptors for APX framework dispatch timing metrics.
+
+    All dispatch metrics are disabled by default (low-overhead opt-in).
+    """
+
+    dispatch_body_collect: Metric = Metric(
+        title="apx.dispatch.body_collect.duration",
+        description="Time to collect the request body from the network stream",
+        group="apx",
+        default=False,
+    )
+    dispatch_crossbeam_send: Metric = Metric(
+        title="apx.dispatch.crossbeam_send.duration",
+        description="Time to send the request over the Crossbeam channel to the Python worker",
+        group="apx",
+        default=False,
+    )
+    dispatch_response_wait: Metric = Metric(
+        title="apx.dispatch.response_wait.duration",
+        description="Time waiting for the Python coroutine to produce the final response",
+        group="apx",
+        default=False,
+    )
+    dispatch_total: Metric = Metric(
+        title="apx.dispatch.total.duration",
+        description="Total end-to-end ASGI dispatch time",
+        group="apx",
+        default=False,
+    )
+    asgi_receive_build: Metric = Metric(
+        title="apx.asgi.receive_build.duration",
+        description="Time to build the ASGI receive dict",
+        group="apx",
+        default=False,
+    )
+    asgi_send_parse: Metric = Metric(
+        title="apx.asgi.send_parse.duration",
+        description="Time to parse an ASGI send event",
+        group="apx",
+        default=False,
+    )
 
 
 class CaptureHeaders(BaseModel):
@@ -360,31 +488,66 @@ class CaptureHeaders(BaseModel):
 
 
 class HttpInstrumentation(BaseModel):
-    """Transport-level HTTP instrumentation (header capture, sanitization)."""
+    """Transport-level HTTP instrumentation (header capture, sanitization).
+
+    Use ``metrics`` to selectively disable individual HTTP server metrics::
+
+        HttpInstrumentation(metrics=HttpMetrics(
+            server_active_requests=Metric(
+                title="http.server.active_requests",
+                description="Number of in-flight HTTP server requests",
+                group="http",
+                default=False,
+            )
+        ))
+    """
 
     type: Literal["http"] = "http"
     enabled: bool = True
     capture_headers: CaptureHeaders = Field(default_factory=CaptureHeaders)
-
-
-class FastAPIInstrumentation(BaseModel):
-    """FastAPI/Starlette framework instrumentation (route extraction)."""
-
-    type: Literal["fastapi"] = "fastapi"
-    enabled: bool = True
-    excluded_routes: list[str] = Field(default_factory=list)
-    record_route: bool = True
+    metrics: HttpMetrics = Field(default_factory=HttpMetrics)
 
 
 class SystemInstrumentation(BaseModel):
-    """System metrics collection (CPU, memory, disk, network)."""
+    """System metrics collection (CPU, memory, disk, network).
+
+    Use ``metrics`` to selectively enable individual system metrics::
+
+        SystemInstrumentation(metrics=SystemMetrics(
+            system_disk_io=Metric(
+                title="system.disk.io",
+                description="Cumulative disk I/O in bytes",
+                group="system",
+                default=True,
+            )
+        ))
+    """
 
     type: Literal["system"] = "system"
     enabled: bool = True
-    collect: set[SystemMetric] = Field(
-        default_factory=lambda: set(_DEFAULT_SYSTEM_METRICS)
-    )
+    metrics: SystemMetrics = Field(default_factory=SystemMetrics)
     interval_seconds: float = Field(default=15.0, gt=0)
+
+
+class ApxInstrumentation(BaseModel):
+    """APX framework dispatch timing metrics (opt-in).
+
+    Records per-phase histograms for the ASGI dispatch pipeline.
+    All metrics default to disabled — enable selectively::
+
+        ApxInstrumentation(metrics=ApxMetrics(
+            dispatch_total=Metric(
+                title="apx.dispatch.total.duration",
+                description="Total end-to-end ASGI dispatch time",
+                group="apx",
+                default=True,
+            )
+        ))
+    """
+
+    type: Literal["apx"] = "apx"
+    enabled: bool = True
+    metrics: ApxMetrics = Field(default_factory=ApxMetrics)
 
 
 def _instrumentation_type(v: Any) -> str:
@@ -396,23 +559,25 @@ def _instrumentation_type(v: Any) -> str:
 Instrumentation = Annotated[
     Union[
         Annotated[HttpInstrumentation, Tag("http")],
-        Annotated[FastAPIInstrumentation, Tag("fastapi")],
         Annotated[SystemInstrumentation, Tag("system")],
+        Annotated[ApxInstrumentation, Tag("apx")],
     ],
     Discriminator(_instrumentation_type),
 ]
 
 _DEFAULT_INSTRUMENTATIONS: list[Instrumentation] = [
     HttpInstrumentation(),
-    FastAPIInstrumentation(),
     SystemInstrumentation(),
 ]
+
+if os.environ.get("APX_PERF"):
+    _DEFAULT_INSTRUMENTATIONS.append(ApxInstrumentation())
 
 
 class Configuration(BaseModel):
     """Telemetry instrumentation configuration.
 
-    Defaults enable HTTP, FastAPI, and system instrumentation automatically.
+    Defaults enable HTTP, FastAPI, system, and APX instrumentation automatically.
     Call ``configure()`` only to override specific instrumentations::
 
         from apx.telemetry import configure, Configuration, SystemInstrumentation

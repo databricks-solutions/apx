@@ -9,27 +9,26 @@ use std::time::Duration;
 use opentelemetry::KeyValue;
 use sysinfo::{Disks, Networks, Pid, System};
 
-use super::config::{SystemConfig, SystemMetricKind};
+use super::config::SystemConfig;
 use super::http::framework_meter;
 
 /// Spawn the system metrics collection background task.
 ///
 /// Returns the `JoinHandle` so the caller can abort on shutdown.
 pub fn spawn_system_metrics(config: &SystemConfig) -> tokio::task::JoinHandle<()> {
-    let metrics = config.metrics.clone();
+    let toggles = config.metrics;
     let interval = Duration::from_secs_f64(config.interval_secs);
     let pid = Pid::from_u32(std::process::id());
 
     tracing::trace!(
         target: "apx::telemetry",
-        metric_count = metrics.len(),
         interval_secs = config.interval_secs,
         pid = pid.as_u32(),
         "spawning system metrics collection task"
     );
 
     tokio::spawn(async move {
-        collection_loop(metrics, interval, pid).await;
+        collection_loop(toggles, interval, pid).await;
     })
 }
 
@@ -46,95 +45,91 @@ struct Instruments {
 }
 
 impl Instruments {
-    fn new(metrics: &std::collections::HashSet<SystemMetricKind>) -> Self {
+    fn new(toggles: super::config::SystemMetricToggles) -> Self {
         let meter = framework_meter();
         tracing::trace!(
             target: "apx::telemetry",
-            process_cpu = metrics.contains(&SystemMetricKind::ProcessCpu),
-            system_cpu = metrics.contains(&SystemMetricKind::SystemCpu),
-            system_memory = metrics.contains(&SystemMetricKind::SystemMemory),
-            system_swap = metrics.contains(&SystemMetricKind::SystemSwap),
-            process_memory = metrics.contains(&SystemMetricKind::ProcessMemory),
-            process_threads = metrics.contains(&SystemMetricKind::ProcessThreads),
-            disk_io = metrics.contains(&SystemMetricKind::SystemDiskIo),
-            network_io = metrics.contains(&SystemMetricKind::SystemNetworkIo),
+            process_cpu = toggles.process_cpu,
+            system_cpu = toggles.system_cpu,
+            system_memory = toggles.system_memory,
+            system_swap = toggles.system_swap,
+            process_memory = toggles.process_memory,
+            process_threads = toggles.process_threads,
+            disk_io = toggles.system_disk_io,
+            network_io = toggles.system_network_io,
             "creating system metric instruments"
         );
         Self {
-            process_cpu: metrics.contains(&SystemMetricKind::ProcessCpu).then(|| {
+            process_cpu: toggles.process_cpu.then(|| {
                 meter
                     .f64_gauge("process.cpu.utilization")
                     .with_description("Process CPU utilization as a fraction of one core")
                     .with_unit("1")
                     .build()
             }),
-            system_cpu: metrics.contains(&SystemMetricKind::SystemCpu).then(|| {
+            system_cpu: toggles.system_cpu.then(|| {
                 meter
                     .f64_gauge("system.cpu.simple_utilization")
                     .with_description("System-wide CPU utilization as a fraction")
                     .with_unit("1")
                     .build()
             }),
-            system_memory: metrics.contains(&SystemMetricKind::SystemMemory).then(|| {
+            system_memory: toggles.system_memory.then(|| {
                 meter
                     .f64_gauge("system.memory.utilization")
                     .with_description("Fraction of available memory used")
                     .with_unit("1")
                     .build()
             }),
-            system_swap: metrics.contains(&SystemMetricKind::SystemSwap).then(|| {
+            system_swap: toggles.system_swap.then(|| {
                 meter
                     .f64_gauge("system.swap.utilization")
                     .with_description("Fraction of swap space used")
                     .with_unit("1")
                     .build()
             }),
-            process_memory: metrics.contains(&SystemMetricKind::ProcessMemory).then(|| {
+            process_memory: toggles.process_memory.then(|| {
                 meter
                     .f64_gauge("process.memory.usage")
                     .with_description("Process resident memory in bytes")
                     .with_unit("By")
                     .build()
             }),
-            process_threads: metrics
-                .contains(&SystemMetricKind::ProcessThreads)
-                .then(|| {
-                    meter
-                        .f64_gauge("process.thread.count")
-                        .with_description("Number of threads in the process")
-                        .with_unit("1")
-                        .build()
-                }),
-            disk_io: metrics.contains(&SystemMetricKind::SystemDiskIo).then(|| {
+            process_threads: toggles.process_threads.then(|| {
+                meter
+                    .f64_gauge("process.thread.count")
+                    .with_description("Number of threads in the process")
+                    .with_unit("1")
+                    .build()
+            }),
+            disk_io: toggles.system_disk_io.then(|| {
                 meter
                     .f64_gauge("system.disk.io")
                     .with_description("Cumulative disk I/O in bytes")
                     .with_unit("By")
                     .build()
             }),
-            network_io: metrics
-                .contains(&SystemMetricKind::SystemNetworkIo)
-                .then(|| {
-                    meter
-                        .f64_gauge("system.network.io")
-                        .with_description("Cumulative network I/O in bytes")
-                        .with_unit("By")
-                        .build()
-                }),
+            network_io: toggles.system_network_io.then(|| {
+                meter
+                    .f64_gauge("system.network.io")
+                    .with_description("Cumulative network I/O in bytes")
+                    .with_unit("By")
+                    .build()
+            }),
         }
     }
 }
 
 /// Periodic collection loop.
 async fn collection_loop(
-    metrics: std::collections::HashSet<SystemMetricKind>,
+    toggles: super::config::SystemMetricToggles,
     interval: Duration,
     pid: Pid,
 ) {
-    let instruments = Instruments::new(&metrics);
+    let instruments = Instruments::new(toggles);
     let mut sys = System::new();
-    let needs_disks = metrics.contains(&SystemMetricKind::SystemDiskIo);
-    let needs_network = metrics.contains(&SystemMetricKind::SystemNetworkIo);
+    let needs_disks = toggles.system_disk_io;
+    let needs_network = toggles.system_network_io;
     let mut disks = if needs_disks {
         Some(Disks::new())
     } else {

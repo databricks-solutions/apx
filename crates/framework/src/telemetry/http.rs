@@ -3,10 +3,41 @@
 //! Records `http.server.request.duration` and `http.server.active_requests`
 //! using OTEL semantic conventions v1.23+. When OTEL is disabled, the global
 //! meter returns noop instruments — zero overhead automatically.
+//!
+//! Per-metric toggles are initialized once per worker process via [`init`]
+//! after reading the Python telemetry config.
+
+use std::sync::OnceLock;
 
 use crate::protocol::http::error::AppError;
+use crate::telemetry::config::HttpMetricToggles;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::MeterProvider;
+
+// ── Global HTTP metric toggles ────────────────────────────────────────────
+
+static HTTP_TOGGLES: OnceLock<HttpMetricToggles> = OnceLock::new();
+
+/// Initialize HTTP metric toggles for this worker process.
+///
+/// Must be called once after reading the Python telemetry config.
+/// Subsequent calls are silently ignored (OnceLock semantics).
+pub fn init(toggles: HttpMetricToggles) {
+    let _ = HTTP_TOGGLES.set(toggles);
+}
+
+/// Return the active HTTP metric toggles.
+///
+/// Falls back to all-enabled defaults if [`init`] has not been called.
+fn http_toggles() -> &'static HttpMetricToggles {
+    static DEFAULT: HttpMetricToggles = HttpMetricToggles {
+        server_request_duration: true,
+        server_active_requests: true,
+    };
+    HTTP_TOGGLES.get().unwrap_or(&DEFAULT)
+}
+
+// ── Framework meter ───────────────────────────────────────────────────────
 
 /// Obtain the framework-internal meter.
 ///
@@ -31,6 +62,8 @@ pub(crate) fn framework_meter() -> opentelemetry::metrics::Meter {
 ///
 /// Covers panics, timeouts, and early returns — the counter is always
 /// decremented when the guard goes out of scope.
+///
+/// Returns `None` when the `server_active_requests` toggle is disabled.
 #[derive(Debug)]
 pub struct ActiveRequestGuard {
     attrs: [KeyValue; 2],
@@ -38,7 +71,12 @@ pub struct ActiveRequestGuard {
 
 impl ActiveRequestGuard {
     /// Increment active requests and return a guard that decrements on drop.
-    pub fn enter(method: &str, scheme: &str) -> Self {
+    ///
+    /// Returns `None` if the `server_active_requests` metric is disabled.
+    pub fn enter(method: &str, scheme: &str) -> Option<Self> {
+        if !http_toggles().server_active_requests {
+            return None;
+        }
         let attrs = [
             KeyValue::new("http.request.method", method.to_owned()),
             KeyValue::new("url.scheme", scheme.to_owned()),
@@ -47,7 +85,7 @@ impl ActiveRequestGuard {
             .i64_up_down_counter("http.server.active_requests")
             .build()
             .add(1, &attrs);
-        Self { attrs }
+        Some(Self { attrs })
     }
 }
 
@@ -61,6 +99,8 @@ impl Drop for ActiveRequestGuard {
 }
 
 /// Record `http.server.request.duration` with standard attributes.
+///
+/// No-ops when the `server_request_duration` metric is disabled.
 pub fn record_duration(
     duration_secs: f64,
     method: &str,
@@ -69,6 +109,10 @@ pub fn record_duration(
     route: &str,
     error_type: Option<&str>,
 ) {
+    if !http_toggles().server_request_duration {
+        return;
+    }
+
     static FIRST: std::sync::Once = std::sync::Once::new();
 
     let mut attrs = vec![

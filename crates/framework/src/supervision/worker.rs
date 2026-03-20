@@ -160,6 +160,10 @@ pub async fn run_worker(
             .map_err(|e| WorkerError::PythonInit(format!("telemetry config: {e}")))
     })?;
 
+    // Initialize per-worker metric toggles from Python config.
+    crate::telemetry::http::init(telemetry_config.http.metrics);
+    crate::telemetry::dispatch_metrics::init(telemetry_config.apx.metrics);
+
     let _system_metrics_handle = if telemetry_config.system.enabled {
         Some(crate::telemetry::system_metrics::spawn_system_metrics(
             &telemetry_config.system,
@@ -173,6 +177,7 @@ pub async fn run_worker(
         system_metrics = telemetry_config.system.enabled,
         http_instrumentation = telemetry_config.http.enabled,
         fastapi_instrumentation = telemetry_config.fastapi.enabled,
+        apx_dispatch_metrics = telemetry_config.apx.enabled,
         otel_endpoint = %std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").unwrap_or_default(),
         meter_provider = apx_core::tracing_init::meter_provider().is_some(),
         "telemetry bootstrap complete"

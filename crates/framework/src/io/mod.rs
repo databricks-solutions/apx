@@ -6,14 +6,9 @@
 
 pub mod channel;
 pub mod completer;
-pub mod counters;
 pub mod reactor;
 
-use std::sync::Arc;
-
 use pyo3::prelude::*;
-
-use counters::RequestCounters;
 
 // ── EventLoop ────────────────────────────────────────────────────────────
 
@@ -27,17 +22,13 @@ impl EventLoop {
     /// Initialize the event loop on the current thread.
     ///
     /// 1. Creates the asyncio reactor (event loop, thread).
-    /// 2. Initializes request counters.
-    /// 3. Stores the tokio runtime handle in the thread-local.
+    /// 2. Stores the tokio runtime handle in the thread-local.
     ///
     /// # Errors
     ///
     /// Returns an error if Python initialization fails.
     pub fn init(py: Python<'_>, loop_policy: &str) -> Result<Self, String> {
         let reactor = reactor::Reactor::init(py, loop_policy)?;
-
-        let request_counters = Arc::new(RequestCounters::new());
-        counters::init(Arc::clone(&request_counters));
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             set_tokio_handle(handle);

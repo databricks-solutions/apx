@@ -39,15 +39,5 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
 
-    // Request stats
-    m.add_function(pyo3::wrap_pyfunction!(request_stats_json, m)?)?;
-
     Ok(())
-}
-
-#[pyfunction]
-fn request_stats_json() -> Option<String> {
-    let counters = crate::io::counters::get()?;
-    let snapshot = counters.snapshot();
-    serde_json::to_string(&snapshot).ok()
 }

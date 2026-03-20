@@ -402,17 +402,12 @@ impl AsgiReceive {
             .take();
 
         if let Some(bytes) = taken {
-            let t0 = crate::telemetry::perf_enabled().then(std::time::Instant::now);
+            let t0 = std::time::Instant::now();
             let event = self.receive_template.bind(py).copy()?;
             event.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, &bytes))?;
-            if let Some(t0) = t0 {
-                tracing::info!(
-                    target: "apx.perf",
-                    phase = "receive_dict_build",
-                    elapsed_us = t0.elapsed().as_micros() as u64,
-                    body_len = bytes.len(),
-                );
-            }
+            crate::telemetry::dispatch_metrics::record_receive_build(
+                t0.elapsed().as_micros() as f64
+            );
             let event = event.unbind().into_any();
             Py::new(py, ResolvedAwaitableWithValue { value: Some(event) })
                 .map(|obj| obj.into_bound(py).into_any())
@@ -617,15 +612,9 @@ impl AsgiSend {
         py: Python<'py>,
         event: Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let t0 = crate::telemetry::perf_enabled().then(std::time::Instant::now);
+        let t0 = std::time::Instant::now();
         let parsed = parse_asgi_send_event(&event)?;
-        if let Some(t0) = t0 {
-            tracing::info!(
-                target: "apx.perf",
-                phase = "parse_send_event",
-                elapsed_us = t0.elapsed().as_micros() as u64,
-            );
-        }
+        crate::telemetry::dispatch_metrics::record_send_parse(t0.elapsed().as_micros() as f64);
 
         let resolved = self.resolved.as_ref();
         match &mut self.inner {

@@ -12,6 +12,7 @@ use crate::dispatch::Dispatch;
 use crate::io::channel::{RequestSlot, ResponseData, Wakeup};
 use crate::protocol::http::error::AppError;
 use crate::supervision::worker_context::WorkerContext;
+use crate::telemetry::dispatch_metrics;
 use crate::transport::types::{BodyStream, InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
@@ -143,17 +144,14 @@ async fn dispatch_inner(
         tracing::Span::current().record("request.id", val);
     }
 
-    let perf = crate::telemetry::perf_enabled();
-    let t_total = perf.then(Instant::now);
+    let t_total = Instant::now();
 
-    let t0 = perf.then(Instant::now);
+    let t0 = Instant::now();
     let body_bytes = body_stream
         .collect(body_limit)
         .await
         .map_err(|e| AppError::Internal(format!("body collect: {e}")))?;
-    if let Some(t) = t0 {
-        tracing::info!(target: "apx.perf", phase = "body_collect", elapsed_us = t.elapsed().as_micros() as u64);
-    }
+    dispatch_metrics::record_body_collect(t0.elapsed().as_micros() as f64);
 
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
@@ -171,35 +169,22 @@ async fn dispatch_inner(
         response_tx,
     };
 
-    let t0 = perf.then(Instant::now);
+    let t0 = Instant::now();
     inbound_tx
         .send(slot)
         .map_err(|_| AppError::Internal("inbound channel closed".to_owned()))?;
     wakeup.signal();
-    if let Some(t) = t0 {
-        tracing::info!(target: "apx.perf", phase = "crossbeam_send", elapsed_us = t.elapsed().as_micros() as u64);
-    }
+    dispatch_metrics::record_crossbeam_send(t0.elapsed().as_micros() as f64);
 
-    let t0 = perf.then(Instant::now);
+    let t0 = Instant::now();
     let response_data = response_rx
         .await
         .map_err(|_| AppError::Internal("response channel closed".to_owned()))?;
-    if let Some(t) = t0 {
-        tracing::info!(target: "apx.perf", phase = "response_wait", elapsed_us = t.elapsed().as_micros() as u64);
-    }
+    dispatch_metrics::record_response_wait(t0.elapsed().as_micros() as f64);
 
     let response = response_data_to_outbound(response_data)?;
 
-    if let Some(t) = t_total {
-        tracing::info!(
-            target: "apx.perf",
-            phase = "dispatch",
-            elapsed_us = t.elapsed().as_micros() as u64,
-            status = response.status.as_u16(),
-            method = %request.method,
-            path = %request.path,
-        );
-    }
+    dispatch_metrics::record_dispatch_total(t_total.elapsed().as_micros() as f64);
 
     Ok(response)
 }
