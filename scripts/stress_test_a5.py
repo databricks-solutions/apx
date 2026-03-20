@@ -16,6 +16,7 @@ Success criteria:
   - No throughput collapse (stream endpoint returns 200)
   - All concurrent requests complete within timeout
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -73,8 +74,10 @@ async def run_stress():
             print("FAIL: server did not become ready within 15s")
             return False
 
-        print(f"Server ready. Hammering {len(ROUTES)} routes × {CONCURRENCY} "
-              f"concurrent for {DURATION_SECONDS}s...")
+        print(
+            f"Server ready. Hammering {len(ROUTES)} routes × {CONCURRENCY} "
+            f"concurrent for {DURATION_SECONDS}s..."
+        )
 
         results: dict = {}
         tasks = []
@@ -108,13 +111,24 @@ def main():
         f.write("import sys; sys.setswitchinterval(0.001)\n")
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.path.dirname(sitecustomize) + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        os.path.dirname(sitecustomize) + os.pathsep + env.get("PYTHONPATH", "")
+    )
     env["PYTHONSTARTUP"] = sitecustomize
 
     print(f"Starting apx server on port 8765 with GIL switch interval 1ms...")
     proc = subprocess.Popen(
-        [apx_bin, "serve", "scripts.bench.app.main:app",
-         "--port", "8765", "--workers", "1", "--loop", "uvloop"],
+        [
+            apx_bin,
+            "serve",
+            "scripts.bench.app.main:app",
+            "--port",
+            "8765",
+            "--workers",
+            "1",
+            "--loop",
+            "uvloop",
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,

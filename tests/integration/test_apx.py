@@ -116,7 +116,9 @@ class TestItemsCRUD:
 
     def test_crud_lifecycle(self, client: httpx.Client) -> None:
         # Create
-        r = client.post("/api/items", json={"name": "Lifecycle", "price": 1.0, "tags": ["a"]})
+        r = client.post(
+            "/api/items", json={"name": "Lifecycle", "price": 1.0, "tags": ["a"]}
+        )
         assert r.status_code == 201
         item_id = r.json()["id"]
 
@@ -126,7 +128,9 @@ class TestItemsCRUD:
         assert r.json()["name"] == "Lifecycle"
 
         # Update
-        r = client.patch(f"/api/items/{item_id}", json={"name": "Updated Lifecycle", "price": 2.0})
+        r = client.patch(
+            f"/api/items/{item_id}", json={"name": "Updated Lifecycle", "price": 2.0}
+        )
         assert r.status_code == 200
         updated = r.json()
         assert updated["name"] == "Updated Lifecycle"
@@ -284,6 +288,7 @@ class TestLogHygiene:
             assert r.status_code == 200
 
         import time
+
         time.sleep(1)
 
         logs = container.logs(tail=500).decode("utf-8", errors="replace")

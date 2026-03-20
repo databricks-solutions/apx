@@ -11,6 +11,7 @@ Usage:
     uv run scripts/bench/main.py -p PROFILE list
     uv run scripts/bench/main.py -p PROFILE report --name run1
 """
+
 from __future__ import annotations
 
 import datetime
@@ -37,9 +38,15 @@ _profile: str = "apx"
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.apps import AppAccessControlRequest, AppPermissionLevel
-from databricks.sdk.service.postgres import Role, RoleIdentityType, RoleMembershipRole, RoleRoleSpec
+from databricks.sdk.service.postgres import (
+    Role,
+    RoleIdentityType,
+    RoleMembershipRole,
+    RoleRoleSpec,
+)
 
 import sys as _sys
+
 _sys.path.insert(0, str(Path(__file__).parent))
 from app_deploy import (  # noqa: E402
     DATABRICKS_APPS,
@@ -57,12 +64,15 @@ from app_deploy import (  # noqa: E402
 
 @app.callback()
 def _main(
-    profile: str = typer.Option("apx", "-p", "--profile", help="Databricks CLI profile"),
+    profile: str = typer.Option(
+        "apx", "-p", "--profile", help="Databricks CLI profile"
+    ),
 ) -> None:
     """APX benchmark tool — Databricks Apps deployment + remote bencher."""
     global _profile
     _profile = profile
     console.print(f"[bold blue]Using Databricks CLI profile:[/] {_profile}")
+
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -169,8 +179,12 @@ PROFILE_SCENARIOS = [
     Scenario(name="health", method="GET", path="/api/health"),
     Scenario(name="get_item", method="GET", path="/api/items/1"),
     Scenario(name="list_items", method="GET", path="/api/items"),
-    Scenario(name="create_item", method="POST", path="/api/items",
-             body={"name": "bench-item", "price": 9.99, "tags": ["test"]}),
+    Scenario(
+        name="create_item",
+        method="POST",
+        path="/api/items",
+        body={"name": "bench-item", "price": 9.99, "tags": ["test"]},
+    ),
 ]
 
 # DATABRICKS_APPS imported from app_deploy.
@@ -197,11 +211,17 @@ def get_git_info() -> tuple[str, str]:
     """Return (commit_hash, commit_message)."""
     hash_result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=False, cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=PROJECT_ROOT,
     )
     msg_result = subprocess.run(
         ["git", "log", "-1", "--format=%s"],
-        capture_output=True, text=True, check=False, cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=PROJECT_ROOT,
     )
     return hash_result.stdout.strip(), msg_result.stdout.strip()
 
@@ -214,7 +234,9 @@ def get_git_info() -> tuple[str, str]:
 def check_build_tools() -> None:
     """Verify maturin is available."""
     if not shutil.which("maturin"):
-        console.print("[red]Error:[/] 'maturin' not found. Install with: pip install maturin")
+        console.print(
+            "[red]Error:[/] 'maturin' not found. Install with: pip install maturin"
+        )
         raise typer.Exit(1)
 
 
@@ -255,21 +277,30 @@ def get_app_url(ws: WorkspaceClient, app_name: str) -> str:
     return url.rstrip("/")
 
 
-def wait_for_app_active(ws: WorkspaceClient, app_name: str, timeout: float = 600.0) -> None:
+def wait_for_app_active(
+    ws: WorkspaceClient, app_name: str, timeout: float = 600.0
+) -> None:
     """Poll app status via SDK until RUNNING."""
     deadline = time.monotonic() + timeout
     with Progress(
-        SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
         task = progress.add_task(f"Waiting for {app_name} to be ACTIVE...", total=None)
         while time.monotonic() < deadline:
             app = ws.apps.get(app_name)
-            state = app.app_status.state.value if app.app_status and app.app_status.state else "?"
+            state = (
+                app.app_status.state.value
+                if app.app_status and app.app_status.state
+                else "?"
+            )
             if state == "RUNNING":
                 progress.update(task, description=f"[green]{app_name} is ACTIVE!")
                 return
-            progress.update(task, description=f"Waiting for {app_name}... (state={state})")
+            progress.update(
+                task, description=f"Waiting for {app_name}... (state={state})"
+            )
             time.sleep(10)
 
     console.print(f"[red]Error:[/] {app_name} did not become ACTIVE within {timeout}s")
@@ -306,7 +337,9 @@ def run_databricks_app(profile: str, resource_key: str) -> None:
         check=False,
     )
     if result.returncode != 0:
-        console.print(f"[yellow]Warning:[/] bundle run {resource_key} returned non-zero (may already be running).")
+        console.print(
+            f"[yellow]Warning:[/] bundle run {resource_key} returned non-zero (may already be running)."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -321,10 +354,14 @@ def grant_bencher_permissions(ws: WorkspaceClient) -> None:
     # not the display name.
     sp_client_id = bencher_app.service_principal_client_id
     if not sp_client_id:
-        console.print("[yellow]Warning:[/] Could not find bencher service principal client ID — skip permission grant.")
+        console.print(
+            "[yellow]Warning:[/] Could not find bencher service principal client ID — skip permission grant."
+        )
         return
 
-    console.print(f"\n[bold blue]Granting CAN_USE to bencher SP ({sp_client_id}) on benchable apps...[/]")
+    console.print(
+        f"\n[bold blue]Granting CAN_USE to bencher SP ({sp_client_id}) on benchable apps...[/]"
+    )
     for app_name in BENCHABLE_APPS.values():
         try:
             result = ws.apps.update_permissions(
@@ -344,9 +381,13 @@ def grant_bencher_permissions(ws: WorkspaceClient) -> None:
             if granted:
                 console.print(f"  [green]Granted:[/] CAN_USE on {app_name}")
             else:
-                console.print(f"  [yellow]Warning:[/] CAN_USE grant on {app_name} not reflected in ACL")
+                console.print(
+                    f"  [yellow]Warning:[/] CAN_USE grant on {app_name} not reflected in ACL"
+                )
         except Exception as exc:
-            console.print(f"  [yellow]Warning:[/] Failed to set permission on {app_name}: {exc}")
+            console.print(
+                f"  [yellow]Warning:[/] Failed to set permission on {app_name}: {exc}"
+            )
 
 
 def grant_bencher_pg_access(ws: WorkspaceClient, project_id: str = "bench-pg") -> None:
@@ -354,17 +395,23 @@ def grant_bencher_pg_access(ws: WorkspaceClient, project_id: str = "bench-pg") -
     bencher_app = ws.apps.get("bench-bencher")
     sp_client_id = bencher_app.service_principal_client_id
     if not sp_client_id:
-        console.print("[yellow]Warning:[/] No bencher SP client ID — skip PG role grant.")
+        console.print(
+            "[yellow]Warning:[/] No bencher SP client ID — skip PG role grant."
+        )
         return
 
     # Discover the default branch (typically "production").
     branches = list(ws.postgres.list_branches(parent=f"projects/{project_id}"))
     if not branches:
-        console.print(f"[yellow]Warning:[/] No branches found for project {project_id} — skip PG role grant.")
+        console.print(
+            f"[yellow]Warning:[/] No branches found for project {project_id} — skip PG role grant."
+        )
         return
     branch = branches[0].name
     role_id = f"sp-{sp_client_id[:8]}"
-    console.print(f"[bold blue]Granting PG superuser role to bencher SP on {branch}...[/]")
+    console.print(
+        f"[bold blue]Granting PG superuser role to bencher SP on {branch}...[/]"
+    )
     assert branch, f"Branch is required, got {branch}"
     try:
         ws.postgres.create_role(
@@ -403,14 +450,16 @@ def _poll_run(
     """Poll GET /api/benchmarks/{id} until completed or failed. Returns final response."""
     headers = _bencher_headers(token)
     with Progress(
-        SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
         task = progress.add_task("Waiting for benchmark...", total=None)
         while True:
             resp = httpx.get(
                 f"{bencher_url}/api/benchmarks/{run_id}",
-                headers=headers, timeout=30.0,
+                headers=headers,
+                timeout=30.0,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -471,7 +520,7 @@ def _print_comparison_tables(
                 label = f"{env_names[0]}_vs_{name}"
                 r = ratios.get(label, {}).get("throughput")
                 if r is not None and r != 0:
-                    row.append(f"{1/r:.2f}x")
+                    row.append(f"{1 / r:.2f}x")
                 else:
                     row.append("N/A")
         table.add_row(*row)
@@ -485,7 +534,12 @@ def _print_comparison_tables(
         table.add_column(name, justify="right")
 
     for sname in scenario_names:
-        lat = report["scenarios"].get(sname, {}).get("comparison", {}).get("latency_ms", {})
+        lat = (
+            report["scenarios"]
+            .get(sname, {})
+            .get("comparison", {})
+            .get("latency_ms", {})
+        )
         row = [sname]
         for name in env_names:
             l = lat.get(name, {})
@@ -596,7 +650,9 @@ def _print_report(report: dict) -> None:
 
     env_names_set: set[str] = set()
     for sdata in scenarios_section.values():
-        env_names_set.update(sdata.get("comparison", {}).get("throughput_rps", {}).keys())
+        env_names_set.update(
+            sdata.get("comparison", {}).get("throughput_rps", {}).keys()
+        )
     env_names = sorted(env_names_set)
 
     if scenario_names:
@@ -663,11 +719,19 @@ def deploy() -> None:
 @app.command()
 def bench(
     name: str = typer.Option(..., help="Run name"),
-    duration: str = typer.Option("10s", "-d", "--duration", help="Duration per scenario (oha -z)"),
-    connections: int = typer.Option(100, "-c", "--connections", help="Concurrent connections"),
+    duration: str = typer.Option(
+        "10s", "-d", "--duration", help="Duration per scenario (oha -z)"
+    ),
+    connections: int = typer.Option(
+        100, "-c", "--connections", help="Concurrent connections"
+    ),
     warmup: int = typer.Option(1000, help="Number of warmup requests"),
-    do_profile: bool = typer.Option(False, "--profile-asgi", help="Also run profiling pass"),
-    detached: bool = typer.Option(False, "--detached", help="Start and return immediately without polling"),
+    do_profile: bool = typer.Option(
+        False, "--profile-asgi", help="Also run profiling pass"
+    ),
+    detached: bool = typer.Option(
+        False, "--detached", help="Start and return immediately without polling"
+    ),
     results_dir: Path = typer.Option(DEFAULT_RESULTS, "--results-dir"),
 ) -> None:
     """Start a remote benchmark via the bencher server."""
@@ -693,10 +757,14 @@ def bench(
     headers = _bencher_headers(token)
     resp = httpx.post(
         f"{bencher_url}/api/benchmarks",
-        json=config, headers=headers, timeout=30.0,
+        json=config,
+        headers=headers,
+        timeout=30.0,
     )
     if resp.status_code != 202:
-        console.print(f"[red]Error:[/] Failed to start benchmark: {resp.status_code} {resp.text}")
+        console.print(
+            f"[red]Error:[/] Failed to start benchmark: {resp.status_code} {resp.text}"
+        )
         raise typer.Exit(1)
 
     run_data = resp.json()
@@ -704,20 +772,25 @@ def bench(
     console.print(f"[green]Started:[/] run_id={run_id}  name={name}")
 
     if detached:
-        console.print("[dim]Detached mode — use 'list' to check status, 'report --name' to fetch results.[/]")
+        console.print(
+            "[dim]Detached mode — use 'list' to check status, 'report --name' to fetch results.[/]"
+        )
         return
 
     # Poll until completed/failed.
     final = _poll_run(bencher_url, token, run_id)
 
     if final["status"] == "failed":
-        console.print(f"[red]Benchmark failed:[/] {final.get('error_message', 'unknown error')}")
+        console.print(
+            f"[red]Benchmark failed:[/] {final.get('error_message', 'unknown error')}"
+        )
         raise typer.Exit(1)
 
     # Download report.
     resp = httpx.get(
         f"{bencher_url}/api/benchmarks/{run_id}/report",
-        headers=headers, timeout=30.0,
+        headers=headers,
+        timeout=30.0,
     )
     if resp.status_code != 200:
         console.print("[yellow]Warning:[/] Could not download report.")
@@ -761,7 +834,9 @@ def list_runs() -> None:
 
     for r in runs:
         status = r["status"]
-        style = {"completed": "green", "failed": "red", "running": "yellow"}.get(status, "")
+        style = {"completed": "green", "failed": "red", "running": "yellow"}.get(
+            status, ""
+        )
         prog = r.get("progress", {})
         prog_str = f"{prog.get('completed', 0)}/{prog.get('total', 0)}"
         table.add_row(
@@ -782,7 +857,8 @@ def _resolve_run_id_by_name(bencher_url: str, token: str, name: str) -> str | No
     resp = httpx.get(
         f"{bencher_url}/api/benchmarks",
         params={"name": name},
-        headers=headers, timeout=30.0,
+        headers=headers,
+        timeout=30.0,
     )
     resp.raise_for_status()
     runs = resp.json()
@@ -793,14 +869,18 @@ def _resolve_run_id_by_name(bencher_url: str, token: str, name: str) -> str | No
 
 
 def _fetch_and_print_report(
-    bencher_url: str, token: str, run_id: str,
-    *, save_dir: Path | None = None,
+    bencher_url: str,
+    token: str,
+    run_id: str,
+    *,
+    save_dir: Path | None = None,
 ) -> None:
     """Download report from server, optionally save locally, and print tables."""
     headers = _bencher_headers(token)
     resp = httpx.get(
         f"{bencher_url}/api/benchmarks/{run_id}/report",
-        headers=headers, timeout=30.0,
+        headers=headers,
+        timeout=30.0,
     )
     if resp.status_code == 404:
         console.print(f"[red]Error:[/] Report not available for run {run_id}")
@@ -851,16 +931,21 @@ def report(
             if resolved_id:
                 console.print(f"[dim]Resolved '{name}' → {resolved_id[:12]}[/]")
                 _fetch_and_print_report(
-                    bencher_url, token, resolved_id,
+                    bencher_url,
+                    token,
+                    resolved_id,
                     save_dir=run_dir,
                 )
             elif run_dir.exists():
                 # Legacy filesystem-based report generation.
                 sys.path.insert(0, str(BENCH_DIR))
                 from profile_analysis import analyze_records, load_records  # noqa: F401
+
                 _generate_report_legacy(run_dir, scenarios)
             else:
-                console.print(f"[red]Error:[/] Run '{name}' not found locally or on server")
+                console.print(
+                    f"[red]Error:[/] Run '{name}' not found locally or on server"
+                )
                 raise typer.Exit(1)
     else:
         console.print("[red]Error:[/] Provide --name or --id")
@@ -877,7 +962,9 @@ def _generate_report_legacy(run_dir: Path, scenarios_path: Path) -> None:
     scenario_list = [Scenario(**s) for s in json.loads(scenarios_path.read_text())]
 
     env_names = [e.name for e in meta.environments]
-    scenario_meta = {s.name: {"method": s.method, "path": s.path} for s in scenario_list}
+    scenario_meta = {
+        s.name: {"method": s.method, "path": s.path} for s in scenario_list
+    }
 
     all_oha: dict[str, dict[str, dict]] = {}
     all_scenario_names: set[str] = set()
@@ -924,8 +1011,12 @@ def _generate_report_legacy(run_dir: Path, scenarios_path: Path) -> None:
                 b_lat = latency_ms.get(b, {})
                 ratios[label] = {
                     "throughput": _safe_ratio(a_tp, b_tp),
-                    "latency_p50": _safe_ratio(a_lat.get("p50", 0), b_lat.get("p50", 0)),
-                    "latency_p99": _safe_ratio(a_lat.get("p99", 0), b_lat.get("p99", 0)),
+                    "latency_p50": _safe_ratio(
+                        a_lat.get("p50", 0), b_lat.get("p50", 0)
+                    ),
+                    "latency_p99": _safe_ratio(
+                        a_lat.get("p99", 0), b_lat.get("p99", 0)
+                    ),
                 }
 
         scenarios_section[sname] = {
@@ -952,10 +1043,26 @@ def _generate_report_legacy(run_dir: Path, scenarios_path: Path) -> None:
             for path, s in stats.items():
                 endpoints[path] = {
                     "count": s["count"],
-                    "handler_us": {"p50": round(s["handler_p50_us"], 1), "p99": round(s["handler_p99_us"], 1), "avg": round(s["handler_avg_us"], 1)},
-                    "send_us": {"p50": round(s["send_p50_us"], 1), "p99": round(s["send_p99_us"], 1), "avg": round(s["send_avg_us"], 1)},
-                    "recv_us": {"p50": round(s["recv_p50_us"], 1), "p99": round(s["recv_p99_us"], 1), "avg": round(s["recv_avg_us"], 1)},
-                    "total_us": {"p50": round(s["total_p50_us"], 1), "p99": round(s["total_p99_us"], 1), "avg": round(s["total_avg_us"], 1)},
+                    "handler_us": {
+                        "p50": round(s["handler_p50_us"], 1),
+                        "p99": round(s["handler_p99_us"], 1),
+                        "avg": round(s["handler_avg_us"], 1),
+                    },
+                    "send_us": {
+                        "p50": round(s["send_p50_us"], 1),
+                        "p99": round(s["send_p99_us"], 1),
+                        "avg": round(s["send_avg_us"], 1),
+                    },
+                    "recv_us": {
+                        "p50": round(s["recv_p50_us"], 1),
+                        "p99": round(s["recv_p99_us"], 1),
+                        "avg": round(s["recv_avg_us"], 1),
+                    },
+                    "total_us": {
+                        "p50": round(s["total_p50_us"], 1),
+                        "p99": round(s["total_p99_us"], 1),
+                        "avg": round(s["total_avg_us"], 1),
+                    },
                     "recv_calls_avg": round(s["recv_calls_avg"], 1),
                     "send_calls_avg": round(s["send_calls_avg"], 1),
                 }
@@ -983,8 +1090,12 @@ def _generate_report_legacy(run_dir: Path, scenarios_path: Path) -> None:
                 b_ep = profiling_section.get(b, {}).get("endpoints", {}).get(path)
                 if a_ep and b_ep:
                     label = f"{a}_vs_{b}"
-                    path_ratios[f"handler_p50_{label}"] = _safe_ratio(a_ep["handler_us"]["p50"], b_ep["handler_us"]["p50"])
-                    path_ratios[f"send_p50_{label}"] = _safe_ratio(a_ep["send_us"]["p50"], b_ep["send_us"]["p50"])
+                    path_ratios[f"handler_p50_{label}"] = _safe_ratio(
+                        a_ep["handler_us"]["p50"], b_ep["handler_us"]["p50"]
+                    )
+                    path_ratios[f"send_p50_{label}"] = _safe_ratio(
+                        a_ep["send_us"]["p50"], b_ep["send_us"]["p50"]
+                    )
         if path_ratios:
             profiling_ratios[path] = path_ratios
 
@@ -994,7 +1105,12 @@ def _generate_report_legacy(run_dir: Path, scenarios_path: Path) -> None:
             label = f"{a}_vs_{b}"
             tp_ratios = []
             for sname in scenario_names:
-                r = scenarios_section.get(sname, {}).get("comparison", {}).get("ratios", {}).get(label, {})
+                r = (
+                    scenarios_section.get(sname, {})
+                    .get("comparison", {})
+                    .get("ratios", {})
+                    .get(label, {})
+                )
                 if r.get("throughput") is not None:
                     tp_ratios.append(r["throughput"])
             summary.setdefault("avg_throughput_ratio", {})[label] = (
@@ -1043,6 +1159,7 @@ def _default_cpuset(cpus: float) -> str:
     """Pin to ceil(cpus) cores starting from 0 so nproc inside the container
     matches the actual CPU budget and thread pools size correctly."""
     import math
+
     n = max(1, math.ceil(cpus))
     return ",".join(str(i) for i in range(n))
 
@@ -1052,10 +1169,22 @@ def start(
     port: int = typer.Option(8000, "--port", help="Host port to expose"),
     workers: int = typer.Option(2, "--workers", "-w", help="Number of APX workers"),
     cpus: float = typer.Option(2.0, "--cpus", help="CPU limit for the container"),
-    cpuset_cpus: str = typer.Option("", "--cpuset-cpus", help="Pin to specific cores (e.g. '0,1'). Auto-derived from --cpus if empty."),
-    memory: str = typer.Option("6g", "--memory", "-m", help="Memory limit (e.g. 512m, 2g, 6g)"),
-    max_concurrent: int = typer.Option(0, "--max-concurrent", help="Max concurrent requests per worker (0 = framework default 256)"),
-    build_image: bool = typer.Option(True, "--build/--no-build", help="Build Docker image before starting"),
+    cpuset_cpus: str = typer.Option(
+        "",
+        "--cpuset-cpus",
+        help="Pin to specific cores (e.g. '0,1'). Auto-derived from --cpus if empty.",
+    ),
+    memory: str = typer.Option(
+        "6g", "--memory", "-m", help="Memory limit (e.g. 512m, 2g, 6g)"
+    ),
+    max_concurrent: int = typer.Option(
+        0,
+        "--max-concurrent",
+        help="Max concurrent requests per worker (0 = framework default 256)",
+    ),
+    build_image: bool = typer.Option(
+        True, "--build/--no-build", help="Build Docker image before starting"
+    ),
 ) -> None:
     """Build the Docker image and start the APX bench app locally."""
     build_dir = DATABRICKS_DIR / ".build" / "bench-apx"
@@ -1067,9 +1196,12 @@ def start(
         console.print("[bold blue]Building Docker image...[/]")
         result = subprocess.run(
             [
-                "docker", "build",
-                "-f", str(LOCAL_DOCKERFILE),
-                "-t", LOCAL_IMAGE,
+                "docker",
+                "build",
+                "-f",
+                str(LOCAL_DOCKERFILE),
+                "-t",
+                LOCAL_IMAGE,
                 str(build_dir),
             ],
             check=False,
@@ -1081,7 +1213,8 @@ def start(
 
     subprocess.run(
         ["docker", "rm", "-f", LOCAL_CONTAINER],
-        capture_output=True, check=False,
+        capture_output=True,
+        check=False,
     )
 
     pinned = cpuset_cpus or _default_cpuset(cpus)
@@ -1091,21 +1224,37 @@ def start(
     )
     result = subprocess.run(
         [
-            "docker", "run", "-d",
-            "--platform", "linux/amd64",
-            "--name", LOCAL_CONTAINER,
-            "--cpus", str(cpus),
-            "--cpuset-cpus", pinned,
-            "--memory", memory,
-            "--memory-swap", memory,
-            "-p", f"{port}:8000",
-            "-e", "APX_BENCH_SERVER=apx",
-            "-e", "APX_BENCH_PROFILE=1",
-            "-e", "APX_PERF=1",
+            "docker",
+            "run",
+            "-d",
+            "--platform",
+            "linux/amd64",
+            "--name",
+            LOCAL_CONTAINER,
+            "--cpus",
+            str(cpus),
+            "--cpuset-cpus",
+            pinned,
+            "--memory",
+            memory,
+            "--memory-swap",
+            memory,
+            "-p",
+            f"{port}:8000",
+            "-e",
+            "APX_BENCH_SERVER=apx",
+            "-e",
+            "APX_BENCH_PROFILE=1",
+            "-e",
+            "APX_PERF=1",
             LOCAL_IMAGE,
-            "apx", "serve", "app.main",
-            "--host", "0.0.0.0",
-            "--workers", str(workers),
+            "apx",
+            "serve",
+            "app.main",
+            "--host",
+            "0.0.0.0",
+            "--workers",
+            str(workers),
             *(["--max-concurrent", str(max_concurrent)] if max_concurrent > 0 else []),
         ],
         check=False,
@@ -1122,7 +1271,9 @@ def stop() -> None:
     """Stop the locally running APX bench app."""
     result = subprocess.run(
         ["docker", "rm", "-f", LOCAL_CONTAINER],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if result.returncode == 0:
         console.print(f"[green]Container '{LOCAL_CONTAINER}' stopped and removed.[/]")

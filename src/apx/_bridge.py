@@ -49,7 +49,9 @@ async def guarded(coro: Coroutine[Any, Any, None], send: _ErrorSink) -> None:
 _AsgiApp = Callable[..., Coroutine[Any, Any, None]]
 
 
-def launch(app: _AsgiApp, scope: dict[str, Any], receive: Any, send: _ErrorSink) -> None:
+def launch(
+    app: _AsgiApp, scope: dict[str, Any], receive: Any, send: _ErrorSink
+) -> None:
     """Create an ASGI coroutine and submit it as a guarded task.
 
     Called on the asyncio thread via ``call_soon_threadsafe``.

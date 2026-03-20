@@ -3,6 +3,7 @@
 Provides functions to load and analyze ASGI profiling JSONL produced by
 the bench profiling middleware (app/profiling.py).
 """
+
 from __future__ import annotations
 
 import json
@@ -43,7 +44,9 @@ def ns_to_us(ns: float) -> float:
     return ns / 1000.0
 
 
-def analyze_records(reqs: list[dict], path_filter: str | None = None) -> dict[str, dict]:
+def analyze_records(
+    reqs: list[dict], path_filter: str | None = None
+) -> dict[str, dict]:
     """Group by path, compute stats per field."""
     by_path: dict[str, list[dict]] = {}
     for r in reqs:
@@ -66,5 +69,3 @@ def analyze_records(reqs: list[dict], path_filter: str | None = None) -> dict[st
         s["send_calls_avg"] = sum(r["send_n"] for r in records) / len(records)
         stats[path] = s
     return stats
-
-

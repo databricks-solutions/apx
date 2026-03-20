@@ -1,4 +1,5 @@
 """FastAPI application for the bencher service."""
+
 from __future__ import annotations
 
 import json
@@ -25,8 +26,7 @@ OHA_VERSION = "1.14.0"
 async def install_oha() -> str:
     """Download oha binary for linux-amd64 from GitHub releases."""
     url = (
-        f"https://github.com/hatoo/oha/releases/download/"
-        f"v{OHA_VERSION}/oha-linux-amd64"
+        f"https://github.com/hatoo/oha/releases/download/v{OHA_VERSION}/oha-linux-amd64"
     )
     dest = Path(tempfile.mkdtemp(prefix="oha_")) / "oha"
 
@@ -94,7 +94,10 @@ async def log_requests(request: Request, call_next):
     elapsed_ms = (time.monotonic() - t0) * 1000
     logger.info(
         "%s %s → %d (%.1fms)",
-        request.method, request.url.path, response.status_code, elapsed_ms,
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed_ms,
     )
     return response
 

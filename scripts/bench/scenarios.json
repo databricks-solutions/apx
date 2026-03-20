@@ -1,85 +1,83 @@
 [
-    {
-        "name": "echo",
-        "method": "GET",
-        "path": "/api/echo"
-    },
-    {
-        "name": "health",
-        "method": "GET",
-        "path": "/api/health"
-    },
-    {
-        "name": "list_items",
-        "method": "GET",
-        "path": "/api/items"
-    },
-    {
-        "name": "get_item",
-        "method": "GET",
-        "path": "/api/items/1"
-    },
-    {
-        "name": "create_item",
-        "method": "POST",
-        "path": "/api/items",
-        "body": {
-            "name": "bench-item",
-            "price": 9.99,
-            "tags": [
-                "test"
-            ]
-        }
-    },
-    {
-        "name": "update_item",
-        "method": "PATCH",
-        "path": "/api/items/1",
-        "body": {
-            "name": "updated-item"
-        }
-    },
-    {
-        "name": "delete_item",
-        "method": "DELETE",
-        "path": "/api/items/5"
-    },
-    {
-        "name": "static_page",
-        "method": "GET",
-        "path": "/"
-    },
-    {
-        "name": "yield_once",
-        "method": "GET",
-        "path": "/api/yield-once"
-    },
-    {
-        "name": "cpu_1k",
-        "method": "GET",
-        "path": "/api/cpu/1000"
-    },
-    {
-        "name": "stream_10",
-        "method": "GET",
-        "path": "/api/stream/10"
-    },
-    {
-        "name": "upload_1kb",
-        "method": "POST",
-        "path": "/api/upload",
-        "body": {
-            "data": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-        }
-    },
-    {
-        "name": "large_10kb",
-        "method": "GET",
-        "path": "/api/large/10"
-    },
-    {
-        "name": "deps",
-        "method": "GET",
-        "path": "/api/deps"
+  {
+    "name": "echo",
+    "method": "GET",
+    "path": "/api/echo"
+  },
+  {
+    "name": "health",
+    "method": "GET",
+    "path": "/api/health"
+  },
+  {
+    "name": "list_items",
+    "method": "GET",
+    "path": "/api/items"
+  },
+  {
+    "name": "get_item",
+    "method": "GET",
+    "path": "/api/items/1"
+  },
+  {
+    "name": "create_item",
+    "method": "POST",
+    "path": "/api/items",
+    "body": {
+      "name": "bench-item",
+      "price": 9.99,
+      "tags": ["test"]
     }
+  },
+  {
+    "name": "update_item",
+    "method": "PATCH",
+    "path": "/api/items/1",
+    "body": {
+      "name": "updated-item"
+    }
+  },
+  {
+    "name": "delete_item",
+    "method": "DELETE",
+    "path": "/api/items/5"
+  },
+  {
+    "name": "static_page",
+    "method": "GET",
+    "path": "/"
+  },
+  {
+    "name": "yield_once",
+    "method": "GET",
+    "path": "/api/yield-once"
+  },
+  {
+    "name": "cpu_1k",
+    "method": "GET",
+    "path": "/api/cpu/1000"
+  },
+  {
+    "name": "stream_10",
+    "method": "GET",
+    "path": "/api/stream/10"
+  },
+  {
+    "name": "upload_1kb",
+    "method": "POST",
+    "path": "/api/upload",
+    "body": {
+      "data": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+  },
+  {
+    "name": "large_10kb",
+    "method": "GET",
+    "path": "/api/large/10"
+  },
+  {
+    "name": "deps",
+    "method": "GET",
+    "path": "/api/deps"
+  }
 ]

@@ -1,4 +1,5 @@
 """Lakebase Autoscaled (PostgreSQL-compatible) engine and session factory for the bencher service."""
+
 from __future__ import annotations
 
 import logging
@@ -85,13 +86,18 @@ def _migrate(engine) -> None:
         return
     with engine.connect() as conn:
         for table, column, col_type in migrations:
-            result = conn.execute(text(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name = :table AND column_name = :column"
-            ), {"table": table, "column": column})
+            result = conn.execute(
+                text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = :table AND column_name = :column"
+                ),
+                {"table": table, "column": column},
+            )
             if result.fetchone() is None:
                 logger.info("Migrating: ALTER TABLE %s ADD COLUMN %s", table, column)
-                conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {column} {col_type}'))
+                conn.execute(
+                    text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                )
         conn.commit()
 
 

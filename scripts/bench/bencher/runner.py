@@ -3,6 +3,7 @@
 Runs as a BackgroundTask. Uses the Databricks SDK for auth and
 app URL resolution. Stores results in Lakebase Autoscaled (PostgreSQL).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -124,9 +125,12 @@ async def _run_warmup(
     cmd = [
         oha_path,
         "--no-tui",
-        "-n", str(warmup_requests),
-        "-c", str(min(warmup_requests, 50)),
-        "-H", f"Authorization: Bearer {token}",
+        "-n",
+        str(warmup_requests),
+        "-c",
+        str(min(warmup_requests, 50)),
+        "-H",
+        f"Authorization: Bearer {token}",
         f"{url}/api/health",
     ]
     proc = await asyncio.create_subprocess_exec(
@@ -148,18 +152,26 @@ async def _run_oha(
     target_url = f"{url}{scenario.path}"
     logger.info(
         "Running oha: %s %s (duration=%s, connections=%d)",
-        scenario.method, target_url, duration, connections,
+        scenario.method,
+        target_url,
+        duration,
+        connections,
     )
     t0 = time.monotonic()
 
     cmd = [
         oha_path,
-        "--output-format", "json",
+        "--output-format",
+        "json",
         "--no-tui",
-        "-z", duration,
-        "-c", str(connections),
-        "-m", scenario.method,
-        "-H", f"Authorization: Bearer {token}",
+        "-z",
+        duration,
+        "-c",
+        str(connections),
+        "-m",
+        scenario.method,
+        "-H",
+        f"Authorization: Bearer {token}",
     ]
 
     if scenario.body is not None:
@@ -177,7 +189,10 @@ async def _run_oha(
     if proc.returncode != 0:
         logger.warning(
             "oha failed for %s (exit=%d, %.1fs): %s",
-            scenario.name, proc.returncode, elapsed, stderr[:200],
+            scenario.name,
+            proc.returncode,
+            elapsed,
+            stderr[:200],
         )
         return None
 
@@ -285,8 +300,12 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
 
     logger.info(
         "[%s] Starting run: name=%s, envs=%s, duration=%s, connections=%d, profile=%s",
-        run_id[:8], config.name, list(config.environments.keys()),
-        config.duration, config.connections, config.profile,
+        run_id[:8],
+        config.name,
+        list(config.environments.keys()),
+        config.duration,
+        config.connections,
+        config.profile,
     )
 
     try:
@@ -313,7 +332,13 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
         total_profile = len(env_names) * len(PROFILE_SCENARIOS) if config.profile else 0
         total = total_bench + total_profile
         completed = 0
-        logger.info("[%s] Total steps: %d (bench=%d, profile=%d)", run_id[:8], total, total_bench, total_profile)
+        logger.info(
+            "[%s] Total steps: %d (bench=%d, profile=%d)",
+            run_id[:8],
+            total,
+            total_bench,
+            total_profile,
+        )
 
         # ---- Health check + warmup ----
         token = _get_token(ws)
@@ -343,8 +368,7 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
                     raise RuntimeError("Run cancelled")
 
                 _set_progress(
-                    run_id, total, completed,
-                    f"bench {env_name}/{scenario.name}"
+                    run_id, total, completed, f"bench {env_name}/{scenario.name}"
                 )
 
                 raw_json = await _run_oha(
@@ -379,18 +403,26 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
                             session.commit()
                         logger.info(
                             "[%s] %s/%s: %.0f rps, p50=%.2fms, success=%.1f%%",
-                            run_id[:8], env_name, scenario.name,
-                            rps, _f(percentiles, "p50") * 1000, success_rate * 100,
+                            run_id[:8],
+                            env_name,
+                            scenario.name,
+                            rps,
+                            _f(percentiles, "p50") * 1000,
+                            success_rate * 100,
                         )
                     else:
                         logger.warning(
                             "[%s] %s/%s: 0%% success rate — skipping",
-                            run_id[:8], env_name, scenario.name,
+                            run_id[:8],
+                            env_name,
+                            scenario.name,
                         )
                 else:
                     logger.warning(
                         "[%s] %s/%s: oha returned no output",
-                        run_id[:8], env_name, scenario.name,
+                        run_id[:8],
+                        env_name,
+                        scenario.name,
                     )
 
                 completed += 1
@@ -410,13 +442,16 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
                         raise RuntimeError("Run cancelled")
 
                     _set_progress(
-                        run_id, total, completed,
-                        f"profile {env_name}/{scenario.name}"
+                        run_id, total, completed, f"profile {env_name}/{scenario.name}"
                     )
 
                     await _run_oha(
-                        oha_path, scenario, url, token,
-                        config.duration, config.connections,
+                        oha_path,
+                        scenario,
+                        url,
+                        token,
+                        config.duration,
+                        config.connections,
                     )
                     completed += 1
 
@@ -433,11 +468,15 @@ async def execute_run(run_id: str, config: BenchConfig, oha_path: str) -> None:
                     with Session(get_engine()) as session:
                         session.add(pr)
                         session.commit()
-                    logger.info("[%s] Stored profiling data for %s", run_id[:8], env_name)
+                    logger.info(
+                        "[%s] Stored profiling data for %s", run_id[:8], env_name
+                    )
                 if scheduler_stats:
                     logger.info(
                         "[%s] Scheduler stats for %s: %s",
-                        run_id[:8], env_name, json.dumps(scheduler_stats),
+                        run_id[:8],
+                        env_name,
+                        json.dumps(scheduler_stats),
                     )
 
         # ---- Generate report ----

@@ -56,6 +56,7 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 # Resolved once at import time from env vars set by the supervisor.
 # These attributes are merged into every span and log-level span.
 
+
 def _resolve_identity() -> dict[str, str]:
     worker_id = os.environ.get("APX_WORKER_ID")
     if worker_id is not None:
@@ -63,6 +64,7 @@ def _resolve_identity() -> dict[str, str]:
     if os.environ.get("APX_WORKER_NONCE") is not None:
         return {"apx.role": "worker"}
     return {"apx.role": "supervisor"}
+
 
 _IDENTITY_ATTRS: dict[str, str] = _resolve_identity()
 
@@ -283,13 +285,9 @@ class Counter:
         self.name = name
         self.description = description
         self.unit = unit
-        self._instrument: RustCounter = _create_counter(
-            name, description, str(unit)
-        )
+        self._instrument: RustCounter = _create_counter(name, description, str(unit))
 
-    def inc(
-        self, value: int = 1, *, labels: dict[str, str] | None = None
-    ) -> None:
+    def inc(self, value: int = 1, *, labels: dict[str, str] | None = None) -> None:
         """Increment the counter."""
         self._instrument.inc(value, labels)
 
@@ -307,9 +305,7 @@ class Histogram:
             name, description, str(unit)
         )
 
-    def observe(
-        self, value: float, *, labels: dict[str, str] | None = None
-    ) -> None:
+    def observe(self, value: float, *, labels: dict[str, str] | None = None) -> None:
         """Record an observation."""
         self._instrument.observe(value, labels)
 
@@ -323,13 +319,9 @@ class Gauge:
         self.name = name
         self.description = description
         self.unit = unit
-        self._instrument: RustGauge = _create_gauge(
-            name, description, str(unit)
-        )
+        self._instrument: RustGauge = _create_gauge(name, description, str(unit))
 
-    def set(
-        self, value: float, *, labels: dict[str, str] | None = None
-    ) -> None:
+    def set(self, value: float, *, labels: dict[str, str] | None = None) -> None:
         """Set the gauge value."""
         self._instrument.set(value, labels)
 
@@ -350,11 +342,13 @@ class SystemMetric(str, enum.Enum):
     SYSTEM_NETWORK_IO = "system.network.io"
 
 
-_DEFAULT_SYSTEM_METRICS: frozenset[SystemMetric] = frozenset({
-    SystemMetric.PROCESS_CPU,
-    SystemMetric.SYSTEM_CPU,
-    SystemMetric.SYSTEM_MEMORY,
-})
+_DEFAULT_SYSTEM_METRICS: frozenset[SystemMetric] = frozenset(
+    {
+        SystemMetric.PROCESS_CPU,
+        SystemMetric.SYSTEM_CPU,
+        SystemMetric.SYSTEM_MEMORY,
+    }
+)
 
 
 class CaptureHeaders(BaseModel):
@@ -387,7 +381,9 @@ class SystemInstrumentation(BaseModel):
 
     type: Literal["system"] = "system"
     enabled: bool = True
-    collect: set[SystemMetric] = Field(default_factory=lambda: set(_DEFAULT_SYSTEM_METRICS))
+    collect: set[SystemMetric] = Field(
+        default_factory=lambda: set(_DEFAULT_SYSTEM_METRICS)
+    )
     interval_seconds: float = Field(default=15.0, gt=0)
 
 

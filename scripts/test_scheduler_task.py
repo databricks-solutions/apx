@@ -7,6 +7,7 @@ Key findings:
 
 Usage: uv run scripts/test_scheduler_task.py
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +21,7 @@ import weakref
 # ---------------------------------------------------------------------------
 # The proposed _SchedulerTask
 # ---------------------------------------------------------------------------
+
 
 async def _sentinel():
     """Suspend forever — the Rust scheduler drives the real coroutine."""
@@ -287,7 +289,11 @@ def test_streaming_pattern_with_asyncio_thread():
 
         result = ",".join(results)
         check("all chunks", "chunk-0" in result and "chunk-4" in result, result)
-        check("correct result", result == "chunk-0,chunk-1,chunk-2,chunk-3,chunk-4", result)
+        check(
+            "correct result",
+            result == "chunk-0,chunk-1,chunk-2,chunk-3,chunk-4",
+            result,
+        )
 
         proxy.cancel()
         coro.close()
@@ -415,6 +421,7 @@ if __name__ == "__main__":
     print(f"Python {sys.version}")
     try:
         import _asyncio
+
         print(f"C accelerator: yes (_enter_task type: {type(_enter_task).__name__})")
     except ImportError:
         print(f"C accelerator: no (pure Python fallback)")
@@ -428,7 +435,7 @@ if __name__ == "__main__":
     test_sentinel_step_doesnt_conflict()
     test_anyio_task_group()
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Results: {PASS} passed, {FAIL} failed")
     if FAIL:
         sys.exit(1)

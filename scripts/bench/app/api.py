@@ -46,6 +46,7 @@ def version() -> dict[str, str]:
     """Return the APX package version (includes build timestamp)."""
     try:
         from importlib.metadata import version as pkg_version
+
         return {"apx": pkg_version("apx")}
     except Exception as exc:
         return {"apx": f"unknown ({exc})"}
@@ -108,6 +109,7 @@ def update_item(item_id: int, body: ItemUpdate) -> Item:
 def delete_item(item_id: int):
     _cache.pop(f"item:{item_id}", None)
     from fastapi.responses import Response
+
     return Response(status_code=204)
 
 
@@ -201,10 +203,14 @@ async def telemetry_test():
     with span("test.custom_span", surface="span"):
         pass
 
-    counter = Counter("test.custom_counter", description="integration test counter", unit="1")
+    counter = Counter(
+        "test.custom_counter", description="integration test counter", unit="1"
+    )
     counter.inc(1)
 
-    histogram = Histogram("test.custom_histogram", description="integration test histogram", unit="ms")
+    histogram = Histogram(
+        "test.custom_histogram", description="integration test histogram", unit="ms"
+    )
     histogram.observe(42.0)
 
     gauge = Gauge("test.custom_gauge", description="integration test gauge")
@@ -226,6 +232,7 @@ async def telemetry_test():
 def profile_dump():
     """Return profiling JSONL over HTTP (for remote extraction)."""
     from .profiling import PROFILE_PATH, flush
+
     flush()
     if not PROFILE_PATH.exists():
         raise HTTPException(status_code=404, detail="No profiling data")
@@ -236,6 +243,7 @@ def profile_dump():
 def profile_reset():
     """Clear profiling data for a fresh run."""
     from . import profiling
+
     profiling.reset()
     return {"status": "reset"}
 
@@ -251,4 +259,5 @@ def scheduler_stats():
     if data is None:
         raise HTTPException(status_code=404, detail="no scheduler stats")
     import json
+
     return json.loads(data)

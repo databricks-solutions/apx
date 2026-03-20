@@ -8,6 +8,7 @@ Handles cross-compilation of the APX wheel, assembly of Databricks app
 directories, workspace-FS upload for bench-apx, and app lifecycle management
 via the Databricks SDK (bypassing DABs, which lack telemetry support).
 """
+
 from __future__ import annotations
 
 import datetime
@@ -362,7 +363,9 @@ def upload_apx_app(ws: WorkspaceClient) -> str:
             return False
         return True
 
-    files = sorted(f for f in local_build.rglob("*") if f.is_file() and _should_upload(f))
+    files = sorted(
+        f for f in local_build.rglob("*") if f.is_file() and _should_upload(f)
+    )
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -430,7 +433,9 @@ def _wait_no_pending_deployment(ws: WorkspaceClient, timeout: float) -> None:
         state = pending.status.state if pending.status else None
         if state != AppDeploymentState.IN_PROGRESS:
             return
-        console.print(f"[dim]  waiting for pending deployment to settle (state={state!r})...[/]")
+        console.print(
+            f"[dim]  waiting for pending deployment to settle (state={state!r})...[/]"
+        )
         time.sleep(5)
     console.print(
         f"[yellow]Warning:[/] pending deployment did not clear within {timeout}s, proceeding."
@@ -488,7 +493,9 @@ def deploy_apx_app(
     # new deploy() until that lock clears. The lock may not appear in
     # pending_deployment immediately (timing gap), so we retry on the specific
     # BadRequest rather than trying to predict the exact moment it clears.
-    console.print(f"[bold blue]Deploying '{APX_APP_NAME}' from {source_code_path}...[/]")
+    console.print(
+        f"[bold blue]Deploying '{APX_APP_NAME}' from {source_code_path}...[/]"
+    )
     deployment = AppDeployment(
         source_code_path=source_code_path,
         mode=AppDeploymentMode.SNAPSHOT,
@@ -499,14 +506,17 @@ def deploy_apx_app(
     _DEPLOY_RETRY_INTERVAL = 10
     _deploy_deadline = time.monotonic() + timeout
     with Progress(
-        SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
         task = progress.add_task(f"Deploying {APX_APP_NAME}...", total=None)
 
         def _on_update(dep: AppDeployment) -> None:
             status = dep.status.state.value if dep.status and dep.status.state else "?"
-            progress.update(task, description=f"Deploying {APX_APP_NAME}... (state={status})")
+            progress.update(
+                task, description=f"Deploying {APX_APP_NAME}... (state={status})"
+            )
 
         while True:
             try:

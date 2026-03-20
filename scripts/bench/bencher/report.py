@@ -3,6 +3,7 @@
 Produces the same JSON schema as the original filesystem-based generate_report()
 in main.py, but works from in-memory ScenarioResult / ProfileResult lists.
 """
+
 from __future__ import annotations
 
 import json
@@ -59,7 +60,9 @@ def generate_report(
 
     logger.info(
         "Generating report: name=%s, %d scenario results, %d profile results",
-        config.name, len(scenario_results), len(profile_results),
+        config.name,
+        len(scenario_results),
+        len(profile_results),
     )
     env_names = sorted(config.environments.keys())
 
@@ -105,7 +108,7 @@ def generate_report(
         # Pairwise ratios.
         ratios: dict[str, dict] = {}
         for i, a in enumerate(env_names):
-            for b in env_names[i + 1:]:
+            for b in env_names[i + 1 :]:
                 label = f"{a}_vs_{b}"
                 a_tp = throughput_rps.get(a, 0)
                 b_tp = throughput_rps.get(b, 0)
@@ -197,7 +200,7 @@ def generate_report(
     for path in sorted(all_paths):
         path_ratios: dict[str, float | None] = {}
         for i, a in enumerate(env_names):
-            for b in env_names[i + 1:]:
+            for b in env_names[i + 1 :]:
                 a_ep = profiling_section.get(a, {}).get("endpoints", {}).get(path)
                 b_ep = profiling_section.get(b, {}).get("endpoints", {}).get(path)
                 if a_ep and b_ep:
@@ -214,7 +217,7 @@ def generate_report(
     # ---- Compute summary ----
     summary: dict[str, dict] = {}
     for i, a in enumerate(env_names):
-        for b in env_names[i + 1:]:
+        for b in env_names[i + 1 :]:
             label = f"{a}_vs_{b}"
 
             tp_ratios = []
@@ -248,10 +251,15 @@ def generate_report(
             )
 
     # ---- Assemble ----
-    logger.info("Report built: %d scenarios, %d profiled envs", len(scenarios_section), len(profiling_section))
+    logger.info(
+        "Report built: %d scenarios, %d profiled envs",
+        len(scenarios_section),
+        len(profiling_section),
+    )
 
     report = {
-        "meta": meta or {
+        "meta": meta
+        or {
             "name": config.name,
             "duration": config.duration,
             "connections": config.connections,

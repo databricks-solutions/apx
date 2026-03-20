@@ -213,7 +213,9 @@ def telemetry_container(
     try:
         _wait_for_healthy(base_url)
     except Exception:
-        _print_container_logs(container, header="Telemetry container logs (startup failed)")
+        _print_container_logs(
+            container, header="Telemetry container logs (startup failed)"
+        )
         container.stop(timeout=5)
         container.remove()
         raise
@@ -222,7 +224,9 @@ def telemetry_container(
 
     yield base_url
 
-    _print_container_logs(container, tail=40, header="Telemetry container logs (teardown)")
+    _print_container_logs(
+        container, tail=40, header="Telemetry container logs (teardown)"
+    )
     container.stop(timeout=10)
     container.remove()
 

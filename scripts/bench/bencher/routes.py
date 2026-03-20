@@ -1,4 +1,5 @@
 """API endpoints for the bencher service."""
+
 from __future__ import annotations
 
 import json
@@ -51,7 +52,10 @@ async def start_benchmark(
 
     logger.info(
         "Scheduling benchmark run %s (name=%s, mode=%s, envs=%s)",
-        run.id, config.name, mode, list(config.environments.keys()),
+        run.id,
+        config.name,
+        mode,
+        list(config.environments.keys()),
     )
     background_tasks.add_task(execute_run, run.id, config, oha_path)
 
@@ -132,7 +136,9 @@ async def cancel_benchmark(run_id: str, session: Session = Depends(get_session))
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     if run.status not in (RunStatus.PENDING, RunStatus.RUNNING):
-        raise HTTPException(status_code=400, detail=f"Run is {run.status}, cannot cancel")
+        raise HTTPException(
+            status_code=400, detail=f"Run is {run.status}, cannot cancel"
+        )
 
     logger.info("Cancelling benchmark run %s", run_id)
     cancelled = request_cancel(run_id)
