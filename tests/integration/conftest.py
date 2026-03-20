@@ -67,16 +67,22 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
-def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):  # noqa: ARG001
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[None]
+):  # noqa: ARG001
     outcome = yield
     report = outcome.get_result()
     if report.when == "call" and report.failed:
         global _any_test_failed
         _any_test_failed = True
-        _print_container_logs(tail=80, header=f"Container logs (last 80 lines) after FAILED {item.nodeid}")
+        _print_container_logs(
+            tail=80, header=f"Container logs (last 80 lines) after FAILED {item.nodeid}"
+        )
 
 
-def _print_container_logs(*, tail: int | Literal["all"] = "all", header: str = "Container logs") -> None:
+def _print_container_logs(
+    *, tail: int | Literal["all"] = "all", header: str = "Container logs"
+) -> None:
     if _container is None:
         return
     try:
@@ -123,7 +129,9 @@ def _stamp_wheel(wheel_path: Path, new_version: str) -> Path:
     meta_path.write_text(meta_text)
 
     old_name = old_di.name
-    new_di_name = re.sub(r"-[\d][^-]*\.dist-info$", f"-{new_version}.dist-info", old_name)
+    new_di_name = re.sub(
+        r"-[\d][^-]*\.dist-info$", f"-{new_version}.dist-info", old_name
+    )
     new_di = old_di.rename(old_di.parent / new_di_name)
 
     record_path = new_di / "RECORD"
@@ -136,7 +144,11 @@ def _stamp_wheel(wheel_path: Path, new_version: str) -> Path:
             record_rows.append([rel, "", ""])
             continue
         data = fpath.read_bytes()
-        digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+        digest = (
+            base64.urlsafe_b64encode(hashlib.sha256(data).digest())
+            .rstrip(b"=")
+            .decode()
+        )
         record_rows.append([rel, f"sha256={digest}", str(len(data))])
 
     buf = io.StringIO()
@@ -176,17 +188,29 @@ def _build_apx_wheel(dest_dir: Path) -> Path:
 
     result = subprocess.run(
         [
-            "docker", "run", "--rm",
-            "-v", f"{PROJECT_ROOT}:/io",
-            "-v", f"{sccache_dir}:/cache/sccache",
-            "-v", f"{cargo_home / 'registry'}:/root/.cargo/registry",
-            "-v", f"{cargo_home / 'git'}:/root/.cargo/git",
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{PROJECT_ROOT}:/io",
+            "-v",
+            f"{sccache_dir}:/cache/sccache",
+            "-v",
+            f"{cargo_home / 'registry'}:/root/.cargo/registry",
+            "-v",
+            f"{cargo_home / 'git'}:/root/.cargo/git",
             CROSS_IMAGE,
-            "maturin", "build", "--release",
-            "--target", CROSS_TARGET,
-            "-i", "python3.11",
-            "--out", str(Path("/io") / dest_dir.relative_to(PROJECT_ROOT)),
-            "--manifest-path", "crates/apx/Cargo.toml",
+            "maturin",
+            "build",
+            "--release",
+            "--target",
+            CROSS_TARGET,
+            "-i",
+            "python3.11",
+            "--out",
+            str(Path("/io") / dest_dir.relative_to(PROJECT_ROOT)),
+            "--manifest-path",
+            "crates/apx/Cargo.toml",
         ],
         cwd=str(PROJECT_ROOT),
         check=False,
@@ -194,7 +218,9 @@ def _build_apx_wheel(dest_dir: Path) -> Path:
     if result.returncode != 0:
         pytest.fail("maturin cross-compilation failed (see output above)")
 
-    wheels = sorted(dest_dir.glob("apx-*.whl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    wheels = sorted(
+        dest_dir.glob("apx-*.whl"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
     assert wheels, "No APX wheel found after maturin build"
 
     m = re.search(r'^version\s*=\s*"([^"]+)"', CARGO_TOML.read_text(), re.MULTILINE)
@@ -273,7 +299,7 @@ def apx_image(request: pytest.FixtureRequest) -> str:
 # ---------------------------------------------------------------------------
 
 
-def wait_for_healthy(base_url: str, *, timeout: float = 120) -> None:
+def wait_for_healthy(base_url: str, *, timeout: float = 10) -> None:
     """Poll the health endpoint until the container is ready."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -284,7 +310,6 @@ def wait_for_healthy(base_url: str, *, timeout: float = 120) -> None:
         except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
             pass
         time.sleep(1.0)
-    pytest.fail(f"Container did not become healthy within {timeout}s (url={base_url})")
 
 
 def print_container_logs(
@@ -336,6 +361,7 @@ def apx_container(apx_image: str) -> Generator[str]:
         environment={
             "APX_BENCH_PROFILE": "1",
             "APX_PERF": "1",
+            "APX_LOG": "trace",
         },
         detach=True,
     )
@@ -356,7 +382,7 @@ def apx_container(apx_image: str) -> Generator[str]:
         container.stop(timeout=5)
         container.remove()
         _container = None
-        raise
+        pytest.fail("Container did not become healthy")
 
     elapsed = time.monotonic() - t0
     print(f"[container] Ready in {elapsed:.1f}s at {base_url}")

@@ -213,6 +213,11 @@ impl Reactor {
         })
     }
 
+    /// The Python asyncio event loop object.
+    pub fn event_loop_py(&self) -> &Py<PyAny> {
+        &self.event_loop
+    }
+
     /// Cached `loop.call_soon_threadsafe` bound method.
     pub fn call_soon_threadsafe(&self) -> &Py<PyAny> {
         &self.call_soon_threadsafe

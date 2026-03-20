@@ -22,6 +22,21 @@ class Forbidden(Exception):
     """Return a 403 Forbidden response."""
     ...
 
+# ── Dispatch primitives ──────────────────────────────────────────────────
+
+class RequestQueue:
+    """Inbound request queue drained by the asyncio dispatch loop."""
+    def try_recv(self) -> tuple[Any, Any, Any] | None: ...
+
+class SlotReceive:
+    """ASGI receive() callable for the 3-thread dispatch path."""
+    def __call__(self) -> Any: ...
+
+class SlotSend:
+    """ASGI send() callable for the 3-thread dispatch path."""
+    def __call__(self, event: dict[str, Any]) -> Any: ...
+    def send_error(self, traceback: str) -> None: ...
+
 # ── Scheduler primitives ─────────────────────────────────────────────────
 
 class Event:

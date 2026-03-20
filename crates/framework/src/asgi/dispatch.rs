@@ -1,25 +1,23 @@
-//! ASGI dispatch — calls `app(scope, receive, send)` and collects response.
+//! ASGI dispatch — zero-GIL 3-thread HTTP dispatch + legacy WS dispatch.
 //!
-//! Implements the [`Dispatch`] trait for ASGI applications. The hot path
-//! collects the request body, builds scope, wraps the ASGI coroutine in
-//! `_guarded` (which catches `Exception` and forwards it as a 500 without
-//! re-raising), and submits it to asyncio via `call_soon_threadsafe(create_task, ...)`.
+//! HTTP requests flow through the crossbeam pipeline:
+//!   Thread 1 (tokio) → crossbeam → Thread 2 (asyncio) → crossbeam → Thread 3 → oneshot → Thread 1
 //!
-//! The response flows through a oneshot channel: `AsgiSend` accumulates
-//! status/headers from `ResponseStart` and builds the complete
-//! `OutboundResponse` on the first body chunk.
+//! WebSocket upgrades still use the legacy `call_soon_threadsafe(launch_fn, ...)`
+//! path until WS is migrated to crossbeam.
 
-use crate::asgi::scope::{AsgiReceive, AsgiSend, ScopeInterns, SendCache, scope_from_template};
+use crate::asgi::channel_body::ChannelBody;
+use crate::asgi::scope::ScopeInterns;
 use crate::dispatch::Dispatch;
+use crate::io::channel::{RequestSlot, ResponseData, Wakeup};
 use crate::protocol::http::error::AppError;
 use crate::supervision::worker_context::WorkerContext;
 use crate::transport::types::{BodyStream, InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
-use http::header::HeaderMap;
+use http::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::body::Incoming;
 use hyper::{Request, Response};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -28,42 +26,41 @@ use std::time::Instant;
 
 // ── AsgiDispatch ─────────────────────────────────────────────────────────
 
-/// ASGI dispatch: calls `app(scope, receive, send)` with oneshot response.
-///
-/// `AsgiSend` accumulates status/headers from `ResponseStart` and sends the
-/// complete `OutboundResponse` via a oneshot channel on the first body chunk.
+/// ASGI dispatch: HTTP via crossbeam pipeline (no GIL), WS via legacy path.
 pub struct AsgiDispatch {
-    /// The Python ASGI callable (Arc-wrapped to avoid per-request GIL).
-    app: Arc<Py<PyAny>>,
-    /// Pre-interned scope strings, shared across all requests.
-    scope_interns: Arc<ScopeInterns>,
-    /// Pre-built receive dict template, cloned per-request via `PyDict::copy`.
-    receive_template: Arc<Py<PyDict>>,
-    /// Cached Python objects for the send path.
-    send_cache: Arc<SendCache>,
-    /// Shared worker infrastructure (asyncio submission state).
-    ctx: Arc<WorkerContext>,
+    /// Inbound channel sender — pushes `RequestSlot` to Thread 2.
+    inbound_tx: crossbeam_channel::Sender<RequestSlot>,
+    /// Wakeup signal for the asyncio thread.
+    wakeup: Arc<Wakeup>,
     /// Maximum request body size in bytes.
     body_limit: usize,
+
+    // ── WS legacy fields (until WS migrates to crossbeam) ──
+    /// The Python ASGI callable.
+    app: Arc<Py<PyAny>>,
+    /// Pre-interned scope strings (shared with RequestQueue on Thread 2).
+    scope_interns: Arc<ScopeInterns>,
+    /// Shared worker context (carries call_soon_threadsafe + launch_fn for WS).
+    ctx: Arc<WorkerContext>,
 }
 
 impl AsgiDispatch {
-    /// Create a new `AsgiDispatch`.
+    /// Create a new `AsgiDispatch` with crossbeam pipeline for HTTP.
     pub fn new(
+        inbound_tx: crossbeam_channel::Sender<RequestSlot>,
+        wakeup: Arc<Wakeup>,
+        body_limit: usize,
         app: Py<PyAny>,
         scope_interns: Arc<ScopeInterns>,
-        receive_template: Py<PyDict>,
-        send_cache: Arc<SendCache>,
         ctx: Arc<WorkerContext>,
-        body_limit: usize,
     ) -> Self {
         Self {
+            inbound_tx,
+            wakeup,
+            body_limit,
             app: Arc::new(app),
             scope_interns,
-            receive_template: Arc::new(receive_template),
-            send_cache,
             ctx,
-            body_limit,
         }
     }
 }
@@ -83,25 +80,11 @@ impl Dispatch for AsgiDispatch {
     ) -> Pin<Box<dyn Future<Output = OutboundResponse> + Send>> {
         let body_stream = request.take_body();
         let body_limit = self.body_limit;
-
-        let app = Arc::clone(&self.app);
-        let interns = Arc::clone(&self.scope_interns);
-        let recv_tpl = Arc::clone(&self.receive_template);
-        let send_cache = Arc::clone(&self.send_cache);
-        let ctx = Arc::clone(&self.ctx);
+        let inbound_tx = self.inbound_tx.clone();
+        let wakeup = Arc::clone(&self.wakeup);
 
         Box::pin(async move {
-            let result = dispatch_inner(
-                request,
-                body_stream,
-                body_limit,
-                app,
-                interns,
-                recv_tpl,
-                send_cache,
-                ctx,
-            )
-            .await;
+            let result = dispatch_inner(request, body_stream, body_limit, inbound_tx, wakeup).await;
             result.unwrap_or_else(error_response)
         })
     }
@@ -143,21 +126,14 @@ impl Dispatch for AsgiDispatch {
 
 // ── Dispatch internals ───────────────────────────────────────────────────
 
-/// Full dispatch pipeline: collect body → build scope → submit to asyncio
-/// → await oneshot response.
-///
-/// When `APX_PERF=1`, emits per-phase timing events under the `apx.perf`
-/// tracing target. Zero overhead when disabled.
-#[expect(clippy::too_many_arguments, reason = "dispatch args are all required")]
+/// Zero-GIL HTTP dispatch: collect body → build RequestSlot → push to
+/// crossbeam → signal wakeup → await oneshot response.
 async fn dispatch_inner(
     request: InboundRequest,
     body_stream: BodyStream,
     body_limit: usize,
-    app: Arc<Py<PyAny>>,
-    interns: Arc<ScopeInterns>,
-    recv_tpl: Arc<Py<PyDict>>,
-    send_cache: Arc<SendCache>,
-    ctx: Arc<WorkerContext>,
+    inbound_tx: crossbeam_channel::Sender<RequestSlot>,
+    wakeup: Arc<Wakeup>,
 ) -> Result<OutboundResponse, AppError> {
     if let Some(id) = request
         .headers
@@ -180,69 +156,74 @@ async fn dispatch_inner(
     }
 
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let t_gil = perf.then(Instant::now);
-    Python::attach(|py| -> Result<(), AppError> {
-        if let Some(t) = t_gil {
-            tracing::info!(target: "apx.perf", phase = "gil_acquire", elapsed_us = t.elapsed().as_micros() as u64);
-        }
-
-        let t0 = perf.then(Instant::now);
-        let scope = scope_from_template(py, &interns.scope_template, &request, None, &interns)
-            .map_err(|e| AppError::Internal(format!("scope build: {e}")))?;
-        if let Some(t) = t0 {
-            tracing::info!(target: "apx.perf", phase = "scope_build", elapsed_us = t.elapsed().as_micros() as u64);
-        }
-
-        let tpl = recv_tpl.clone_ref(py);
-        let receive = if body_bytes.is_empty() {
-            AsgiReceive::empty(disconnect_rx, tpl)
-        } else {
-            AsgiReceive::http(body_bytes, disconnect_rx, tpl)
-        };
-        let receive_obj =
-            Py::new(py, receive).map_err(|e| AppError::Internal(format!("wrap receive: {e}")))?;
-        let send = AsgiSend::http(response_tx, disconnect_tx, &send_cache, py);
-        let send_obj =
-            Py::new(py, send).map_err(|e| AppError::Internal(format!("wrap send: {e}")))?;
-
-        if let Some(trace_ctx) = crate::telemetry::context::extract_trace_context() {
-            let _ = crate::telemetry::context::set_python_context(py, &trace_ctx);
-        }
-
-        let t0 = perf.then(Instant::now);
-        ctx.call_soon_threadsafe
-            .call1(py, (&ctx.launch_fn, &*app, &scope, &receive_obj, &send_obj))
-            .map_err(|e| AppError::Internal(format!("submit to asyncio: {e}")))?;
-        if let Some(t) = t0 {
-            tracing::info!(target: "apx.perf", phase = "submit", elapsed_us = t.elapsed().as_micros() as u64);
-        }
-
-        Ok(())
-    })?;
+    let raw_path = Bytes::copy_from_slice(request.path.as_bytes());
+    let slot = RequestSlot {
+        method: request.method.clone(),
+        path: request.path.clone(),
+        raw_path,
+        query_string: request.query_string.clone(),
+        headers: request.headers.clone(),
+        body: body_bytes,
+        protocol: request.protocol,
+        client_addr: request.client_addr,
+        server_addr: request.server_addr,
+        response_tx,
+    };
 
     let t0 = perf.then(Instant::now);
-    let response = response_rx
+    inbound_tx
+        .send(slot)
+        .map_err(|_| AppError::Internal("inbound channel closed".to_owned()))?;
+    wakeup.signal();
+    if let Some(t) = t0 {
+        tracing::info!(target: "apx.perf", phase = "crossbeam_send", elapsed_us = t.elapsed().as_micros() as u64);
+    }
+
+    let t0 = perf.then(Instant::now);
+    let response_data = response_rx
         .await
         .map_err(|_| AppError::Internal("response channel closed".to_owned()))?;
     if let Some(t) = t0 {
         tracing::info!(target: "apx.perf", phase = "response_wait", elapsed_us = t.elapsed().as_micros() as u64);
     }
 
+    let response = response_data_to_outbound(response_data)?;
+
     if let Some(t) = t_total {
-        let status = response.as_ref().map(|r| r.status.as_u16()).unwrap_or(500);
         tracing::info!(
             target: "apx.perf",
             phase = "dispatch",
             elapsed_us = t.elapsed().as_micros() as u64,
-            status,
+            status = response.status.as_u16(),
             method = %request.method,
             path = %request.path,
         );
     }
 
-    response
+    Ok(response)
+}
+
+/// Convert a `ResponseData` from the crossbeam pipeline into an `OutboundResponse`.
+fn response_data_to_outbound(data: ResponseData) -> Result<OutboundResponse, AppError> {
+    let status =
+        http::StatusCode::from_u16(data.status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+    let mut headers = HeaderMap::with_capacity(data.headers.len());
+    for (name, value) in &data.headers {
+        let header_name = HeaderName::from_bytes(name)
+            .map_err(|e| AppError::Internal(format!("invalid header name: {e}")))?;
+        let header_value = HeaderValue::from_bytes(value)
+            .map_err(|e| AppError::Internal(format!("invalid header value: {e}")))?;
+        headers.append(header_name, header_value);
+    }
+    let body = ResponseBody::Stream(Box::pin(ChannelBody::new(data.body_rx)));
+
+    Ok(OutboundResponse {
+        status,
+        headers,
+        body,
+        server_route: None,
+    })
 }
 
 /// Client-visible body for internal errors.
@@ -269,7 +250,7 @@ fn error_response(err: AppError) -> OutboundResponse {
             let mut h = HeaderMap::new();
             h.insert(
                 http::header::CONTENT_TYPE,
-                http::HeaderValue::from_static("text/plain"),
+                HeaderValue::from_static("text/plain"),
             );
             h
         },

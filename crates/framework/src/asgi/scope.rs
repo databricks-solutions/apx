@@ -481,12 +481,23 @@ impl ResolvedAwaitable {
 
 /// Zero-overhead Python awaitable that completes immediately with a value.
 ///
-/// Used by `AsgiReceive` to return the receive dict without
-/// `future_into_py` (which requires a tokio runtime, unavailable on
-/// `spawn_blocking` threads).
+/// Used by `AsgiReceive` and `SlotReceive` to return the receive dict
+/// without `future_into_py` (which requires a tokio runtime, unavailable
+/// on `spawn_blocking` threads).
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "visible to sibling modules in asgi/"
+)]
 #[pyclass(module = "apx._core", freelist = 64)]
-struct ResolvedAwaitableWithValue {
+pub(crate) struct ResolvedAwaitableWithValue {
     value: Option<Py<PyAny>>,
+}
+
+impl ResolvedAwaitableWithValue {
+    /// Create a new resolved awaitable that will return `value`.
+    pub(crate) fn new(value: Py<PyAny>) -> Self {
+        Self { value: Some(value) }
+    }
 }
 
 #[pymethods]

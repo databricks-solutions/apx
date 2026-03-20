@@ -4,6 +4,8 @@
 //! and exposes cached Python callables for coroutine submission via
 //! `call_soon_threadsafe(create_task, coro)`.
 
+pub mod channel;
+pub mod completer;
 pub mod counters;
 pub mod reactor;
 
@@ -54,6 +56,11 @@ impl EventLoop {
     /// Cached `loop.create_task` — creates a standard asyncio.Task.
     pub fn create_task(&self) -> &Py<PyAny> {
         self.reactor.create_task()
+    }
+
+    /// The Python asyncio event loop object.
+    pub fn event_loop_py(&self) -> &Py<PyAny> {
+        self.reactor.event_loop_py()
     }
 
     /// Shut down the event loop.

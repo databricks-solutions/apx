@@ -121,24 +121,35 @@ pub async fn run_worker(
     let mut runtime = init_worker(&bootstrap, channel).await?;
     signal_readiness(&mut runtime.channel).await?;
 
-    // Build WorkerContext from the event loop.
+    // Create the 3-thread dispatch pipeline (no GIL needed).
+    let pipeline = Arc::new(
+        crate::io::channel::DispatchPipeline::new()
+            .map_err(|e| WorkerError::PythonInit(format!("dispatch pipeline: {e}")))?,
+    );
+
+    // Spawn Thread 3 — the response completer relay.
+    let _completer_handle = crate::io::completer::spawn(&pipeline.outbound)
+        .map_err(|e| WorkerError::PythonInit(format!("completer thread: {e}")))?;
+
+    // Build WorkerContext with pipeline + WS legacy fields.
     let ctx = {
         let el = &runtime.event_loop;
         Python::attach(|py| -> Result<Arc<WorkerContext>, WorkerError> {
             let launch_fn = register_launch(py)
                 .map_err(|e| WorkerError::PythonInit(format!("register launch: {e}")))?;
             Ok(Arc::new(WorkerContext {
+                pipeline: Arc::clone(&pipeline),
                 call_soon_threadsafe: el.call_soon_threadsafe().clone_ref(py),
-                create_task: el.create_task().clone_ref(py),
                 launch_fn,
             }))
         })?
     };
 
-    // Load app and build dispatch pipeline.
+    // Load app, install Python dispatch, build Rust dispatch.
     let server_addr = runtime.listener.local_addr();
+    let event_loop_py = runtime.event_loop.event_loop_py();
     let dispatch = Python::attach(|py| {
-        ModuleImport::new(bootstrap.app_module.as_str()).build(py, ctx, server_addr)
+        ModuleImport::new(bootstrap.app_module.as_str()).build(py, ctx, event_loop_py, server_addr)
     })?;
 
     // Read telemetry config from Python (after app load, so user configure() ran).
