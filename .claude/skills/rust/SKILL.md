@@ -153,6 +153,88 @@ impl ExternalCommand for Uv { ... }
 
 Each Rust module is a bounded context. Types and functions within a module share a domain model; the module boundary is the public API. Keep internal helpers private.
 
+### Sans-I/O: separate protocol logic from transport
+
+*Source: [sans-io.readthedocs.io](https://sans-io.readthedocs.io/how-to-sans-io.html)*
+
+Protocol logic (parsing, validation, state machines, data transformation) must be pure functions or types that take data in and return data out — no sockets, no channels, no async, no file handles. I/O operations (network, channels, disk) live in a thin outer layer that calls the protocol layer.
+
+This makes protocol logic testable without standing up real infrastructure, reusable across different I/O backends (tokio, crossbeam, sync), and composable across boundaries (Rust ↔ Python).
+
+```rust
+// bad — protocol parsing entangled with channel I/O
+impl SlotSend {
+    fn __call__(&self, py, event: &PyDict) -> PyResult<...> {
+        let type_val: String = event.get_item("type")?.extract()?;
+        match type_val.as_str() {
+            "http.response.start" => {
+                let status = event.get_item("status")?.extract()?;
+                *self.status.lock() = Some(status);
+                // parse headers here too...
+            }
+            "http.response.body" => {
+                let body = event.get_item("body")?.extract()?;
+                self.outbound_tx.send(OutboundSlot { ... })?;  // I/O mixed in
+                self.body_tx.send(body)?;                       // I/O mixed in
+            }
+        }
+    }
+}
+
+// good — protocol layer is a pure function, I/O layer calls it
+enum SendEvent {
+    Start { status: u16, headers: Vec<(Bytes, Bytes)> },
+    Body { data: Bytes, more_body: bool },
+}
+
+fn parse_send_event(event: &Bound<'_, PyDict>) -> PyResult<SendEvent> {
+    // pure — no channels, no async, testable with synthetic PyDicts
+}
+
+impl SlotSend {
+    fn __call__(&self, py, event: &PyDict) -> PyResult<...> {
+        let parsed = parse_send_event(event)?;   // protocol
+        self.dispatch(parsed)                      // I/O
+    }
+}
+```
+
+The same principle applies to request classification:
+
+```rust
+// bad — routing decision mixed with hyper I/O
+async fn handle(self, req: Request<Incoming>) -> Response<...> {
+    if req.uri().path() == "/_health/alive" {
+        return json_response(HEALTH_ALIVE);       // mixed: decision + response construction
+    }
+    if is_websocket_upgrade(&req) {
+        return self.dispatch.dispatch_ws(req).await;  // mixed: decision + dispatch
+    }
+    // ... semaphore, timeout, dispatch ...
+}
+
+// good — classification is a pure function
+enum RequestKind {
+    Probe(ProbeKind),
+    WebSocket,
+    Http,
+}
+
+fn classify(path: &str, headers: &HeaderMap) -> RequestKind {
+    // pure — no async, no Response construction, testable with strings
+}
+
+async fn handle(self, req: Request<Incoming>) -> Response<...> {
+    match classify(req.uri().path(), req.headers()) {
+        RequestKind::Probe(kind) => probe_response(kind),
+        RequestKind::WebSocket => self.dispatch.dispatch_ws(req).await,
+        RequestKind::Http => self.dispatch_http(req).await,
+    }
+}
+```
+
+**Rule of thumb:** if a function touches both data transformation AND a channel/socket/file, split it. The data transformation half is the protocol layer; the channel/socket half is the I/O layer. The protocol layer should be testable with `#[test]` using synthetic inputs — no `#[tokio::test]`, no channels, no `Python::attach`.
+
 ## API design
 
 *Sources: Microsoft M-INIT-BUILDER, M-IMPL-ASREF, M-IMPL-IO, M-AVOID-WRAPPERS; Rust API Guidelines C-COMMON-TRAITS*
@@ -216,6 +298,25 @@ fn normalize(input: &str) -> Cow<'_, str> {
 ### Pre-allocate when size is known
 
 Use `String::with_capacity()` / `Vec::with_capacity()` when the final size is known or estimable. Avoids repeated reallocations.
+
+### Protocol functions are pure
+
+If a function parses, validates, classifies, or transforms data — it must not touch I/O (channels, sockets, files, async runtimes). Accept data in, return data out. This makes protocol logic testable with `#[test]` (no `#[tokio::test]`, no `Python::attach`, no channel setup).
+
+```rust
+// bad — needs a channel + tokio runtime to test
+async fn handle_response(data: ResponseData, tx: &mpsc::Sender<Bytes>) -> Result<()> {
+    let status = StatusCode::from_u16(data.status)?;
+    for chunk in data.chunks { tx.send(chunk).await?; }  // I/O inside logic
+    Ok(())
+}
+
+// good — pure transformation, separately testable
+fn build_response(data: ResponseData) -> Result<OutboundResponse> {
+    let status = StatusCode::from_u16(data.status)?;
+    Ok(OutboundResponse { status, headers: data.headers, body: data.body })
+}
+```
 
 ### Test-first for bugs
 
