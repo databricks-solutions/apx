@@ -127,10 +127,6 @@ pub async fn run_worker(
             .map_err(|e| WorkerError::PythonInit(format!("dispatch pipeline: {e}")))?,
     );
 
-    // Spawn Thread 3 — the response completer relay.
-    let _completer_handle = crate::io::completer::spawn(&pipeline.outbound)
-        .map_err(|e| WorkerError::PythonInit(format!("completer thread: {e}")))?;
-
     // Build WorkerContext with pipeline + WS legacy fields.
     let ctx = {
         let el = &runtime.event_loop;

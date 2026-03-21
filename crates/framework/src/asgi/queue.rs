@@ -10,7 +10,7 @@ use crate::asgi::scope::{
 };
 use crate::asgi::slot_receive::SlotReceive;
 use crate::asgi::slot_send::SlotSend;
-use crate::io::channel::{InboundChannel, OutboundChannel, RequestSlot};
+use crate::io::channel::{InboundChannel, RequestSlot};
 use crate::transport::types::{BodyStream, InboundRequest, TransportKind};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 // ── RequestQueue ─────────────────────────────────────────────────────────
 
-/// Python-visible request queue for the 3-thread dispatch pipeline.
+/// Python-visible request queue for the 2-thread dispatch pipeline.
 ///
 /// Created once per worker, passed to `install_dispatch()` in Python.
 /// `try_recv()` is called from the `_on_readable` callback whenever
@@ -26,7 +26,6 @@ use std::sync::Arc;
 #[pyclass(module = "apx._core")]
 pub struct RequestQueue {
     inbound_rx: crossbeam_channel::Receiver<RequestSlot>,
-    outbound_tx: crossbeam_channel::Sender<crate::io::channel::OutboundSlot>,
     scope_interns: Arc<ScopeInterns>,
     receive_template: Py<PyDict>,
     resolved: Py<ResolvedAwaitable>,
@@ -39,20 +38,18 @@ impl std::fmt::Debug for RequestQueue {
 }
 
 impl RequestQueue {
-    /// Create a new request queue from channel halves and scope interns.
+    /// Create a new request queue from the inbound channel and scope interns.
     ///
     /// Must be called with the GIL held (needs `py` for template construction).
     pub fn new(
         py: Python<'_>,
         inbound: &InboundChannel,
-        outbound: &OutboundChannel,
         scope_interns: Arc<ScopeInterns>,
     ) -> PyResult<Self> {
         let receive_template = build_receive_template(py)?;
         let resolved = Py::new(py, ResolvedAwaitable)?;
         Ok(Self {
             inbound_rx: inbound.receiver().clone(),
-            outbound_tx: outbound.sender().clone(),
             scope_interns,
             receive_template,
             resolved,
@@ -98,11 +95,7 @@ impl RequestQueue {
         let receive = SlotReceive::new(slot.body, self.receive_template.clone_ref(py));
         let receive_obj = Py::new(py, receive)?.into_bound(py).into_any();
 
-        let send = SlotSend::new(
-            slot.response_tx,
-            self.outbound_tx.clone(),
-            self.resolved.clone_ref(py),
-        );
+        let send = SlotSend::new(slot.response_tx, self.resolved.clone_ref(py));
         let send_obj = Py::new(py, send)?.into_bound(py).into_any();
 
         let scope_any = scope.into_bound(py).into_any();

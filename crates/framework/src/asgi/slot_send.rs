@@ -1,12 +1,12 @@
-//! ASGI `send()` callable for the 3-thread dispatch pipeline.
+//! ASGI `send()` callable for the 2-thread dispatch pipeline.
 //!
 //! [`SlotSend`] collects `http.response.start` (status + headers) and on
 //! the first `http.response.body` creates an mpsc channel, builds a
-//! [`ResponseData`] + [`OutboundSlot`], and pushes it to the outbound
-//! crossbeam channel. Subsequent body chunks are pushed via the mpsc
-//! sender. Dropping the sender signals EOF.
+//! [`ResponseData`], and fires the tokio oneshot directly to Thread 1.
+//! Subsequent body chunks are pushed via the mpsc sender. Dropping the
+//! sender signals EOF.
 
-use crate::io::channel::{OutboundSlot, ResponseData};
+use crate::io::channel::ResponseData;
 use bytes::Bytes;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
@@ -17,17 +17,16 @@ use super::scope::ResolvedAwaitable;
 
 // ── SlotSend ─────────────────────────────────────────────────────────────
 
-/// ASGI `send` callable for the 3-thread pipeline.
+/// ASGI `send` callable for the 2-thread pipeline.
 ///
 /// Runs entirely on Thread 2 (Python thread, 100% GIL). On the first
-/// body chunk, creates the response and pushes it to Thread 3 via the
-/// outbound crossbeam channel.
+/// body chunk, creates the response and fires the tokio oneshot directly
+/// to Thread 1.
 #[pyclass(module = "apx._core", freelist = 64)]
 pub struct SlotSend {
     status: Option<u16>,
     raw_headers: Option<Vec<(Bytes, Bytes)>>,
     response_tx: Option<oneshot::Sender<ResponseData>>,
-    outbound_tx: crossbeam_channel::Sender<OutboundSlot>,
     body_tx: Option<mpsc::UnboundedSender<Bytes>>,
     resolved: Py<ResolvedAwaitable>,
 }
@@ -46,14 +45,12 @@ impl SlotSend {
     /// Create a new `SlotSend` for an HTTP request.
     pub(crate) fn new(
         response_tx: oneshot::Sender<ResponseData>,
-        outbound_tx: crossbeam_channel::Sender<OutboundSlot>,
         resolved: Py<ResolvedAwaitable>,
     ) -> Self {
         Self {
             status: None,
             raw_headers: None,
             response_tx: Some(response_tx),
-            outbound_tx,
             body_tx: None,
             resolved,
         }
@@ -79,10 +76,7 @@ impl SlotSend {
                 )],
                 body_rx,
             };
-            let _ = self.outbound_tx.send(OutboundSlot {
-                response,
-                completer: response_tx,
-            });
+            let _ = response_tx.send(response);
         }
     }
 
@@ -176,10 +170,7 @@ impl SlotSend {
         };
 
         if let Some(response_tx) = self.response_tx.take() {
-            let _ = self.outbound_tx.send(OutboundSlot {
-                response,
-                completer: response_tx,
-            });
+            let _ = response_tx.send(response);
         }
 
         Ok(())

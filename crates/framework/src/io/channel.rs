@@ -60,26 +60,6 @@ pub struct ResponseData {
     pub body_rx: mpsc::UnboundedReceiver<Bytes>,
 }
 
-// ── OutboundSlot ─────────────────────────────────────────────────────────
-
-/// Slot pushed into the outbound channel by `SlotSend` on Thread 2.
-///
-/// Thread 3 picks this up and fires the oneshot to wake Thread 1.
-pub struct OutboundSlot {
-    /// The response data (status, headers, body channel).
-    pub response: ResponseData,
-    /// Oneshot sender back to the tokio task on Thread 1.
-    pub completer: oneshot::Sender<ResponseData>,
-}
-
-impl std::fmt::Debug for OutboundSlot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OutboundSlot")
-            .field("status", &self.response.status)
-            .finish_non_exhaustive()
-    }
-}
-
 // ── Wakeup ───────────────────────────────────────────────────────────────
 
 /// Cross-platform wakeup signal for the asyncio thread.
@@ -165,42 +145,16 @@ impl InboundChannel {
     }
 }
 
-// ── OutboundChannel ──────────────────────────────────────────────────────
-
-/// Thread 2 → Thread 3 response channel.
-#[derive(Debug)]
-pub struct OutboundChannel {
-    tx: crossbeam_channel::Sender<OutboundSlot>,
-    rx: crossbeam_channel::Receiver<OutboundSlot>,
-}
-
-impl OutboundChannel {
-    /// Create a new unbounded outbound channel.
-    pub fn new() -> Self {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        Self { tx, rx }
-    }
-
-    /// Sender half — used by `SlotSend` on Thread 2.
-    pub fn sender(&self) -> &crossbeam_channel::Sender<OutboundSlot> {
-        &self.tx
-    }
-
-    /// Receiver half — used by the completer loop on Thread 3.
-    pub fn receiver(&self) -> &crossbeam_channel::Receiver<OutboundSlot> {
-        &self.rx
-    }
-}
-
 // ── DispatchPipeline ─────────────────────────────────────────────────────
 
-/// Bundles both channels + wakeup. Created once per worker.
+/// Bundles the inbound channel + wakeup. Created once per worker.
+///
+/// Responses flow directly from `SlotSend` to Thread 1 via tokio oneshot —
+/// no outbound channel or relay thread needed.
 #[derive(Debug)]
 pub struct DispatchPipeline {
     /// Thread 1 → Thread 2 request channel.
     pub inbound: InboundChannel,
-    /// Thread 2 → Thread 3 response channel.
-    pub outbound: OutboundChannel,
     /// Wakeup signal for the asyncio thread.
     pub wakeup: Arc<Wakeup>,
 }
@@ -214,7 +168,6 @@ impl DispatchPipeline {
     pub fn new() -> io::Result<Self> {
         Ok(Self {
             inbound: InboundChannel::new(),
-            outbound: OutboundChannel::new(),
             wakeup: Arc::new(Wakeup::new()?),
         })
     }
@@ -255,24 +208,6 @@ mod tests {
         ch.sender().send(slot).unwrap();
         let received = ch.receiver().try_recv().unwrap();
         assert_eq!(received.path, "/test");
-    }
-
-    #[test]
-    fn outbound_channel_send_recv() {
-        let ch = OutboundChannel::new();
-        let (_body_tx, body_rx) = mpsc::unbounded_channel();
-        let (completer, _completer_rx) = oneshot::channel();
-        let slot = OutboundSlot {
-            response: ResponseData {
-                status: 200,
-                headers: vec![],
-                body_rx,
-            },
-            completer,
-        };
-        ch.sender().send(slot).unwrap();
-        let received = ch.receiver().try_recv().unwrap();
-        assert_eq!(received.response.status, 200);
     }
 
     #[test]

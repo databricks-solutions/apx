@@ -5,7 +5,6 @@
 //! `call_soon_threadsafe(create_task, coro)`.
 
 pub mod channel;
-pub mod completer;
 pub mod reactor;
 
 use pyo3::prelude::*;
