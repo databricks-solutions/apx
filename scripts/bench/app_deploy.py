@@ -341,6 +341,7 @@ def upload_apx_app(ws: WorkspaceClient) -> str:
     # Wipe the remote directory so stale files (old wheels, etc.) don't linger.
     try:
         ws.workspace.delete(upload_path, recursive=True)
+        time.sleep(1)
     except Exception as exc:
         console.print(f"[dim]  directory did not exist, skipping wipe.[/]")
         console.print(f"[dim] Original error: {exc}[/]")
