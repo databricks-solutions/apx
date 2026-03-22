@@ -10,12 +10,12 @@
 //!     ...
 //! ```
 
-use opentelemetry::trace::{
-    SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState, Tracer,
-};
+use opentelemetry::trace::{SpanContext, TraceContextExt, Tracer};
 use opentelemetry::{Context, trace::Span};
 use pyo3::prelude::*;
 use std::collections::HashMap;
+
+use super::context::SerializedContext;
 
 /// OTEL span status code exposed as a Python enum.
 #[pyclass(module = "apx._core", eq, eq_int, from_py_object)]
@@ -84,7 +84,7 @@ impl SpanHandle {
         let parent_cx = resolve_parent_context(py);
 
         // Save current context var value so we can restore it in __exit__.
-        slf.saved_parent = read_context_var_raw(py);
+        slf.saved_parent = super::context::read_context_var_raw(py);
 
         let tracer = opentelemetry::global::tracer("apx.user");
         let mut span = tracer
@@ -260,64 +260,17 @@ fn format_traceback(tb: &Bound<'_, PyAny>) -> PyResult<String> {
 
 // ── Serialized trace context ──────────────────────────────────────────
 
-/// Hex-encoded trace context as stored in the Python `ContextVar`.
-#[derive(Debug, Clone)]
-struct SerializedContext {
-    trace_id_hex: String,
-    span_id_hex: String,
-    flags: u8,
-}
-
 /// Invalid/empty trace context written to the ContextVar when no parent exists.
 const EMPTY_TRACE_ID_HEX: &str = "00000000000000000000000000000000";
 const EMPTY_SPAN_ID_HEX: &str = "0000000000000000";
 
 // ── Context var helpers ─────────────────────────────────────────────────
 
-/// Read the serialized context from the Python ContextVar.
-fn read_context_var_raw(py: Python<'_>) -> Option<SerializedContext> {
-    let cv = super::context::context_var()?;
-    let val = cv.call_method0(py, c"get").ok()?;
-    let (trace_id_hex, span_id_hex, flags) = val.extract::<(String, String, u8)>(py).ok()?;
-    Some(SerializedContext {
-        trace_id_hex,
-        span_id_hex,
-        flags,
-    })
-}
-
 /// Build an OTEL `Context` from the Python ContextVar.
 fn resolve_parent_context(py: Python<'_>) -> Context {
-    read_context_var_raw(py)
-        .as_ref()
-        .and_then(parse_span_context)
+    super::context::read_python_span_context(py)
         .map(|sc| Context::new().with_remote_span_context(sc))
         .unwrap_or_default()
-}
-
-/// Parse hex-encoded trace/span IDs into an OTEL `SpanContext`.
-///
-/// Returns `None` for any malformed or invalid (all-zeros) identifiers.
-/// Invalid contexts must not be attached — in opentelemetry 0.29,
-/// `with_remote_span_context` marks the context as active, so an invalid
-/// one with `flags=0` would cause `ParentBased` to drop all child spans.
-fn parse_span_context(raw: &SerializedContext) -> Option<SpanContext> {
-    let tid: [u8; 16] = hex::decode(&raw.trace_id_hex).ok()?.try_into().ok()?;
-    let sid: [u8; 8] = hex::decode(&raw.span_id_hex).ok()?.try_into().ok()?;
-
-    let trace_id = TraceId::from_bytes(tid);
-    let span_id = SpanId::from_bytes(sid);
-    if trace_id == TraceId::INVALID || span_id == SpanId::INVALID {
-        return None;
-    }
-
-    Some(SpanContext::new(
-        trace_id,
-        span_id,
-        TraceFlags::new(raw.flags),
-        true,
-        TraceState::default(),
-    ))
 }
 
 /// Write a `SpanContext` into the Python ContextVar.

@@ -69,14 +69,8 @@ where
                 writeln!(writer, "{timestamp} |  apx | {channel} | {message}")
             }
         } else {
-            use tracing_subscriber::fmt::time::FormatTime;
-            use tracing_subscriber::fmt::time::SystemTime;
-
-            let timer = SystemTime;
-            timer.format_time(&mut writer)?;
-
             let level = event.metadata().level();
-            write!(writer, " {level:>5} ")?;
+            write!(writer, "{level:>5} ")?;
 
             if let Some(id) = worker_id() {
                 write!(writer, "[worker-{id}] ")?;

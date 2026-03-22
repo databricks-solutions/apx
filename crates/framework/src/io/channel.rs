@@ -40,6 +40,8 @@ pub struct RequestSlot {
     pub client_addr: Option<SocketAddr>,
     /// Server socket address.
     pub server_addr: SocketAddr,
+    /// Trace context extracted from the active OTEL span on the tokio thread.
+    pub trace_context: Option<crate::telemetry::context::TraceContext>,
     /// Thread 1 awaits this for the response.
     pub response_tx: oneshot::Sender<ResponseData>,
 }
@@ -203,6 +205,7 @@ mod tests {
             protocol: ProtocolVersion::Http11,
             client_addr: None,
             server_addr: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            trace_context: None,
             response_tx,
         };
         ch.sender().send(slot).unwrap();
@@ -236,6 +239,7 @@ mod tests {
             protocol: ProtocolVersion::Http11,
             client_addr: Some(SocketAddr::from(([10, 0, 0, 1], 5000))),
             server_addr: SocketAddr::from(([0, 0, 0, 0], 8000)),
+            trace_context: None,
             response_tx,
         };
         let dbg = format!("{slot:?}");

@@ -19,6 +19,7 @@ use hyper::server::conn::http1;
 use hyper::service::Service;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
+use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -27,6 +28,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::OwnedSemaphorePermit;
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -142,90 +145,187 @@ impl Service<Request<Incoming>> for ApxService {
     }
 }
 
+// ── Trace context ────────────────────────────────────────────────────────
+
+/// Parse `x-request-id` UUID into an OTEL `TraceId`.
+///
+/// Databricks Apps always sends a UUID v4 (128 bits = OTEL TraceId size).
+/// For locally-generated UUIDs the same mapping applies.
+fn parse_request_id_as_trace_id(headers: &HeaderMap) -> Option<TraceId> {
+    let val = headers.get(&REQUEST_ID_HEADER)?.to_str().ok()?;
+    let uuid = uuid::Uuid::parse_str(val).ok()?;
+    Some(TraceId::from_bytes(*uuid.as_bytes()))
+}
+
+/// Build a `tracing` span for an HTTP request with OTEL semantic conventions.
+///
+/// If the `x-request-id` header contains a valid UUID, the span's trace_id
+/// is set to match so all downstream spans share the Databricks correlation ID.
+fn build_request_span(
+    headers: &HeaderMap,
+    method: &str,
+    scheme: &str,
+    path: &str,
+) -> tracing::Span {
+    let request_id = headers
+        .get(&REQUEST_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let span = tracing::info_span!(
+        "http.server.request",
+        otel.kind = "server",
+        http.request.method = method,
+        url.scheme = scheme,
+        url.path = path,
+        request.id = request_id,
+        http.response.status_code = tracing::field::Empty,
+    );
+
+    if let Some(tid) = parse_request_id_as_trace_id(headers) {
+        let parent_span_id = SpanId::from_bytes(
+            uuid::Uuid::new_v4().as_bytes()[..8]
+                .try_into()
+                .unwrap_or([0; 8]),
+        );
+        let parent_sc = SpanContext::new(
+            tid,
+            parent_span_id,
+            TraceFlags::SAMPLED,
+            true,
+            TraceState::default(),
+        );
+        let parent_cx = opentelemetry::Context::new().with_remote_span_context(parent_sc);
+        span.set_parent(parent_cx);
+    }
+
+    span
+}
+
 // ── Request pipeline ─────────────────────────────────────────────────────
 
 impl ApxService {
     /// Main request handler — orchestrates probe check, semaphore, timeout, dispatch.
     async fn handle(self, req: Request<Incoming>) -> Response<ResponseBody> {
         let method = req.method().as_str().to_owned();
-        let scheme = "http"; // TODO: detect TLS in future
+        let scheme = "http";
 
-        // Health probe short-circuit.
+        // Health probe short-circuit — no span needed.
         if let Some(probe_resp) = probe_response(req.uri().path()) {
             return probe_resp;
         }
 
-        let _active = ActiveRequestGuard::enter(&method, scheme);
-        let start = std::time::Instant::now();
-
-        // Concurrency limit.
-        let Ok(permit) = Arc::clone(&self.semaphore).try_acquire_owned() else {
-            let resp = error_response(hyper::StatusCode::SERVICE_UNAVAILABLE, "service overloaded");
-            let elapsed = start.elapsed().as_secs_f64();
-            http::record_duration(elapsed, &method, scheme, 503, "", Some("503"));
-            return resp;
-        };
-
         // WebSocket upgrade — must happen before consuming the request body.
         if websocket::is_websocket_upgrade(&req) {
-            let path = req.uri().path().to_owned();
-            let response = self
-                .dispatch
-                .dispatch_ws(req, self.server_addr, self.client_addr)
-                .await;
-            let status = response.status().as_u16();
-            let elapsed = start.elapsed().as_secs_f64();
-            http::record_duration(elapsed, &method, scheme, status, &path, None);
-            drop(permit);
-            return response;
+            return self.handle_ws(req, &method, scheme).await;
         }
 
         let path = req.uri().path().to_owned();
         let inbound = inbound_from_hyper(req, path.clone(), self.server_addr, self.client_addr);
+        let span = build_request_span(&inbound.headers, &method, scheme, &path);
 
-        // Timeout-wrapped dispatch.
-        let result = tokio::time::timeout(self.timeout, self.dispatch.dispatch(inbound)).await;
+        self.handle_http(inbound, method, scheme, path, span).await
+    }
 
-        let (response, server_route) = match result {
-            Ok(mut outbound) => {
-                let route = outbound.server_route.take();
-                if let ResponseBody::Stream(stream) = outbound.body {
-                    outbound.body = ResponseBody::Stream(Box::pin(PermitGuardedStream {
-                        inner: stream,
-                        _permit: permit,
-                    }));
-                } else {
-                    drop(permit);
-                }
-                (outbound_to_hyper(outbound), route)
-            }
-            Err(_elapsed) => {
-                drop(permit);
-                (
-                    error_response(hyper::StatusCode::REQUEST_TIMEOUT, "request timeout"),
-                    None,
-                )
-            }
-        };
-
-        let route = server_route.as_deref().unwrap_or(&path);
+    /// WebSocket upgrade path — no OTEL span (short-lived handshake).
+    async fn handle_ws(
+        self,
+        req: Request<Incoming>,
+        method: &str,
+        scheme: &str,
+    ) -> Response<ResponseBody> {
+        let path = req.uri().path().to_owned();
+        let start = std::time::Instant::now();
+        let response = self
+            .dispatch
+            .dispatch_ws(req, self.server_addr, self.client_addr)
+            .await;
         let status = response.status().as_u16();
-        let elapsed = start.elapsed().as_secs_f64();
-        let error_type = if status >= 400 {
-            Some(status.to_string())
-        } else {
-            None
-        };
         http::record_duration(
-            elapsed,
-            &method,
+            start.elapsed().as_secs_f64(),
+            method,
             scheme,
             status,
-            route,
-            error_type.as_deref(),
+            &path,
+            None,
         );
-
         response
+    }
+
+    /// HTTP dispatch path — wrapped in an OTEL span.
+    async fn handle_http(
+        self,
+        inbound: InboundRequest,
+        method: String,
+        scheme: &str,
+        path: String,
+        span: tracing::Span,
+    ) -> Response<ResponseBody> {
+        async {
+            let _active = ActiveRequestGuard::enter(&method, scheme);
+            let start = std::time::Instant::now();
+
+            let Ok(permit) = Arc::clone(&self.semaphore).try_acquire_owned() else {
+                let resp =
+                    error_response(hyper::StatusCode::SERVICE_UNAVAILABLE, "service overloaded");
+                http::record_duration(
+                    start.elapsed().as_secs_f64(),
+                    &method,
+                    scheme,
+                    503,
+                    "",
+                    Some("503"),
+                );
+                return resp;
+            };
+
+            let result = tokio::time::timeout(self.timeout, self.dispatch.dispatch(inbound)).await;
+
+            let (response, server_route) = match result {
+                Ok(mut outbound) => {
+                    let route = outbound.server_route.take();
+                    if let ResponseBody::Stream(stream) = outbound.body {
+                        outbound.body = ResponseBody::Stream(Box::pin(PermitGuardedStream {
+                            inner: stream,
+                            _permit: permit,
+                        }));
+                    } else {
+                        drop(permit);
+                    }
+                    (outbound_to_hyper(outbound), route)
+                }
+                Err(_elapsed) => {
+                    drop(permit);
+                    (
+                        error_response(hyper::StatusCode::REQUEST_TIMEOUT, "request timeout"),
+                        None,
+                    )
+                }
+            };
+
+            let route = server_route.as_deref().unwrap_or(&path);
+            let status = response.status().as_u16();
+            let elapsed = start.elapsed().as_secs_f64();
+            let error_type = if status >= 400 {
+                Some(status.to_string())
+            } else {
+                None
+            };
+
+            tracing::Span::current().record("http.response.status_code", status);
+            http::record_duration(
+                elapsed,
+                &method,
+                scheme,
+                status,
+                route,
+                error_type.as_deref(),
+            );
+
+            response
+        }
+        .instrument(span)
+        .await
     }
 }
 

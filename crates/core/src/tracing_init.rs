@@ -43,6 +43,11 @@ pub fn meter_provider() -> Option<&'static opentelemetry_sdk::metrics::SdkMeterP
     METER_PROVIDER.get()
 }
 
+/// Access the global logger provider (if OTEL is enabled).
+pub fn logger_provider() -> Option<&'static opentelemetry_sdk::logs::SdkLoggerProvider> {
+    LOGGER_PROVIDER.get()
+}
+
 /// Initialize the tracing subscriber with optional OTLP export.
 ///
 /// OTEL is enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` is set and
@@ -156,6 +161,12 @@ fn histogram_bucket_view(
     )
 }
 
+/// Format resource attributes as `{key=value, ...}` for human-readable log output.
+fn format_resource_attrs(resource: &Resource) -> String {
+    let pairs: Vec<String> = resource.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    format!("{{{}}}", pairs.join(", "))
+}
+
 /// Build the OTEL resource from `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
 /// and the optional `APX_APP_DIR`.
 fn build_resource(app_dir: Option<&str>) -> Resource {
@@ -217,8 +228,7 @@ fn init_tracing_with_otel(
     use opentelemetry_otlp::WithExportConfig;
 
     let resource = build_resource(app_dir);
-    let resource_clone = resource.clone();
-    let resource_attrs: Vec<_> = resource_clone.iter().collect();
+    let resource_display = format_resource_attrs(&resource);
 
     let registry = tracing_subscriber::registry();
 
@@ -299,7 +309,7 @@ fn init_tracing_with_otel(
             target: "apx::telemetry",
             endpoint,
             filter,
-            resource = ?resource_attrs,
+            resource = %resource_display,
             "OTLP pipeline active: traces + metrics + logs (10s metric interval)"
         );
     }

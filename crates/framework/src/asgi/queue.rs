@@ -83,6 +83,10 @@ impl RequestQueue {
         py: Python<'py>,
         slot: RequestSlot,
     ) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
+        if let Some(ref ctx) = slot.trace_context {
+            crate::telemetry::context::set_python_context(py, ctx)?;
+        }
+
         let request = slot_to_inbound_request(&slot);
         let scope = scope_from_template(
             py,

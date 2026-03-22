@@ -144,6 +144,8 @@ async fn dispatch_inner(
         tracing::Span::current().record("request.id", val);
     }
 
+    let trace_context = crate::telemetry::context::extract_trace_context();
+
     let t_total = Instant::now();
 
     let t0 = Instant::now();
@@ -166,6 +168,7 @@ async fn dispatch_inner(
         protocol: request.protocol,
         client_addr: request.client_addr,
         server_addr: request.server_addr,
+        trace_context,
         response_tx,
     };
 

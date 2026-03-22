@@ -313,12 +313,14 @@ fn counter_with_labels() {
 fn emit_log_does_not_panic() {
     // _emit_log writes into the tracing subscriber. We verify it does not
     // panic at any severity level.
-    crate::telemetry::logging::emit_log(50, "critical".to_owned(), "test".to_owned());
-    crate::telemetry::logging::emit_log(40, "error".to_owned(), "test".to_owned());
-    crate::telemetry::logging::emit_log(30, "warning".to_owned(), "test".to_owned());
-    crate::telemetry::logging::emit_log(20, "info".to_owned(), "test".to_owned());
-    crate::telemetry::logging::emit_log(10, "debug".to_owned(), "test".to_owned());
-    crate::telemetry::logging::emit_log(5, "trace".to_owned(), "test".to_owned());
+    with_py(|py| {
+        crate::telemetry::logging::emit_log(py, 50, "critical".to_owned(), "test".to_owned());
+        crate::telemetry::logging::emit_log(py, 40, "error".to_owned(), "test".to_owned());
+        crate::telemetry::logging::emit_log(py, 30, "warning".to_owned(), "test".to_owned());
+        crate::telemetry::logging::emit_log(py, 20, "info".to_owned(), "test".to_owned());
+        crate::telemetry::logging::emit_log(py, 10, "debug".to_owned(), "test".to_owned());
+        crate::telemetry::logging::emit_log(py, 5, "trace".to_owned(), "test".to_owned());
+    });
 }
 
 // ── Context propagation test ────────────────────────────────────────────
