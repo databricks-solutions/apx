@@ -164,10 +164,10 @@ class TestInstrumentationModels:
         """Configuration parses typed dicts via the discriminated union."""
         config = Configuration(
             instrumentations=[
-                {"type": "http", "enabled": False},
-                {"type": "system", "metrics": {"swap": True}},
-                {"type": "process", "metrics": {"threads": True}},
-                {"type": "apx", "metrics": {"dispatch_total": True}},
+                HttpInstrumentation(enabled=False),
+                SystemInstrumentation(metrics=SystemMetrics(swap=True)),
+                ProcessInstrumentation(metrics=ProcessMetrics(threads=True)),
+                ApxInstrumentation(metrics=ApxMetrics(dispatch_total=True)),
             ]
         )
         types = [i.type for i in config.instrumentations]
