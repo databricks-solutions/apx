@@ -156,6 +156,20 @@ pub async fn run_worker(
             .map_err(|e| WorkerError::PythonInit(format!("telemetry config: {e}")))
     })?;
 
+    // Relay system + process config to supervisor (worker 0 only).
+    if bootstrap.relay_telemetry {
+        let relay = super::ipc::protocol::TelemetryRelay {
+            system: telemetry_config.system,
+            process: telemetry_config.process,
+        };
+        runtime
+            .channel
+            .send(&IpcMessage::TelemetryConfig(relay))
+            .await
+            .map_err(WorkerError::from)?;
+        tracing::debug!(target: "apx::telemetry", "relayed telemetry config to supervisor");
+    }
+
     // Initialize per-worker metric toggles from Python config.
     crate::telemetry::http::init(telemetry_config.http.metrics);
     crate::telemetry::dispatch_metrics::init(telemetry_config.apx.metrics);

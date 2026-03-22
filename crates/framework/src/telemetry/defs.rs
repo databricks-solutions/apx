@@ -161,3 +161,104 @@ pub const ASGI_SEND_PARSE: MetricDef = MetricDef {
     description: "Time to parse the ASGI send event dict from the Python handler",
     unit: "us",
 };
+
+// ── Catalog ──────────────────────────────────────────────────────────────
+
+/// A metric definition with additional classification metadata.
+#[derive(Debug, Clone, Copy)]
+pub struct MetricCatalogEntry {
+    /// The core metric definition (name, description, unit).
+    pub def: MetricDef,
+    /// Logical group: `"system"`, `"process"`, `"http"`, or `"apx"`.
+    pub group: &'static str,
+    /// Collection scope: `"supervisor"`, `"worker"`, or `"both"`.
+    pub scope: &'static str,
+}
+
+/// Complete catalog of all framework-defined metrics.
+pub static ALL_METRICS: &[MetricCatalogEntry] = &[
+    // System-global (supervisor only)
+    MetricCatalogEntry {
+        def: SYSTEM_CPU,
+        group: "system",
+        scope: "supervisor",
+    },
+    MetricCatalogEntry {
+        def: SYSTEM_MEMORY,
+        group: "system",
+        scope: "supervisor",
+    },
+    MetricCatalogEntry {
+        def: SYSTEM_SWAP,
+        group: "system",
+        scope: "supervisor",
+    },
+    MetricCatalogEntry {
+        def: SYSTEM_DISK_IO,
+        group: "system",
+        scope: "supervisor",
+    },
+    MetricCatalogEntry {
+        def: SYSTEM_NETWORK_IO,
+        group: "system",
+        scope: "supervisor",
+    },
+    // Process (both supervisor and workers)
+    MetricCatalogEntry {
+        def: PROCESS_CPU,
+        group: "process",
+        scope: "both",
+    },
+    MetricCatalogEntry {
+        def: PROCESS_MEMORY,
+        group: "process",
+        scope: "both",
+    },
+    MetricCatalogEntry {
+        def: PROCESS_THREADS,
+        group: "process",
+        scope: "both",
+    },
+    // HTTP (per-worker)
+    MetricCatalogEntry {
+        def: HTTP_REQUEST_DURATION,
+        group: "http",
+        scope: "worker",
+    },
+    MetricCatalogEntry {
+        def: HTTP_ACTIVE_REQUESTS,
+        group: "http",
+        scope: "worker",
+    },
+    // APX dispatch (per-worker)
+    MetricCatalogEntry {
+        def: DISPATCH_BODY_COLLECT,
+        group: "apx",
+        scope: "worker",
+    },
+    MetricCatalogEntry {
+        def: DISPATCH_CROSSBEAM_SEND,
+        group: "apx",
+        scope: "worker",
+    },
+    MetricCatalogEntry {
+        def: DISPATCH_RESPONSE_WAIT,
+        group: "apx",
+        scope: "worker",
+    },
+    MetricCatalogEntry {
+        def: DISPATCH_TOTAL,
+        group: "apx",
+        scope: "worker",
+    },
+    MetricCatalogEntry {
+        def: ASGI_RECEIVE_BUILD,
+        group: "apx",
+        scope: "worker",
+    },
+    MetricCatalogEntry {
+        def: ASGI_SEND_PARSE,
+        group: "apx",
+        scope: "worker",
+    },
+];

@@ -192,11 +192,28 @@ pub enum IpcMessage {
     /// Worker → Supervisor: worker is ready to accept HTTP traffic.
     Ready,
 
+    /// Worker → Supervisor: telemetry config read from Python for supervisor relay.
+    TelemetryConfig(TelemetryRelay),
+
     /// Supervisor → Worker: stop accepting, finish in-flight requests.
     Drain,
 
     /// Worker → Supervisor: drain complete, about to exit.
     Drained,
+}
+
+/// Telemetry config relayed from a worker to the supervisor.
+///
+/// The first worker (worker 0) sends this after loading the Python app
+/// and reading the telemetry configuration. The supervisor uses it to
+/// start system-global and supervisor process metrics with user toggles
+/// instead of Rust defaults.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TelemetryRelay {
+    /// System-global metrics configuration (supervisor only).
+    pub system: crate::telemetry::config::SystemConfig,
+    /// Per-process metrics configuration (supervisor's own process).
+    pub process: crate::telemetry::config::ProcessConfig,
 }
 
 /// Bootstrap config sent to the worker over the IPC channel.
@@ -222,6 +239,9 @@ pub struct WorkerBootstrap {
     /// Workers install the corresponding policy before creating the event loop.
     #[serde(default = "default_loop_policy")]
     pub loop_policy: String,
+    /// If true, the worker sends a `TelemetryConfig` message after app load.
+    #[serde(default)]
+    pub relay_telemetry: bool,
 }
 
 // ── Bootstrap errors ────────────────────────────────────────────────────
@@ -306,6 +326,7 @@ mod tests {
             max_concurrent: None,
             nonce: Nonce::generate(),
             loop_policy: "uvloop".to_owned(),
+            relay_telemetry: false,
         };
         let msg = IpcMessage::Bootstrap(bootstrap);
         let encoded = rmp_serde::to_vec(&msg)
@@ -420,6 +441,7 @@ mod tests {
             max_concurrent: None,
             nonce: Nonce::from_string("abc123".to_owned()),
             loop_policy: "uvloop".to_owned(),
+            relay_telemetry: false,
         };
         let encoded = rmp_serde::to_vec(&bootstrap).unwrap();
         let decoded: WorkerBootstrap = rmp_serde::from_slice(&encoded).unwrap();
@@ -428,7 +450,6 @@ mod tests {
 
     #[test]
     fn worker_bootstrap_serde_default_loop_policy() {
-        // Simulate decoding a message without loop_policy (backward compat).
         let bootstrap = WorkerBootstrap {
             host: "0.0.0.0".to_owned(),
             port: 8000,
@@ -437,7 +458,69 @@ mod tests {
             max_concurrent: None,
             nonce: Nonce::from_string("abc123".to_owned()),
             loop_policy: default_loop_policy(),
+            relay_telemetry: false,
         };
         assert_eq!(bootstrap.loop_policy, "uvloop");
+    }
+
+    #[test]
+    fn worker_bootstrap_relay_telemetry_roundtrip() {
+        let bootstrap = WorkerBootstrap {
+            host: "0.0.0.0".to_owned(),
+            port: 8000,
+            app_module: AppModule::new("backend.app").unwrap(),
+            request_timeout_secs: 30,
+            max_concurrent: None,
+            nonce: Nonce::from_string("abc123".to_owned()),
+            loop_policy: "uvloop".to_owned(),
+            relay_telemetry: true,
+        };
+        let encoded = rmp_serde::to_vec(&bootstrap).unwrap();
+        let decoded: WorkerBootstrap = rmp_serde::from_slice(&encoded).unwrap();
+        assert!(decoded.relay_telemetry);
+    }
+
+    #[test]
+    fn ipc_message_telemetry_config_roundtrip() {
+        use crate::telemetry::config::{
+            ProcessConfig, ProcessMetricToggles, SystemConfig, SystemGlobalToggles,
+        };
+
+        let relay = TelemetryRelay {
+            system: SystemConfig {
+                enabled: true,
+                interval_secs: 10.0,
+                metrics: SystemGlobalToggles {
+                    system_cpu: true,
+                    system_memory: false,
+                    system_swap: true,
+                    system_disk_io: false,
+                    system_network_io: true,
+                },
+            },
+            process: ProcessConfig {
+                enabled: false,
+                interval_secs: 5.0,
+                metrics: ProcessMetricToggles {
+                    process_cpu: false,
+                    process_memory: true,
+                    process_threads: false,
+                },
+            },
+        };
+        let msg = IpcMessage::TelemetryConfig(relay);
+        let encoded = rmp_serde::to_vec(&msg).unwrap();
+        let decoded: IpcMessage = rmp_serde::from_slice(&encoded).unwrap();
+        match decoded {
+            IpcMessage::TelemetryConfig(r) => {
+                assert!(r.system.enabled);
+                assert!((r.system.interval_secs - 10.0).abs() < f64::EPSILON);
+                assert!(r.system.metrics.system_cpu);
+                assert!(!r.system.metrics.system_memory);
+                assert!(!r.process.enabled);
+                assert!(r.process.metrics.process_memory);
+            }
+            other => unreachable!("expected TelemetryConfig, got {other:?}"),
+        }
     }
 }

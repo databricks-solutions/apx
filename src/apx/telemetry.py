@@ -38,6 +38,7 @@ from typing import Annotated, Any, Callable, ClassVar, Literal, TypeVar, Union
 from pydantic import BaseModel, Discriminator, Field, Tag
 
 from apx._core import (
+    PyMetricDefinition as MetricDefinition,
     RustCounter,
     RustGauge,
     RustHistogram,
@@ -46,6 +47,7 @@ from apx._core import (
     create_counter as _create_counter,
     create_gauge as _create_gauge,
     create_histogram as _create_histogram,
+    metric_catalog,
 )
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -87,6 +89,8 @@ __all__ = [
     "ApxMetrics",
     "CaptureHeaders",
     "Instrumentation",
+    "MetricDefinition",
+    "metric_catalog",
 ]
 
 
@@ -431,10 +435,8 @@ class SystemInstrumentation(BaseModel):
     to the machine and identical regardless of which process reads them,
     so a single collection task on the supervisor avoids redundant work.
 
-    Note: the supervisor uses Rust-side defaults for these toggles
-    and does not read this Python config (no Python interpreter in
-    the supervisor process). This model is provided so the config
-    schema is self-documenting and for future IPC-based relay.
+    The first worker relays this configuration to the supervisor via IPC
+    after loading the Python app, so user overrides are honoured.
     """
 
     type: Literal["system"] = "system"
@@ -446,10 +448,10 @@ class SystemInstrumentation(BaseModel):
 class ProcessInstrumentation(BaseModel):
     """Per-process metrics instrumentation (CPU, RSS, threads).
 
-    Collected per-worker. Each worker spawns a background task that
-    periodically reads its own process stats via ``sysinfo`` and
-    reports them as OTEL gauges. The supervisor also collects its
-    own process metrics independently (using Rust defaults).
+    Collected per-worker and on the supervisor. Each process spawns a
+    background task that periodically reads its own stats via ``sysinfo``
+    and reports them as OTEL gauges. The first worker relays this
+    configuration to the supervisor via IPC so user overrides are honoured.
 
     Attribution: OTEL Resource carries ``apx.worker.id`` for workers
     and ``apx.role=supervisor`` for the supervisor process.
@@ -548,6 +550,7 @@ def _effective_instrumentations() -> list[Instrumentation]:
     return result
 
 
+# note - unused in python but called from rust
 def _get_config() -> dict[str, Any]:
     """Serialize the effective config (defaults + overrides) for Rust."""
     effective = _effective_instrumentations()

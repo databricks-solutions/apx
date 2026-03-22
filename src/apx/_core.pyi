@@ -107,3 +107,14 @@ def create_histogram(
 ) -> RustHistogram: ...
 def create_gauge(name: str, description: str = "", unit: str = "") -> RustGauge: ...
 def _emit_log(level: int, message: str, logger_name: str) -> None: ...
+
+class PyMetricDefinition:
+    """A framework metric definition."""
+
+    name: str
+    description: str
+    unit: str
+    group: str
+    scope: str
+
+def metric_catalog() -> list[PyMetricDefinition]: ...

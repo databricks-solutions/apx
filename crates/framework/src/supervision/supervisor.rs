@@ -126,17 +126,50 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
 
     let mut workers = Vec::with_capacity(config.workers);
     for i in 0..config.workers {
-        let worker = spawn_worker(i, &config, &nonce, socket_dir.path()).await?;
+        let relay = i == 0;
+        let worker = spawn_worker(i, &config, &nonce, socket_dir.path(), relay).await?;
         workers.push(worker);
     }
 
-    // System-global metrics + supervisor's own process metrics (Rust defaults).
-    let _system_metrics_handle = crate::telemetry::system_metrics::spawn_system_metrics(
-        &crate::telemetry::config::default_system_config(),
-    );
-    let _supervisor_process_handle = crate::telemetry::process_metrics::spawn_process_metrics(
-        &crate::telemetry::config::default_process_config(),
-    );
+    // Wait for telemetry config relay from worker 0.
+    let (system_config, process_config) =
+        match tokio::time::timeout(WORKER_READINESS_TIMEOUT, workers[0].channel.recv()).await {
+            Ok(Ok(IpcMessage::TelemetryConfig(relay))) => {
+                tracing::info!("received telemetry config relay from worker 0");
+                (relay.system, relay.process)
+            }
+            Ok(Ok(other)) => {
+                tracing::warn!(
+                    ?other,
+                    "expected TelemetryConfig from worker 0, falling back to defaults"
+                );
+                (
+                    crate::telemetry::config::default_system_config(),
+                    crate::telemetry::config::default_process_config(),
+                )
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(%e, "IPC error reading telemetry config, falling back to defaults");
+                (
+                    crate::telemetry::config::default_system_config(),
+                    crate::telemetry::config::default_process_config(),
+                )
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "timeout waiting for telemetry config relay, falling back to defaults"
+                );
+                (
+                    crate::telemetry::config::default_system_config(),
+                    crate::telemetry::config::default_process_config(),
+                )
+            }
+        };
+
+    let _system_metrics_handle =
+        crate::telemetry::system_metrics::spawn_system_metrics(&system_config);
+    let _supervisor_process_handle =
+        crate::telemetry::process_metrics::spawn_process_metrics(&process_config);
 
     // Run monitor and shutdown signal in parallel.
     // Monitor returns on AllWorkersCrashed; shutdown signal returns on SIGTERM/SIGINT.
@@ -211,6 +244,7 @@ async fn spawn_worker(
     config: &SupervisorConfig,
     nonce: &Nonce,
     socket_dir: &std::path::Path,
+    relay_telemetry: bool,
 ) -> Result<WorkerHandle, SupervisorError> {
     let sock_path = socket_dir.join(format!("worker-{index}.sock"));
     let sock_str = sock_path
@@ -283,6 +317,7 @@ async fn spawn_worker(
         max_concurrent: config.max_concurrent,
         nonce: nonce.clone(),
         loop_policy: config.loop_policy.clone(),
+        relay_telemetry,
     };
 
     channel
@@ -365,7 +400,7 @@ async fn monitor_workers(
             "restarting worker"
         );
 
-        match spawn_worker(exited_index, config, nonce, socket_dir).await {
+        match spawn_worker(exited_index, config, nonce, socket_dir, false).await {
             Ok(new_handle) => {
                 let restart_count = handle.restart_count;
                 workers[exited_index] = new_handle;

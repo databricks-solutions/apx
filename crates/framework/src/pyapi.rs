@@ -38,6 +38,11 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         crate::telemetry::logging::emit_log,
         m
     )?)?;
+    m.add_class::<crate::telemetry::metrics::PyMetricDefinition>()?;
+    m.add_function(pyo3::wrap_pyfunction!(
+        crate::telemetry::metrics::metric_catalog,
+        m
+    )?)?;
 
     Ok(())
 }

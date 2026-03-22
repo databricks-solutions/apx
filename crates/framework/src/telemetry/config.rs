@@ -7,6 +7,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use serde::{Deserialize, Serialize};
 
 // ── Domain types ─────────────────────────────────────────────────────────
 
@@ -24,7 +25,7 @@ pub struct TelemetryConfig {
 }
 
 /// System-global metrics instrumentation configuration (supervisor only).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct SystemConfig {
     /// Whether system metrics collection is enabled.
     pub enabled: bool,
@@ -37,7 +38,7 @@ pub struct SystemConfig {
 /// Per-metric boolean toggles for system-global instrumentation.
 ///
 /// These metrics are collected once on the supervisor process.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "one bool per OTEL metric toggle"
@@ -68,7 +69,7 @@ impl Default for SystemGlobalToggles {
 }
 
 /// Per-process metrics instrumentation configuration (each worker + supervisor).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ProcessConfig {
     /// Whether process metrics collection is enabled.
     pub enabled: bool,
@@ -81,7 +82,7 @@ pub struct ProcessConfig {
 /// Per-metric boolean toggles for process-level instrumentation.
 ///
 /// These metrics are collected per-worker and once on the supervisor.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ProcessMetricToggles {
     /// Toggle for [`super::defs::PROCESS_CPU`].
     pub process_cpu: bool,

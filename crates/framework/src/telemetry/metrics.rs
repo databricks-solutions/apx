@@ -141,6 +141,54 @@ pub fn create_gauge(name: String, description: String, unit: String) -> RustGaug
     }
 }
 
+// ── Metric catalog introspection ─────────────────────────────────────────
+
+/// A framework metric definition exposed to Python.
+#[derive(Debug, Clone, Copy)]
+#[pyclass(module = "apx._core", skip_from_py_object)]
+pub struct PyMetricDefinition {
+    /// OTEL metric name (e.g. `"system.cpu.simple_utilization"`).
+    #[pyo3(get)]
+    pub name: &'static str,
+    /// Human-readable description.
+    #[pyo3(get)]
+    pub description: &'static str,
+    /// UCUM unit string.
+    #[pyo3(get)]
+    pub unit: &'static str,
+    /// Logical group: `"system"`, `"process"`, `"http"`, or `"apx"`.
+    #[pyo3(get)]
+    pub group: &'static str,
+    /// Collection scope: `"supervisor"`, `"worker"`, or `"both"`.
+    #[pyo3(get)]
+    pub scope: &'static str,
+}
+
+#[pymethods]
+impl PyMetricDefinition {
+    fn __repr__(&self) -> String {
+        format!(
+            "MetricDefinition(name={:?}, group={:?}, scope={:?})",
+            self.name, self.group, self.scope
+        )
+    }
+}
+
+/// Return the full catalog of framework-defined metrics.
+#[pyfunction]
+pub fn metric_catalog() -> Vec<PyMetricDefinition> {
+    super::defs::ALL_METRICS
+        .iter()
+        .map(|entry| PyMetricDefinition {
+            name: entry.def.name,
+            description: entry.def.description,
+            unit: entry.def.unit,
+            group: entry.group,
+            scope: entry.scope,
+        })
+        .collect()
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Convert optional label map to OTEL `KeyValue` vec.

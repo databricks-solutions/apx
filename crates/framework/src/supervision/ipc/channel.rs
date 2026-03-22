@@ -211,6 +211,7 @@ mod tests {
             max_concurrent: None,
             nonce,
             loop_policy: "uvloop".to_owned(),
+            relay_telemetry: false,
         };
 
         let supervisor_handle = tokio::spawn(async move {
