@@ -13,47 +13,92 @@ use pyo3::types::{PyDict, PyList};
 /// Top-level telemetry configuration, flattened from the Python model.
 #[derive(Debug, Clone)]
 pub struct TelemetryConfig {
-    /// System metrics collection.
+    /// Machine-wide system metrics (supervisor only).
     pub system: SystemConfig,
+    /// Per-process metrics (each worker + supervisor).
+    pub process: ProcessConfig,
     /// Transport-level HTTP instrumentation.
     pub http: HttpConfig,
-    /// FastAPI/Starlette framework instrumentation.
-    pub fastapi: FastApiConfig,
     /// APX framework dispatch timing metrics.
     pub apx: ApxConfig,
 }
 
-/// System metrics instrumentation configuration.
+/// System-global metrics instrumentation configuration (supervisor only).
 #[derive(Debug, Clone, Copy)]
 pub struct SystemConfig {
     /// Whether system metrics collection is enabled.
     pub enabled: bool,
     /// Collection interval in seconds.
     pub interval_secs: f64,
-    /// Per-metric enable flags mirroring `SystemMetrics` in Python.
-    pub metrics: SystemMetricToggles,
+    /// Per-metric enable flags for machine-wide gauges.
+    pub metrics: SystemGlobalToggles,
 }
 
-/// Per-metric boolean toggles for system instrumentation.
-#[derive(Debug, Clone, Copy, Default)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct SystemMetricToggles {
-    /// Enable `process.cpu.utilization` gauge.
-    pub process_cpu: bool,
-    /// Enable `system.cpu.simple_utilization` gauge.
+/// Per-metric boolean toggles for system-global instrumentation.
+///
+/// These metrics are collected once on the supervisor process.
+#[derive(Debug, Clone, Copy)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one bool per OTEL metric toggle"
+)]
+pub struct SystemGlobalToggles {
+    /// Toggle for [`super::defs::SYSTEM_CPU`].
     pub system_cpu: bool,
-    /// Enable `system.memory.utilization` gauge.
+    /// Toggle for [`super::defs::SYSTEM_MEMORY`].
     pub system_memory: bool,
-    /// Enable `system.swap.utilization` gauge.
+    /// Toggle for [`super::defs::SYSTEM_SWAP`].
     pub system_swap: bool,
-    /// Enable `process.memory.usage` gauge.
-    pub process_memory: bool,
-    /// Enable `process.thread.count` gauge.
-    pub process_threads: bool,
-    /// Enable `system.disk.io` gauge.
+    /// Toggle for [`super::defs::SYSTEM_DISK_IO`].
     pub system_disk_io: bool,
-    /// Enable `system.network.io` gauge.
+    /// Toggle for [`super::defs::SYSTEM_NETWORK_IO`].
     pub system_network_io: bool,
+}
+
+impl Default for SystemGlobalToggles {
+    fn default() -> Self {
+        Self {
+            system_cpu: true,
+            system_memory: true,
+            system_swap: false,
+            system_disk_io: false,
+            system_network_io: false,
+        }
+    }
+}
+
+/// Per-process metrics instrumentation configuration (each worker + supervisor).
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessConfig {
+    /// Whether process metrics collection is enabled.
+    pub enabled: bool,
+    /// Collection interval in seconds.
+    pub interval_secs: f64,
+    /// Per-metric enable flags for process-level gauges.
+    pub metrics: ProcessMetricToggles,
+}
+
+/// Per-metric boolean toggles for process-level instrumentation.
+///
+/// These metrics are collected per-worker and once on the supervisor.
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessMetricToggles {
+    /// Toggle for [`super::defs::PROCESS_CPU`].
+    pub process_cpu: bool,
+    /// Toggle for [`super::defs::PROCESS_MEMORY`].
+    pub process_memory: bool,
+    /// Toggle for [`super::defs::PROCESS_THREADS`].
+    pub process_threads: bool,
+}
+
+impl Default for ProcessMetricToggles {
+    fn default() -> Self {
+        Self {
+            process_cpu: true,
+            process_memory: false,
+            process_threads: false,
+        }
+    }
 }
 
 /// HTTP transport instrumentation configuration.
@@ -67,16 +112,16 @@ pub struct HttpConfig {
     pub capture_response_headers: Vec<String>,
     /// Header name patterns whose values are replaced with `[REDACTED]`.
     pub sanitize_headers: Vec<String>,
-    /// Per-metric enable flags mirroring `HttpMetrics` in Python.
+    /// Per-metric enable flags.
     pub metrics: HttpMetricToggles,
 }
 
 /// Per-metric boolean toggles for HTTP instrumentation.
 #[derive(Debug, Clone, Copy)]
 pub struct HttpMetricToggles {
-    /// Enable `http.server.request.duration` histogram.
+    /// Toggle for [`super::defs::HTTP_REQUEST_DURATION`].
     pub server_request_duration: bool,
-    /// Enable `http.server.active_requests` up-down counter.
+    /// Toggle for [`super::defs::HTTP_ACTIVE_REQUESTS`].
     pub server_active_requests: bool,
 }
 
@@ -89,42 +134,54 @@ impl Default for HttpMetricToggles {
     }
 }
 
-/// FastAPI/Starlette framework instrumentation configuration.
-#[derive(Debug, Clone)]
-pub struct FastApiConfig {
-    /// Whether FastAPI instrumentation is enabled.
-    pub enabled: bool,
-    /// URL regex patterns to exclude from tracing.
-    pub excluded_routes: Vec<String>,
-    /// Extract matched route template from Starlette scope.
-    pub record_route: bool,
-}
-
 /// APX framework dispatch timing instrumentation configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct ApxConfig {
     /// Whether APX dispatch metrics are enabled.
     pub enabled: bool,
-    /// Per-metric enable flags mirroring `ApxMetrics` in Python.
+    /// Per-metric enable flags.
     pub metrics: ApxMetricToggles,
 }
 
 /// Per-metric boolean toggles for APX dispatch timing.
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one bool per OTEL metric toggle"
+)]
 pub struct ApxMetricToggles {
-    /// Enable `apx.dispatch.body_collect.duration` histogram.
+    /// Toggle for [`super::defs::DISPATCH_BODY_COLLECT`].
     pub dispatch_body_collect: bool,
-    /// Enable `apx.dispatch.crossbeam_send.duration` histogram.
+    /// Toggle for [`super::defs::DISPATCH_CROSSBEAM_SEND`].
     pub dispatch_crossbeam_send: bool,
-    /// Enable `apx.dispatch.response_wait.duration` histogram.
+    /// Toggle for [`super::defs::DISPATCH_RESPONSE_WAIT`].
     pub dispatch_response_wait: bool,
-    /// Enable `apx.dispatch.total.duration` histogram.
+    /// Toggle for [`super::defs::DISPATCH_TOTAL`].
     pub dispatch_total: bool,
-    /// Enable `apx.asgi.receive_build.duration` histogram.
+    /// Toggle for [`super::defs::ASGI_RECEIVE_BUILD`].
     pub asgi_receive_build: bool,
-    /// Enable `apx.asgi.send_parse.duration` histogram.
+    /// Toggle for [`super::defs::ASGI_SEND_PARSE`].
     pub asgi_send_parse: bool,
+}
+
+// ── Public defaults (used by supervisor) ─────────────────────────────────
+
+/// Default system-global config matching Python defaults.
+pub fn default_system_config() -> SystemConfig {
+    SystemConfig {
+        enabled: true,
+        interval_secs: 15.0,
+        metrics: SystemGlobalToggles::default(),
+    }
+}
+
+/// Default per-process config matching Python defaults.
+pub fn default_process_config() -> ProcessConfig {
+    ProcessConfig {
+        enabled: true,
+        interval_secs: 15.0,
+        metrics: ProcessMetricToggles::default(),
+    }
 }
 
 // ── Python config reading ────────────────────────────────────────────────
@@ -153,8 +210,8 @@ pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
     );
 
     let mut system = default_system_config();
+    let mut process = default_process_config();
     let mut http = default_http_config();
-    let mut fastapi = default_fastapi_config();
     let mut apx = default_apx_config();
 
     for item in instrumentations.iter() {
@@ -170,21 +227,21 @@ pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
                     "parsed system instrumentation config"
                 );
             }
+            "process" => {
+                process = parse_process_config(dict)?;
+                tracing::trace!(
+                    target: "apx::telemetry",
+                    enabled = process.enabled,
+                    interval_secs = process.interval_secs,
+                    "parsed process instrumentation config"
+                );
+            }
             "http" => {
                 http = parse_http_config(dict)?;
                 tracing::trace!(
                     target: "apx::telemetry",
                     enabled = http.enabled,
                     "parsed http instrumentation config"
-                );
-            }
-            "fastapi" => {
-                fastapi = parse_fastapi_config(dict)?;
-                tracing::trace!(
-                    target: "apx::telemetry",
-                    enabled = fastapi.enabled,
-                    record_route = fastapi.record_route,
-                    "parsed fastapi instrumentation config"
                 );
             }
             "apx" => {
@@ -204,34 +261,21 @@ pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
     tracing::trace!(
         target: "apx::telemetry",
         system_enabled = system.enabled,
+        process_enabled = process.enabled,
         http_enabled = http.enabled,
-        fastapi_enabled = fastapi.enabled,
         apx_enabled = apx.enabled,
         "telemetry config resolved"
     );
 
     Ok(TelemetryConfig {
         system,
+        process,
         http,
-        fastapi,
         apx,
     })
 }
 
-// ── Default configs ──────────────────────────────────────────────────────
-
-fn default_system_config() -> SystemConfig {
-    SystemConfig {
-        enabled: true,
-        interval_secs: 15.0,
-        metrics: SystemMetricToggles {
-            process_cpu: true,
-            system_cpu: true,
-            system_memory: true,
-            ..Default::default()
-        },
-    }
-}
+// ── Private defaults ─────────────────────────────────────────────────────
 
 fn default_http_config() -> HttpConfig {
     HttpConfig {
@@ -240,14 +284,6 @@ fn default_http_config() -> HttpConfig {
         capture_response_headers: Vec::new(),
         sanitize_headers: Vec::new(),
         metrics: HttpMetricToggles::default(),
-    }
-}
-
-fn default_fastapi_config() -> FastApiConfig {
-    FastApiConfig {
-        enabled: true,
-        excluded_routes: Vec::new(),
-        record_route: true,
     }
 }
 
@@ -264,14 +300,9 @@ fn parse_system_config(dict: &Bound<'_, PyDict>) -> PyResult<SystemConfig> {
     let enabled = extract_bool(dict, "enabled", true)?;
     let interval_secs = extract_float(dict, "interval_seconds", 15.0)?;
     let metrics = if let Some(metrics_dict) = dict.get_item("metrics")? {
-        parse_system_metric_toggles(metrics_dict.cast()?)
+        parse_system_global_toggles(metrics_dict.cast()?)
     } else {
-        SystemMetricToggles {
-            process_cpu: true,
-            system_cpu: true,
-            system_memory: true,
-            ..Default::default()
-        }
+        SystemGlobalToggles::default()
     };
 
     Ok(SystemConfig {
@@ -281,17 +312,39 @@ fn parse_system_config(dict: &Bound<'_, PyDict>) -> PyResult<SystemConfig> {
     })
 }
 
-fn parse_system_metric_toggles(dict: &Bound<'_, PyDict>) -> SystemMetricToggles {
-    let b = |key: &str, default: bool| extract_metric_default(dict, key, default);
-    SystemMetricToggles {
-        process_cpu: b("process_cpu", true),
-        system_cpu: b("system_cpu", true),
-        system_memory: b("system_memory", true),
-        system_swap: b("system_swap", false),
-        process_memory: b("process_memory", false),
-        process_threads: b("process_threads", false),
-        system_disk_io: b("system_disk_io", false),
-        system_network_io: b("system_network_io", false),
+fn parse_system_global_toggles(dict: &Bound<'_, PyDict>) -> SystemGlobalToggles {
+    let defaults = SystemGlobalToggles::default();
+    SystemGlobalToggles {
+        system_cpu: extract_bool_or(dict, "cpu", defaults.system_cpu),
+        system_memory: extract_bool_or(dict, "memory", defaults.system_memory),
+        system_swap: extract_bool_or(dict, "swap", defaults.system_swap),
+        system_disk_io: extract_bool_or(dict, "disk_io", defaults.system_disk_io),
+        system_network_io: extract_bool_or(dict, "network_io", defaults.system_network_io),
+    }
+}
+
+fn parse_process_config(dict: &Bound<'_, PyDict>) -> PyResult<ProcessConfig> {
+    let enabled = extract_bool(dict, "enabled", true)?;
+    let interval_secs = extract_float(dict, "interval_seconds", 15.0)?;
+    let metrics = if let Some(metrics_dict) = dict.get_item("metrics")? {
+        parse_process_metric_toggles(metrics_dict.cast()?)
+    } else {
+        ProcessMetricToggles::default()
+    };
+
+    Ok(ProcessConfig {
+        enabled,
+        interval_secs,
+        metrics,
+    })
+}
+
+fn parse_process_metric_toggles(dict: &Bound<'_, PyDict>) -> ProcessMetricToggles {
+    let defaults = ProcessMetricToggles::default();
+    ProcessMetricToggles {
+        process_cpu: extract_bool_or(dict, "cpu", defaults.process_cpu),
+        process_memory: extract_bool_or(dict, "memory", defaults.process_memory),
+        process_threads: extract_bool_or(dict, "threads", defaults.process_threads),
     }
 }
 
@@ -323,23 +376,19 @@ fn parse_http_config(dict: &Bound<'_, PyDict>) -> PyResult<HttpConfig> {
 }
 
 fn parse_http_metric_toggles(dict: &Bound<'_, PyDict>) -> HttpMetricToggles {
-    let b = |key: &str, default: bool| extract_metric_default(dict, key, default);
+    let defaults = HttpMetricToggles::default();
     HttpMetricToggles {
-        server_request_duration: b("server_request_duration", true),
-        server_active_requests: b("server_active_requests", true),
+        server_request_duration: extract_bool_or(
+            dict,
+            "server_request_duration",
+            defaults.server_request_duration,
+        ),
+        server_active_requests: extract_bool_or(
+            dict,
+            "server_active_requests",
+            defaults.server_active_requests,
+        ),
     }
-}
-
-fn parse_fastapi_config(dict: &Bound<'_, PyDict>) -> PyResult<FastApiConfig> {
-    let enabled = extract_bool(dict, "enabled", true)?;
-    let record_route = extract_bool(dict, "record_route", true)?;
-    let excluded_routes = extract_string_list(dict, "excluded_routes")?;
-
-    Ok(FastApiConfig {
-        enabled,
-        excluded_routes,
-        record_route,
-    })
 }
 
 fn parse_apx_config(dict: &Bound<'_, PyDict>) -> PyResult<ApxConfig> {
@@ -354,32 +403,17 @@ fn parse_apx_config(dict: &Bound<'_, PyDict>) -> PyResult<ApxConfig> {
 }
 
 fn parse_apx_metric_toggles(dict: &Bound<'_, PyDict>) -> ApxMetricToggles {
-    let b = |key: &str| extract_metric_default(dict, key, false);
     ApxMetricToggles {
-        dispatch_body_collect: b("dispatch_body_collect"),
-        dispatch_crossbeam_send: b("dispatch_crossbeam_send"),
-        dispatch_response_wait: b("dispatch_response_wait"),
-        dispatch_total: b("dispatch_total"),
-        asgi_receive_build: b("asgi_receive_build"),
-        asgi_send_parse: b("asgi_send_parse"),
+        dispatch_body_collect: extract_bool_or(dict, "dispatch_body_collect", false),
+        dispatch_crossbeam_send: extract_bool_or(dict, "dispatch_crossbeam_send", false),
+        dispatch_response_wait: extract_bool_or(dict, "dispatch_response_wait", false),
+        dispatch_total: extract_bool_or(dict, "dispatch_total", false),
+        asgi_receive_build: extract_bool_or(dict, "asgi_receive_build", false),
+        asgi_send_parse: extract_bool_or(dict, "asgi_send_parse", false),
     }
 }
 
-/// Extract the `default` boolean from a serialized `Metric` sub-dict.
-///
-/// The Python `Metric` model serialises as `{"title": "...", "description":
-/// "...", "group": "...", "default": true/false}`. This helper dereferences
-/// that nested structure and returns the `default` field, falling back to
-/// `default` if the key is absent or the value is not a dict.
-fn extract_metric_default(dict: &Bound<'_, PyDict>, key: &str, default: bool) -> bool {
-    let Ok(Some(item)) = dict.get_item(key) else {
-        return default;
-    };
-    let Ok(metric_dict) = item.cast::<PyDict>() else {
-        return default;
-    };
-    extract_bool(metric_dict, "default", default).unwrap_or(default)
-}
+// ── Low-level extractors ─────────────────────────────────────────────────
 
 fn extract_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<String> {
     dict.get_item(key)?
@@ -392,6 +426,11 @@ fn extract_bool(dict: &Bound<'_, PyDict>, key: &str, default: bool) -> PyResult<
         .map(|v| v.extract())
         .transpose()
         .map(|v| v.unwrap_or(default))
+}
+
+/// Extract a bool from a dict, returning `default` on any error.
+fn extract_bool_or(dict: &Bound<'_, PyDict>, key: &str, default: bool) -> bool {
+    extract_bool(dict, key, default).unwrap_or(default)
 }
 
 fn extract_float(dict: &Bound<'_, PyDict>, key: &str, default: f64) -> PyResult<f64> {

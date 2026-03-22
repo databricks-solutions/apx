@@ -81,9 +81,10 @@ __all__ = [
     "HttpMetrics",
     "SystemInstrumentation",
     "SystemMetrics",
+    "ProcessInstrumentation",
+    "ProcessMetrics",
     "ApxInstrumentation",
     "ApxMetrics",
-    "Metric",
     "CaptureHeaders",
     "Instrumentation",
 ]
@@ -331,152 +332,73 @@ class Gauge:
 # ── Instrumentation configuration ────────────────────────────────────────
 
 
-class Metric(BaseModel):
-    """A single observable metric descriptor.
+class ProcessMetrics(BaseModel):
+    """Per-process metric toggles.
 
-    Carries the OTEL metric name, a human-readable description, the logical
-    group it belongs to (``"system"``, ``"http"``, or ``"apx"``), and whether
-    it is enabled (``default=True``) or disabled (``default=False``)::
+    Collected per-worker (and once for the supervisor process itself).
+    Each worker reports its own CPU, memory, and thread count under
+    the OTEL Resource attribute ``apx.worker.id``; the supervisor
+    reports under ``apx.role=supervisor``.
 
-        SystemInstrumentation(metrics=SystemMetrics(
-            system_disk_io=Metric(
-                title="system.disk.io",
-                description="Cumulative disk I/O in bytes",
-                group="system",
-                default=True,
-            )
-        ))
+    Metric names, descriptions, and units are defined in the Rust
+    metric definitions module (``telemetry/defs.rs``).
     """
 
-    title: str
-    description: str = ""
-    group: str
-    default: bool
+    cpu: bool = True
+    memory: bool = False
+    threads: bool = False
 
 
 class SystemMetrics(BaseModel):
-    """Per-metric descriptors for system instrumentation.
+    """Machine-wide metric toggles.
 
-    Override individual fields to enable or disable metrics::
+    Collected once on the supervisor process only. These are global
+    system gauges (CPU, memory, swap, disk I/O, network I/O) that
+    are identical regardless of which process reads them, so only
+    the supervisor collects them to avoid N redundant copies.
 
-        SystemInstrumentation(metrics=SystemMetrics(
-            system_disk_io=SystemMetrics().system_disk_io.model_copy(update={"default": True})
-        ))
+    Metric names, descriptions, and units are defined in the Rust
+    metric definitions module (``telemetry/defs.rs``).
     """
 
-    process_cpu: Metric = Metric(
-        title="process.cpu.utilization",
-        description="APX worker process CPU utilization as a fraction of one core",
-        group="system",
-        default=True,
-    )
-    process_memory: Metric = Metric(
-        title="process.memory.usage",
-        description="APX worker process resident memory usage in bytes",
-        group="system",
-        default=False,
-    )
-    process_threads: Metric = Metric(
-        title="process.thread.count",
-        description="Number of threads in the APX worker process",
-        group="system",
-        default=False,
-    )
-    system_cpu: Metric = Metric(
-        title="system.cpu.simple_utilization",
-        description="System-wide CPU utilization as a fraction",
-        group="system",
-        default=True,
-    )
-    system_memory: Metric = Metric(
-        title="system.memory.utilization",
-        description="System memory utilization as a fraction",
-        group="system",
-        default=True,
-    )
-    system_swap: Metric = Metric(
-        title="system.swap.utilization",
-        description="System swap utilization as a fraction",
-        group="system",
-        default=False,
-    )
-
-    system_disk_io: Metric = Metric(
-        title="system.disk.io",
-        description="Cumulative disk I/O in bytes",
-        group="system",
-        default=False,
-    )
-    system_network_io: Metric = Metric(
-        title="system.network.io",
-        description="Cumulative network I/O in bytes",
-        group="system",
-        default=False,
-    )
+    cpu: bool = True
+    memory: bool = True
+    swap: bool = False
+    disk_io: bool = False
+    network_io: bool = False
 
 
 class HttpMetrics(BaseModel):
-    """Per-metric descriptors for HTTP server instrumentation.
+    """HTTP server metric toggles.
 
-    All HTTP metrics are enabled by default.
+    Collected per-worker. Each worker reports its own request duration
+    and active request count. The OTEL Resource attribute
+    ``apx.worker.id`` distinguishes workers; aggregate across all
+    workers at query time (e.g. ``sum(rate(...))``) for server-wide
+    totals.
     """
 
-    server_request_duration: Metric = Metric(
-        title="http.server.request.duration",
-        description="HTTP server request duration",
-        group="http",
-        default=True,
-    )
-    server_active_requests: Metric = Metric(
-        title="http.server.active_requests",
-        description="Number of in-flight HTTP server requests",
-        group="http",
-        default=True,
-    )
+    server_request_duration: bool = True
+    server_active_requests: bool = True
 
 
 class ApxMetrics(BaseModel):
-    """Per-metric descriptors for APX framework dispatch timing metrics.
+    """APX framework dispatch pipeline metric toggles.
 
-    All dispatch metrics are disabled by default (low-overhead opt-in).
+    Collected per-worker. Each histogram records latency for the
+    dispatch phases within a single worker process. Use the OTEL
+    Resource attribute ``apx.worker.id`` to drill down; aggregate
+    across workers for server-wide distributions.
+
+    All metrics default to disabled (opt-in for low overhead).
     """
 
-    dispatch_body_collect: Metric = Metric(
-        title="apx.dispatch.body_collect.duration",
-        description="Time to collect the request body from the network stream",
-        group="apx",
-        default=False,
-    )
-    dispatch_crossbeam_send: Metric = Metric(
-        title="apx.dispatch.crossbeam_send.duration",
-        description="Time to send the request over the Crossbeam channel to the Python worker",
-        group="apx",
-        default=False,
-    )
-    dispatch_response_wait: Metric = Metric(
-        title="apx.dispatch.response_wait.duration",
-        description="Time waiting for the Python coroutine to produce the final response",
-        group="apx",
-        default=False,
-    )
-    dispatch_total: Metric = Metric(
-        title="apx.dispatch.total.duration",
-        description="Total end-to-end ASGI dispatch time",
-        group="apx",
-        default=False,
-    )
-    asgi_receive_build: Metric = Metric(
-        title="apx.asgi.receive_build.duration",
-        description="Time to build the ASGI receive dict",
-        group="apx",
-        default=False,
-    )
-    asgi_send_parse: Metric = Metric(
-        title="apx.asgi.send_parse.duration",
-        description="Time to parse an ASGI send event",
-        group="apx",
-        default=False,
-    )
+    dispatch_body_collect: bool = False
+    dispatch_crossbeam_send: bool = False
+    dispatch_response_wait: bool = False
+    dispatch_total: bool = False
+    asgi_receive_build: bool = False
+    asgi_send_parse: bool = False
 
 
 class CaptureHeaders(BaseModel):
@@ -490,16 +412,10 @@ class CaptureHeaders(BaseModel):
 class HttpInstrumentation(BaseModel):
     """Transport-level HTTP instrumentation (header capture, sanitization).
 
-    Use ``metrics`` to selectively disable individual HTTP server metrics::
+    Collected per-worker. Use ``metrics`` to selectively disable
+    individual HTTP server metrics::
 
-        HttpInstrumentation(metrics=HttpMetrics(
-            server_active_requests=Metric(
-                title="http.server.active_requests",
-                description="Number of in-flight HTTP server requests",
-                group="http",
-                default=False,
-            )
-        ))
+        HttpInstrumentation(metrics=HttpMetrics(server_active_requests=False))
     """
 
     type: Literal["http"] = "http"
@@ -509,18 +425,16 @@ class HttpInstrumentation(BaseModel):
 
 
 class SystemInstrumentation(BaseModel):
-    """System metrics collection (CPU, memory, disk, network).
+    """Machine-wide metrics instrumentation (CPU, memory, swap, disk, network).
 
-    Use ``metrics`` to selectively enable individual system metrics::
+    Collected on the supervisor only. System-level gauges are global
+    to the machine and identical regardless of which process reads them,
+    so a single collection task on the supervisor avoids redundant work.
 
-        SystemInstrumentation(metrics=SystemMetrics(
-            system_disk_io=Metric(
-                title="system.disk.io",
-                description="Cumulative disk I/O in bytes",
-                group="system",
-                default=True,
-            )
-        ))
+    Note: the supervisor uses Rust-side defaults for these toggles
+    and does not read this Python config (no Python interpreter in
+    the supervisor process). This model is provided so the config
+    schema is self-documenting and for future IPC-based relay.
     """
 
     type: Literal["system"] = "system"
@@ -529,20 +443,31 @@ class SystemInstrumentation(BaseModel):
     interval_seconds: float = Field(default=15.0, gt=0)
 
 
+class ProcessInstrumentation(BaseModel):
+    """Per-process metrics instrumentation (CPU, RSS, threads).
+
+    Collected per-worker. Each worker spawns a background task that
+    periodically reads its own process stats via ``sysinfo`` and
+    reports them as OTEL gauges. The supervisor also collects its
+    own process metrics independently (using Rust defaults).
+
+    Attribution: OTEL Resource carries ``apx.worker.id`` for workers
+    and ``apx.role=supervisor`` for the supervisor process.
+    """
+
+    type: Literal["process"] = "process"
+    enabled: bool = True
+    metrics: ProcessMetrics = Field(default_factory=ProcessMetrics)
+    interval_seconds: float = Field(default=15.0, gt=0)
+
+
 class ApxInstrumentation(BaseModel):
     """APX framework dispatch timing metrics (opt-in).
 
-    Records per-phase histograms for the ASGI dispatch pipeline.
-    All metrics default to disabled — enable selectively::
+    Collected per-worker. Records per-phase histograms for the ASGI
+    dispatch pipeline. All metrics default to disabled::
 
-        ApxInstrumentation(metrics=ApxMetrics(
-            dispatch_total=Metric(
-                title="apx.dispatch.total.duration",
-                description="Total end-to-end ASGI dispatch time",
-                group="apx",
-                default=True,
-            )
-        ))
+        ApxInstrumentation(metrics=ApxMetrics(dispatch_total=True))
     """
 
     type: Literal["apx"] = "apx"
@@ -560,6 +485,7 @@ Instrumentation = Annotated[
     Union[
         Annotated[HttpInstrumentation, Tag("http")],
         Annotated[SystemInstrumentation, Tag("system")],
+        Annotated[ProcessInstrumentation, Tag("process")],
         Annotated[ApxInstrumentation, Tag("apx")],
     ],
     Discriminator(_instrumentation_type),
@@ -568,6 +494,7 @@ Instrumentation = Annotated[
 _DEFAULT_INSTRUMENTATIONS: list[Instrumentation] = [
     HttpInstrumentation(),
     SystemInstrumentation(),
+    ProcessInstrumentation(),
 ]
 
 if os.environ.get("APX_PERF"):
@@ -577,7 +504,7 @@ if os.environ.get("APX_PERF"):
 class Configuration(BaseModel):
     """Telemetry instrumentation configuration.
 
-    Defaults enable HTTP, FastAPI, system, and APX instrumentation automatically.
+    Defaults enable HTTP, system, and APX instrumentation automatically.
     Call ``configure()`` only to override specific instrumentations::
 
         from apx.telemetry import configure, Configuration, SystemInstrumentation

@@ -130,6 +130,14 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
         workers.push(worker);
     }
 
+    // System-global metrics + supervisor's own process metrics (Rust defaults).
+    let _system_metrics_handle = crate::telemetry::system_metrics::spawn_system_metrics(
+        &crate::telemetry::config::default_system_config(),
+    );
+    let _supervisor_process_handle = crate::telemetry::process_metrics::spawn_process_metrics(
+        &crate::telemetry::config::default_process_config(),
+    );
+
     // Run monitor and shutdown signal in parallel.
     // Monitor returns on AllWorkersCrashed; shutdown signal returns on SIGTERM/SIGINT.
     tokio::select! {

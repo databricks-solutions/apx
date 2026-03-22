@@ -4,24 +4,13 @@
 //! When OTEL is disabled, the global meter returns noop instruments
 //! — zero overhead automatically.
 
-use opentelemetry::metrics::{Meter, MeterProvider};
+use opentelemetry::metrics::Meter;
 use pyo3::prelude::*;
 use std::collections::HashMap;
 
 /// Obtain the user-facing meter (backed by configured provider or global noop).
 fn user_meter() -> Meter {
-    static LOGGED: std::sync::Once = std::sync::Once::new();
-    if let Some(mp) = apx_core::tracing_init::meter_provider() {
-        LOGGED.call_once(|| {
-            tracing::info!(target: "apx::telemetry", meter = "apx.user", "user meter: using configured SdkMeterProvider");
-        });
-        mp.meter("apx.user")
-    } else {
-        LOGGED.call_once(|| {
-            tracing::warn!(target: "apx::telemetry", meter = "apx.user", "user meter: SdkMeterProvider not initialized, using global noop");
-        });
-        opentelemetry::global::meter("apx.user")
-    }
+    super::get_meter("apx.user")
 }
 
 // ── Counter ─────────────────────────────────────────────────────────────

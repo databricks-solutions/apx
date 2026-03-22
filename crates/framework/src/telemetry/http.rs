@@ -7,56 +7,26 @@
 //! Per-metric toggles are initialized once per worker process via [`init`]
 //! after reading the Python telemetry config.
 
-use std::sync::OnceLock;
-
 use crate::protocol::http::error::AppError;
 use crate::telemetry::config::HttpMetricToggles;
+use crate::telemetry::defs;
 use opentelemetry::KeyValue;
-use opentelemetry::metrics::MeterProvider;
 
 // ── Global HTTP metric toggles ────────────────────────────────────────────
 
-static HTTP_TOGGLES: OnceLock<HttpMetricToggles> = OnceLock::new();
-
-/// Initialize HTTP metric toggles for this worker process.
-///
-/// Must be called once after reading the Python telemetry config.
-/// Subsequent calls are silently ignored (OnceLock semantics).
-pub fn init(toggles: HttpMetricToggles) {
-    let _ = HTTP_TOGGLES.set(toggles);
-}
-
-/// Return the active HTTP metric toggles.
-///
-/// Falls back to all-enabled defaults if [`init`] has not been called.
-fn http_toggles() -> &'static HttpMetricToggles {
-    static DEFAULT: HttpMetricToggles = HttpMetricToggles {
-        server_request_duration: true,
-        server_active_requests: true,
-    };
-    HTTP_TOGGLES.get().unwrap_or(&DEFAULT)
-}
+super::toggle_store!(HTTP_TOGGLES: HttpMetricToggles = HttpMetricToggles {
+    server_request_duration: true,
+    server_active_requests: true,
+});
 
 // ── Framework meter ───────────────────────────────────────────────────────
 
-/// Obtain the framework-internal meter.
-///
-/// Uses the configured provider if available, falls back to the global
-/// (which may be noop when OTEL is disabled — zero overhead).
+/// Obtain the framework-internal meter (`apx.framework`).
 pub(crate) fn framework_meter() -> opentelemetry::metrics::Meter {
-    static LOGGED: std::sync::Once = std::sync::Once::new();
-    if let Some(mp) = apx_core::tracing_init::meter_provider() {
-        LOGGED.call_once(|| {
-            tracing::info!(target: "apx::telemetry", meter = "apx.framework", "framework meter: using configured SdkMeterProvider");
-        });
-        mp.meter("apx.framework")
-    } else {
-        LOGGED.call_once(|| {
-            tracing::warn!(target: "apx::telemetry", meter = "apx.framework", "framework meter: SdkMeterProvider not initialized, using global noop");
-        });
-        opentelemetry::global::meter("apx.framework")
-    }
+    super::get_meter("apx.framework")
 }
+
+// ── Active requests guard ─────────────────────────────────────────────────
 
 /// RAII guard that decrements `http.server.active_requests` on drop.
 ///
@@ -74,7 +44,7 @@ impl ActiveRequestGuard {
     ///
     /// Returns `None` if the `server_active_requests` metric is disabled.
     pub fn enter(method: &str, scheme: &str) -> Option<Self> {
-        if !http_toggles().server_active_requests {
+        if !toggles().server_active_requests {
             return None;
         }
         let attrs = [
@@ -82,7 +52,7 @@ impl ActiveRequestGuard {
             KeyValue::new("url.scheme", scheme.to_owned()),
         ];
         framework_meter()
-            .i64_up_down_counter("http.server.active_requests")
+            .i64_up_down_counter(defs::HTTP_ACTIVE_REQUESTS.name)
             .build()
             .add(1, &attrs);
         Some(Self { attrs })
@@ -92,11 +62,13 @@ impl ActiveRequestGuard {
 impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
         framework_meter()
-            .i64_up_down_counter("http.server.active_requests")
+            .i64_up_down_counter(defs::HTTP_ACTIVE_REQUESTS.name)
             .build()
             .add(-1, &self.attrs);
     }
 }
+
+// ── Request duration ──────────────────────────────────────────────────────
 
 /// Record `http.server.request.duration` with standard attributes.
 ///
@@ -109,7 +81,7 @@ pub fn record_duration(
     route: &str,
     error_type: Option<&str>,
 ) {
-    if !http_toggles().server_request_duration {
+    if !toggles().server_request_duration {
         return;
     }
 
@@ -124,11 +96,8 @@ pub fn record_duration(
     if let Some(et) = error_type {
         attrs.push(KeyValue::new("error.type", et.to_owned()));
     }
-    framework_meter()
-        .f64_histogram("http.server.request.duration")
-        .with_description("Duration of HTTP server requests")
-        .with_unit("s")
-        .build()
+    defs::HTTP_REQUEST_DURATION
+        .histogram(&framework_meter())
         .record(duration_secs, &attrs);
 
     FIRST.call_once(|| {
@@ -142,6 +111,8 @@ pub fn record_duration(
         );
     });
 }
+
+// ── Error / protocol helpers ──────────────────────────────────────────────
 
 /// Map an `AppError` variant to an OTEL semconv `error.type` value.
 pub fn error_type_for(err: &AppError) -> &'static str {
@@ -166,23 +137,17 @@ pub fn protocol_version(version: http::Version) -> &'static str {
 
 use super::config::HttpConfig;
 
-/// Captured header attribute following OTEL semconv `http.{request,response}.header.<name>`.
-fn header_attr_name(direction: &str, name: &str) -> String {
-    let normalized = name.to_lowercase().replace('-', "_");
-    format!("http.{direction}.header.{normalized}")
-}
-
-fn is_sanitized(name: &str, patterns: &[String]) -> bool {
-    let lower = name.to_lowercase();
-    patterns.iter().any(|p| lower.contains(&p.to_lowercase()))
-}
-
 const REDACTED: &str = "[REDACTED]";
 
-/// Extract request header values as OTEL span attributes.
-pub fn capture_request_headers(headers: &http::HeaderMap, config: &HttpConfig) -> Vec<KeyValue> {
+/// Extract header values as OTEL span attributes for the given direction.
+fn capture_headers(
+    direction: &str,
+    header_names: &[String],
+    headers: &http::HeaderMap,
+    sanitize_patterns: &[String],
+) -> Vec<KeyValue> {
     let mut attrs = Vec::new();
-    for name in &config.capture_request_headers {
+    for name in header_names {
         let lower = name.to_lowercase();
         let values: Vec<&str> = headers
             .get_all(
@@ -195,8 +160,12 @@ pub fn capture_request_headers(headers: &http::HeaderMap, config: &HttpConfig) -
         if values.is_empty() {
             continue;
         }
-        let attr_name = header_attr_name("request", name);
-        let value = if is_sanitized(name, &config.sanitize_headers) {
+        let normalized = name.to_lowercase().replace('-', "_");
+        let attr_name = format!("http.{direction}.header.{normalized}");
+        let value = if sanitize_patterns
+            .iter()
+            .any(|p| lower.contains(&p.to_lowercase()))
+        {
             REDACTED.to_owned()
         } else {
             values.join(", ")
@@ -204,31 +173,24 @@ pub fn capture_request_headers(headers: &http::HeaderMap, config: &HttpConfig) -
         attrs.push(KeyValue::new(attr_name, value));
     }
     attrs
+}
+
+/// Extract request header values as OTEL span attributes.
+pub fn capture_request_headers(headers: &http::HeaderMap, config: &HttpConfig) -> Vec<KeyValue> {
+    capture_headers(
+        "request",
+        &config.capture_request_headers,
+        headers,
+        &config.sanitize_headers,
+    )
 }
 
 /// Extract response header values as OTEL span attributes.
 pub fn capture_response_headers(headers: &http::HeaderMap, config: &HttpConfig) -> Vec<KeyValue> {
-    let mut attrs = Vec::new();
-    for name in &config.capture_response_headers {
-        let lower = name.to_lowercase();
-        let values: Vec<&str> = headers
-            .get_all(
-                http::header::HeaderName::from_bytes(lower.as_bytes())
-                    .unwrap_or(http::header::HeaderName::from_static("x-unknown")),
-            )
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .collect();
-        if values.is_empty() {
-            continue;
-        }
-        let attr_name = header_attr_name("response", name);
-        let value = if is_sanitized(name, &config.sanitize_headers) {
-            REDACTED.to_owned()
-        } else {
-            values.join(", ")
-        };
-        attrs.push(KeyValue::new(attr_name, value));
-    }
-    attrs
+    capture_headers(
+        "response",
+        &config.capture_response_headers,
+        headers,
+        &config.sanitize_headers,
+    )
 }

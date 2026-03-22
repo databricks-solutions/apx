@@ -1,15 +1,17 @@
-//! Background system metrics collection via `sysinfo`.
+//! Machine-wide system metrics collection via `sysinfo`.
 //!
 //! Spawns a tokio task that periodically reads CPU, memory, swap, disk,
 //! and network metrics and reports them through the OTEL metrics pipeline.
-//! Only collects metrics present in `SystemConfig.metrics`.
+//! Collected once on the supervisor process only.
 
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
-use sysinfo::{Disks, Networks, Pid, System};
+use opentelemetry::metrics::Gauge;
+use sysinfo::{Disks, Networks, System};
 
 use super::config::SystemConfig;
+use super::defs;
 use super::http::framework_meter;
 
 /// Spawn the system metrics collection background task.
@@ -18,142 +20,53 @@ use super::http::framework_meter;
 pub fn spawn_system_metrics(config: &SystemConfig) -> tokio::task::JoinHandle<()> {
     let toggles = config.metrics;
     let interval = Duration::from_secs_f64(config.interval_secs);
-    let pid = Pid::from_u32(std::process::id());
 
     tracing::trace!(
         target: "apx::telemetry",
         interval_secs = config.interval_secs,
-        pid = pid.as_u32(),
         "spawning system metrics collection task"
     );
 
     tokio::spawn(async move {
-        collection_loop(toggles, interval, pid).await;
+        collection_loop(toggles, interval).await;
     })
 }
 
-/// Metrics collection instruments, created once and reused.
+/// System-global instruments, created once and reused.
 struct Instruments {
-    process_cpu: Option<opentelemetry::metrics::Gauge<f64>>,
-    system_cpu: Option<opentelemetry::metrics::Gauge<f64>>,
-    system_memory: Option<opentelemetry::metrics::Gauge<f64>>,
-    system_swap: Option<opentelemetry::metrics::Gauge<f64>>,
-    process_memory: Option<opentelemetry::metrics::Gauge<f64>>,
-    process_threads: Option<opentelemetry::metrics::Gauge<f64>>,
-    disk_io: Option<opentelemetry::metrics::Gauge<f64>>,
-    network_io: Option<opentelemetry::metrics::Gauge<f64>>,
+    system_cpu: Option<Gauge<f64>>,
+    system_memory: Option<Gauge<f64>>,
+    system_swap: Option<Gauge<f64>>,
+    disk_io: Option<Gauge<f64>>,
+    network_io: Option<Gauge<f64>>,
 }
 
 impl Instruments {
-    fn new(toggles: super::config::SystemMetricToggles) -> Self {
+    fn new(toggles: super::config::SystemGlobalToggles) -> Self {
         let meter = framework_meter();
-        tracing::trace!(
-            target: "apx::telemetry",
-            process_cpu = toggles.process_cpu,
-            system_cpu = toggles.system_cpu,
-            system_memory = toggles.system_memory,
-            system_swap = toggles.system_swap,
-            process_memory = toggles.process_memory,
-            process_threads = toggles.process_threads,
-            disk_io = toggles.system_disk_io,
-            network_io = toggles.system_network_io,
-            "creating system metric instruments"
-        );
         Self {
-            process_cpu: toggles.process_cpu.then(|| {
-                meter
-                    .f64_gauge("process.cpu.utilization")
-                    .with_description("Process CPU utilization as a fraction of one core")
-                    .with_unit("1")
-                    .build()
-            }),
-            system_cpu: toggles.system_cpu.then(|| {
-                meter
-                    .f64_gauge("system.cpu.simple_utilization")
-                    .with_description("System-wide CPU utilization as a fraction")
-                    .with_unit("1")
-                    .build()
-            }),
-            system_memory: toggles.system_memory.then(|| {
-                meter
-                    .f64_gauge("system.memory.utilization")
-                    .with_description("Fraction of available memory used")
-                    .with_unit("1")
-                    .build()
-            }),
-            system_swap: toggles.system_swap.then(|| {
-                meter
-                    .f64_gauge("system.swap.utilization")
-                    .with_description("Fraction of swap space used")
-                    .with_unit("1")
-                    .build()
-            }),
-            process_memory: toggles.process_memory.then(|| {
-                meter
-                    .f64_gauge("process.memory.usage")
-                    .with_description("Process resident memory in bytes")
-                    .with_unit("By")
-                    .build()
-            }),
-            process_threads: toggles.process_threads.then(|| {
-                meter
-                    .f64_gauge("process.thread.count")
-                    .with_description("Number of threads in the process")
-                    .with_unit("1")
-                    .build()
-            }),
-            disk_io: toggles.system_disk_io.then(|| {
-                meter
-                    .f64_gauge("system.disk.io")
-                    .with_description("Cumulative disk I/O in bytes")
-                    .with_unit("By")
-                    .build()
-            }),
-            network_io: toggles.system_network_io.then(|| {
-                meter
-                    .f64_gauge("system.network.io")
-                    .with_description("Cumulative network I/O in bytes")
-                    .with_unit("By")
-                    .build()
-            }),
+            system_cpu: defs::SYSTEM_CPU.optional_gauge(&meter, toggles.system_cpu),
+            system_memory: defs::SYSTEM_MEMORY.optional_gauge(&meter, toggles.system_memory),
+            system_swap: defs::SYSTEM_SWAP.optional_gauge(&meter, toggles.system_swap),
+            disk_io: defs::SYSTEM_DISK_IO.optional_gauge(&meter, toggles.system_disk_io),
+            network_io: defs::SYSTEM_NETWORK_IO.optional_gauge(&meter, toggles.system_network_io),
         }
     }
 }
 
 /// Periodic collection loop.
-async fn collection_loop(
-    toggles: super::config::SystemMetricToggles,
-    interval: Duration,
-    pid: Pid,
-) {
+async fn collection_loop(toggles: super::config::SystemGlobalToggles, interval: Duration) {
     let instruments = Instruments::new(toggles);
     let mut sys = System::new();
-    let needs_disks = toggles.system_disk_io;
-    let needs_network = toggles.system_network_io;
-    let mut disks = if needs_disks {
-        Some(Disks::new())
-    } else {
-        None
-    };
-    let mut networks = if needs_network {
-        Some(Networks::new())
-    } else {
-        None
-    };
-
+    let mut disks = toggles.system_disk_io.then(Disks::new);
+    let mut networks = toggles.system_network_io.then(Networks::new);
     let no_attrs: &[KeyValue] = &[];
     let mut first_tick = true;
 
     loop {
         tokio::time::sleep(interval).await;
-        collect_once(
-            &mut sys,
-            &instruments,
-            pid,
-            no_attrs,
-            &mut disks,
-            &mut networks,
-        );
+        collect_once(&mut sys, &instruments, no_attrs, &mut disks, &mut networks);
+
         if first_tick {
             sys.refresh_cpu_all();
             sys.refresh_memory();
@@ -175,14 +88,12 @@ async fn collection_loop(
 fn collect_once(
     sys: &mut System,
     instruments: &Instruments,
-    pid: Pid,
     no_attrs: &[KeyValue],
     disks: &mut Option<Disks>,
     networks: &mut Option<Networks>,
 ) {
     sys.refresh_cpu_all();
     sys.refresh_memory();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
 
     if let Some(gauge) = &instruments.system_cpu {
         let usage = f64::from(sys.global_cpu_usage()) / 100.0;
@@ -203,21 +114,6 @@ fn collect_once(
         let used = sys.used_swap();
         if total > 0 {
             gauge.record(used as f64 / total as f64, no_attrs);
-        }
-    }
-
-    if let Some(process) = sys.process(pid) {
-        if let Some(gauge) = &instruments.process_cpu {
-            let usage = f64::from(process.cpu_usage()) / 100.0;
-            gauge.record(usage, no_attrs);
-        }
-        if let Some(gauge) = &instruments.process_memory {
-            gauge.record(process.memory() as f64, no_attrs);
-        }
-        if let Some(gauge) = &instruments.process_threads
-            && let Some(tasks) = process.tasks()
-        {
-            gauge.record(tasks.len() as f64, no_attrs);
         }
     }
 
