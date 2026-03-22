@@ -7,10 +7,13 @@
 //! Per-metric toggles are initialized once per worker process via [`init`]
 //! after reading the Python telemetry config.
 
+use std::sync::OnceLock;
+
 use crate::protocol::http::error::AppError;
 use crate::telemetry::config::HttpMetricToggles;
 use crate::telemetry::defs;
 use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Histogram, UpDownCounter};
 
 // ── Global HTTP metric toggles ────────────────────────────────────────────
 
@@ -24,6 +27,19 @@ super::toggle_store!(HTTP_TOGGLES: HttpMetricToggles = HttpMetricToggles {
 /// Obtain the framework-internal meter (`apx.framework`).
 pub(crate) fn framework_meter() -> opentelemetry::metrics::Meter {
     super::get_meter("apx.framework")
+}
+
+// ── Active requests instrument ────────────────────────────────────────────
+
+fn active_requests_counter() -> &'static UpDownCounter<i64> {
+    static COUNTER: OnceLock<UpDownCounter<i64>> = OnceLock::new();
+    COUNTER.get_or_init(|| {
+        framework_meter()
+            .i64_up_down_counter(defs::HTTP_ACTIVE_REQUESTS.name)
+            .with_description(defs::HTTP_ACTIVE_REQUESTS.description)
+            .with_unit(defs::HTTP_ACTIVE_REQUESTS.unit)
+            .build()
+    })
 }
 
 // ── Active requests guard ─────────────────────────────────────────────────
@@ -51,21 +67,22 @@ impl ActiveRequestGuard {
             KeyValue::new("http.request.method", method.to_owned()),
             KeyValue::new("url.scheme", scheme.to_owned()),
         ];
-        framework_meter()
-            .i64_up_down_counter(defs::HTTP_ACTIVE_REQUESTS.name)
-            .build()
-            .add(1, &attrs);
+        active_requests_counter().add(1, &attrs);
         Some(Self { attrs })
     }
 }
 
 impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
-        framework_meter()
-            .i64_up_down_counter(defs::HTTP_ACTIVE_REQUESTS.name)
-            .build()
-            .add(-1, &self.attrs);
+        active_requests_counter().add(-1, &self.attrs);
     }
+}
+
+// ── Request duration instrument ───────────────────────────────────────────
+
+fn duration_histogram() -> &'static Histogram<f64> {
+    static HIST: OnceLock<Histogram<f64>> = OnceLock::new();
+    HIST.get_or_init(|| defs::HTTP_REQUEST_DURATION.histogram(&framework_meter()))
 }
 
 // ── Request duration ──────────────────────────────────────────────────────
@@ -96,9 +113,7 @@ pub fn record_duration(
     if let Some(et) = error_type {
         attrs.push(KeyValue::new("error.type", et.to_owned()));
     }
-    defs::HTTP_REQUEST_DURATION
-        .histogram(&framework_meter())
-        .record(duration_secs, &attrs);
+    duration_histogram().record(duration_secs, &attrs);
 
     FIRST.call_once(|| {
         tracing::info!(

@@ -481,3 +481,111 @@ class TestMetricCatalog:
             | EXPECTED_APX_METRICS
         )
         assert all_names == expected
+
+
+# ── Metric unit + description correctness ─────────────────────────────────
+
+VALID_UCUM_UNITS = {"1", "s", "ms", "us", "By", "kBy", "MBy", "%"}
+
+EXPECTED_UNITS: dict[str, str] = {
+    "system.cpu.simple_utilization": "1",
+    "system.memory.utilization": "1",
+    "system.swap.utilization": "1",
+    "system.disk.io": "By",
+    "system.network.io": "By",
+    "process.cpu.utilization": "1",
+    "process.memory.usage": "By",
+    "process.thread.count": "1",
+    "http.server.request.duration": "s",
+    "http.server.active_requests": "1",
+    "apx.dispatch.body_collect.duration": "us",
+    "apx.dispatch.crossbeam_send.duration": "us",
+    "apx.dispatch.response_wait.duration": "us",
+    "apx.dispatch.total.duration": "us",
+    "apx.asgi.receive_build.duration": "us",
+    "apx.asgi.send_parse.duration": "us",
+}
+
+EXPECTED_DESCRIPTIONS: dict[str, str] = {
+    "system.cpu.simple_utilization": "System-wide CPU utilization as a fraction",
+    "system.memory.utilization": "Fraction of available memory used",
+    "system.swap.utilization": "Fraction of swap space used",
+    "system.disk.io": "Cumulative disk I/O in bytes",
+    "system.network.io": "Cumulative network I/O in bytes",
+    "process.cpu.utilization": "Process CPU utilization as a fraction of one core",
+    "process.memory.usage": "Process resident memory in bytes",
+    "process.thread.count": "Number of threads in the process",
+    "http.server.request.duration": "Duration of HTTP server requests",
+    "http.server.active_requests": "Number of in-flight HTTP server requests",
+    "apx.dispatch.body_collect.duration": "Time to collect the request body from the network stream",
+    "apx.dispatch.crossbeam_send.duration": "Time to push the request slot to the crossbeam channel and signal wakeup",
+    "apx.dispatch.response_wait.duration": "Time waiting for the Python handler to produce a response",
+    "apx.dispatch.total.duration": "Total dispatch duration from body collect start to response ready",
+    "apx.asgi.receive_build.duration": "Time to build the ASGI receive dict for the Python handler",
+    "apx.asgi.send_parse.duration": "Time to parse the ASGI send event dict from the Python handler",
+}
+
+
+class TestMetricUnits:
+    """Verify every metric has a correct UCUM unit — catches missing .with_unit() calls."""
+
+    def test_all_units_non_empty(self) -> None:
+        for entry in metric_catalog():
+            assert entry.unit, f"{entry.name} has empty unit"
+
+    def test_all_units_are_valid_ucum(self) -> None:
+        for entry in metric_catalog():
+            assert entry.unit in VALID_UCUM_UNITS, (
+                f"{entry.name} has unexpected unit {entry.unit!r}"
+            )
+
+    def test_units_match_expected_values(self) -> None:
+        for entry in metric_catalog():
+            expected = EXPECTED_UNITS.get(entry.name)
+            assert expected is not None, f"no expected unit for {entry.name}"
+            assert entry.unit == expected, (
+                f"{entry.name}: unit={entry.unit!r}, expected {expected!r}"
+            )
+
+    def test_http_active_requests_unit(self) -> None:
+        """Regression: http.server.active_requests was missing .with_unit()."""
+        entry = next(e for e in metric_catalog() if e.name == "http.server.active_requests")
+        assert entry.unit == "1"
+
+
+class TestMetricDescriptions:
+    """Verify every metric has a meaningful description — catches missing .with_description()."""
+
+    def test_all_descriptions_non_empty(self) -> None:
+        for entry in metric_catalog():
+            assert entry.description, f"{entry.name} has empty description"
+
+    def test_no_placeholder_descriptions(self) -> None:
+        """No metric should have a placeholder like '-' or 'TODO'."""
+        for entry in metric_catalog():
+            assert entry.description not in ("-", "TODO", "N/A", "n/a"), (
+                f"{entry.name} has placeholder description {entry.description!r}"
+            )
+
+    def test_descriptions_match_expected_values(self) -> None:
+        for entry in metric_catalog():
+            expected = EXPECTED_DESCRIPTIONS.get(entry.name)
+            assert expected is not None, f"no expected description for {entry.name}"
+            assert entry.description == expected, (
+                f"{entry.name}: description={entry.description!r}, expected {expected!r}"
+            )
+
+    def test_http_active_requests_description(self) -> None:
+        """Regression: http.server.active_requests was missing .with_description()."""
+        entry = next(e for e in metric_catalog() if e.name == "http.server.active_requests")
+        assert entry.description == "Number of in-flight HTTP server requests"
+
+    def test_descriptions_are_sentence_fragments(self) -> None:
+        """Descriptions should start with an uppercase letter and not end with a period."""
+        for entry in metric_catalog():
+            assert entry.description[0].isupper(), (
+                f"{entry.name}: description should start uppercase: {entry.description!r}"
+            )
+            assert not entry.description.endswith("."), (
+                f"{entry.name}: description should not end with period: {entry.description!r}"
+            )

@@ -108,6 +108,54 @@ pub fn shutdown_telemetry() {
 
 // ── Internal ────────────────────────────────────────────────────────────
 
+/// OpenTelemetry semantic conventions version for resource attributes.
+const SEMCONV_SCHEMA_URL: &str = "https://opentelemetry.io/schemas/1.29.0";
+
+/// Histogram boundaries for duration metrics recorded in seconds.
+///
+/// Aligned with OpenTelemetry HTTP semantic conventions for
+/// `http.server.request.duration`.
+const DURATION_SECONDS_BOUNDARIES: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+];
+
+/// Histogram boundaries for duration metrics recorded in microseconds.
+///
+/// Covers sub-millisecond dispatch latencies (body collect, crossbeam send,
+/// ASGI parse) up to 100ms outliers.
+const DURATION_MICROSECONDS_BOUNDARIES: &[f64] = &[
+    1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0, 2_500.0, 5_000.0, 10_000.0, 50_000.0,
+    100_000.0,
+];
+
+/// SDK View that assigns appropriate histogram bucket boundaries based on unit.
+///
+/// Matches histogram instruments by their declared unit (`"s"` or `"us"`) and
+/// overrides the default SDK boundaries (which assume milliseconds) with
+/// boundaries that match the actual measurement scale.
+fn histogram_bucket_view(
+    inst: &opentelemetry_sdk::metrics::Instrument,
+) -> Option<opentelemetry_sdk::metrics::Stream> {
+    use opentelemetry_sdk::metrics::{Aggregation, InstrumentKind, Stream};
+
+    if inst.kind != Some(InstrumentKind::Histogram) {
+        return None;
+    }
+
+    let boundaries = match inst.unit.as_ref() {
+        "s" => DURATION_SECONDS_BOUNDARIES,
+        "us" => DURATION_MICROSECONDS_BOUNDARIES,
+        _ => return None,
+    };
+
+    Some(
+        Stream::new().aggregation(Aggregation::ExplicitBucketHistogram {
+            boundaries: boundaries.to_vec(),
+            record_min_max: true,
+        }),
+    )
+}
+
 /// Build the OTEL resource from `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
 /// and the optional `APX_APP_DIR`.
 fn build_resource(app_dir: Option<&str>) -> Resource {
@@ -134,7 +182,9 @@ fn build_resource(app_dir: Option<&str>) -> Resource {
         attrs.push(KeyValue::new("apx.role", "supervisor"));
     }
 
-    Resource::builder().with_attributes(attrs).build()
+    Resource::builder()
+        .with_schema_url(attrs, SEMCONV_SCHEMA_URL)
+        .build()
 }
 
 fn init_tracing_fmt_only(filter: &str) {
@@ -206,6 +256,7 @@ fn init_tracing_with_otel(
     let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
         .with_resource(resource.clone())
         .with_reader(reader)
+        .with_view(histogram_bucket_view)
         .build();
 
     opentelemetry::global::set_meter_provider(provider.clone());

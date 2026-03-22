@@ -14,17 +14,28 @@ pub mod process_metrics;
 pub mod spans;
 pub mod system_metrics;
 
+use opentelemetry::InstrumentationScope;
 use opentelemetry::metrics::MeterProvider;
 use pyo3::prelude::*;
 
+/// OpenTelemetry semantic conventions version this instrumentation conforms to.
+const SEMCONV_SCHEMA_URL: &str = "https://opentelemetry.io/schemas/1.29.0";
+
 /// Obtain a named OTEL meter backed by the configured provider.
 ///
-/// Falls back to the global (noop when OTEL is disabled — zero overhead).
+/// Attaches the framework version and OTEL semconv schema URL to the
+/// instrumentation scope so that `metric_schema_url` is populated in
+/// exported telemetry.
 pub(crate) fn get_meter(name: &'static str) -> opentelemetry::metrics::Meter {
+    let scope = InstrumentationScope::builder(name)
+        .with_version(env!("CARGO_PKG_VERSION"))
+        .with_schema_url(SEMCONV_SCHEMA_URL)
+        .build();
+
     if let Some(mp) = apx_core::tracing_init::meter_provider() {
-        mp.meter(name)
+        mp.meter_with_scope(scope)
     } else {
-        opentelemetry::global::meter(name)
+        opentelemetry::global::meter_with_scope(scope)
     }
 }
 
