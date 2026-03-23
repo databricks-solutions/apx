@@ -86,12 +86,14 @@ class TracesExport(BaseModel):
 
 class LogRecord(BaseModel):
     timeUnixNano: str = ""
+    observedTimeUnixNano: str = ""
     severityNumber: int = 0
     severityText: str = ""
     body: AnyValue = AnyValue()
     attributes: list[KeyValue] = []
     traceId: str = ""
     spanId: str = ""
+    flags: int = 0
 
 
 class ScopeLogs(BaseModel):

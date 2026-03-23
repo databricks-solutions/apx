@@ -5,9 +5,17 @@ Tests cover:
 - Instrumentation models and the discriminated union
 - configure() / _get_config() merge logic
 - metric_catalog() introspection from Rust
+- Unit class constants and custom unit creation
+- span context manager, async context manager, and decorator
+- log namespace methods at all severity levels
+- Counter, Histogram, Gauge wrappers (construction + invocation)
+- StatusCode enum values
+- _resolve_identity() worker/supervisor logic
 """
 
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 
@@ -16,15 +24,22 @@ from apx.telemetry import (
     ApxMetrics,
     CaptureHeaders,
     Configuration,
+    Counter,
+    Gauge,
+    Histogram,
     HttpInstrumentation,
     HttpMetrics,
     MetricDefinition,
     ProcessInstrumentation,
     ProcessMetrics,
+    StatusCode,
     SystemInstrumentation,
     SystemMetrics,
+    Unit,
     configure,
+    log,
     metric_catalog,
+    span,
 )
 
 
@@ -549,7 +564,9 @@ class TestMetricUnits:
 
     def test_http_active_requests_unit(self) -> None:
         """Regression: http.server.active_requests was missing .with_unit()."""
-        entry = next(e for e in metric_catalog() if e.name == "http.server.active_requests")
+        entry = next(
+            e for e in metric_catalog() if e.name == "http.server.active_requests"
+        )
         assert entry.unit == "1"
 
 
@@ -577,7 +594,9 @@ class TestMetricDescriptions:
 
     def test_http_active_requests_description(self) -> None:
         """Regression: http.server.active_requests was missing .with_description()."""
-        entry = next(e for e in metric_catalog() if e.name == "http.server.active_requests")
+        entry = next(
+            e for e in metric_catalog() if e.name == "http.server.active_requests"
+        )
         assert entry.description == "Number of in-flight HTTP server requests"
 
     def test_descriptions_are_sentence_fragments(self) -> None:
@@ -589,3 +608,264 @@ class TestMetricDescriptions:
             assert not entry.description.endswith("."), (
                 f"{entry.name}: description should not end with period: {entry.description!r}"
             )
+
+
+# ── Unit class ────────────────────────────────────────────────────────────
+
+
+class TestUnit:
+    """Verify Unit constants and string inheritance."""
+
+    def test_is_str_subclass(self) -> None:
+        assert isinstance(Unit.seconds, str)
+
+    def test_seconds(self) -> None:
+        assert Unit.seconds == "s"
+
+    def test_milliseconds(self) -> None:
+        assert Unit.milliseconds == "ms"
+
+    def test_bytes(self) -> None:
+        assert Unit.bytes == "By"
+
+    def test_kilobytes(self) -> None:
+        assert Unit.kilobytes == "kBy"
+
+    def test_megabytes(self) -> None:
+        assert Unit.megabytes == "MBy"
+
+    def test_requests(self) -> None:
+        assert Unit.requests == "1"
+
+    def test_ratio(self) -> None:
+        assert Unit.ratio == "1"
+
+    def test_percent(self) -> None:
+        assert Unit.percent == "%"
+
+    def test_dimensionless(self) -> None:
+        assert Unit.dimensionless == "1"
+
+    def test_custom_unit(self) -> None:
+        custom = Unit("widgets")
+        assert custom == "widgets"
+        assert isinstance(custom, Unit)
+
+    def test_unit_usable_as_string(self) -> None:
+        assert f"duration in {Unit.seconds}" == "duration in s"
+
+
+# ── StatusCode enum ───────────────────────────────────────────────────────
+
+
+class TestStatusCode:
+    """Verify StatusCode enum values exposed from Rust."""
+
+    def test_ok_value(self) -> None:
+        assert StatusCode.Ok == 0
+
+    def test_error_value(self) -> None:
+        assert StatusCode.Error == 1
+
+    def test_distinct(self) -> None:
+        assert StatusCode.Ok != StatusCode.Error
+
+
+# ── span class ────────────────────────────────────────────────────────────
+
+
+class TestSpan:
+    """Verify the span context manager, async context manager, and decorator."""
+
+    def test_sync_context_manager(self) -> None:
+        with span("test.sync_cm") as handle:
+            assert handle is not None
+
+    def test_sync_context_manager_with_attributes(self) -> None:
+        with span("test.attrs", key="value", count=42) as handle:
+            assert handle is not None
+
+    def test_async_context_manager(self) -> None:
+        async def _run() -> object:
+            async with span("test.async_cm") as handle:
+                return handle
+
+        handle = asyncio.get_event_loop().run_until_complete(_run())
+        assert handle is not None
+
+    def test_decorator_sync(self) -> None:
+        @span("test.sync_dec")
+        def decorated() -> str:
+            return "ok"
+
+        assert decorated() == "ok"
+
+    def test_decorator_async(self) -> None:
+        @span("test.async_dec")
+        async def decorated() -> str:
+            return "ok"
+
+        result = asyncio.get_event_loop().run_until_complete(decorated())
+        assert result == "ok"
+
+    def test_nested_spans(self) -> None:
+        with span("test.outer"):
+            with span("test.inner"):
+                pass
+
+    def test_exit_returns_false(self) -> None:
+        """__exit__ should not suppress exceptions (returns False)."""
+        s = span("test.exit_false")
+        s.__enter__()
+        assert s.__exit__(None, None, None) is False
+
+    def test_merged_attrs_include_identity(self) -> None:
+        """_merged_attrs should include _IDENTITY_ATTRS."""
+        s = span("test.identity", custom="val")
+        merged = s._merged_attrs()
+        assert "apx.role" in merged
+        assert merged["custom"] == "val"
+
+
+# ── log namespace ─────────────────────────────────────────────────────────
+
+
+class TestLog:
+    """Verify all log level methods execute without error."""
+
+    def test_trace(self) -> None:
+        log.trace("trace msg", key="val")
+
+    def test_debug(self) -> None:
+        log.debug("debug msg")
+
+    def test_info(self) -> None:
+        log.info("info msg", status=200)
+
+    def test_notice(self) -> None:
+        log.notice("notice msg")
+
+    def test_warn(self) -> None:
+        log.warn("warn msg", threshold=100)
+
+    def test_error(self) -> None:
+        log.error("error msg")
+
+    def test_fatal(self) -> None:
+        log.fatal("fatal msg")
+
+    def test_exception_in_handler(self) -> None:
+        """log.exception captures the current exception context."""
+        try:
+            raise ValueError("test error")
+        except ValueError:
+            log.exception("caught error", detail="extra")
+
+    def test_exception_without_active_exc(self) -> None:
+        """log.exception outside except block still works (no active exc)."""
+        log.exception("no active exception")
+
+
+# ── Counter wrapper ───────────────────────────────────────────────────────
+
+
+class TestCounter:
+    """Verify Counter construction and invocation."""
+
+    def test_constructor_stores_fields(self) -> None:
+        c = Counter("test.counter", description="desc", unit=Unit.requests)
+        assert c.name == "test.counter"
+        assert c.description == "desc"
+        assert c.unit == "1"
+
+    def test_inc_default(self) -> None:
+        c = Counter("test.counter.default")
+        c.inc()
+
+    def test_inc_value(self) -> None:
+        c = Counter("test.counter.val")
+        c.inc(5)
+
+    def test_inc_with_labels(self) -> None:
+        c = Counter("test.counter.labels")
+        c.inc(1, labels={"method": "GET"})
+
+    def test_unit_accepts_string(self) -> None:
+        c = Counter("test.counter.str_unit", unit="widgets")
+        assert c.unit == "widgets"
+
+
+# ── Histogram wrapper ─────────────────────────────────────────────────────
+
+
+class TestHistogram:
+    """Verify Histogram construction and invocation."""
+
+    def test_constructor_stores_fields(self) -> None:
+        h = Histogram("test.histo", description="latency", unit=Unit.milliseconds)
+        assert h.name == "test.histo"
+        assert h.description == "latency"
+        assert h.unit == "ms"
+
+    def test_observe(self) -> None:
+        h = Histogram("test.histo.obs")
+        h.observe(42.0)
+
+    def test_observe_with_labels(self) -> None:
+        h = Histogram("test.histo.labels")
+        h.observe(99.0, labels={"endpoint": "/api"})
+
+
+# ── Gauge wrapper ─────────────────────────────────────────────────────────
+
+
+class TestGauge:
+    """Verify Gauge construction and invocation."""
+
+    def test_constructor_stores_fields(self) -> None:
+        g = Gauge("test.gauge", description="active", unit=Unit.dimensionless)
+        assert g.name == "test.gauge"
+        assert g.description == "active"
+        assert g.unit == "1"
+
+    def test_set(self) -> None:
+        g = Gauge("test.gauge.set")
+        g.set(7.0)
+
+    def test_set_with_labels(self) -> None:
+        g = Gauge("test.gauge.labels")
+        g.set(3.0, labels={"pool": "main"})
+
+
+# ── _resolve_identity ─────────────────────────────────────────────────────
+
+
+class TestResolveIdentity:
+    """Verify worker vs supervisor identity resolution from env vars."""
+
+    def test_supervisor_when_no_worker_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("APX_WORKER_ID", raising=False)
+        monkeypatch.delenv("APX_WORKER_NONCE", raising=False)
+        from apx.telemetry import _resolve_identity
+
+        result = _resolve_identity()
+        assert result["apx.role"] == "supervisor"
+
+    def test_worker_with_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("APX_WORKER_ID", "3")
+        from apx.telemetry import _resolve_identity
+
+        result = _resolve_identity()
+        assert result["apx.role"] == "worker"
+        assert result["apx.worker.id"] == "3"
+
+    def test_worker_with_nonce_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("APX_WORKER_ID", raising=False)
+        monkeypatch.setenv("APX_WORKER_NONCE", "abc")
+        from apx.telemetry import _resolve_identity
+
+        result = _resolve_identity()
+        assert result["apx.role"] == "worker"
+        assert "apx.worker.id" not in result

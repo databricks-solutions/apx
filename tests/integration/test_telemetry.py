@@ -23,8 +23,12 @@ import httpx
 import pytest
 
 from .otlp_models import (
+    InstrumentationScope,
+    LogRecord,
     LogsExport,
+    Metric,
     MetricsExport,
+    Span,
     TracesExport,
     read_jsonl,
 )
@@ -127,13 +131,18 @@ def _wait_for_collector_data(
     collector: OtelCollector,
     *,
     timeout: float = 30,
+    require_logs: bool = False,
 ) -> None:
-    """Wait until the collector has received at least some traces and metrics."""
+    """Wait until the collector has received at least some traces and metrics.
+
+    When *require_logs* is True, also waits for at least one log record.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         has_traces = len(collector.traces()) > 0
         has_metrics = len(collector.metrics()) > 0
-        if has_traces and has_metrics:
+        has_logs = not require_logs or len(collector.logs()) > 0
+        if has_traces and has_metrics and has_logs:
             return
         time.sleep(1.0)
 
@@ -143,13 +152,59 @@ def _uuid_to_trace_id(uid: str) -> str:
     return uuid.UUID(uid).bytes.hex()
 
 
+def _flat_log_records(
+    collector: OtelCollector,
+) -> list[tuple[InstrumentationScope, LogRecord]]:
+    """Flatten all (scope, log_record) pairs from the collector."""
+    records: list[tuple[InstrumentationScope, LogRecord]] = []
+    for export in collector.logs():
+        for rl in export.resourceLogs:
+            for sl in rl.scopeLogs:
+                for lr in sl.logRecords:
+                    records.append((sl.scope, lr))
+    return records
+
+
+def _flat_metrics(collector: OtelCollector) -> list[Metric]:
+    """Flatten all Metric objects from the collector."""
+    metrics: list[Metric] = []
+    for export in collector.metrics():
+        for rm in export.resourceMetrics:
+            for sm in rm.scopeMetrics:
+                metrics.extend(sm.metrics)
+    return metrics
+
+
+def _flat_spans(collector: OtelCollector) -> list[Span]:
+    """Flatten all Span objects from the collector."""
+    spans: list[Span] = []
+    for export in collector.traces():
+        for rs in export.resourceSpans:
+            for ss in rs.scopeSpans:
+                spans.extend(ss.spans)
+    return spans
+
+
+def _metric_type(m: Metric) -> str:
+    """Return the aggregation type of a metric: 'sum', 'histogram', or 'gauge'."""
+    if m.sum is not None:
+        return "sum"
+    if m.histogram is not None:
+        return "histogram"
+    if m.gauge is not None:
+        return "gauge"
+    return "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
-def otel_collector(tmp_path_factory: pytest.TempPathFactory) -> Generator[OtelCollector]:
+def otel_collector(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Generator[OtelCollector]:
     """Start an OTEL Collector Docker container writing JSONL to a temp dir."""
     data_dir = tmp_path_factory.mktemp("otel")
     port = _find_free_port()
@@ -369,9 +424,7 @@ class TestTelemetry:
                 for ss in rs.scopeSpans:
                     for s in ss.spans:
                         if s.name == "integration test log message":
-                            attrs = {
-                                a.key: a.value.stringValue for a in s.attributes
-                            }
+                            attrs = {a.key: a.value.stringValue for a in s.attributes}
                             assert attrs.get("log.level") == "info", (
                                 f"expected log.level='info'; got {attrs}"
                             )
@@ -506,9 +559,7 @@ class TestTraceContext:
             f"expected log span with traceId={expected_trace}; got {all_log_spans}"
         )
 
-    def test_otel_logs_have_trace_context(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_otel_logs_have_trace_context(self, otel_collector: OtelCollector) -> None:
         """OTLP log records carry a non-empty traceId from the request span."""
         expected_trace = _uuid_to_trace_id(REQUEST_ID)
         for export in otel_collector.logs():
@@ -558,3 +609,532 @@ class TestTraceContext:
             f"traceId for REQUEST_ID_2 not found: {trace_2}"
         )
         assert trace_1 != trace_2
+
+
+# ---------------------------------------------------------------------------
+# Tests — log-trace correlation and log record completeness
+# ---------------------------------------------------------------------------
+
+ZERO_TRACE_ID = "0" * 32
+ZERO_SPAN_ID = "0" * 16
+REQUEST_ID_LOG = "b1c2d3e4-f5a6-4b7c-8d9e-0f1a2b3c4d5e"
+
+
+@pytest.mark.integration
+class TestLogTraceCorrelation:
+    """Verify OTLP log records carry trace context and have complete metadata.
+
+    Exercises both log emission paths:
+
+    1. **Direct OTEL path** — Python ``logging.getLogger().info()`` goes through
+       ``_emit_log`` → ``emit_otel_log_record``, which explicitly sets
+       ``trace_id``/``span_id`` from the Python ``ContextVar``.  Scope: ``apx.python``.
+
+    2. **Bridge path** — Rust ``tracing::info!`` events are converted to OTLP
+       log records by ``OpenTelemetryTracingBridge``.  The bridge should read
+       the active ``tracing::Span`` context on the tokio thread.
+    """
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _setup(
+        self,
+        telemetry_client: httpx.Client,
+        otel_collector: OtelCollector,
+    ) -> None:
+        _generate_telemetry(telemetry_client, request_id=REQUEST_ID_LOG)
+        time.sleep(5)
+        _wait_for_collector_data(otel_collector, require_logs=True)
+
+    # ── Direct-path (Python) log tests ────────────────────────────────────
+
+    def test_python_direct_logs_have_trace_context(
+        self, otel_collector: OtelCollector
+    ) -> None:
+        """Python logging → emit_otel_log_record carries the request's traceId."""
+        expected_trace = _uuid_to_trace_id(REQUEST_ID_LOG)
+        records = _flat_log_records(otel_collector)
+
+        direct_logs = [
+            (scope, lr)
+            for scope, lr in records
+            if lr.body.stringValue
+            and "integration test log message" in lr.body.stringValue
+            and scope.name == "apx.python"
+        ]
+
+        assert direct_logs, (
+            f"no direct-path Python log records found with scope 'apx.python'; "
+            f"all scopes: {sorted(set(s.name for s, _ in records))}"
+        )
+
+        for _scope, lr in direct_logs:
+            assert lr.traceId == expected_trace, (
+                f"Python direct log traceId mismatch: "
+                f"expected {expected_trace}, got {lr.traceId}"
+            )
+            assert lr.spanId and lr.spanId != ZERO_SPAN_ID, (
+                f"Python direct log should have non-empty spanId; got {lr.spanId!r}"
+            )
+
+    def test_python_direct_logs_have_complete_metadata(
+        self, otel_collector: OtelCollector
+    ) -> None:
+        """Direct-path log records have severity, body, and timestamps."""
+        records = _flat_log_records(otel_collector)
+
+        direct_logs = [lr for scope, lr in records if scope.name == "apx.python"]
+        assert direct_logs, "no direct-path Python log records found"
+
+        for lr in direct_logs:
+            body = (lr.body.stringValue or "")[:80]
+            assert lr.body.stringValue, "direct log has empty body"
+            assert lr.severityNumber > 0, (
+                f"direct log has zero severityNumber: {body!r}"
+            )
+            assert lr.severityText, f"direct log missing severityText: {body!r}"
+            assert lr.timeUnixNano and lr.timeUnixNano != "0", (
+                f"direct log has zero timeUnixNano: {body!r}"
+            )
+
+    # ── Bridge-path (Rust tracing) log tests ──────────────────────────────
+
+    def test_rust_http_log_has_trace_context(
+        self, otel_collector: OtelCollector
+    ) -> None:
+        """Rust tracing::info! inside .instrument(span) carries traceId via the bridge.
+
+        The ``record_duration`` function in ``http.rs`` emits
+        ``"http metrics: first request duration recorded"`` inside the HTTP span
+        on the tokio thread.  The ``OpenTelemetryTracingBridge`` should propagate
+        the active span's trace context to the OTLP log record.
+        """
+        records = _flat_log_records(otel_collector)
+
+        rust_logs = [
+            (scope, lr)
+            for scope, lr in records
+            if lr.body.stringValue and "http metrics" in lr.body.stringValue
+        ]
+
+        assert rust_logs, (
+            f"no 'http metrics' log found; "
+            f"all log bodies: "
+            f"{[lr.body.stringValue[:80] for _, lr in records if lr.body.stringValue]}"
+        )
+
+        for _scope, lr in rust_logs:
+            assert lr.traceId and lr.traceId != ZERO_TRACE_ID, (
+                f"Rust tracing::info! inside .instrument(span) should carry traceId "
+                f"via OpenTelemetryTracingBridge; got traceId={lr.traceId!r}"
+            )
+
+    # ── Cross-cutting log metadata tests ──────────────────────────────────
+
+    def test_all_log_records_have_severity(self, otel_collector: OtelCollector) -> None:
+        """Every OTLP log record has non-zero severityNumber and non-empty severityText."""
+        records = _flat_log_records(otel_collector)
+        assert records, "no log records found in collector"
+
+        for scope, lr in records:
+            body = (lr.body.stringValue or "")[:80]
+            assert lr.severityNumber > 0, (
+                f"log record has zero severityNumber: body={body!r} scope={scope.name}"
+            )
+            assert lr.severityText, (
+                f"log record missing severityText: body={body!r} scope={scope.name}"
+            )
+
+    def test_all_log_records_have_body(self, otel_collector: OtelCollector) -> None:
+        """Every OTLP log record has a non-empty body."""
+        records = _flat_log_records(otel_collector)
+        assert records, "no log records found in collector"
+
+        for scope, lr in records:
+            assert lr.body.stringValue, (
+                f"log record has empty body: scope={scope.name} traceId={lr.traceId}"
+            )
+
+    def test_all_log_records_have_timestamp(
+        self, otel_collector: OtelCollector
+    ) -> None:
+        """Every OTLP log record has at least one valid timestamp.
+
+        ``timeUnixNano`` is the event time (may be unset by the bridge).
+        ``observedTimeUnixNano`` is when the SDK first saw the record.
+        At least one must be present.
+        """
+        records = _flat_log_records(otel_collector)
+        assert records, "no log records found in collector"
+
+        for scope, lr in records:
+            body = (lr.body.stringValue or "")[:80]
+            has_time = bool(lr.timeUnixNano and lr.timeUnixNano != "0")
+            has_observed = bool(
+                lr.observedTimeUnixNano and lr.observedTimeUnixNano != "0"
+            )
+            assert has_time or has_observed, (
+                f"log record has no timestamp: body={body!r} scope={scope.name}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Tests — metric correctness (names, types, units, descriptions)
+# ---------------------------------------------------------------------------
+
+OTEL_SPAN_KIND_SERVER = 2
+
+
+@pytest.mark.integration
+class TestMetricCorrectness:
+    """Verify exported metrics carry correct names, aggregation types, units, and descriptions.
+
+    Guards against regressions like the histogram_bucket_view bug that
+    replaced metric names with empty strings.
+    """
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _setup(
+        self,
+        telemetry_client: httpx.Client,
+        otel_collector: OtelCollector,
+    ) -> None:
+        _generate_telemetry(telemetry_client)
+        _generate_telemetry(telemetry_client)
+        _wait_for_collector_data(otel_collector)
+
+    # ── Regression: no empty metric names ─────────────────────────────────
+
+    def test_no_empty_metric_names(self, otel_collector: OtelCollector) -> None:
+        """Regression: histogram_bucket_view must preserve instrument name."""
+        metrics = _flat_metrics(otel_collector)
+        assert metrics, "no metrics found in collector"
+
+        empty = [m for m in metrics if not m.name]
+        assert empty == [], (
+            f"found {len(empty)} metric(s) with empty name; "
+            f"all names: {sorted(set(m.name for m in metrics))}"
+        )
+
+    # ── Built-in metric names ─────────────────────────────────────────────
+
+    def test_builtin_http_duration_present(self, otel_collector: OtelCollector) -> None:
+        names = {m.name for m in _flat_metrics(otel_collector)}
+        assert "http.server.request.duration" in names, (
+            f"expected 'http.server.request.duration'; got {names}"
+        )
+
+    def test_builtin_http_active_requests_present(
+        self, otel_collector: OtelCollector
+    ) -> None:
+        names = {m.name for m in _flat_metrics(otel_collector)}
+        assert "http.server.active_requests" in names, (
+            f"expected 'http.server.active_requests'; got {names}"
+        )
+
+    # ── Custom metric names ───────────────────────────────────────────────
+
+    def test_custom_counter_present(self, otel_collector: OtelCollector) -> None:
+        names = {m.name for m in _flat_metrics(otel_collector)}
+        assert "test.custom_counter" in names
+
+    def test_custom_histogram_present(self, otel_collector: OtelCollector) -> None:
+        names = {m.name for m in _flat_metrics(otel_collector)}
+        assert "test.custom_histogram" in names
+
+    def test_custom_gauge_present(self, otel_collector: OtelCollector) -> None:
+        names = {m.name for m in _flat_metrics(otel_collector)}
+        assert "test.custom_gauge" in names
+
+    # ── Aggregation types ─────────────────────────────────────────────────
+
+    def test_http_duration_is_histogram(self, otel_collector: OtelCollector) -> None:
+        for m in _flat_metrics(otel_collector):
+            if m.name == "http.server.request.duration":
+                assert _metric_type(m) == "histogram", (
+                    f"http.server.request.duration should be histogram, got {_metric_type(m)}"
+                )
+                return
+        pytest.fail("http.server.request.duration not found")
+
+    def test_http_active_requests_is_sum(self, otel_collector: OtelCollector) -> None:
+        """http.server.active_requests is an UpDownCounter → exported as sum."""
+        for m in _flat_metrics(otel_collector):
+            if m.name == "http.server.active_requests":
+                assert _metric_type(m) in ("sum", "gauge"), (
+                    f"http.server.active_requests should be sum or gauge, "
+                    f"got {_metric_type(m)}"
+                )
+                return
+        pytest.fail("http.server.active_requests not found")
+
+    def test_custom_counter_is_sum(self, otel_collector: OtelCollector) -> None:
+        for m in _flat_metrics(otel_collector):
+            if m.name == "test.custom_counter":
+                assert _metric_type(m) == "sum", (
+                    f"test.custom_counter should be sum, got {_metric_type(m)}"
+                )
+                return
+        pytest.fail("test.custom_counter not found")
+
+    def test_custom_histogram_is_histogram(self, otel_collector: OtelCollector) -> None:
+        for m in _flat_metrics(otel_collector):
+            if m.name == "test.custom_histogram":
+                assert _metric_type(m) == "histogram", (
+                    f"test.custom_histogram should be histogram, got {_metric_type(m)}"
+                )
+                return
+        pytest.fail("test.custom_histogram not found")
+
+    def test_custom_gauge_is_gauge(self, otel_collector: OtelCollector) -> None:
+        for m in _flat_metrics(otel_collector):
+            if m.name == "test.custom_gauge":
+                assert _metric_type(m) == "gauge", (
+                    f"test.custom_gauge should be gauge, got {_metric_type(m)}"
+                )
+                return
+        pytest.fail("test.custom_gauge not found")
+
+    # ── Units ─────────────────────────────────────────────────────────────
+
+    def test_http_duration_unit_is_seconds(self, otel_collector: OtelCollector) -> None:
+        for m in _flat_metrics(otel_collector):
+            if m.name == "http.server.request.duration":
+                assert m.unit == "s", (
+                    f"http.server.request.duration unit should be 's', got {m.unit!r}"
+                )
+                return
+        pytest.fail("http.server.request.duration not found")
+
+    def test_http_active_requests_unit(self, otel_collector: OtelCollector) -> None:
+        for m in _flat_metrics(otel_collector):
+            if m.name == "http.server.active_requests":
+                assert m.unit == "1", (
+                    f"http.server.active_requests unit should be '1', got {m.unit!r}"
+                )
+                return
+        pytest.fail("http.server.active_requests not found")
+
+    def test_custom_counter_unit(self, otel_collector: OtelCollector) -> None:
+        for m in _flat_metrics(otel_collector):
+            if m.name == "test.custom_counter":
+                assert m.unit == "1", (
+                    f"test.custom_counter unit should be '1', got {m.unit!r}"
+                )
+                return
+        pytest.fail("test.custom_counter not found")
+
+    def test_custom_histogram_unit(self, otel_collector: OtelCollector) -> None:
+        for m in _flat_metrics(otel_collector):
+            if m.name == "test.custom_histogram":
+                assert m.unit == "ms", (
+                    f"test.custom_histogram unit should be 'ms', got {m.unit!r}"
+                )
+                return
+        pytest.fail("test.custom_histogram not found")
+
+    # ── Descriptions ──────────────────────────────────────────────────────
+
+    def test_http_duration_description(self, otel_collector: OtelCollector) -> None:
+        for m in _flat_metrics(otel_collector):
+            if m.name == "http.server.request.duration":
+                assert m.description, (
+                    "http.server.request.duration should have non-empty description"
+                )
+                return
+        pytest.fail("http.server.request.duration not found")
+
+    def test_custom_counter_description(self, otel_collector: OtelCollector) -> None:
+        for m in _flat_metrics(otel_collector):
+            if m.name == "test.custom_counter":
+                assert m.description == "integration test counter", (
+                    f"test.custom_counter description mismatch: {m.description!r}"
+                )
+                return
+        pytest.fail("test.custom_counter not found")
+
+    def test_custom_histogram_description(self, otel_collector: OtelCollector) -> None:
+        for m in _flat_metrics(otel_collector):
+            if m.name == "test.custom_histogram":
+                assert m.description == "integration test histogram", (
+                    f"test.custom_histogram description mismatch: {m.description!r}"
+                )
+                return
+        pytest.fail("test.custom_histogram not found")
+
+    def test_custom_gauge_description(self, otel_collector: OtelCollector) -> None:
+        for m in _flat_metrics(otel_collector):
+            if m.name == "test.custom_gauge":
+                assert m.description == "integration test gauge", (
+                    f"test.custom_gauge description mismatch: {m.description!r}"
+                )
+                return
+        pytest.fail("test.custom_gauge not found")
+
+    # ── Data points have values ───────────────────────────────────────────
+
+    def test_http_duration_has_data_points(self, otel_collector: OtelCollector) -> None:
+        """The histogram should have at least one recorded observation."""
+        for m in _flat_metrics(otel_collector):
+            if m.name == "http.server.request.duration" and m.histogram:
+                assert m.histogram.dataPoints, (
+                    "http.server.request.duration histogram has no data points"
+                )
+                return
+        pytest.fail("http.server.request.duration histogram not found")
+
+    def test_custom_counter_has_data_points(
+        self, otel_collector: OtelCollector
+    ) -> None:
+        for m in _flat_metrics(otel_collector):
+            if m.name == "test.custom_counter" and m.sum:
+                assert m.sum.dataPoints, "test.custom_counter sum has no data points"
+                return
+        pytest.fail("test.custom_counter sum not found")
+
+
+# ---------------------------------------------------------------------------
+# Tests — span attributes and structure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestSpanAttributes:
+    """Verify HTTP and custom spans carry correct attributes and structure."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _setup(
+        self,
+        telemetry_client: httpx.Client,
+        otel_collector: OtelCollector,
+    ) -> None:
+        _generate_telemetry(telemetry_client)
+        time.sleep(3)
+        _wait_for_collector_data(otel_collector)
+
+    # ── HTTP span structure ───────────────────────────────────────────────
+
+    def test_http_span_exists(self, otel_collector: OtelCollector) -> None:
+        spans = _flat_spans(otel_collector)
+        http_spans = [s for s in spans if s.name == "http.server.request"]
+        assert http_spans, (
+            f"expected 'http.server.request' span; got {sorted(set(s.name for s in spans))}"
+        )
+
+    def test_http_span_kind_is_server(self, otel_collector: OtelCollector) -> None:
+        """HTTP spans should have kind=SERVER (2)."""
+        for s in _flat_spans(otel_collector):
+            if s.name == "http.server.request":
+                assert s.kind == OTEL_SPAN_KIND_SERVER, (
+                    f"http.server.request kind should be SERVER (2), got {s.kind}"
+                )
+                return
+        pytest.fail("http.server.request span not found")
+
+    def test_http_span_has_method_attribute(
+        self, otel_collector: OtelCollector
+    ) -> None:
+        for s in _flat_spans(otel_collector):
+            if s.name == "http.server.request":
+                attr_keys = {a.key for a in s.attributes}
+                assert "http.request.method" in attr_keys, (
+                    f"http.server.request missing 'http.request.method'; "
+                    f"got {attr_keys}"
+                )
+                return
+        pytest.fail("http.server.request span not found")
+
+    def test_http_span_has_status_code_attribute(
+        self, otel_collector: OtelCollector
+    ) -> None:
+        for s in _flat_spans(otel_collector):
+            if s.name == "http.server.request":
+                attr_keys = {a.key for a in s.attributes}
+                assert "http.response.status_code" in attr_keys, (
+                    f"http.server.request missing 'http.response.status_code'; "
+                    f"got {attr_keys}"
+                )
+                return
+        pytest.fail("http.server.request span not found")
+
+    def test_http_span_has_url_path(self, otel_collector: OtelCollector) -> None:
+        for s in _flat_spans(otel_collector):
+            if s.name == "http.server.request":
+                attr_keys = {a.key for a in s.attributes}
+                assert "url.path" in attr_keys, (
+                    f"http.server.request missing 'url.path'; got {attr_keys}"
+                )
+                return
+        pytest.fail("http.server.request span not found")
+
+    def test_http_span_has_valid_timestamps(
+        self, otel_collector: OtelCollector
+    ) -> None:
+        for s in _flat_spans(otel_collector):
+            if s.name == "http.server.request":
+                assert s.startTimeUnixNano and s.startTimeUnixNano != "0", (
+                    "http.server.request missing startTimeUnixNano"
+                )
+                assert s.endTimeUnixNano and s.endTimeUnixNano != "0", (
+                    "http.server.request missing endTimeUnixNano"
+                )
+                return
+        pytest.fail("http.server.request span not found")
+
+    # ── Custom span structure ─────────────────────────────────────────────
+
+    def test_custom_span_exists(self, otel_collector: OtelCollector) -> None:
+        spans = _flat_spans(otel_collector)
+        custom = [s for s in spans if s.name == "test.custom_span"]
+        assert custom, (
+            f"expected 'test.custom_span'; got {sorted(set(s.name for s in spans))}"
+        )
+
+    def test_custom_span_has_user_attribute(
+        self, otel_collector: OtelCollector
+    ) -> None:
+        """The telemetry test endpoint passes surface='span' to the custom span."""
+        for s in _flat_spans(otel_collector):
+            if s.name == "test.custom_span":
+                attrs = {a.key: a.value.stringValue for a in s.attributes}
+                assert attrs.get("surface") == "span", (
+                    f"test.custom_span missing surface='span'; got {attrs}"
+                )
+                return
+        pytest.fail("test.custom_span not found")
+
+    def test_custom_span_has_identity_attributes(
+        self, otel_collector: OtelCollector
+    ) -> None:
+        """Python spans should carry apx.role identity attribute."""
+        for s in _flat_spans(otel_collector):
+            if s.name == "test.custom_span":
+                attr_keys = {a.key for a in s.attributes}
+                assert "apx.role" in attr_keys, (
+                    f"test.custom_span missing 'apx.role'; got {attr_keys}"
+                )
+                return
+        pytest.fail("test.custom_span not found")
+
+    # ── Log-level span structure ──────────────────────────────────────────
+
+    def test_log_span_has_level_attribute(self, otel_collector: OtelCollector) -> None:
+        """log.info() creates an instant span with log.level='info'."""
+        for s in _flat_spans(otel_collector):
+            if s.name == "integration test log message":
+                attrs = {a.key: a.value.stringValue for a in s.attributes}
+                assert attrs.get("log.level") == "info", (
+                    f"log span missing log.level='info'; got {attrs}"
+                )
+                return
+        pytest.fail("log span 'integration test log message' not found")
+
+    def test_log_span_is_zero_duration(self, otel_collector: OtelCollector) -> None:
+        """Instant (log-level) spans should have start == end time."""
+        for s in _flat_spans(otel_collector):
+            if s.name == "integration test log message":
+                assert s.startTimeUnixNano == s.endTimeUnixNano, (
+                    f"log span should be zero-duration; "
+                    f"start={s.startTimeUnixNano} end={s.endTimeUnixNano}"
+                )
+                return
+        pytest.fail("log span 'integration test log message' not found")
