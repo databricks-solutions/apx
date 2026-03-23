@@ -54,7 +54,7 @@ hyper-tungstenite = "0.19"
 opentelemetry = "0.29"
 opentelemetry_sdk = { version = "0.29", features = ["rt-tokio", "logs", "trace", "metrics", "spec_unstable_metrics_views"] }
 opentelemetry-otlp = { version = "0.29", features = ["grpc-tonic", "logs", "trace", "metrics"] }
-opentelemetry-appender-tracing = "0.29"
+opentelemetry-appender-tracing = { version = "0.29", features = ["experimental_use_tracing_span_context"] }
 opentelemetry-proto = "0.31.0"
 prost = "0.14.3"
 

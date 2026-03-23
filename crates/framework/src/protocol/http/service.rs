@@ -173,6 +173,7 @@ fn build_request_span(
         .unwrap_or("");
 
     let span = tracing::info_span!(
+        target: "apx::http",
         "http.server.request",
         otel.kind = "server",
         http.request.method = method,

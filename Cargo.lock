@@ -3916,6 +3916,7 @@ dependencies = [
  "opentelemetry 0.29.1",
  "tracing",
  "tracing-core",
+ "tracing-opentelemetry",
  "tracing-subscriber",
 ]
 

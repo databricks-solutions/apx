@@ -154,10 +154,14 @@ fn histogram_bucket_view(
     };
 
     Some(
-        Stream::new().aggregation(Aggregation::ExplicitBucketHistogram {
-            boundaries: boundaries.to_vec(),
-            record_min_max: true,
-        }),
+        Stream::new()
+            .name(inst.name.clone())
+            .description(inst.description.clone())
+            .unit(inst.unit.clone())
+            .aggregation(Aggregation::ExplicitBucketHistogram {
+                boundaries: boundaries.to_vec(),
+                record_min_max: true,
+            }),
     )
 }
 
