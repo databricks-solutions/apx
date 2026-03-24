@@ -1,0 +1,15 @@
+[addon]
+name = "agent"
+description = "🤖 Agent protocol (A2A discovery, /invocations, MCP tools, eval bridge)"
+group = "backend"
+group_display_name = "Backend"
+
+[python.edits]
+imports = [
+    "from .agent import AgentDependency",
+]
+[[python.edits.aliases]]
+code = "Agent: TypeAlias = AgentDependency"
+doc = """
+Agent protocol dependency. Provides agent card and tool registry.
+Recommended usage: `agent: Dependencies.Agent`"""
