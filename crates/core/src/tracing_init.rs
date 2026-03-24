@@ -190,11 +190,12 @@ fn build_resource(app_dir: Option<&str>) -> Resource {
         attrs.push(KeyValue::new("apx.app_path", path.to_owned()));
     }
 
-    if let Ok(worker_id) = std::env::var("APX_WORKER_ID") {
-        attrs.push(KeyValue::new("apx.role", "worker"));
-        attrs.push(KeyValue::new("apx.worker.id", worker_id));
-    } else if std::env::var_os("APX_WORKER_NONCE").is_none() {
-        attrs.push(KeyValue::new("apx.role", "supervisor"));
+    if let Ok(id) = std::env::var("APX_WORKER_ID") {
+        attrs.push(KeyValue::new("apx.process.type", "worker"));
+        attrs.push(KeyValue::new("apx.worker.id", format!("worker-{id}")));
+    } else {
+        attrs.push(KeyValue::new("apx.process.type", "supervisor"));
+        attrs.push(KeyValue::new("apx.worker.id", "supervisor"));
     }
 
     Resource::builder()
@@ -248,7 +249,7 @@ fn init_tracing_with_otel(
         .with_batch_exporter(exporter)
         .build();
 
-    let tracer = provider.tracer("apx-framework");
+    let tracer = provider.tracer("apx.framework");
     opentelemetry::global::set_tracer_provider(provider.clone());
     let _ = TRACER_PROVIDER.set(provider);
 
@@ -288,9 +289,14 @@ fn init_tracing_with_otel(
         .with_batch_exporter(exporter)
         .build();
 
+    // Exclude `apx::python` — Python stdlib logs are forwarded directly
+    // to the OTEL log exporter (with trace context from the Python
+    // ContextVar) in `logging.rs::emit_log()`. Letting them also pass
+    // through the tracing bridge would produce duplicates without context.
+    let otel_log_filter = format!("{filter},apx::python=off");
     let otel_log_layer =
         opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&provider)
-            .with_filter(EnvFilter::new(filter));
+            .with_filter(EnvFilter::new(otel_log_filter));
     let _ = LOGGER_PROVIDER.set(provider);
 
     // ── Fmt (always) ────────────────────────────────────────────────

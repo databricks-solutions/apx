@@ -1,9 +1,12 @@
 //! Forward Python log records into Rust `tracing` events.
 //!
 //! Python's `logging` hierarchy maps to tracing severity levels.
-//! Records flow through: `logging.Handler` → `emit_log()` → `tracing`
-//! → stderr, and (when OTEL is enabled) directly to the OTEL log exporter
-//! with trace context from the Python `ContextVar`.
+//! Each record flows through two paths:
+//!
+//! 1. **Stderr**: `tracing` event with target `apx::python` → fmt layer.
+//!    The OTEL log bridge filters this target out (see `tracing_init.rs`).
+//! 2. **OTEL export**: direct `LogRecord` via the SDK logger, with trace
+//!    context from the Python `ContextVar` when available.
 //!
 //! The direct OTEL path is necessary because `tracing::Span::current()` is
 //! not active on the Python asyncio thread — the `opentelemetry-appender-tracing`
@@ -45,9 +48,10 @@ fn python_level_to_severity(level: i32) -> Severity {
 /// Forward a single Python log record into the Rust tracing subscriber.
 ///
 /// Two output paths:
-/// 1. Always: `tracing` event → stderr via the configured subscriber
-/// 2. When OTEL is enabled + trace context available: direct `LogRecord`
-///    with `trace_id`/`span_id` to the OTEL log exporter
+/// 1. `tracing` event (target `apx::python`) → stderr only.
+///    The OTEL log bridge filters this target out to avoid duplicates.
+/// 2. Direct `LogRecord` to the OTEL log exporter, with trace context
+///    from the Python `ContextVar` when available.
 #[pyfunction]
 #[pyo3(name = "_emit_log")]
 pub fn emit_log(py: Python<'_>, level: i32, message: String, logger_name: String) {
@@ -59,14 +63,13 @@ pub fn emit_log(py: Python<'_>, level: i32, message: String, logger_name: String
         _ => tracing::trace!(target: "apx::python", logger = logger_name, "{}", message),
     }
 
-    if let Some(sc) = super::context::read_python_span_context(py) {
-        emit_otel_log_record(&sc, level, &message, &logger_name);
-    }
+    let sc = super::context::read_python_span_context(py);
+    emit_otel_log_record(sc.as_ref(), level, &message, &logger_name);
 }
 
-/// Emit a direct OTEL `LogRecord` with trace context.
+/// Emit a direct OTEL `LogRecord`, optionally with trace context.
 fn emit_otel_log_record(
-    sc: &opentelemetry::trace::SpanContext,
+    sc: Option<&opentelemetry::trace::SpanContext>,
     level: i32,
     message: &str,
     logger_name: &str,
@@ -86,7 +89,9 @@ fn emit_otel_log_record(
         _ => "TRACE",
     });
     record.add_attribute("logger", logger_name.to_owned());
-    record.set_trace_context(sc.trace_id(), sc.span_id(), Some(sc.trace_flags()));
+    if let Some(sc) = sc {
+        record.set_trace_context(sc.trace_id(), sc.span_id(), Some(sc.trace_flags()));
+    }
 
     logger.emit(record);
 }

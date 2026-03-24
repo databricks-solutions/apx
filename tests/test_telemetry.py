@@ -723,7 +723,8 @@ class TestSpan:
         """_merged_attrs should include _IDENTITY_ATTRS."""
         s = span("test.identity", custom="val")
         merged = s._merged_attrs()
-        assert "apx.role" in merged
+        assert "apx.process.type" in merged
+        assert "apx.worker.id" in merged
         assert merged["custom"] == "val"
 
 
@@ -851,21 +852,23 @@ class TestResolveIdentity:
         from apx.telemetry import _resolve_identity
 
         result = _resolve_identity()
-        assert result["apx.role"] == "supervisor"
+        assert result["apx.process.type"] == "supervisor"
+        assert result["apx.worker.id"] == "supervisor"
 
     def test_worker_with_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("APX_WORKER_ID", "3")
         from apx.telemetry import _resolve_identity
 
         result = _resolve_identity()
-        assert result["apx.role"] == "worker"
-        assert result["apx.worker.id"] == "3"
+        assert result["apx.process.type"] == "worker"
+        assert result["apx.worker.id"] == "worker-3"
 
-    def test_worker_with_nonce_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_supervisor_when_nonce_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With APX_WORKER_NONCE but no APX_WORKER_ID, falls back to supervisor."""
         monkeypatch.delenv("APX_WORKER_ID", raising=False)
         monkeypatch.setenv("APX_WORKER_NONCE", "abc")
         from apx.telemetry import _resolve_identity
 
         result = _resolve_identity()
-        assert result["apx.role"] == "worker"
-        assert "apx.worker.id" not in result
+        assert result["apx.process.type"] == "supervisor"
+        assert result["apx.worker.id"] == "supervisor"

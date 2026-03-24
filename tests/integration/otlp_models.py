@@ -53,6 +53,12 @@ class SpanStatus(BaseModel):
     message: str = ""
 
 
+class SpanEvent(BaseModel):
+    name: str = ""
+    timeUnixNano: str = ""
+    attributes: list[KeyValue] = []
+
+
 class Span(BaseModel):
     traceId: str = ""
     spanId: str = ""
@@ -62,6 +68,7 @@ class Span(BaseModel):
     startTimeUnixNano: str = ""
     endTimeUnixNano: str = ""
     attributes: list[KeyValue] = []
+    events: list[SpanEvent] = []
     status: SpanStatus = SpanStatus()
 
 

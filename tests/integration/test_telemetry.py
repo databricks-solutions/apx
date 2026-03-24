@@ -696,6 +696,39 @@ class TestLogTraceCorrelation:
                 f"direct log has zero timeUnixNano: {body!r}"
             )
 
+    # ── No-duplicate tests ─────────────────────────────────────────────────
+
+    def test_python_logs_not_duplicated(self, otel_collector: OtelCollector) -> None:
+        """Each Python stdlib log should produce exactly one OTEL log record.
+
+        Before the fix, ``emit_log()`` emitted both a ``tracing`` event (picked
+        up by the ``OpenTelemetryTracingBridge``) AND a direct ``LogRecord``.
+        The bridge record had no trace context, creating a confusing duplicate.
+        Now the bridge filters ``apx::python`` events, so only the direct record
+        (with scope ``apx.python``) should exist.
+        """
+        records = _flat_log_records(otel_collector)
+
+        python_test_logs = [
+            (scope, lr)
+            for scope, lr in records
+            if lr.body.stringValue
+            and "integration test log message" in lr.body.stringValue
+        ]
+
+        assert python_test_logs, "no 'integration test log message' logs found"
+
+        scopes = [scope.name for scope, _ in python_test_logs]
+        assert all(s == "apx.python" for s in scopes), (
+            f"expected all Python test logs to come from scope 'apx.python'; "
+            f"got scopes: {scopes}"
+        )
+
+        assert len(python_test_logs) == 1, (
+            f"expected exactly 1 OTEL log record for 'integration test log message'; "
+            f"got {len(python_test_logs)} (scopes: {scopes})"
+        )
+
     # ── Bridge-path (Rust tracing) log tests ──────────────────────────────
 
     def test_rust_http_log_has_trace_context(
@@ -1105,12 +1138,15 @@ class TestSpanAttributes:
     def test_custom_span_has_identity_attributes(
         self, otel_collector: OtelCollector
     ) -> None:
-        """Python spans should carry apx.role identity attribute."""
+        """Python spans should carry apx.process.type identity attribute."""
         for s in _flat_spans(otel_collector):
             if s.name == "test.custom_span":
                 attr_keys = {a.key for a in s.attributes}
-                assert "apx.role" in attr_keys, (
-                    f"test.custom_span missing 'apx.role'; got {attr_keys}"
+                assert "apx.process.type" in attr_keys, (
+                    f"test.custom_span missing 'apx.process.type'; got {attr_keys}"
+                )
+                assert "apx.worker.id" in attr_keys, (
+                    f"test.custom_span missing 'apx.worker.id'; got {attr_keys}"
                 )
                 return
         pytest.fail("test.custom_span not found")

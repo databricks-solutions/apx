@@ -223,6 +223,94 @@ async def telemetry_test():
     return {"ok": True}
 
 
+@router.get("/telemetry/nested-spans")
+async def telemetry_nested_spans():
+    """Three levels of nested spans for parent-child relationship testing."""
+    from apx.telemetry import span
+
+    with span("test.outer", depth="1"):
+        with span("test.middle", depth="2"):
+            with span("test.inner", depth="3"):
+                pass
+
+    return {"ok": True}
+
+
+@router.get("/telemetry/sequential-spans")
+async def telemetry_sequential_spans():
+    """Parent span with two sequential children for sibling relationship testing."""
+    from apx.telemetry import span
+
+    with span("test.parent", role="parent"):
+        with span("test.sibling_a", order="first"):
+            pass
+        with span("test.sibling_b", order="second"):
+            pass
+
+    return {"ok": True}
+
+
+@router.get("/telemetry/error-handling")
+async def telemetry_error_handling():
+    """Exercise error capture: exception in span, log.exception, explicit status."""
+    from apx.telemetry import StatusCode, log, span
+
+    # (a) Span that catches a raised exception.
+    try:
+        with span("test.erroring_span"):
+            raise ValueError("deliberate test error")
+    except ValueError:
+        pass
+
+    # (b) log.exception() inside an except block.
+    try:
+        raise RuntimeError("log exception test")
+    except RuntimeError:
+        log.exception("caught runtime error", source="test")
+
+    # (c) Span with explicit status set to Error.
+    with span("test.explicit_error") as s:
+        s.set_status(StatusCode.Error, "manually set error")
+
+    # (d) Clean span for comparison.
+    with span("test.clean_span"):
+        pass
+
+    return {"ok": True}
+
+
+@router.get("/telemetry/cross-signal")
+async def telemetry_cross_signal():
+    """Exercises spans, log-level spans, metrics, and stdlib logging together."""
+    import logging
+
+    from apx.telemetry import Counter, Histogram, log, span
+
+    with span("test.cross_signal_span", surface="cross"):
+        log.info("cross signal info log", signal="log_info")
+        log.warn("cross signal warn log", signal="log_warn")
+
+        counter = Counter(
+            "test.cross_signal_counter",
+            description="cross signal test counter",
+            unit="1",
+        )
+        counter.inc(1, labels={"scenario": "cross_signal"})
+
+        histogram = Histogram(
+            "test.cross_signal_histogram",
+            description="cross signal test histogram",
+            unit="ms",
+        )
+        histogram.observe(42.0, labels={"scenario": "cross_signal"})
+
+        logging.getLogger("test.cross_signal").warning(
+            "cross signal stdlib warning"
+        )
+
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # Profiling / trace endpoints
 # ---------------------------------------------------------------------------

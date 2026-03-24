@@ -61,10 +61,8 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 def _resolve_identity() -> dict[str, str]:
     worker_id = os.environ.get("APX_WORKER_ID")
     if worker_id is not None:
-        return {"apx.role": "worker", "apx.worker.id": worker_id}
-    if os.environ.get("APX_WORKER_NONCE") is not None:
-        return {"apx.role": "worker"}
-    return {"apx.role": "supervisor"}
+        return {"apx.process.type": "worker", "apx.worker.id": f"worker-{worker_id}"}
+    return {"apx.process.type": "supervisor", "apx.worker.id": "supervisor"}
 
 
 _IDENTITY_ATTRS: dict[str, str] = _resolve_identity()
@@ -340,9 +338,9 @@ class ProcessMetrics(BaseModel):
     """Per-process metric toggles.
 
     Collected per-worker (and once for the supervisor process itself).
-    Each worker reports its own CPU, memory, and thread count under
-    the OTEL Resource attribute ``apx.worker.id``; the supervisor
-    reports under ``apx.role=supervisor``.
+    Each process is identified by the OTEL Resource attributes
+    ``apx.process.type`` (``"supervisor"`` or ``"worker"``) and
+    ``apx.worker.id`` (``"supervisor"`` or ``"worker-N"``).
 
     Metric names, descriptions, and units are defined in the Rust
     metric definitions module (``telemetry/defs.rs``).
@@ -376,10 +374,9 @@ class HttpMetrics(BaseModel):
     """HTTP server metric toggles.
 
     Collected per-worker. Each worker reports its own request duration
-    and active request count. The OTEL Resource attribute
-    ``apx.worker.id`` distinguishes workers; aggregate across all
-    workers at query time (e.g. ``sum(rate(...))``) for server-wide
-    totals.
+    and active request count. Use ``apx.worker.id`` to distinguish
+    workers; aggregate across all workers at query time (e.g.
+    ``sum(rate(...))``) for server-wide totals.
     """
 
     server_request_duration: bool = True
@@ -390,9 +387,9 @@ class ApxMetrics(BaseModel):
     """APX framework dispatch pipeline metric toggles.
 
     Collected per-worker. Each histogram records latency for the
-    dispatch phases within a single worker process. Use the OTEL
-    Resource attribute ``apx.worker.id`` to drill down; aggregate
-    across workers for server-wide distributions.
+    dispatch phases within a single worker process. Use
+    ``apx.worker.id`` to drill down; aggregate across workers for
+    server-wide distributions.
 
     All metrics default to disabled (opt-in for low overhead).
     """
@@ -453,8 +450,9 @@ class ProcessInstrumentation(BaseModel):
     and reports them as OTEL gauges. The first worker relays this
     configuration to the supervisor via IPC so user overrides are honoured.
 
-    Attribution: OTEL Resource carries ``apx.worker.id`` for workers
-    and ``apx.role=supervisor`` for the supervisor process.
+    Attribution: OTEL Resource carries ``apx.process.type``
+    (``"supervisor"`` or ``"worker"``) and ``apx.worker.id``
+    (``"supervisor"`` or ``"worker-N"``).
     """
 
     type: Literal["process"] = "process"
