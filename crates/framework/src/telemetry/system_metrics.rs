@@ -22,6 +22,7 @@ pub fn spawn_system_metrics(config: &SystemConfig) -> tokio::task::JoinHandle<()
     let interval = Duration::from_secs_f64(config.interval_secs);
 
     tracing::trace!(
+        name: "apx.telemetry.system_metrics.started",
         target: "apx::telemetry",
         interval_secs = config.interval_secs,
         "spawning system metrics collection task"
@@ -73,6 +74,7 @@ async fn collection_loop(toggles: super::config::SystemGlobalToggles, interval: 
             let cpu_pct = sys.global_cpu_usage();
             let mem_used_mb = (sys.total_memory() - sys.available_memory()) / (1024 * 1024);
             tracing::info!(
+                name: "apx.telemetry.system_metrics.first_collection",
                 target: "apx::telemetry",
                 interval_ms = interval.as_millis(),
                 cpu_pct = format_args!("{cpu_pct:.1}"),

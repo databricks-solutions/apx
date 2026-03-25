@@ -22,6 +22,7 @@ pub fn spawn_process_metrics(config: &ProcessConfig) -> tokio::task::JoinHandle<
     let pid = Pid::from_u32(std::process::id());
 
     tracing::trace!(
+        name: "apx.telemetry.process_metrics.started",
         target: "apx::telemetry",
         interval_secs = config.interval_secs,
         pid = pid.as_u32(),

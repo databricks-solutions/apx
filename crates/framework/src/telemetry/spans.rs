@@ -10,12 +10,38 @@
 //!     ...
 //! ```
 
-use opentelemetry::trace::{SpanContext, TraceContextExt, Tracer};
+use opentelemetry::trace::{SpanContext, SpanKind, TraceContextExt, Tracer};
 use opentelemetry::{Context, trace::Span};
 use pyo3::prelude::*;
 use std::collections::HashMap;
 
 use super::context::SerializedContext;
+
+/// Cached tracer for user-created spans, with full InstrumentationScope.
+static USER_TRACER: std::sync::OnceLock<opentelemetry::global::BoxedTracer> =
+    std::sync::OnceLock::new();
+
+/// Obtain a tracer for user spans with version + schema_url on the scope.
+fn user_tracer() -> &'static opentelemetry::global::BoxedTracer {
+    USER_TRACER.get_or_init(|| {
+        let scope = opentelemetry::InstrumentationScope::builder("apx.user")
+            .with_version(env!("CARGO_PKG_VERSION"))
+            .with_schema_url(super::SEMCONV_SCHEMA_URL)
+            .build();
+        opentelemetry::global::tracer_with_scope(scope)
+    })
+}
+
+/// Map Python SpanKind integer to OTEL SpanKind.
+fn map_span_kind(kind: u8) -> SpanKind {
+    match kind {
+        2 => SpanKind::Server,
+        3 => SpanKind::Client,
+        4 => SpanKind::Producer,
+        5 => SpanKind::Consumer,
+        _ => SpanKind::Internal,
+    }
+}
 
 /// OTEL span status code exposed as a Python enum.
 #[pyclass(module = "apx._core", eq, eq_int, from_py_object)]
@@ -34,6 +60,8 @@ pub struct SpanHandle {
     name: String,
     /// User-provided attributes to set on the span.
     attributes: HashMap<String, String>,
+    /// OTLP SpanKind (1=INTERNAL, 2=SERVER, 3=CLIENT, 4=PRODUCER, 5=CONSUMER).
+    kind: u8,
     /// The active OTEL span — `Some` between `__enter__` and `__exit__`.
     span: Option<opentelemetry::global::BoxedSpan>,
     /// Serialized parent context to restore on `__exit__`.
@@ -56,6 +84,7 @@ impl SpanHandle {
         Self {
             name,
             attributes: attributes.unwrap_or_default(),
+            kind: 1,
             span: None,
             saved_parent: None,
         }
@@ -66,11 +95,12 @@ impl SpanHandle {
 impl SpanHandle {
     /// Create a new span handle. The span starts on `__enter__`.
     #[new]
-    #[pyo3(signature = (name, attributes=None))]
-    fn new(name: String, attributes: Option<HashMap<String, String>>) -> Self {
+    #[pyo3(signature = (name, attributes=None, kind=1))]
+    fn new(name: String, attributes: Option<HashMap<String, String>>, kind: u8) -> Self {
         Self {
             name,
             attributes: attributes.unwrap_or_default(),
+            kind,
             span: None,
             saved_parent: None,
         }
@@ -86,10 +116,11 @@ impl SpanHandle {
         // Save current context var value so we can restore it in __exit__.
         slf.saved_parent = super::context::read_context_var_raw(py);
 
-        let tracer = opentelemetry::global::tracer("apx.user");
+        let tracer = user_tracer();
         let mut span = tracer
             .span_builder(slf.name.clone())
-            .start_with_context(&tracer, &parent_cx);
+            .with_kind(map_span_kind(slf.kind))
+            .start_with_context(tracer, &parent_cx);
 
         // Apply user-provided attributes.
         for (k, v) in &slf.attributes {
@@ -103,6 +134,7 @@ impl SpanHandle {
         FIRST.call_once(|| {
             let has_provider = apx_core::tracing_init::tracer_provider().is_some();
             tracing::info!(
+                name: "apx.telemetry.first_user_span",
                 target: "apx::telemetry",
                 span_name = slf.name.as_str(),
                 trace_id = %hex::encode(sc.trace_id().to_bytes()),
@@ -282,6 +314,7 @@ fn write_context_var(py: Python<'_>, sc: &SpanContext) {
         hex::encode(sc.trace_id().to_bytes()),
         hex::encode(sc.span_id().to_bytes()),
         sc.trace_flags().to_u8(),
+        sc.trace_state().header(),
     );
     let _ = cv.call_method1(py, c"set", (value,));
 }
@@ -292,11 +325,17 @@ fn restore_context_var(py: Python<'_>, saved: Option<SerializedContext>) {
         return;
     };
     let tuple = match saved {
-        Some(ctx) => (ctx.trace_id_hex, ctx.span_id_hex, ctx.flags),
+        Some(ctx) => (
+            ctx.trace_id_hex,
+            ctx.span_id_hex,
+            ctx.flags,
+            ctx.trace_state,
+        ),
         None => (
             EMPTY_TRACE_ID_HEX.to_owned(),
             EMPTY_SPAN_ID_HEX.to_owned(),
             0u8,
+            String::new(),
         ),
     };
     let _ = cv.call_method1(py, c"set", (tuple,));

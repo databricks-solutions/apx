@@ -11,9 +11,20 @@ use serde::{Deserialize, Serialize};
 
 // ── Domain types ─────────────────────────────────────────────────────────
 
+/// User-defined OTLP resource attributes from Python `Configuration.resource`.
+#[derive(Debug, Clone, Default)]
+pub struct ResourceConfig {
+    /// User-provided key-value pairs merged into `resource.attributes`.
+    pub attributes: Vec<(String, String)>,
+    /// Optional override for the resource schema URL (rare).
+    pub schema_url: Option<String>,
+}
+
 /// Top-level telemetry configuration, flattened from the Python model.
 #[derive(Debug, Clone)]
 pub struct TelemetryConfig {
+    /// User-defined OTLP resource attributes.
+    pub resource: ResourceConfig,
     /// Machine-wide system metrics (supervisor only).
     pub system: SystemConfig,
     /// Per-process metrics (each worker + supervisor).
@@ -192,7 +203,7 @@ pub fn default_process_config() -> ProcessConfig {
 /// Calls `apx.telemetry._get_config()` which returns the merged effective
 /// configuration (defaults + user overrides) as a dict.
 pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
-    tracing::trace!(target: "apx::telemetry", "reading telemetry config from apx.telemetry._get_config()");
+    tracing::trace!(name: "apx.telemetry.config.read_start", target: "apx::telemetry", "reading telemetry config from apx.telemetry._get_config()");
 
     let module = py.import(c"apx.telemetry")?;
     let get_config = module.getattr(c"_get_config")?;
@@ -205,10 +216,17 @@ pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
     let instrumentations: &Bound<'_, PyList> = instrumentations_obj.cast()?;
 
     tracing::trace!(
+        name: "apx.telemetry.config.instrumentations_found",
         target: "apx::telemetry",
         count = instrumentations.len(),
         "instrumentations found in Python telemetry config"
     );
+
+    let resource = if let Some(resource_obj) = config_dict.get_item("resource")? {
+        parse_resource_config(resource_obj.cast()?)?
+    } else {
+        ResourceConfig::default()
+    };
 
     let mut system = default_system_config();
     let mut process = default_process_config();
@@ -222,6 +240,7 @@ pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
             "system" => {
                 system = parse_system_config(dict)?;
                 tracing::trace!(
+                    name: "apx.telemetry.config.parsed_system",
                     target: "apx::telemetry",
                     enabled = system.enabled,
                     interval_secs = system.interval_secs,
@@ -231,6 +250,7 @@ pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
             "process" => {
                 process = parse_process_config(dict)?;
                 tracing::trace!(
+                    name: "apx.telemetry.config.parsed_process",
                     target: "apx::telemetry",
                     enabled = process.enabled,
                     interval_secs = process.interval_secs,
@@ -240,6 +260,7 @@ pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
             "http" => {
                 http = parse_http_config(dict)?;
                 tracing::trace!(
+                    name: "apx.telemetry.config.parsed_http",
                     target: "apx::telemetry",
                     enabled = http.enabled,
                     "parsed http instrumentation config"
@@ -248,18 +269,25 @@ pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
             "apx" => {
                 apx = parse_apx_config(dict)?;
                 tracing::trace!(
+                    name: "apx.telemetry.config.parsed_apx",
                     target: "apx::telemetry",
                     enabled = apx.enabled,
                     "parsed apx instrumentation config"
                 );
             }
             _ => {
-                tracing::debug!(instrumentation_type = %type_str, "unknown instrumentation type, skipping");
+                tracing::debug!(
+                    name: "apx.telemetry.config.unknown_instrumentation_skipped",
+                    target: "apx::telemetry",
+                    instrumentation_type = %type_str,
+                    "unknown instrumentation type, skipping"
+                );
             }
         }
     }
 
     tracing::trace!(
+        name: "apx.telemetry.config.resolved",
         target: "apx::telemetry",
         system_enabled = system.enabled,
         process_enabled = process.enabled,
@@ -269,6 +297,7 @@ pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
     );
 
     Ok(TelemetryConfig {
+        resource,
         system,
         process,
         http,
@@ -296,6 +325,28 @@ fn default_apx_config() -> ApxConfig {
 }
 
 // ── Parsing helpers ──────────────────────────────────────────────────────
+
+fn parse_resource_config(dict: &Bound<'_, PyDict>) -> PyResult<ResourceConfig> {
+    let mut attributes = Vec::new();
+    if let Some(attrs_obj) = dict.get_item("attributes")? {
+        let attrs_list: &Bound<'_, PyList> = attrs_obj.cast()?;
+        for item in attrs_list.iter() {
+            let attr_dict: &Bound<'_, PyDict> = item.cast()?;
+            let key: String = extract_string(attr_dict, "key")?;
+            let value: String = extract_string(attr_dict, "value")?;
+            attributes.push((key, value));
+        }
+    }
+    let schema_url = dict
+        .get_item("schema_url")?
+        .map(|v| v.extract())
+        .transpose()?;
+
+    Ok(ResourceConfig {
+        attributes,
+        schema_url,
+    })
+}
 
 fn parse_system_config(dict: &Bound<'_, PyDict>) -> PyResult<SystemConfig> {
     let enabled = extract_bool(dict, "enabled", true)?;

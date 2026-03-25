@@ -111,7 +111,7 @@ impl Dispatch for AsgiDispatch {
             ) {
                 Ok(response) => response,
                 Err(err) => {
-                    tracing::error!(error = %err, "websocket upgrade error");
+                    tracing::error!(name: "apx.dispatch.websocket_upgrade_error", error = %err, "websocket upgrade error");
                     Response::builder()
                         .status(http::StatusCode::INTERNAL_SERVER_ERROR)
                         .header(http::header::CONTENT_TYPE, "text/plain")
@@ -228,7 +228,7 @@ fn error_response(err: AppError) -> OutboundResponse {
     let body = match &err {
         AppError::Timeout => TIMEOUT_BODY,
         AppError::Internal(msg) => {
-            tracing::error!(error = %msg, "internal dispatch error");
+            tracing::error!(name: "apx.dispatch.internal_error", error = %msg, "internal dispatch error");
             INTERNAL_ERROR_BODY
         }
     };

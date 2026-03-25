@@ -147,6 +147,23 @@ impl Service<Request<Incoming>> for ApxService {
 
 // ── Trace context ────────────────────────────────────────────────────────
 
+/// Parse the `tracestate` HTTP header into an OTEL `TraceState`.
+///
+/// Falls back to an empty `TraceState` if the header is missing or malformed.
+fn parse_tracestate_header(headers: &HeaderMap) -> TraceState {
+    headers
+        .get("tracestate")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|raw| {
+            TraceState::from_key_value(
+                raw.split(',')
+                    .filter_map(|pair| pair.split_once('=').map(|(k, v)| (k.trim(), v.trim()))),
+            )
+            .ok()
+        })
+        .unwrap_or_default()
+}
+
 /// Parse `x-request-id` UUID into an OTEL `TraceId`.
 ///
 /// Databricks Apps always sends a UUID v4 (128 bits = OTEL TraceId size).
@@ -189,13 +206,9 @@ fn build_request_span(
                 .try_into()
                 .unwrap_or([0; 8]),
         );
-        let parent_sc = SpanContext::new(
-            tid,
-            parent_span_id,
-            TraceFlags::SAMPLED,
-            true,
-            TraceState::default(),
-        );
+        let trace_state = parse_tracestate_header(headers);
+        let parent_sc =
+            SpanContext::new(tid, parent_span_id, TraceFlags::SAMPLED, true, trace_state);
         let parent_cx = opentelemetry::Context::new().with_remote_span_context(parent_sc);
         span.set_parent(parent_cx);
     }
@@ -469,7 +482,7 @@ pub async fn serve_tcp(
                 connections.spawn(serve_connection(stream, svc));
             }
             () = &mut shutdown => {
-                tracing::info!("shutdown signal received, stopping accept loop");
+                tracing::info!(name: "apx.http.accept_shutdown", "shutdown signal received, stopping accept loop");
                 break;
             }
         }
@@ -481,7 +494,7 @@ pub async fn serve_tcp(
 /// Serve a single connection using HTTP/1 auto-detection.
 async fn serve_connection(stream: tokio::net::TcpStream, service: ApxService) {
     if let Err(e) = stream.set_nodelay(true) {
-        tracing::debug!(error = %e, "failed to set TCP_NODELAY");
+        tracing::debug!(name: "apx.http.tcp_nodelay_failed", error = %e, "failed to set TCP_NODELAY");
     }
     let io = TokioIo::new(stream);
     let result = http1::Builder::new()
@@ -490,7 +503,7 @@ async fn serve_connection(stream: tokio::net::TcpStream, service: ApxService) {
         .with_upgrades()
         .await;
     if let Err(e) = result {
-        tracing::debug!(error = %e, "connection error");
+        tracing::debug!(name: "apx.http.connection_error", error = %e, "connection error");
     }
 }
 

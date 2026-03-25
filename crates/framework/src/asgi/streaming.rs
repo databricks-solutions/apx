@@ -45,13 +45,14 @@ impl futures_core::Stream for AsgiBodyStream {
         }
 
         if let Some(chunk) = self.initial_chunk.take() {
-            tracing::trace!(chunk_len = chunk.len(), "body_stream: initial chunk");
+            tracing::trace!(name: "apx.asgi.streaming.initial_chunk", chunk_len = chunk.len(), "body_stream: initial chunk");
             return Poll::Ready(Some(Ok(chunk)));
         }
 
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some(AsgiEvent::ResponseBody { body, more_body })) => {
                 tracing::trace!(
+                    name: "apx.asgi.streaming.chunk_received",
                     body_len = body.len(),
                     more_body,
                     "body_stream: chunk received"
@@ -62,12 +63,12 @@ impl futures_core::Stream for AsgiBodyStream {
                 Poll::Ready(Some(Ok(body)))
             }
             Poll::Ready(Some(_) | None) => {
-                tracing::trace!("body_stream: channel closed or unexpected event");
+                tracing::trace!(name: "apx.asgi.streaming.channel_closed_or_unexpected", "body_stream: channel closed or unexpected event");
                 self.done = true;
                 Poll::Ready(None)
             }
             Poll::Pending => {
-                tracing::trace!("body_stream: pending (waiting for next chunk)");
+                tracing::trace!(name: "apx.asgi.streaming.pending", "body_stream: pending (waiting for next chunk)");
                 Poll::Pending
             }
         }

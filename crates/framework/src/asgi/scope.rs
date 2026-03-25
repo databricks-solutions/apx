@@ -672,7 +672,7 @@ impl AsgiSend {
                 status: s,
                 headers: h,
             } => {
-                tracing::trace!(status = s, "asgi_send: response_start");
+                tracing::trace!(name: "apx.asgi.send_response_start", status = s, "asgi_send: response_start");
                 *status = Some(s);
                 *headers = Some(h);
                 Self::resolved_awaitable(resolved, py)
@@ -702,7 +702,7 @@ impl AsgiSend {
                         }));
                     }
                     *stream_tx = Some(stx);
-                    tracing::trace!(body_len, "asgi_send: first body chunk (streaming started)");
+                    tracing::trace!(name: "apx.asgi.send_first_body_chunk", body_len, "asgi_send: first body chunk (streaming started)");
                 } else {
                     let _ = disconnect_tx.take();
                     let body_len = body.len();
@@ -714,7 +714,7 @@ impl AsgiSend {
                             server_route,
                         }));
                     }
-                    tracing::trace!(body_len, "asgi_send: fixed body (complete)");
+                    tracing::trace!(name: "apx.asgi.send_fixed_body", body_len, "asgi_send: fixed body (complete)");
                 }
                 Self::resolved_awaitable(resolved, py)
             }
@@ -728,6 +728,7 @@ impl AsgiSend {
                 match tx.try_send(AsgiEvent::ResponseBody { body, more_body }) {
                     Ok(()) => {
                         tracing::trace!(
+                            name: "apx.asgi.send_stream_chunk",
                             body_len,
                             more_body,
                             "asgi_send: stream chunk sent (no backpressure)"
@@ -739,6 +740,7 @@ impl AsgiSend {
                     }
                     Err(mpsc::error::TrySendError::Full(event)) => {
                         tracing::trace!(
+                            name: "apx.asgi.send_stream_backpressure",
                             body_len,
                             more_body,
                             "asgi_send: stream chunk BACKPRESSURE (channel full)"
@@ -757,12 +759,12 @@ impl AsgiSend {
                         }
                         pyo3_async_runtimes::tokio::future_into_py(py, async move {
                             let _ = tx.send(event).await;
-                            tracing::trace!("asgi_send: backpressure resolved");
+                            tracing::trace!(name: "apx.asgi.send_backpressure_resolved", "asgi_send: backpressure resolved");
                             Ok(Python::attach(|py| py.None()))
                         })
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
-                        tracing::trace!("asgi_send: stream channel CLOSED");
+                        tracing::trace!(name: "apx.asgi.send_stream_channel_closed", "asgi_send: stream channel CLOSED");
                         *stream_tx = None;
                         Err(pyo3::exceptions::PyRuntimeError::new_err(
                             "stream channel closed",

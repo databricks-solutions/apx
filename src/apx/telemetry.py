@@ -1,34 +1,124 @@
 """APX Telemetry — spans, metrics, and structured logs via OTLP.
 
-Usage::
+Quick start::
 
     from apx.telemetry import span, log, Counter, Histogram, Gauge, Unit
 
-    # Spans (context manager / decorator)
     with span("db.query", table="users") as s:
         s.set_attribute("rows", "42")
 
-    async with span("fetch_data"):
-        await db.fetch()
-
-    @span("load_user")
-    async def load_user(uid: int): ...
-
-    # Structured logs (instant spans with a level attribute)
     log.info("request handled", method="GET", status=200)
-    log.warn("slow query", duration_ms=1200)
 
-    # Metrics
-    counter = Counter("http.requests", description="Total requests", unit=Unit.requests)
-    counter.inc()
+    counter = Counter("http.requests", unit=Unit.requests)
+    counter.inc(1, attributes={"method": "GET"})
 
-    histogram = Histogram("http.latency", unit=Unit.milliseconds)
-    histogram.observe(42.0)
+All telemetry is exported via OTLP gRPC and lands in three tables.
+
+
+Table: spans
+~~~~~~~~~~~~
+
+| Column                  | Populated                                                          |
+|-------------------------|--------------------------------------------------------------------|
+| name                    | User: first arg — ``span("my.op")``                               |
+| kind                    | User: ``kind=SpanKind.CLIENT`` (default ``INTERNAL``)              |
+| attributes              | User: ``**kwargs`` on ``span()`` / ``set_attribute()`` on handle   |
+| events                  | User: ``add_event()`` / ``record_exception()`` / auto on exception |
+| status                  | User: ``set_status()`` / auto ``Error`` on exception               |
+| trace_id                | Auto: inherited from parent or generated for root spans            |
+| span_id                 | Auto: generated per span                                           |
+| parent_span_id          | Auto: from enclosing ``span()`` context                            |
+| trace_state             | Auto: propagated from parent context / incoming headers            |
+| flags                   | Auto: trace flags from span context                                |
+| start_time_unix_nano    | Auto: SDK timestamp on enter                                       |
+| end_time_unix_nano      | Auto: SDK timestamp on exit                                        |
+| links                   | Not yet exposed                                                    |
+| dropped_*_count         | Auto: SDK overflow counters                                        |
+| service_name            | Auto: from ``resource.attributes["service.name"]``                 |
+| resource                | Config: ``Configuration(resource=Resource(...))``                  |
+| resource_schema_url     | Auto: semconv schema URL                                           |
+| instrumentation_scope   | Auto: ``apx.user`` + framework version                             |
+| span_schema_url         | Auto: semconv schema URL                                           |
+
+
+Table: logs
+~~~~~~~~~~~
+
+| Column                  | Populated                                                  |
+|-------------------------|------------------------------------------------------------|
+| body                    | User: message arg — ``log.info("message")``                |
+| attributes              | User: ``**kwargs`` — ``log.info(..., method="GET")``       |
+| event_name              | User: ``event_name="user.login"`` kwarg                    |
+| severity_text           | Auto: from log level (``info``, ``warn``, ``error``, ...)  |
+| severity_number         | Auto: from log level                                       |
+| trace_id                | Auto: from active span context                             |
+| span_id                 | Auto: from active span context                             |
+| time_unix_nano          | Auto: SDK timestamp                                        |
+| observed_time_unix_nano | Auto: SDK timestamp                                        |
+| flags                   | Auto: trace flags from span context                        |
+| dropped_attributes_count| Auto: SDK overflow counter                                 |
+| service_name            | Auto: from ``resource.attributes["service.name"]``         |
+| resource                | Config: ``Configuration(resource=Resource(...))``          |
+| resource_schema_url     | Auto: semconv schema URL                                   |
+| instrumentation_scope   | Auto: ``apx.python`` + framework version                   |
+| log_schema_url          | Auto: semconv schema URL                                   |
+
+
+Table: metrics
+~~~~~~~~~~~~~~
+
+| Column                  | Populated                                                           |
+|-------------------------|---------------------------------------------------------------------|
+| name                    | User: constructor arg — ``Counter("http.requests")``                |
+| description             | User: ``description=`` kwarg on constructor                         |
+| unit                    | User: ``unit=`` kwarg on constructor                                |
+| metric_type             | Auto: ``Sum`` / ``Histogram`` / ``Gauge``                           |
+| sum.attributes          | User: ``attributes=`` kwarg on ``Counter.inc()``                    |
+| histogram.attributes    | User: ``attributes=`` kwarg on ``Histogram.observe()``              |
+| gauge.attributes        | User: ``attributes=`` kwarg on ``Gauge.set()``                      |
+| start_time_unix_nano    | Auto: SDK (null for Gauge per spec)                                 |
+| time_unix_nano          | Auto: SDK collection timestamp                                      |
+| metadata                | Not settable via SDK                                                |
+| service_name            | Auto: from ``resource.attributes["service.name"]``                  |
+| resource                | Config: ``Configuration(resource=Resource(...))``                   |
+| resource_schema_url     | Auto: semconv schema URL                                            |
+| instrumentation_scope   | Auto: ``apx.user`` + framework version                              |
+| metric_schema_url       | Auto: semconv schema URL                                            |
+
+Note: per-data-point attributes are nested inside the metric type struct
+(``sum.attributes``, ``histogram.attributes``, ``gauge.attributes``).
+There is no top-level ``attributes`` column on the metrics table.
+
+
+resource vs attributes
+~~~~~~~~~~~~~~~~~~~~~~
+
+Two different columns across all three tables.
+
+``resource.attributes`` describes the *entity* (process/service) — set once
+at startup via ``Configuration``. ``attributes`` describes the *individual
+event* — set per ``span()``/``log``/metric call.
+
+Example::
+
+    # Entity identity (shared across all signals)
+    configure(Configuration(
+        resource=Resource(attributes=[
+            Attribute(key="deployment.environment", value="production"),
+        ])
+    ))
+
+    # Per-event attributes
+    log.info("handled", method="GET", status=200)
+    counter.inc(1, attributes={"method": "GET"})
+    with span("db.query", table="users"):
+        ...
 """
 
 from __future__ import annotations
 
 import asyncio
+import enum
 import functools
 import os
 import sys
@@ -71,7 +161,10 @@ __all__ = [
     "span",
     "log",
     "StatusCode",
+    "SpanKind",
     "Unit",
+    "Attribute",
+    "Resource",
     "Counter",
     "Histogram",
     "Gauge",
@@ -127,17 +220,73 @@ Unit.percent = Unit("%")
 Unit.dimensionless = Unit("1")
 
 
+# ── SpanKind ─────────────────────────────────────────────────────────────
+
+
+class SpanKind(enum.IntEnum):
+    """Span kind — populates the ``kind`` column in the spans table.
+
+    Defaults to ``INTERNAL`` for application logic. Use ``SERVER`` /
+    ``CLIENT`` for RPC boundaries, ``PRODUCER`` / ``CONSUMER`` for
+    messaging.
+
+    Example::
+
+        with span("rpc.call", kind=SpanKind.CLIENT):
+            ...
+    """
+
+    INTERNAL = 1
+    SERVER = 2
+    CLIENT = 3
+    PRODUCER = 4
+    CONSUMER = 5
+
+
 # ── span ─────────────────────────────────────────────────────────────────
 
 
 class span:
-    """Context manager / decorator for creating trace spans.
+    """Context manager and decorator for creating trace spans.
 
-    Keyword arguments become span attributes (values are stringified).
+    Writes to the spans table. See module docstring for the full column
+    mapping.
+
+    Examples::
+
+        # Sync context manager
+        with span("db.query", table="users") as s:
+            s.set_attribute("rows", "42")
+            s.add_event("cache_miss", attributes={"key": "user:1"})
+
+        # Async context manager
+        async with span("fetch_data", endpoint="/api") as s:
+            result = await client.get("/api")
+
+        # Decorator
+        @span("load_user")
+        async def load_user(uid: int): ...
+
+        # Explicit kind for RPC boundaries
+        with span("rpc.call", kind=SpanKind.CLIENT, service="auth"):
+            ...
+
+        # Manual status
+        with span("validate") as s:
+            if not valid:
+                s.set_status(StatusCode.Error, "validation failed")
+
+    Args:
+        name: Span name — populates the ``name`` column.
+        kind: Span kind — populates the ``kind`` column (default ``INTERNAL``).
+        **attributes: Key-value pairs — populate the ``attributes`` column.
     """
 
-    def __init__(self, name: str, **attributes: Any) -> None:
+    def __init__(
+        self, name: str, *, kind: SpanKind = SpanKind.INTERNAL, **attributes: Any
+    ) -> None:
         self._name = name
+        self._kind = kind
         self._attributes = {k: str(v) for k, v in attributes.items()}
         self._handle: SpanHandle | None = None
 
@@ -145,7 +294,7 @@ class span:
         return {**_IDENTITY_ATTRS, **self._attributes}
 
     def __enter__(self) -> SpanHandle:
-        self._handle = SpanHandle(self._name, self._merged_attrs())
+        self._handle = SpanHandle(self._name, self._merged_attrs(), int(self._kind))
         self._handle.__enter__()
         return self._handle
 
@@ -160,7 +309,7 @@ class span:
         return False
 
     async def __aenter__(self) -> SpanHandle:
-        self._handle = SpanHandle(self._name, self._merged_attrs())
+        self._handle = SpanHandle(self._name, self._merged_attrs(), int(self._kind))
         self._handle.__enter__()
         return self._handle
 
@@ -179,14 +328,14 @@ class span:
 
             @functools.wraps(fn)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                async with span(self._name, **self._attributes):
+                async with span(self._name, kind=self._kind, **self._attributes):
                     return await fn(*args, **kwargs)
 
             return async_wrapper  # type: ignore[return-value]
 
         @functools.wraps(fn)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-            with span(self._name, **self._attributes):
+            with span(self._name, kind=self._kind, **self._attributes):
                 return fn(*args, **kwargs)
 
         return sync_wrapper  # type: ignore[return-value]
@@ -195,75 +344,135 @@ class span:
 # ── log ──────────────────────────────────────────────────────────────────
 
 
-def _emit_log_span(level: str, message: str, **attributes: Any) -> None:
+def _emit_log_span(
+    level: str,
+    message: str,
+    *,
+    event_name: str | None = None,
+    **attributes: Any,
+) -> None:
     """Create an instant (zero-duration) span representing a log event."""
     attrs = {**_IDENTITY_ATTRS, **{k: str(v) for k, v in attributes.items()}}
     attrs["log.level"] = level
+    if event_name is not None:
+        attrs["event.name"] = event_name
     handle = SpanHandle(message, attrs)
     handle.__enter__()
     handle.__exit__(None, None, None)
 
 
 class _Log:
-    """Namespace for structured log-level functions.
+    """Structured logging — writes to the logs table.
 
-    Each method creates an instant span with a ``log.level`` attribute,
-    matching the Logfire model where logs are zero-duration spans.
+    See module docstring for the full column mapping.
 
-    Usage::
+    Examples::
 
         from apx.telemetry import log
 
         log.info("request handled", method="GET", status=200)
         log.warn("slow query", duration_ms=1200)
+        log.info("user signed in", event_name="user.login", uid="42")
+
+        try:
+            ...
+        except Exception:
+            log.exception("operation failed", event_name="op.error")
     """
 
     __slots__ = ()
 
     @staticmethod
-    def trace(message: str, **attributes: Any) -> None:
-        """Emit a TRACE-level log span."""
-        _emit_log_span("trace", message, **attributes)
+    def trace(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+        """Emit a TRACE-level log.
+
+        Example::
+
+            log.trace("cache lookup", key="user:1")
+        """
+        _emit_log_span("trace", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def debug(message: str, **attributes: Any) -> None:
-        """Emit a DEBUG-level log span."""
-        _emit_log_span("debug", message, **attributes)
+    def debug(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+        """Emit a DEBUG-level log.
+
+        Example::
+
+            log.debug("query plan", sql="SELECT ...", rows=42)
+        """
+        _emit_log_span("debug", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def info(message: str, **attributes: Any) -> None:
-        """Emit an INFO-level log span."""
-        _emit_log_span("info", message, **attributes)
+    def info(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+        """Emit an INFO-level log.
+
+        Example::
+
+            log.info("request handled", method="GET", status=200)
+            log.info("user signed in", event_name="user.login", uid="42")
+        """
+        _emit_log_span("info", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def notice(message: str, **attributes: Any) -> None:
-        """Emit a NOTICE-level log span."""
-        _emit_log_span("notice", message, **attributes)
+    def notice(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+        """Emit a NOTICE-level log.
+
+        Example::
+
+            log.notice("rate limit approaching", usage_pct=85)
+        """
+        _emit_log_span("notice", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def warn(message: str, **attributes: Any) -> None:
-        """Emit a WARN-level log span."""
-        _emit_log_span("warn", message, **attributes)
+    def warn(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+        """Emit a WARN-level log.
+
+        Example::
+
+            log.warn("slow query", duration_ms=1200, query="SELECT ...")
+        """
+        _emit_log_span("warn", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def error(message: str, **attributes: Any) -> None:
-        """Emit an ERROR-level log span."""
-        _emit_log_span("error", message, **attributes)
+    def error(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+        """Emit an ERROR-level log.
+
+        Example::
+
+            log.error("payment failed", event_name="payment.error", order_id="abc")
+        """
+        _emit_log_span("error", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def fatal(message: str, **attributes: Any) -> None:
-        """Emit a FATAL-level log span."""
-        _emit_log_span("fatal", message, **attributes)
+    def fatal(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+        """Emit a FATAL-level log.
+
+        Example::
+
+            log.fatal("database unreachable", host="db-primary")
+        """
+        _emit_log_span("fatal", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def exception(message: str, **attributes: Any) -> None:
-        """Emit an ERROR-level log span with the current exception attached.
+    def exception(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+        """Emit an ERROR-level log with the current exception attached.
 
-        Must be called from an ``except`` block.
+        Must be called from an ``except`` block. Automatically captures
+        ``exception.type``, ``exception.message``, and
+        ``exception.stacktrace`` as attributes.
+
+        Example::
+
+            try:
+                process_payment(order)
+            except Exception:
+                log.exception("payment failed", event_name="payment.error")
         """
         exc_info = sys.exc_info()
         attrs = {**_IDENTITY_ATTRS, **{k: str(v) for k, v in attributes.items()}}
         attrs["log.level"] = "error"
+        if event_name is not None:
+            attrs["event.name"] = event_name
         if exc_info[1] is not None:
             attrs["exception.type"] = type(exc_info[1]).__qualname__
             attrs["exception.message"] = str(exc_info[1])
@@ -282,7 +491,17 @@ log = _Log()
 
 
 class Counter:
-    """OTLP counter metric backed by Rust."""
+    """Monotonic sum metric — writes to the metrics table as ``metric_type=Sum``.
+
+    Per-data-point attributes end up in ``sum.attributes``.
+    See module docstring for the full column mapping.
+
+    Example::
+
+        counter = Counter("http.requests", description="Total requests", unit=Unit.requests)
+        counter.inc()
+        counter.inc(5, attributes={"method": "POST", "status": "200"})
+    """
 
     def __init__(
         self, name: str, *, description: str = "", unit: Unit | str = ""
@@ -292,13 +511,29 @@ class Counter:
         self.unit = unit
         self._instrument: RustCounter = _create_counter(name, description, str(unit))
 
-    def inc(self, value: int = 1, *, labels: dict[str, str] | None = None) -> None:
-        """Increment the counter."""
-        self._instrument.inc(value, labels)
+    def inc(self, value: int = 1, *, attributes: dict[str, str] | None = None) -> None:
+        """Increment the counter.
+
+        Example::
+
+            counter.inc()
+            counter.inc(5, attributes={"method": "POST"})
+        """
+        self._instrument.inc(value, attributes)
 
 
 class Histogram:
-    """OTLP histogram metric backed by Rust."""
+    """Distribution metric — writes to the metrics table as ``metric_type=Histogram``.
+
+    Per-data-point attributes end up in ``histogram.attributes``.
+    See module docstring for the full column mapping.
+
+    Example::
+
+        histogram = Histogram("http.request.duration", description="Request latency", unit=Unit.milliseconds)
+        histogram.observe(42.0)
+        histogram.observe(120.5, attributes={"route": "/api/users"})
+    """
 
     def __init__(
         self, name: str, *, description: str = "", unit: Unit | str = ""
@@ -310,13 +545,30 @@ class Histogram:
             name, description, str(unit)
         )
 
-    def observe(self, value: float, *, labels: dict[str, str] | None = None) -> None:
-        """Record an observation."""
-        self._instrument.observe(value, labels)
+    def observe(self, value: float, *, attributes: dict[str, str] | None = None) -> None:
+        """Record an observation.
+
+        Example::
+
+            histogram.observe(42.0)
+            histogram.observe(120.5, attributes={"route": "/api/users"})
+        """
+        self._instrument.observe(value, attributes)
 
 
 class Gauge:
-    """OTLP gauge metric backed by Rust."""
+    """Last-value metric — writes to the metrics table as ``metric_type=Gauge``.
+
+    Per-data-point attributes end up in ``gauge.attributes``.
+    ``start_time_unix_nano`` is null for gauges per OTLP spec.
+    See module docstring for the full column mapping.
+
+    Example::
+
+        gauge = Gauge("db.connections", description="Active connections", unit=Unit.dimensionless)
+        gauge.set(42.0)
+        gauge.set(7.0, attributes={"pool": "primary"})
+    """
 
     def __init__(
         self, name: str, *, description: str = "", unit: Unit | str = ""
@@ -326,12 +578,53 @@ class Gauge:
         self.unit = unit
         self._instrument: RustGauge = _create_gauge(name, description, str(unit))
 
-    def set(self, value: float, *, labels: dict[str, str] | None = None) -> None:
-        """Set the gauge value."""
-        self._instrument.set(value, labels)
+    def set(self, value: float, *, attributes: dict[str, str] | None = None) -> None:
+        """Set the gauge value.
+
+        Example::
+
+            gauge.set(42.0)
+            gauge.set(7.0, attributes={"pool": "primary"})
+        """
+        self._instrument.set(value, attributes)
 
 
 # ── Instrumentation configuration ────────────────────────────────────────
+
+
+class Attribute(BaseModel):
+    """A key-value pair for ``resource.attributes`` configuration.
+
+    Populates the ``resource`` column across all three tables.
+    This is the process identity — distinct from per-event ``attributes``.
+
+    Example::
+
+        Attribute(key="deployment.environment", value="production")
+    """
+
+    key: str
+    value: str
+
+
+class Resource(BaseModel):
+    """Resource identity — populates the ``resource`` column across all three tables.
+
+    Attributes set here are merged with built-in attributes
+    (``service.name``, ``apx.process.type``, ``apx.worker.id``,
+    ``apx.app_path``) and environment variables (``OTEL_SERVICE_NAME``,
+    ``OTEL_RESOURCE_ATTRIBUTES``). User attributes win on key collision.
+
+    Example::
+
+        Resource(attributes=[
+            Attribute(key="deployment.environment", value="production"),
+            Attribute(key="team", value="platform"),
+        ])
+    """
+
+    attributes: list[Attribute] = Field(default_factory=list)
+    schema_url: str | None = None
 
 
 class ProcessMetrics(BaseModel):
@@ -502,18 +795,25 @@ if os.environ.get("APX_PERF"):
 
 
 class Configuration(BaseModel):
-    """Telemetry instrumentation configuration.
+    """Telemetry pipeline configuration.
 
-    Defaults enable HTTP, system, and APX instrumentation automatically.
-    Call ``configure()`` only to override specific instrumentations::
+    Defaults enable HTTP, system, and process instrumentation. Call
+    ``configure()`` only to override specific instrumentations or to
+    set custom ``resource`` attributes.
 
-        from apx.telemetry import configure, Configuration, SystemInstrumentation
+    Example::
+
+        from apx.telemetry import configure, Configuration, Resource, Attribute
 
         configure(Configuration(
+            resource=Resource(attributes=[
+                Attribute(key="deployment.environment", value="staging"),
+            ]),
             instrumentations=[SystemInstrumentation(enabled=False)],
         ))
     """
 
+    resource: Resource = Field(default_factory=Resource)
     instrumentations: list[Instrumentation] = Field(default_factory=list)
 
 
@@ -526,6 +826,14 @@ def configure(config: Configuration) -> None:
     User-provided instrumentations are merged with defaults by ``type``:
     same type replaces the default, new types are appended, omitted
     defaults are kept as-is.
+
+    Example::
+
+        configure(Configuration(
+            resource=Resource(attributes=[
+                Attribute(key="team", value="platform"),
+            ]),
+        ))
     """
     global _config  # noqa: PLW0603
     _config = config
@@ -552,6 +860,13 @@ def _effective_instrumentations() -> list[Instrumentation]:
 def _get_config() -> dict[str, Any]:
     """Serialize the effective config (defaults + overrides) for Rust."""
     effective = _effective_instrumentations()
+    resource = _config.resource
+    resource_dict: dict[str, Any] = {
+        "attributes": [{"key": a.key, "value": a.value} for a in resource.attributes],
+    }
+    if resource.schema_url is not None:
+        resource_dict["schema_url"] = resource.schema_url
     return {
+        "resource": resource_dict,
         "instrumentations": [i.model_dump() for i in effective],
     }

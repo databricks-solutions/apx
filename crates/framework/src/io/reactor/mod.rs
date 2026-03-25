@@ -20,31 +20,31 @@ fn install_loop_policy(py: Python<'_>, policy: &str) {
         match py.import(c"uvloop") {
             Ok(uvloop) => {
                 let Ok(asyncio) = py.import(c"asyncio") else {
-                    tracing::error!("failed to import asyncio for uvloop policy install");
+                    tracing::error!(name: "apx.reactor.asyncio_import_failed", "failed to import asyncio for uvloop policy install");
                     return;
                 };
                 let Ok(policy_obj) = uvloop.call_method0(c"EventLoopPolicy") else {
-                    tracing::error!("uvloop.EventLoopPolicy() call failed");
+                    tracing::error!(name: "apx.reactor.uvloop_event_loop_policy_failed", "uvloop.EventLoopPolicy() call failed");
                     return;
                 };
                 if let Err(e) = asyncio.call_method1(c"set_event_loop_policy", (policy_obj,)) {
-                    tracing::error!(error = %e, "asyncio.set_event_loop_policy() failed");
+                    tracing::error!(name: "apx.reactor.set_event_loop_policy_failed", error = %e, "asyncio.set_event_loop_policy() failed");
                     return;
                 }
-                tracing::info!("installed uvloop event loop policy");
+                tracing::info!(name: "apx.reactor.uvloop_policy_installed", "installed uvloop event loop policy");
             }
             Err(e) => {
-                tracing::warn!(error = %e, "uvloop not available, falling back to asyncio");
+                tracing::warn!(name: "apx.reactor.uvloop_unavailable_fallback", error = %e, "uvloop not available, falling back to asyncio");
             }
         }
     } else {
-        tracing::info!(policy, "using asyncio event loop policy");
+        tracing::info!(name: "apx.reactor.event_loop_policy", policy, "using asyncio event loop policy");
     }
 }
 
 /// Create an asyncio event loop.
 fn create_event_loop(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-    tracing::info!("creating asyncio event loop");
+    tracing::info!(name: "apx.reactor.creating_event_loop", "creating asyncio event loop");
     py.import(c"asyncio")?.call_method0(c"new_event_loop")
 }
 
@@ -93,7 +93,7 @@ fn shutdown_asyncgens(_py: Python<'_>, event_loop: &Bound<'_, PyAny>) {
         return;
     };
     if let Err(e) = event_loop.call_method1(c"run_until_complete", (&coro,)) {
-        tracing::warn!(error = %e, "shutdown_asyncgens failed");
+        tracing::warn!(name: "apx.reactor.shutdown_asyncgens_failed", error = %e, "shutdown_asyncgens failed");
     }
 }
 
@@ -115,7 +115,7 @@ fn shutdown_default_executor(py: Python<'_>, event_loop: &Bound<'_, PyAny>) {
         return;
     };
     if let Err(e) = event_loop.call_method1(c"run_until_complete", (&wait_for,)) {
-        tracing::warn!(error = %e, "shutdown_default_executor failed");
+        tracing::warn!(name: "apx.reactor.shutdown_default_executor_failed", error = %e, "shutdown_default_executor failed");
     }
 }
 
@@ -166,13 +166,17 @@ impl Reactor {
         events
             .call_method1(c"_set_running_loop", (&event_loop,))
             .map_err(|e| format!("_set_running_loop: {e}"))?;
-        tracing::info!("reactor: _set_running_loop installed");
+        tracing::info!(name: "apx.reactor.set_running_loop_installed", "reactor: _set_running_loop installed");
 
         // Eager task factory (Python 3.12+).
         if let Ok(eager_factory) = asyncio.getattr(c"eager_task_factory") {
             match event_loop.call_method1(c"set_task_factory", (eager_factory,)) {
-                Ok(_) => tracing::info!("eager task factory enabled (Python 3.12+)"),
-                Err(e) => tracing::debug!("eager task factory not available: {e}"),
+                Ok(_) => {
+                    tracing::info!(name: "apx.reactor.eager_task_factory_enabled", "eager task factory enabled (Python 3.12+)");
+                }
+                Err(e) => {
+                    tracing::debug!(name: "apx.reactor.eager_task_factory_unavailable", "eager task factory not available: {e}");
+                }
             }
         }
 
@@ -197,13 +201,13 @@ impl Reactor {
                 Python::attach(|py| {
                     let el = el_for_thread.bind(py);
                     if let Err(e) = el.call_method0(c"run_forever") {
-                        tracing::error!(error = %e, "asyncio thread: run_forever failed");
+                        tracing::error!(name: "apx.reactor.run_forever_failed", error = %e, "asyncio thread: run_forever failed");
                     }
                 });
             })
             .map_err(|e| format!("spawn asyncio thread: {e}"))?;
 
-        tracing::info!("reactor initialized (asyncio delegation)");
+        tracing::info!(name: "apx.reactor.initialized", "reactor initialized (asyncio delegation)");
 
         Ok(Self {
             event_loop: event_loop.unbind(),
@@ -249,7 +253,7 @@ impl Reactor {
         if let Some(h) = handle
             && let Err(e) = h.join()
         {
-            tracing::warn!("asyncio thread panicked: {e:?}");
+            tracing::warn!(name: "apx.reactor.asyncio_thread_panicked", "asyncio thread panicked: {e:?}");
         }
 
         Python::attach(|py| {

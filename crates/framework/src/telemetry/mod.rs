@@ -66,10 +66,10 @@ pub(crate) use toggle_store;
 /// Called once during worker startup, after the Python interpreter and
 /// event loop are initialized.
 pub fn bootstrap_python_telemetry(py: Python<'_>) -> PyResult<()> {
-    tracing::trace!(target: "apx::telemetry", "bootstrapping Python-side telemetry");
+    tracing::trace!(name: "apx.telemetry.bootstrap_start", target: "apx::telemetry", "bootstrapping Python-side telemetry");
     install_log_handler(py)?;
     context::init_context_var(py)?;
-    tracing::trace!(target: "apx::telemetry", "Python telemetry bootstrap complete");
+    tracing::trace!(name: "apx.telemetry.bootstrap_complete", target: "apx::telemetry", "Python telemetry bootstrap complete");
     Ok(())
 }
 
@@ -78,6 +78,6 @@ fn install_log_handler(py: Python<'_>) -> PyResult<()> {
     let emit_fn = pyo3::wrap_pyfunction!(logging::emit_log, py)?;
     let bridge = py.import(c"apx._bridge")?;
     bridge.call_method1(c"install_log_handler", (emit_fn,))?;
-    tracing::trace!(target: "apx::telemetry", "Python log handler installed (apx._bridge)");
+    tracing::trace!(name: "apx.telemetry.log_handler_installed", target: "apx::telemetry", "Python log handler installed (apx._bridge)");
     Ok(())
 }

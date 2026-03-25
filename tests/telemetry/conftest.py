@@ -34,6 +34,9 @@ from otlp_models import (  # noqa: E402
     LogsExport,
     Metric,
     MetricsExport,
+    ResourceLogs,
+    ResourceMetrics,
+    ResourceSpans,
     Span,
     TracesExport,
     read_jsonl,
@@ -185,9 +188,38 @@ def flat_metrics_with_scope(
     return result
 
 
+def flat_resource_spans(collector: OtelCollector) -> list[ResourceSpans]:
+    """All ResourceSpans envelopes (with resource + schemaUrl)."""
+    result: list[ResourceSpans] = []
+    for export in collector.traces():
+        result.extend(export.resourceSpans)
+    return result
+
+
+def flat_resource_logs(collector: OtelCollector) -> list[ResourceLogs]:
+    """All ResourceLogs envelopes (with resource + schemaUrl)."""
+    result: list[ResourceLogs] = []
+    for export in collector.logs():
+        result.extend(export.resourceLogs)
+    return result
+
+
+def flat_resource_metrics(collector: OtelCollector) -> list[ResourceMetrics]:
+    """All ResourceMetrics envelopes (with resource + schemaUrl)."""
+    result: list[ResourceMetrics] = []
+    for export in collector.metrics():
+        result.extend(export.resourceMetrics)
+    return result
+
+
 def span_attrs(span: Span) -> dict[str, str]:
     """Extract span attributes as a {key: stringValue} dict."""
     return {a.key: (a.value.stringValue or "") for a in span.attributes}
+
+
+def log_attrs(lr: LogRecord) -> dict[str, str]:
+    """Extract log record attributes as a {key: stringValue} dict."""
+    return {a.key: (a.value.stringValue or "") for a in lr.attributes}
 
 
 # ---------------------------------------------------------------------------

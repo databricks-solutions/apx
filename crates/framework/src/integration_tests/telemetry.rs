@@ -277,7 +277,7 @@ fn gauge_records_to_in_memory_exporter() {
 }
 
 #[test]
-fn counter_with_labels() {
+fn counter_with_attributes() {
     let tt = setup();
     let _lock = EXPORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     tt.metric_exporter.reset();
@@ -290,10 +290,9 @@ fn counter_with_labels() {
 
     with_py(|py| {
         let obj = pyo3::Py::new(py, counter).unwrap();
-        let labels = pyo3::types::PyDict::new(py);
-        labels.set_item("method", "GET").unwrap();
-        // Pass labels as a positional arg (not **kwargs).
-        obj.call_method1(py, "inc", (1u64, labels)).unwrap();
+        let attrs = pyo3::types::PyDict::new(py);
+        attrs.set_item("method", "GET").unwrap();
+        obj.call_method1(py, "inc", (1u64, attrs)).unwrap();
     });
 
     tt.meter_provider.force_flush().unwrap();
@@ -314,12 +313,48 @@ fn emit_log_does_not_panic() {
     // _emit_log writes into the tracing subscriber. We verify it does not
     // panic at any severity level.
     with_py(|py| {
-        crate::telemetry::logging::emit_log(py, 50, "critical".to_owned(), "test".to_owned());
-        crate::telemetry::logging::emit_log(py, 40, "error".to_owned(), "test".to_owned());
-        crate::telemetry::logging::emit_log(py, 30, "warning".to_owned(), "test".to_owned());
-        crate::telemetry::logging::emit_log(py, 20, "info".to_owned(), "test".to_owned());
-        crate::telemetry::logging::emit_log(py, 10, "debug".to_owned(), "test".to_owned());
-        crate::telemetry::logging::emit_log(py, 5, "trace".to_owned(), "test".to_owned());
+        crate::telemetry::logging::emit_log(
+            py,
+            50,
+            "critical".to_owned(),
+            "test".to_owned(),
+            String::new(),
+        );
+        crate::telemetry::logging::emit_log(
+            py,
+            40,
+            "error".to_owned(),
+            "test".to_owned(),
+            String::new(),
+        );
+        crate::telemetry::logging::emit_log(
+            py,
+            30,
+            "warning".to_owned(),
+            "test".to_owned(),
+            String::new(),
+        );
+        crate::telemetry::logging::emit_log(
+            py,
+            20,
+            "info".to_owned(),
+            "test".to_owned(),
+            String::new(),
+        );
+        crate::telemetry::logging::emit_log(
+            py,
+            10,
+            "debug".to_owned(),
+            "test".to_owned(),
+            String::new(),
+        );
+        crate::telemetry::logging::emit_log(
+            py,
+            5,
+            "trace".to_owned(),
+            "test".to_owned(),
+            String::new(),
+        );
     });
 }
 
@@ -335,16 +370,19 @@ fn trace_context_roundtrip_through_python_context_var() {
             trace_id: [0xAB; 16],
             span_id: [0xCD; 8],
             trace_flags: 1,
+            trace_state: String::new(),
         };
         crate::telemetry::context::set_python_context(py, &ctx).unwrap();
 
         // Read it back via the ContextVar (same mechanism SpanHandle uses).
         let cv = crate::telemetry::context::context_var().unwrap();
-        let val: (String, String, u8) = cv.call_method0(py, c"get").unwrap().extract(py).unwrap();
+        let val: (String, String, u8, String) =
+            cv.call_method0(py, c"get").unwrap().extract(py).unwrap();
 
         assert_eq!(val.0, "abababababababababababababababab"); // 16 × 0xAB
         assert_eq!(val.1, "cdcdcdcdcdcdcdcd"); // 8 × 0xCD
         assert_eq!(val.2, 1);
+        assert_eq!(val.3, "");
     });
 }
 
@@ -366,6 +404,7 @@ fn span_handle_inherits_injected_trace_context() {
             trace_id: injected_trace_id,
             span_id: injected_span_id,
             trace_flags: 1,
+            trace_state: String::new(),
         };
         crate::telemetry::context::set_python_context(py, &ctx).unwrap();
 

@@ -30,9 +30,9 @@ impl std::fmt::Debug for RustCounter {
 #[pymethods]
 impl RustCounter {
     /// Increment the counter.
-    #[pyo3(signature = (value=1, labels=None))]
-    fn inc(&self, value: u64, labels: Option<HashMap<String, String>>) {
-        let attrs = labels_to_kv(labels);
+    #[pyo3(signature = (value=1, attributes=None))]
+    fn inc(&self, value: u64, attributes: Option<HashMap<String, String>>) {
+        let attrs = to_kv(attributes);
         self.inner.add(value, &attrs);
     }
 }
@@ -54,9 +54,9 @@ impl std::fmt::Debug for RustHistogram {
 #[pymethods]
 impl RustHistogram {
     /// Record an observation.
-    #[pyo3(signature = (value, labels=None))]
-    fn observe(&self, value: f64, labels: Option<HashMap<String, String>>) {
-        let attrs = labels_to_kv(labels);
+    #[pyo3(signature = (value, attributes=None))]
+    fn observe(&self, value: f64, attributes: Option<HashMap<String, String>>) {
+        let attrs = to_kv(attributes);
         self.inner.record(value, &attrs);
     }
 }
@@ -78,9 +78,9 @@ impl std::fmt::Debug for RustGauge {
 #[pymethods]
 impl RustGauge {
     /// Set the gauge value.
-    #[pyo3(signature = (value, labels=None))]
-    fn set(&self, value: f64, labels: Option<HashMap<String, String>>) {
-        let attrs = labels_to_kv(labels);
+    #[pyo3(signature = (value, attributes=None))]
+    fn set(&self, value: f64, attributes: Option<HashMap<String, String>>) {
+        let attrs = to_kv(attributes);
         self.inner.record(value, &attrs);
     }
 }
@@ -91,7 +91,7 @@ impl RustGauge {
 #[pyfunction]
 #[pyo3(signature = (name, description=String::new(), unit=String::new()))]
 pub fn create_counter(name: String, description: String, unit: String) -> RustCounter {
-    tracing::trace!(target: "apx::telemetry", name, unit, "creating user counter");
+    tracing::trace!(name: "apx.telemetry.metric.counter_created", target: "apx::telemetry", name, unit, "creating user counter");
     let meter = user_meter();
     let mut builder = meter.u64_counter(name);
     if !description.is_empty() {
@@ -109,7 +109,7 @@ pub fn create_counter(name: String, description: String, unit: String) -> RustCo
 #[pyfunction]
 #[pyo3(signature = (name, description=String::new(), unit=String::new()))]
 pub fn create_histogram(name: String, description: String, unit: String) -> RustHistogram {
-    tracing::trace!(target: "apx::telemetry", name, unit, "creating user histogram");
+    tracing::trace!(name: "apx.telemetry.metric.histogram_created", target: "apx::telemetry", name, unit, "creating user histogram");
     let meter = user_meter();
     let mut builder = meter.f64_histogram(name);
     if !description.is_empty() {
@@ -127,7 +127,7 @@ pub fn create_histogram(name: String, description: String, unit: String) -> Rust
 #[pyfunction]
 #[pyo3(signature = (name, description=String::new(), unit=String::new()))]
 pub fn create_gauge(name: String, description: String, unit: String) -> RustGauge {
-    tracing::trace!(target: "apx::telemetry", name, unit, "creating user gauge");
+    tracing::trace!(name: "apx.telemetry.metric.gauge_created", target: "apx::telemetry", name, unit, "creating user gauge");
     let meter = user_meter();
     let mut builder = meter.f64_gauge(name);
     if !description.is_empty() {
@@ -191,11 +191,11 @@ pub fn metric_catalog() -> Vec<PyMetricDefinition> {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/// Convert optional label map to OTEL `KeyValue` vec.
+/// Convert optional attribute map to OTEL `KeyValue` vec.
 ///
-/// Returns an empty vec without allocating when labels are absent.
-fn labels_to_kv(labels: Option<HashMap<String, String>>) -> Vec<opentelemetry::KeyValue> {
-    let Some(map) = labels else {
+/// Returns an empty vec without allocating when attributes are absent.
+fn to_kv(attrs: Option<HashMap<String, String>>) -> Vec<opentelemetry::KeyValue> {
+    let Some(map) = attrs else {
         return Vec::new();
     };
     map.into_iter()

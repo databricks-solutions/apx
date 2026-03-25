@@ -117,6 +117,7 @@ pub fn record_duration(
 
     FIRST.call_once(|| {
         tracing::info!(
+            name: "apx.http.first_request_recorded",
             target: "apx::telemetry",
             method,
             status_code,

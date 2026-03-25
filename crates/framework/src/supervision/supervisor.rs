@@ -117,6 +117,7 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
     })?;
 
     tracing::info!(
+        name: "apx.supervisor.started",
         workers = config.workers,
         host = %config.host,
         port = config.port,
@@ -132,39 +133,45 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
     }
 
     // Wait for telemetry config relay from worker 0.
-    let (system_config, process_config) =
-        match tokio::time::timeout(WORKER_READINESS_TIMEOUT, workers[0].channel.recv()).await {
-            Ok(Ok(IpcMessage::TelemetryConfig(relay))) => {
-                tracing::info!("received telemetry config relay from worker 0");
-                (relay.system, relay.process)
-            }
-            Ok(Ok(other)) => {
-                tracing::warn!(
-                    ?other,
-                    "expected TelemetryConfig from worker 0, falling back to defaults"
-                );
-                (
-                    crate::telemetry::config::default_system_config(),
-                    crate::telemetry::config::default_process_config(),
-                )
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(%e, "IPC error reading telemetry config, falling back to defaults");
-                (
-                    crate::telemetry::config::default_system_config(),
-                    crate::telemetry::config::default_process_config(),
-                )
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "timeout waiting for telemetry config relay, falling back to defaults"
-                );
-                (
-                    crate::telemetry::config::default_system_config(),
-                    crate::telemetry::config::default_process_config(),
-                )
-            }
-        };
+    let (system_config, process_config) = match tokio::time::timeout(
+        WORKER_READINESS_TIMEOUT,
+        workers[0].channel.recv(),
+    )
+    .await
+    {
+        Ok(Ok(IpcMessage::TelemetryConfig(relay))) => {
+            tracing::info!(name: "apx.supervisor.telemetry_config_received", "received telemetry config relay from worker 0");
+            (relay.system, relay.process)
+        }
+        Ok(Ok(other)) => {
+            tracing::warn!(
+                name: "apx.supervisor.telemetry_config_unexpected",
+                ?other,
+                "expected TelemetryConfig from worker 0, falling back to defaults"
+            );
+            (
+                crate::telemetry::config::default_system_config(),
+                crate::telemetry::config::default_process_config(),
+            )
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(name: "apx.supervisor.telemetry_config_ipc_error", %e, "IPC error reading telemetry config, falling back to defaults");
+            (
+                crate::telemetry::config::default_system_config(),
+                crate::telemetry::config::default_process_config(),
+            )
+        }
+        Err(_) => {
+            tracing::warn!(
+                name: "apx.supervisor.telemetry_config_timeout",
+                "timeout waiting for telemetry config relay, falling back to defaults"
+            );
+            (
+                crate::telemetry::config::default_system_config(),
+                crate::telemetry::config::default_process_config(),
+            )
+        }
+    };
 
     let _system_metrics_handle =
         crate::telemetry::system_metrics::spawn_system_metrics(&system_config);
@@ -178,7 +185,7 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
             result?;
         }
         () = shutdown_signal() => {
-            tracing::info!("shutdown signal received, stopping workers");
+            tracing::info!(name: "apx.supervisor.shutdown", "shutdown signal received, stopping workers");
             shutdown_workers(&mut workers).await;
         }
     }
@@ -301,7 +308,7 @@ async fn spawn_worker(
         .spawn()
         .map_err(|e| SupervisorError::WorkerSpawn { index, source: e })?;
 
-    tracing::info!(worker = index, pid = child.id(), "spawned worker");
+    tracing::info!(name: "apx.supervisor.worker_spawned", worker = index, pid = child.id(), "spawned worker");
 
     // Accept connection and complete bootstrap handshake.
     let mut channel = tokio::time::timeout(WORKER_READINESS_TIMEOUT, channel::accept(&listener))
@@ -333,7 +340,7 @@ async fn spawn_worker(
 
     match msg {
         IpcMessage::Ready => {
-            tracing::info!(worker = index, "worker ready");
+            tracing::info!(name: "apx.supervisor.worker_ready", worker = index, "worker ready");
         }
         other => {
             return Err(SupervisorError::Ipc {
@@ -364,7 +371,7 @@ async fn monitor_workers(
     loop {
         let (exited_index, status) = wait_for_any_exit(workers).await;
 
-        tracing::error!(worker = exited_index, ?status, "worker exited");
+        tracing::error!(name: "apx.supervisor.worker_error", worker = exited_index, ?status, "worker exited");
 
         let handle = &mut workers[exited_index];
 
@@ -377,6 +384,7 @@ async fn monitor_workers(
 
         if handle.restart_count > MAX_RESTARTS_PER_WORKER {
             tracing::error!(
+                name: "apx.supervisor.max_restarts",
                 worker = exited_index,
                 restarts = handle.restart_count,
                 "worker exceeded max restarts"
@@ -395,6 +403,7 @@ async fn monitor_workers(
         }
 
         tracing::info!(
+            name: "apx.supervisor.worker_restart",
             worker = exited_index,
             attempt = handle.restart_count,
             "restarting worker"
@@ -408,7 +417,7 @@ async fn monitor_workers(
                 workers[exited_index].last_restart = std::time::Instant::now();
             }
             Err(e) => {
-                tracing::error!(worker = exited_index, error = %e, "failed to restart worker");
+                tracing::error!(name: "apx.supervisor.worker_restart_failed", worker = exited_index, error = %e, "failed to restart worker");
             }
         }
     }
@@ -444,7 +453,7 @@ pub(crate) async fn shutdown_workers(workers: &mut [WorkerHandle]) {
     // Phase 1: Send Drain over IPC.
     for worker in workers.iter_mut() {
         if let Err(e) = worker.channel.send(&IpcMessage::Drain).await {
-            tracing::debug!(worker = worker.index, error = %e, "failed to send Drain");
+            tracing::debug!(name: "apx.supervisor.drain_send_failed", worker = worker.index, error = %e, "failed to send Drain");
         }
     }
 
@@ -453,17 +462,18 @@ pub(crate) async fn shutdown_workers(workers: &mut [WorkerHandle]) {
         for worker in workers.iter_mut() {
             match worker.channel.recv().await {
                 Ok(IpcMessage::Drained) => {
-                    tracing::info!(worker = worker.index, "worker drained");
+                    tracing::info!(name: "apx.supervisor.drained", worker = worker.index, "worker drained");
                 }
                 Ok(msg) => {
                     tracing::debug!(
+                        name: "apx.supervisor.drain_unexpected_message",
                         worker = worker.index,
                         ?msg,
                         "unexpected message during drain"
                     );
                 }
                 Err(e) => {
-                    tracing::debug!(worker = worker.index, error = %e, "IPC error during drain");
+                    tracing::debug!(name: "apx.supervisor.drain_ipc_error", worker = worker.index, error = %e, "IPC error during drain");
                 }
             }
         }
@@ -482,7 +492,7 @@ pub(crate) async fn shutdown_workers(workers: &mut [WorkerHandle]) {
             .await
             .is_err()
         {
-            tracing::warn!("workers did not exit after drain, sending SIGKILL");
+            tracing::warn!(name: "apx.supervisor.sigkill", "workers did not exit after drain, sending SIGKILL");
             for worker in workers.iter_mut() {
                 let _ = worker.child.kill().await;
             }
@@ -491,7 +501,7 @@ pub(crate) async fn shutdown_workers(workers: &mut [WorkerHandle]) {
     }
 
     // Phase 3: SIGTERM remaining workers that didn't drain in time.
-    tracing::warn!("drain timeout, sending SIGTERM to remaining workers");
+    tracing::warn!(name: "apx.supervisor.drain_timeout", "drain timeout, sending SIGTERM to remaining workers");
     for worker in workers.iter() {
         if let Some(pid) = worker.child.id() {
             send_signal(pid, Signal::Term).await;

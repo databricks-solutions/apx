@@ -22,6 +22,7 @@ import pytest
 from apx.telemetry import (
     ApxInstrumentation,
     ApxMetrics,
+    Attribute,
     CaptureHeaders,
     Configuration,
     Counter,
@@ -32,6 +33,8 @@ from apx.telemetry import (
     MetricDefinition,
     ProcessInstrumentation,
     ProcessMetrics,
+    Resource,
+    SpanKind,
     StatusCode,
     SystemInstrumentation,
     SystemMetrics,
@@ -766,6 +769,28 @@ class TestLog:
         """log.exception outside except block still works (no active exc)."""
         log.exception("no active exception")
 
+    def test_info_with_event_name(self) -> None:
+        """log.info accepts event_name keyword argument."""
+        log.info("user signed in", event_name="user.login", uid="42")
+
+    def test_all_levels_accept_event_name(self) -> None:
+        """Every log level method accepts event_name."""
+        log.trace("t", event_name="test.trace")
+        log.debug("d", event_name="test.debug")
+        log.info("i", event_name="test.info")
+        log.notice("n", event_name="test.notice")
+        log.warn("w", event_name="test.warn")
+        log.error("e", event_name="test.error")
+        log.fatal("f", event_name="test.fatal")
+        try:
+            raise ValueError("exc")
+        except ValueError:
+            log.exception("x", event_name="test.exception")
+
+    def test_event_name_none_by_default(self) -> None:
+        """event_name defaults to None — omitting it must not raise."""
+        log.info("no event name")
+
 
 # ── Counter wrapper ───────────────────────────────────────────────────────
 
@@ -787,9 +812,9 @@ class TestCounter:
         c = Counter("test.counter.val")
         c.inc(5)
 
-    def test_inc_with_labels(self) -> None:
-        c = Counter("test.counter.labels")
-        c.inc(1, labels={"method": "GET"})
+    def test_inc_with_attributes(self) -> None:
+        c = Counter("test.counter.attrs")
+        c.inc(1, attributes={"method": "GET"})
 
     def test_unit_accepts_string(self) -> None:
         c = Counter("test.counter.str_unit", unit="widgets")
@@ -812,9 +837,9 @@ class TestHistogram:
         h = Histogram("test.histo.obs")
         h.observe(42.0)
 
-    def test_observe_with_labels(self) -> None:
-        h = Histogram("test.histo.labels")
-        h.observe(99.0, labels={"endpoint": "/api"})
+    def test_observe_with_attributes(self) -> None:
+        h = Histogram("test.histo.attrs")
+        h.observe(99.0, attributes={"endpoint": "/api"})
 
 
 # ── Gauge wrapper ─────────────────────────────────────────────────────────
@@ -833,9 +858,9 @@ class TestGauge:
         g = Gauge("test.gauge.set")
         g.set(7.0)
 
-    def test_set_with_labels(self) -> None:
-        g = Gauge("test.gauge.labels")
-        g.set(3.0, labels={"pool": "main"})
+    def test_set_with_attributes(self) -> None:
+        g = Gauge("test.gauge.attrs")
+        g.set(3.0, attributes={"pool": "main"})
 
 
 # ── _resolve_identity ─────────────────────────────────────────────────────
@@ -872,3 +897,150 @@ class TestResolveIdentity:
         result = _resolve_identity()
         assert result["apx.process.type"] == "supervisor"
         assert result["apx.worker.id"] == "supervisor"
+
+
+# ── Attribute model ───────────────────────────────────────────────────────
+
+
+class TestAttribute:
+    """Verify Attribute Pydantic model for resource configuration."""
+
+    def test_construction(self) -> None:
+        a = Attribute(key="env", value="prod")
+        assert a.key == "env"
+        assert a.value == "prod"
+
+    def test_model_dump(self) -> None:
+        a = Attribute(key="team", value="platform")
+        data = a.model_dump()
+        assert data == {"key": "team", "value": "platform"}
+
+    def test_roundtrip(self) -> None:
+        a = Attribute(key="k", value="v")
+        restored = Attribute.model_validate(a.model_dump())
+        assert restored == a
+
+
+# ── Resource model ────────────────────────────────────────────────────────
+
+
+class TestResource:
+    """Verify Resource Pydantic model for OTLP resource configuration."""
+
+    def test_defaults_empty(self) -> None:
+        r = Resource()
+        assert r.attributes == []
+        assert r.schema_url is None
+
+    def test_with_attributes(self) -> None:
+        r = Resource(attributes=[Attribute(key="k", value="v")])
+        assert len(r.attributes) == 1
+        assert r.attributes[0].key == "k"
+
+    def test_with_schema_url(self) -> None:
+        r = Resource(schema_url="https://example.com/schema")
+        assert r.schema_url == "https://example.com/schema"
+
+    def test_model_dump(self) -> None:
+        r = Resource(
+            attributes=[Attribute(key="env", value="staging")],
+            schema_url="https://example.com",
+        )
+        data = r.model_dump()
+        assert data["attributes"][0]["key"] == "env"
+        assert data["schema_url"] == "https://example.com"
+
+
+# ── Configuration resource field ──────────────────────────────────────────
+
+
+class TestConfigurationResource:
+    """Verify resource field in Configuration model."""
+
+    def test_default_resource_is_empty(self) -> None:
+        c = Configuration()
+        assert c.resource.attributes == []
+        assert c.resource.schema_url is None
+
+    def test_resource_in_config(self) -> None:
+        c = Configuration(
+            resource=Resource(
+                attributes=[Attribute(key="env", value="staging")]
+            )
+        )
+        assert len(c.resource.attributes) == 1
+        assert c.resource.attributes[0].key == "env"
+
+    def test_get_config_includes_resource(self) -> None:
+        configure(
+            Configuration(
+                resource=Resource(
+                    attributes=[Attribute(key="team", value="platform")]
+                )
+            )
+        )
+        from apx.telemetry import _get_config
+
+        config = _get_config()
+        assert "resource" in config
+        assert config["resource"]["attributes"][0]["key"] == "team"
+        assert config["resource"]["attributes"][0]["value"] == "platform"
+        configure(Configuration())
+
+    def test_get_config_resource_schema_url(self) -> None:
+        configure(
+            Configuration(
+                resource=Resource(schema_url="https://custom.schema")
+            )
+        )
+        from apx.telemetry import _get_config
+
+        config = _get_config()
+        assert config["resource"]["schema_url"] == "https://custom.schema"
+        configure(Configuration())
+
+    def test_get_config_no_schema_url_by_default(self) -> None:
+        configure(Configuration())
+        from apx.telemetry import _get_config
+
+        config = _get_config()
+        assert "schema_url" not in config["resource"]
+
+
+# ── SpanKind enum ─────────────────────────────────────────────────────────
+
+
+class TestSpanKind:
+    """Verify SpanKind enum values match OTLP proto definition."""
+
+    def test_internal_value(self) -> None:
+        assert SpanKind.INTERNAL == 1
+
+    def test_server_value(self) -> None:
+        assert SpanKind.SERVER == 2
+
+    def test_client_value(self) -> None:
+        assert SpanKind.CLIENT == 3
+
+    def test_producer_value(self) -> None:
+        assert SpanKind.PRODUCER == 4
+
+    def test_consumer_value(self) -> None:
+        assert SpanKind.CONSUMER == 5
+
+    def test_span_accepts_kind(self) -> None:
+        with span("test.with_kind", kind=SpanKind.CLIENT):
+            pass
+
+    def test_span_default_kind_is_internal(self) -> None:
+        s = span("test.default_kind")
+        assert s._kind == SpanKind.INTERNAL
+        with s:
+            pass
+
+    def test_span_kind_propagated_to_decorator(self) -> None:
+        @span("test.dec_kind", kind=SpanKind.SERVER)
+        def decorated() -> str:
+            return "ok"
+
+        assert decorated() == "ok"

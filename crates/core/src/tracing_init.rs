@@ -172,8 +172,13 @@ fn format_resource_attrs(resource: &Resource) -> String {
 }
 
 /// Build the OTEL resource from `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
-/// and the optional `APX_APP_DIR`.
-fn build_resource(app_dir: Option<&str>) -> Resource {
+/// the optional `APX_APP_DIR`, and any user-provided attributes.
+///
+/// Merge order (later wins on key collision):
+/// 1. Built-in attributes (`service.name`, `apx.*`)
+/// 2. `OTEL_RESOURCE_ATTRIBUTES` environment variable
+/// 3. `user_attrs` from Python `Configuration.resource`
+fn build_resource(app_dir: Option<&str>, user_attrs: &[(String, String)]) -> Resource {
     let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "apx".to_owned());
     let mut attrs = vec![KeyValue::new("service.name", service_name)];
 
@@ -196,6 +201,10 @@ fn build_resource(app_dir: Option<&str>) -> Resource {
     } else {
         attrs.push(KeyValue::new("apx.process.type", "supervisor"));
         attrs.push(KeyValue::new("apx.worker.id", "supervisor"));
+    }
+
+    for (k, v) in user_attrs {
+        attrs.push(KeyValue::new(k.clone(), v.clone()));
     }
 
     Resource::builder()
@@ -232,7 +241,7 @@ fn init_tracing_with_otel(
 ) -> Result<(), String> {
     use opentelemetry_otlp::WithExportConfig;
 
-    let resource = build_resource(app_dir);
+    let resource = build_resource(app_dir, &[]);
     let resource_display = format_resource_attrs(&resource);
 
     let registry = tracing_subscriber::registry();
@@ -249,7 +258,11 @@ fn init_tracing_with_otel(
         .with_batch_exporter(exporter)
         .build();
 
-    let tracer = provider.tracer("apx.framework");
+    let scope = opentelemetry::InstrumentationScope::builder("apx.framework")
+        .with_version(env!("CARGO_PKG_VERSION"))
+        .with_schema_url(SEMCONV_SCHEMA_URL)
+        .build();
+    let tracer = provider.tracer_with_scope(scope);
     opentelemetry::global::set_tracer_provider(provider.clone());
     let _ = TRACER_PROVIDER.set(provider);
 

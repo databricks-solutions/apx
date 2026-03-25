@@ -279,6 +279,54 @@ async def telemetry_error_handling():
     return {"ok": True}
 
 
+@router.get("/telemetry/otlp-fields")
+async def telemetry_otlp_fields():
+    """Exercise all OTLP field improvements for integration testing."""
+    from apx.telemetry import Counter, Gauge, Histogram, SpanKind, log, span
+
+    with span("test.client_call", kind=SpanKind.CLIENT, target="upstream") as s:
+        s.add_event("dns.resolved", {"host": "example.com"})
+        s.set_attribute("net.peer.name", "example.com")
+
+    with span("test.internal_work") as s:
+        s.add_event("step.completed", {"step": "1"})
+
+    log.info("otlp fields test log", event_name="test.otlp_fields")
+
+    counter = Counter(
+        "test.otlp_fields_counter", description="OTLP fields test", unit="1"
+    )
+    counter.inc(1)
+
+    histogram = Histogram(
+        "test.otlp_fields_histogram", description="OTLP fields test", unit="ms"
+    )
+    histogram.observe(42.0)
+
+    gauge = Gauge("test.otlp_fields_gauge", description="OTLP fields test")
+    gauge.set(7.0)
+
+    return {"ok": True}
+
+
+@router.get("/telemetry/event-name")
+async def telemetry_event_name():
+    """Exercise event_name on log methods and stdlib logging."""
+    import logging
+
+    from apx.telemetry import log
+
+    log.info("user logged in", event_name="user.login", uid="42")
+    log.warn("rate limit near", event_name="rate_limit.warning", current="950")
+
+    logging.getLogger("test.event_name").warning(
+        "stdlib with event_name",
+        extra={"event_name": "stdlib.test_event"},
+    )
+
+    return {"ok": True}
+
+
 @router.get("/telemetry/cross-signal")
 async def telemetry_cross_signal():
     """Exercises spans, log-level spans, metrics, and stdlib logging together."""
@@ -295,14 +343,14 @@ async def telemetry_cross_signal():
             description="cross signal test counter",
             unit="1",
         )
-        counter.inc(1, labels={"scenario": "cross_signal"})
+        counter.inc(1, attributes={"scenario": "cross_signal"})
 
         histogram = Histogram(
             "test.cross_signal_histogram",
             description="cross signal test histogram",
             unit="ms",
         )
-        histogram.observe(42.0, labels={"scenario": "cross_signal"})
+        histogram.observe(42.0, attributes={"scenario": "cross_signal"})
 
         logging.getLogger("test.cross_signal").warning(
             "cross signal stdlib warning"

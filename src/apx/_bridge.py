@@ -17,13 +17,14 @@ class _ErrorSink(Protocol):
 
 
 class _ApxHandler(logging.Handler):
-    def __init__(self, emit_fn: Callable[[int, str, str], None]) -> None:
+    def __init__(self, emit_fn: Callable[[int, str, str, str], None]) -> None:
         super().__init__()
         self._emit = emit_fn
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            self._emit(record.levelno, record.getMessage(), record.name)
+            event_name = getattr(record, "event_name", "") or ""
+            self._emit(record.levelno, record.getMessage(), record.name, event_name)
         except Exception:
             pass
 

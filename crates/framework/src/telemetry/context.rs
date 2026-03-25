@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 static CONTEXT_VAR: OnceLock<Py<PyAny>> = OnceLock::new();
 
 /// Trace identity extracted from a Rust `tracing::Span`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct TraceContext {
     /// 16-byte trace identifier.
     pub trace_id: [u8; 16],
@@ -24,6 +24,8 @@ pub struct TraceContext {
     pub span_id: [u8; 8],
     /// W3C trace flags.
     pub trace_flags: u8,
+    /// W3C tracestate header value (vendor-specific, comma-separated key=value).
+    pub trace_state: String,
 }
 
 // ── ContextVar lifecycle ────────────────────────────────────────────────
@@ -35,7 +37,7 @@ pub fn init_context_var(py: Python<'_>) -> PyResult<()> {
     let contextvars = py.import(c"contextvars")?;
     let cv = contextvars.call_method1(c"ContextVar", ("_apx_trace_ctx",))?;
     let _ = CONTEXT_VAR.set(cv.unbind());
-    tracing::trace!(target: "apx::telemetry", var = "_apx_trace_ctx", "Python trace context ContextVar initialized");
+    tracing::trace!(name: "apx.telemetry.context_var_init", target: "apx::telemetry", var = "_apx_trace_ctx", "Python trace context ContextVar initialized");
     Ok(())
 }
 
@@ -61,6 +63,7 @@ pub fn extract_trace_context() -> Option<TraceContext> {
         trace_id: sc.trace_id().to_bytes(),
         span_id: sc.span_id().to_bytes(),
         trace_flags: sc.trace_flags().to_u8(),
+        trace_state: sc.trace_state().header(),
     })
 }
 
@@ -72,17 +75,20 @@ pub(crate) struct SerializedContext {
     pub(crate) trace_id_hex: String,
     pub(crate) span_id_hex: String,
     pub(crate) flags: u8,
+    pub(crate) trace_state: String,
 }
 
 /// Read the serialized context from the Python `ContextVar`.
 pub(crate) fn read_context_var_raw(py: Python<'_>) -> Option<SerializedContext> {
     let cv = context_var()?;
     let val = cv.call_method0(py, c"get").ok()?;
-    let (trace_id_hex, span_id_hex, flags) = val.extract::<(String, String, u8)>(py).ok()?;
+    let (trace_id_hex, span_id_hex, flags, trace_state) =
+        val.extract::<(String, String, u8, String)>(py).ok()?;
     Some(SerializedContext {
         trace_id_hex,
         span_id_hex,
         flags,
+        trace_state,
     })
 }
 
@@ -102,12 +108,23 @@ pub(crate) fn parse_span_context(raw: &SerializedContext) -> Option<SpanContext>
         return None;
     }
 
+    let ts = if raw.trace_state.is_empty() {
+        TraceState::default()
+    } else {
+        TraceState::from_key_value(
+            raw.trace_state
+                .split(',')
+                .filter_map(|pair| pair.split_once('=').map(|(k, v)| (k.trim(), v.trim()))),
+        )
+        .unwrap_or_default()
+    };
+
     Some(SpanContext::new(
         trace_id,
         span_id,
         TraceFlags::new(raw.flags),
         true,
-        TraceState::default(),
+        ts,
     ))
 }
 
@@ -122,15 +139,21 @@ pub(crate) fn read_python_span_context(py: Python<'_>) -> Option<SpanContext> {
 
 /// Push trace context into the Python `ContextVar` so `SpanHandle` picks it up.
 ///
-/// Creates a tuple `(trace_id_hex, span_id_hex, trace_flags)` in the context var.
-/// Called on the event loop thread before invoking the Python handler.
+/// Creates a tuple `(trace_id_hex, span_id_hex, trace_flags, trace_state)` in
+/// the context var. Called on the event loop thread before invoking the Python
+/// handler.
 pub fn set_python_context(py: Python<'_>, ctx: &TraceContext) -> PyResult<()> {
     let Some(cv) = context_var() else {
         return Ok(());
     };
     let trace_id_hex = hex::encode(ctx.trace_id);
     let span_id_hex = hex::encode(ctx.span_id);
-    let value = (trace_id_hex, span_id_hex, ctx.trace_flags);
+    let value = (
+        trace_id_hex,
+        span_id_hex,
+        ctx.trace_flags,
+        ctx.trace_state.clone(),
+    );
     cv.call_method1(py, c"set", (value,))?;
     Ok(())
 }

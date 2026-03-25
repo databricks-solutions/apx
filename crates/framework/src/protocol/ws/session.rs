@@ -137,7 +137,7 @@ async fn ws_session(
     let ws_stream = match ws_future.await {
         Ok(stream) => stream,
         Err(e) => {
-            tracing::error!(error = %e, "websocket upgrade completion failed");
+            tracing::error!(name: "apx.ws.upgrade_completion_failed", error = %e, "websocket upgrade completion failed");
             return;
         }
     };
@@ -171,7 +171,7 @@ async fn ws_session(
         Ok(())
     });
     if let Err(e) = schedule_result {
-        tracing::error!(error = %e, "failed to schedule websocket coroutine");
+        tracing::error!(name: "apx.ws.schedule_coroutine_failed", error = %e, "failed to schedule websocket coroutine");
     }
 
     // Clean up forwarding tasks.
@@ -215,7 +215,7 @@ where
                 }
             }
             Some(Err(e)) => {
-                tracing::debug!(error = %e, "websocket read error");
+                tracing::debug!(name: "apx.ws.read_error", error = %e, "websocket read error");
                 let _ = tx
                     .send(WsIncomingEvent::Disconnect {
                         code: WS_CLOSE_NORMAL,
@@ -253,7 +253,7 @@ where
             }
             AsgiEvent::WsSend { text, bytes } => {
                 if !accepted {
-                    tracing::warn!("websocket send before accept — dropping frame");
+                    tracing::warn!(name: "apx.ws.send_before_accept", "websocket send before accept — dropping frame");
                     continue;
                 }
                 let msg = if let Some(t) = text {
@@ -264,7 +264,7 @@ where
                     continue;
                 };
                 if let Err(e) = sink.send(msg).await {
-                    tracing::debug!(error = %e, "websocket write error");
+                    tracing::debug!(name: "apx.ws.write_error", error = %e, "websocket write error");
                     break;
                 }
             }
@@ -277,7 +277,7 @@ where
                 break;
             }
             AsgiEvent::ResponseStart { .. } | AsgiEvent::ResponseBody { .. } => {
-                tracing::error!("HTTP response event in websocket context — ignoring");
+                tracing::error!(name: "apx.ws.http_response_in_ws_context", "HTTP response event in websocket context — ignoring");
             }
         }
     }

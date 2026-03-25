@@ -41,6 +41,8 @@ class Resource(BaseModel):
 class InstrumentationScope(BaseModel):
     name: str = ""
     version: str = ""
+    schemaUrl: str = ""
+    attributes: list[KeyValue] = []
 
 
 # ---------------------------------------------------------------------------
@@ -70,16 +72,20 @@ class Span(BaseModel):
     attributes: list[KeyValue] = []
     events: list[SpanEvent] = []
     status: SpanStatus = SpanStatus()
+    flags: int = 0
+    traceState: str = ""
 
 
 class ScopeSpans(BaseModel):
     scope: InstrumentationScope = InstrumentationScope()
     spans: list[Span] = []
+    schemaUrl: str = ""
 
 
 class ResourceSpans(BaseModel):
     resource: Resource = Resource()
     scopeSpans: list[ScopeSpans] = []
+    schemaUrl: str = ""
 
 
 class TracesExport(BaseModel):
@@ -101,16 +107,19 @@ class LogRecord(BaseModel):
     traceId: str = ""
     spanId: str = ""
     flags: int = 0
+    eventName: str = ""
 
 
 class ScopeLogs(BaseModel):
     scope: InstrumentationScope = InstrumentationScope()
     logRecords: list[LogRecord] = []
+    schemaUrl: str = ""
 
 
 class ResourceLogs(BaseModel):
     resource: Resource = Resource()
     scopeLogs: list[ScopeLogs] = []
+    schemaUrl: str = ""
 
 
 class LogsExport(BaseModel):
@@ -152,11 +161,13 @@ class Metric(BaseModel):
 class ScopeMetrics(BaseModel):
     scope: InstrumentationScope = InstrumentationScope()
     metrics: list[Metric] = []
+    schemaUrl: str = ""
 
 
 class ResourceMetrics(BaseModel):
     resource: Resource = Resource()
     scopeMetrics: list[ScopeMetrics] = []
+    schemaUrl: str = ""
 
 
 class MetricsExport(BaseModel):

@@ -167,7 +167,11 @@ pub async fn run_worker(
             .send(&IpcMessage::TelemetryConfig(relay))
             .await
             .map_err(WorkerError::from)?;
-        tracing::debug!(target: "apx::telemetry", "relayed telemetry config to supervisor");
+        tracing::debug!(
+            name: "apx.worker.telemetry_relayed",
+            target: "apx::telemetry",
+            "relayed telemetry config to supervisor"
+        );
     }
 
     // Initialize per-worker metric toggles from Python config.
@@ -183,6 +187,7 @@ pub async fn run_worker(
     };
 
     tracing::info!(
+        name: "apx.worker.telemetry_bootstrap_complete",
         target: "apx::telemetry",
         process_metrics = telemetry_config.process.enabled,
         http_instrumentation = telemetry_config.http.enabled,
@@ -212,11 +217,22 @@ pub async fn run_worker(
         let mut reader = ipc_reader;
         match reader.recv().await {
             Ok(IpcMessage::Drain) => {
-                tracing::info!("received Drain from supervisor");
+                tracing::info!(
+                    name: "apx.worker.drain_received",
+                    "received Drain from supervisor"
+                );
                 let _ = drain_tx.send(());
             }
-            Ok(msg) => tracing::warn!(?msg, "unexpected IPC message"),
-            Err(e) => tracing::debug!(error = %e, "IPC channel closed"),
+            Ok(msg) => tracing::warn!(
+                name: "apx.worker.drain_unexpected_ipc",
+                ?msg,
+                "unexpected IPC message"
+            ),
+            Err(e) => tracing::debug!(
+                name: "apx.worker.drain_ipc_closed",
+                error = %e,
+                "IPC channel closed"
+            ),
         }
     });
 
