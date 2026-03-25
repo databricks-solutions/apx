@@ -224,8 +224,8 @@ async def _handle_invocation(
 ) -> Any:
     """Dispatch an agent invocation to the matching route handler.
 
-    Looks up the tool by operation_id, constructs an internal request to
-    the corresponding route, and returns the result.
+    Looks up the tool by operation_id and dispatches via the ASGI transport —
+    fully async, preserves the DI chain and OBO auth.
     """
     agent_ctx: AgentContext = request.app.state.agent_context
     tool = agent_ctx.get_tool(body.tool)
@@ -236,23 +236,18 @@ async def _handle_invocation(
             detail=f"Unknown tool: {body.tool}. Available: {[t.name for t in agent_ctx.tools]}",
         )
 
-    # Forward to the route via the test client (internal dispatch)
-    # This preserves all middleware, DI, and auth handling
-    from starlette.testclient import TestClient
+    from httpx import ASGITransport, AsyncClient
 
-    # Build the internal request
-    if tool.method == "GET":
-        response = TestClient(request.app).get(
-            tool.path,
-            params=body.arguments,
-            headers=dict(request.headers),
-        )
-    else:
-        response = TestClient(request.app).request(
+    async with AsyncClient(
+        transport=ASGITransport(app=request.app),
+        base_url="http://internal",
+    ) as client:
+        response = await client.request(
             method=tool.method,
             url=tool.path,
-            json=body.arguments,
-            headers=dict(request.headers),
+            json=body.arguments if tool.method != "GET" else None,
+            params=body.arguments if tool.method == "GET" else None,
+            headers={"Authorization": request.headers.get("Authorization", "")},
         )
 
     if response.status_code >= 400:
