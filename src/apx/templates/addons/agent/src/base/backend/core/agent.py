@@ -5,7 +5,9 @@ Define agent tools as plain typed functions and register them with Agent():
     from .core import Dependencies
     from .core.agent import Agent
 
-    def query_genie(question: str, space_id: str, ws: Dependencies.UserClient) -> str:
+    Workspace = Dependencies.Workspace
+
+    def query_genie(question: str, space_id: str, ws: Workspace) -> str:
         \"\"\"Answer a natural language question using a Genie Space.\"\"\"
         return ws.genie.ask(space_id=space_id, question=question).answer or ""
 

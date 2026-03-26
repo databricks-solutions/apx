@@ -13,3 +13,10 @@ code = "Agent: TypeAlias = AgentDependency"
 doc = """
 Agent protocol dependency. Provides agent card and tool registry.
 Recommended usage: `agent: Dependencies.Agent`"""
+
+[[python.edits.aliases]]
+code = "Workspace: TypeAlias = UserWorkspaceClientDependency"
+doc = """
+Workspace client authenticated on behalf of the current user (OBO).
+Shorthand for Dependencies.UserClient in agent tool functions.
+Recommended usage: `ws: Workspace`"""

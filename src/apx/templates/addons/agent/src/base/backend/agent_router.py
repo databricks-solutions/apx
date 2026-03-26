@@ -8,8 +8,10 @@ excluded from the tool schema.
 from .core import Dependencies
 from .core.agent import Agent
 
+Workspace = Dependencies.Workspace
 
-def list_catalogs(ws: Dependencies.UserClient) -> list[str]:
+
+def list_catalogs(ws: Workspace) -> list[str]:
     """List Unity Catalog catalogs accessible to the current user."""
     return [c.name for c in ws.catalogs.list() if c.name]
 
