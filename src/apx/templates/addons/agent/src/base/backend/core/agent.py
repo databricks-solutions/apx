@@ -1,32 +1,46 @@
 """Agent protocol addon — A2A discovery, /invocations, MCP tools, eval bridge.
 
-Reads [tool.apx.agent] from pyproject.toml and generates agent protocol
-endpoints from the app's existing routes. Routes are tools — no new
-abstractions needed.
+Define agent tools as plain typed functions and register them with Agent():
 
-Configuration (pyproject.toml):
+    from .core import Dependencies
+    from .core.agent import Agent
+
+    def query_genie(question: str, space_id: str, ws: Dependencies.UserClient) -> str:
+        \"\"\"Answer a natural language question using a Genie Space.\"\"\"
+        return ws.genie.ask(space_id=space_id, question=question).answer or ""
+
+    agent = Agent(tools=[query_genie])
+
+Parameters typed as Dependencies.* are injected by FastAPI and excluded from
+the tool schema. All other typed parameters become the tool's input schema,
+derived from their type hints. The docstring becomes the tool description.
+
+Requires [tool.apx.agent] in pyproject.toml:
 
     [tool.apx.agent]
     name = "my-agent"
     description = "What this agent does"
-    # tools = ["operationA", "operationB"]  # optional: filter by operation_id
 """
 
 from __future__ import annotations
 
-import json
+import inspect
 import logging
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any, AsyncGenerator, TypeAlias
+from typing import Annotated, Any, AsyncGenerator, TypeAlias, get_args, get_origin, get_type_hints
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request, params
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 
 from ._base import LifespanDependency
 
 logger = logging.getLogger(__name__)
+
+# Module-level Agent instance, set when user calls Agent(tools=[...])
+_agent_instance: Agent | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -39,16 +53,13 @@ class AgentConfig(BaseModel):
 
     name: str
     description: str = ""
-    tools: list[str] | None = None  # None = all operation_ids
 
 
 class AgentTool(BaseModel):
-    """A tool derived from a FastAPI route."""
+    """A tool derived from a plain Python function."""
 
-    name: str  # operation_id
+    name: str
     description: str
-    method: str  # HTTP method
-    path: str  # route path
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
     streaming: bool = False
@@ -64,7 +75,7 @@ class AgentCard(BaseModel):
 
 
 class AgentContext:
-    """Injectable dependency providing agent config and tool registry."""
+    """Provides agent config and tool registry to route handlers."""
 
     def __init__(self, config: AgentConfig, tools: list[AgentTool], card: AgentCard):
         self.config = config
@@ -77,6 +88,104 @@ class AgentContext:
 
 
 # ---------------------------------------------------------------------------
+# Function inspection helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_fastapi_dependency(annotation: Any) -> bool:
+    """Return True if the annotation is a FastAPI Depends (Dependencies.*)."""
+    if get_origin(annotation) is not Annotated:
+        return False
+    return any(isinstance(arg, params.Depends) for arg in get_args(annotation))
+
+
+def _inspect_tool_fn(fn: Callable) -> tuple[dict[str, tuple[Any, Any]], list[str]]:
+    """Inspect a tool function's signature.
+
+    Returns:
+        plain_params: {name: (type, default)} for tool input parameters
+        dep_param_names: list of parameter names that are FastAPI dependencies
+    """
+    try:
+        hints = get_type_hints(fn, include_extras=True)
+    except Exception:
+        hints = {}
+
+    sig = inspect.signature(fn)
+    plain_params: dict[str, tuple[Any, Any]] = {}
+    dep_param_names: list[str] = []
+
+    for name, param in sig.parameters.items():
+        annotation = hints.get(name, Any)
+        if _is_fastapi_dependency(annotation):
+            dep_param_names.append(name)
+        else:
+            default = param.default if param.default is not inspect.Parameter.empty else ...
+            plain_params[name] = (annotation, default)
+
+    return plain_params, dep_param_names
+
+
+def _make_input_model(fn: Callable, plain_params: dict[str, tuple[Any, Any]]) -> type[BaseModel] | None:
+    """Dynamically create a Pydantic input model from the plain parameters."""
+    if not plain_params:
+        return None
+    fields = {name: (annotation, default) for name, (annotation, default) in plain_params.items()}
+    return create_model(f"{fn.__name__}_input", **fields)
+
+
+def _make_route_handler(
+    fn: Callable,
+    input_model: type[BaseModel] | None,
+    dep_param_names: list[str],
+) -> Callable:
+    """Create a FastAPI route handler that calls fn with injected dependencies."""
+    hints = get_type_hints(fn, include_extras=True)
+    dep_annotations = {name: hints[name] for name in dep_param_names if name in hints}
+
+    if input_model is not None:
+        # Build a handler: (body: InputModel, dep1: Dep1, ...) -> return_type
+        async def handler(body: input_model, **kwargs: Any) -> Any:  # type: ignore[valid-type]
+            return fn(**body.model_dump(), **kwargs)
+
+        # Inject dependency annotations into the handler's __annotations__
+        # so FastAPI can resolve them
+        handler.__annotations__ = {"body": input_model, **dep_annotations, "return": hints.get("return", Any)}
+        _patch_handler_signature(handler, input_model, dep_annotations)
+    else:
+        async def handler(**kwargs: Any) -> Any:
+            return fn(**kwargs)
+
+        handler.__annotations__ = {**dep_annotations, "return": hints.get("return", Any)}
+        _patch_handler_signature(handler, None, dep_annotations)
+
+    handler.__name__ = fn.__name__
+    handler.__doc__ = fn.__doc__
+    return handler
+
+
+def _patch_handler_signature(
+    handler: Callable,
+    input_model: type[BaseModel] | None,
+    dep_annotations: dict[str, Any],
+) -> None:
+    """Replace handler's inspect.Signature so FastAPI sees the right parameters."""
+    parameters: list[inspect.Parameter] = []
+
+    if input_model is not None:
+        parameters.append(
+            inspect.Parameter("body", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=input_model)
+        )
+
+    for dep_name, dep_annotation in dep_annotations.items():
+        parameters.append(
+            inspect.Parameter(dep_name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=dep_annotation)
+        )
+
+    handler.__signature__ = inspect.Signature(parameters)  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------
 
@@ -85,7 +194,6 @@ def _load_agent_config() -> AgentConfig | None:
     """Read [tool.apx.agent] from pyproject.toml. Returns None if absent."""
     pyproject_path = Path("pyproject.toml")
     if not pyproject_path.exists():
-        # Walk up to find it
         for parent in Path.cwd().parents:
             candidate = parent / "pyproject.toml"
             if candidate.exists():
@@ -106,104 +214,87 @@ def _load_agent_config() -> AgentConfig | None:
     if not agent_section:
         return None
 
-    return AgentConfig(**agent_section)
+    return AgentConfig(**{k: v for k, v in agent_section.items() if k in AgentConfig.model_fields})
 
 
 # ---------------------------------------------------------------------------
-# Tool discovery from OpenAPI spec
+# Schema helpers
 # ---------------------------------------------------------------------------
 
 
-def _build_tool_registry(app: FastAPI, config: AgentConfig) -> list[AgentTool]:
-    """Extract agent tools from the app's OpenAPI schema.
+def _schema_for_model(model: type[BaseModel] | None) -> dict[str, Any] | None:
+    if model is None:
+        return None
+    return model.model_json_schema()
 
-    Each route with an operation_id becomes a tool. Tool name = operation_id,
-    description = route docstring or summary, schemas from request/response models.
+
+def _schema_for_return(fn: Callable) -> dict[str, Any] | None:
+    hints = get_type_hints(fn)
+    return_type = hints.get("return")
+    if return_type is None or return_type is type(None):
+        return None
+    if isinstance(return_type, type) and issubclass(return_type, BaseModel):
+        return return_type.model_json_schema()
+    return {"type": "string"}
+
+
+# ---------------------------------------------------------------------------
+# Agent class — the user-facing API
+# ---------------------------------------------------------------------------
+
+
+class Agent:
+    """Register plain typed functions as agent tools.
+
+    Example::
+
+        def query_genie(question: str, space_id: str, ws: Dependencies.UserClient) -> str:
+            \"\"\"Answer a question using a Genie Space.\"\"\"
+            return ws.genie.ask(space_id=space_id, question=question).answer or ""
+
+        agent = Agent(tools=[query_genie])
+
+    Dependencies.* parameters are injected by FastAPI and excluded from the
+    tool schema. All other typed parameters become tool inputs.
     """
-    schema = app.openapi()
-    tools: list[AgentTool] = []
 
-    for path, methods in schema.get("paths", {}).items():
-        for method, details in methods.items():
-            if method in ("options", "head"):
-                continue
+    def __init__(self, tools: list[Callable]) -> None:
+        global _agent_instance
+        self._tool_fns = tools
+        _agent_instance = self
 
-            operation_id = details.get("operationId")
-            if not operation_id:
-                continue
+        # Pre-analyze all functions at construction time
+        self._analyzed: list[tuple[Callable, dict, list[str], type[BaseModel] | None]] = []
+        for fn in tools:
+            plain_params, dep_names = _inspect_tool_fn(fn)
+            input_model = _make_input_model(fn, plain_params)
+            self._analyzed.append((fn, plain_params, dep_names, input_model))
 
-            # Filter if tools list is specified
-            if config.tools and operation_id not in config.tools:
-                continue
+    def build_router(self) -> APIRouter:
+        """Build an APIRouter with a POST route for each tool."""
+        router = APIRouter()
+        for fn, plain_params, dep_names, input_model in self._analyzed:
+            handler = _make_route_handler(fn, input_model, dep_names)
+            router.add_api_route(
+                f"/tools/{fn.__name__}",
+                handler,
+                methods=["POST"],
+                operation_id=fn.__name__,
+                summary=fn.__doc__ or fn.__name__,
+                response_model=None,
+            )
+        return router
 
-            # Skip internal endpoints
-            if path.startswith("/.well-known") or path in ("/health", "/invocations"):
-                continue
-
-            # Extract description
-            description = details.get("description") or details.get("summary") or ""
-
-            # Extract input schema from requestBody
-            input_schema = None
-            request_body = details.get("requestBody", {})
-            json_content = request_body.get("content", {}).get("application/json", {})
-            if json_content.get("schema"):
-                input_schema = _resolve_schema_ref(json_content["schema"], schema)
-
-            # Extract output schema from 200 response
-            output_schema = None
-            success_response = details.get("responses", {}).get("200", {})
-            response_content = success_response.get("content", {}).get("application/json", {})
-            if response_content.get("schema"):
-                output_schema = _resolve_schema_ref(response_content["schema"], schema)
-
-            # Detect streaming (text/event-stream response)
-            streaming = "text/event-stream" in success_response.get("content", {})
-
-            tools.append(AgentTool(
-                name=operation_id,
-                description=description,
-                method=method.upper(),
-                path=path,
-                input_schema=input_schema,
-                output_schema=output_schema,
-                streaming=streaming,
-            ))
-
-    logger.info(f"Agent '{config.name}': registered {len(tools)} tools from routes")
-    return tools
-
-
-def _resolve_schema_ref(schema: dict, openapi_schema: dict) -> dict:
-    """Resolve $ref pointers in OpenAPI schema."""
-    ref = schema.get("$ref")
-    if not ref:
-        return schema
-
-    # $ref format: "#/components/schemas/ModelName"
-    parts = ref.lstrip("#/").split("/")
-    resolved = openapi_schema
-    for part in parts:
-        resolved = resolved.get(part, {})
-    return resolved
-
-
-def _build_agent_card(config: AgentConfig, tools: list[AgentTool]) -> AgentCard:
-    """Build the A2A discovery card."""
-    return AgentCard(
-        name=config.name,
-        description=config.description,
-        tools=[
-            {
-                "name": t.name,
-                "description": t.description,
-                "inputSchema": t.input_schema,
-                "outputSchema": t.output_schema,
-                "streaming": t.streaming,
-            }
-            for t in tools
-        ],
-    )
+    def build_tools(self) -> list[AgentTool]:
+        return [
+            AgentTool(
+                name=fn.__name__,
+                description=(fn.__doc__ or "").strip(),
+                input_schema=_schema_for_model(input_model),
+                output_schema=_schema_for_return(fn),
+            )
+            for fn, _, _, input_model in self._analyzed
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -212,21 +303,12 @@ def _build_agent_card(config: AgentConfig, tools: list[AgentTool]) -> AgentCard:
 
 
 class InvocationRequest(BaseModel):
-    """Simplified agent protocol request."""
-
     tool: str
     arguments: dict[str, Any] = {}
 
 
-async def _handle_invocation(
-    request: Request,
-    body: InvocationRequest,
-) -> Any:
-    """Dispatch an agent invocation to the matching route handler.
-
-    Looks up the tool by operation_id and dispatches via the ASGI transport —
-    fully async, preserves the DI chain and OBO auth.
-    """
+async def _handle_invocation(request: Request, body: InvocationRequest) -> Any:
+    """Dispatch an agent invocation to the matching tool route via ASGI."""
     agent_ctx: AgentContext = request.app.state.agent_context
     tool = agent_ctx.get_tool(body.tool)
 
@@ -242,11 +324,9 @@ async def _handle_invocation(
         transport=ASGITransport(app=request.app),
         base_url="http://internal",
     ) as client:
-        response = await client.request(
-            method=tool.method,
-            url=tool.path,
-            json=body.arguments if tool.method != "GET" else None,
-            params=body.arguments if tool.method == "GET" else None,
+        response = await client.post(
+            f"/tools/{body.tool}",
+            json=body.arguments,
             headers={"Authorization": request.headers.get("Authorization", "")},
         )
 
@@ -271,15 +351,30 @@ class _AgentDependency(LifespanDependency):
             yield
             return
 
-        # Build tool registry from app's OpenAPI spec
-        tools = _build_tool_registry(app, config)
-        card = _build_agent_card(config, tools)
-        app.state.agent_context = AgentContext(config=config, tools=tools, card=card)
+        if _agent_instance is None:
+            logger.warning(
+                "No Agent() registered. Create one with Agent(tools=[...]) in your agent module."
+            )
+            app.state.agent_context = None
+            yield
+            return
 
-        logger.info(
-            f"Agent protocol enabled: {config.name} "
-            f"({len(tools)} tools, card at /.well-known/agent.json)"
+        tools = _agent_instance.build_tools()
+        card = AgentCard(
+            name=config.name,
+            description=config.description,
+            tools=[
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "inputSchema": t.input_schema,
+                    "outputSchema": t.output_schema,
+                }
+                for t in tools
+            ],
         )
+        app.state.agent_context = AgentContext(config=config, tools=tools, card=card)
+        logger.info(f"Agent protocol enabled: {config.name} ({len(tools)} tools)")
         yield
 
     @staticmethod
@@ -289,33 +384,27 @@ class _AgentDependency(LifespanDependency):
     def get_routers(self) -> list[APIRouter]:
         agent_router = APIRouter()
 
-        @agent_router.get(
-            "/.well-known/agent.json",
-            response_model=AgentCard,
-            include_in_schema=False,
-        )
-        async def agent_card(request: Request):
+        @agent_router.get("/.well-known/agent.json", include_in_schema=False)
+        async def agent_card(request: Request) -> AgentCard:
             ctx: AgentContext | None = request.app.state.agent_context
             if ctx is None:
                 raise HTTPException(status_code=404, detail="Agent protocol not configured")
             return ctx.card
 
-        @agent_router.post(
-            "/invocations",
-            include_in_schema=False,
-        )
-        async def invocations(request: Request, body: InvocationRequest):
+        @agent_router.post("/invocations", include_in_schema=False)
+        async def invocations(request: Request, body: InvocationRequest) -> Any:
             ctx: AgentContext | None = request.app.state.agent_context
             if ctx is None:
                 raise HTTPException(status_code=404, detail="Agent protocol not configured")
             return await _handle_invocation(request, body)
 
-        @agent_router.get(
-            "/health",
-            include_in_schema=False,
-        )
-        async def health():
+        @agent_router.get("/health", include_in_schema=False)
+        async def health() -> dict[str, str]:
             return {"status": "ok"}
+
+        # Tool routes from the registered Agent instance
+        if _agent_instance is not None:
+            agent_router.include_router(_agent_instance.build_router())
 
         return [agent_router]
 
