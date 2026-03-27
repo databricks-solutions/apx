@@ -684,15 +684,15 @@ class ApxMetrics(BaseModel):
     ``apx.worker.id`` to drill down; aggregate across workers for
     server-wide distributions.
 
-    All metrics default to disabled (opt-in for low overhead).
+    If APX_PERF environment variable is not set, none of these metrics are collected.
     """
 
-    dispatch_body_collect: bool = False
-    dispatch_crossbeam_send: bool = False
-    dispatch_response_wait: bool = False
-    dispatch_total: bool = False
-    asgi_receive_build: bool = False
-    asgi_send_parse: bool = False
+    dispatch_body_collect: bool = True
+    dispatch_crossbeam_send: bool = True
+    dispatch_response_wait: bool = True
+    dispatch_total: bool = True
+    asgi_receive_build: bool = True
+    asgi_send_parse: bool = True
 
 
 class CaptureHeaders(BaseModel):
@@ -758,7 +758,7 @@ class ApxInstrumentation(BaseModel):
     """APX framework dispatch timing metrics (opt-in).
 
     Collected per-worker. Records per-phase histograms for the ASGI
-    dispatch pipeline. All metrics default to disabled::
+    dispatch pipeline. If APX_PERF environment variable is not set, none of these metrics are collected::
 
         ApxInstrumentation(metrics=ApxMetrics(dispatch_total=True))
     """

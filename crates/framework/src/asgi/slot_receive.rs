@@ -51,8 +51,14 @@ impl SlotReceive {
             .take();
 
         if let Some(bytes) = taken {
-            let event = self.receive_template.bind(py).copy()?;
-            event.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, &bytes))?;
+            let event = crate::telemetry::timed!(
+                crate::telemetry::dispatch_metrics::record_receive_build,
+                {
+                    let event = self.receive_template.bind(py).copy()?;
+                    event.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, &bytes))?;
+                    event
+                }
+            );
             let event = event.unbind().into_any();
             Py::new(py, ResolvedAwaitableWithValue::new(event))
                 .map(|obj| obj.into_bound(py).into_any())

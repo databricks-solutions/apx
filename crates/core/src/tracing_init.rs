@@ -116,6 +116,69 @@ pub fn shutdown_telemetry() {
 /// OpenTelemetry semantic conventions version for resource attributes.
 const SEMCONV_SCHEMA_URL: &str = "https://opentelemetry.io/schemas/1.29.0";
 
+// ── Log bridge helpers ───────────────────────────────────────────────
+
+/// Wrapper that overrides the instrumentation scope used by the
+/// `OpenTelemetryTracingBridge`. The bridge hardcodes `provider.logger("")`
+/// (empty scope), so this intercepts that call and returns a logger with
+/// scope `apx.framework` + version + schema URL instead.
+///
+/// Only used at construction time — the bridge stores the resulting
+/// `SdkLogger` and the wrapper is dropped immediately after.
+#[derive(Debug, Clone)]
+struct ScopedLoggerProvider {
+    inner: opentelemetry_sdk::logs::SdkLoggerProvider,
+    scope: opentelemetry::InstrumentationScope,
+}
+
+impl opentelemetry::logs::LoggerProvider for ScopedLoggerProvider {
+    type Logger = opentelemetry_sdk::logs::SdkLogger;
+
+    fn logger_with_scope(&self, scope: opentelemetry::InstrumentationScope) -> Self::Logger {
+        self.inner.logger_with_scope(scope)
+    }
+
+    fn logger(&self, _name: impl Into<std::borrow::Cow<'static, str>>) -> Self::Logger {
+        self.inner.logger_with_scope(self.scope.clone())
+    }
+}
+
+/// Pass-through log processor that copies `observed_timestamp` into
+/// `timestamp` when the latter is unset.
+///
+/// The `OpenTelemetryTracingBridge` never calls `set_timestamp()`, so
+/// without this processor the OTLP `time_unix_nano` field is 0. The
+/// SDK's `SdkLogger::emit()` populates `observed_timestamp` before
+/// iterating processors, so the value is always available here.
+///
+/// Records that already carry a `timestamp` (e.g. Python-originated
+/// ones from `logging.rs`) pass through unchanged.
+#[derive(Debug, Copy, Clone)]
+struct TimestampProcessor;
+
+impl opentelemetry_sdk::logs::LogProcessor for TimestampProcessor {
+    fn emit(
+        &self,
+        record: &mut opentelemetry_sdk::logs::SdkLogRecord,
+        _scope: &opentelemetry::InstrumentationScope,
+    ) {
+        use opentelemetry::logs::LogRecord as _;
+        if record.timestamp().is_none()
+            && let Some(ts) = record.observed_timestamp()
+        {
+            record.set_timestamp(ts);
+        }
+    }
+
+    fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+        Ok(())
+    }
+
+    fn shutdown(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+        Ok(())
+    }
+}
+
 /// Histogram boundaries for duration metrics recorded in seconds.
 ///
 /// Aligned with OpenTelemetry HTTP semantic conventions for
@@ -299,8 +362,20 @@ fn init_tracing_with_otel(
 
     let provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
         .with_resource(resource)
+        .with_log_processor(TimestampProcessor)
         .with_batch_exporter(exporter)
         .build();
+
+    // The bridge hardcodes `provider.logger("")` (empty scope).
+    // Wrap the provider so the bridge gets a logger scoped to
+    // `apx.framework` with version and schema URL instead.
+    let scoped = ScopedLoggerProvider {
+        inner: provider.clone(),
+        scope: opentelemetry::InstrumentationScope::builder("apx.framework")
+            .with_version(env!("CARGO_PKG_VERSION"))
+            .with_schema_url(SEMCONV_SCHEMA_URL)
+            .build(),
+    };
 
     // Exclude `apx::python` — Python stdlib logs are forwarded directly
     // to the OTEL log exporter (with trace context from the Python
@@ -308,7 +383,7 @@ fn init_tracing_with_otel(
     // through the tracing bridge would produce duplicates without context.
     let otel_log_filter = format!("{filter},apx::python=off");
     let otel_log_layer =
-        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&provider)
+        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&scoped)
             .with_filter(EnvFilter::new(otel_log_filter));
     let _ = LOGGER_PROVIDER.set(provider);
 

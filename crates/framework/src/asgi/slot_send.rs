@@ -91,9 +91,28 @@ impl SlotSend {
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("type"))?;
 
         if type_obj.eq(pyo3::intern!(py, "http.response.start"))? {
-            self.handle_response_start(py, &event)
+            crate::telemetry::timed!(
+                crate::telemetry::dispatch_metrics::record_send_parse,
+                self.handle_response_start(py, &event)
+            )
         } else if type_obj.eq(pyo3::intern!(py, "http.response.body"))? {
-            self.handle_response_body(py, &event)
+            let (body, more_body) =
+                crate::telemetry::timed!(crate::telemetry::dispatch_metrics::record_send_parse, {
+                    let body = extract_body_bytes(&event)?;
+                    let more_body: bool = event
+                        .get_item(pyo3::intern!(py, "more_body"))?
+                        .map(|b| b.extract())
+                        .transpose()?
+                        .unwrap_or(false);
+                    (body, more_body)
+                });
+
+            if self.body_tx.is_none() {
+                self.send_first_body_chunk(body, more_body)?;
+            } else {
+                self.send_subsequent_chunk(body, more_body);
+            }
+            Ok(self.resolved.clone_ref(py).into_bound(py).into_any())
         } else {
             let event_type: String = type_obj.extract()?;
             Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -117,29 +136,6 @@ impl SlotSend {
         let headers = extract_raw_headers(event)?;
         self.status = Some(status);
         self.raw_headers = Some(headers);
-        Ok(self.resolved.clone_ref(py).into_bound(py).into_any())
-    }
-
-    /// Handle `http.response.body` — first chunk creates the response
-    /// and pushes to crossbeam; subsequent chunks go via mpsc.
-    fn handle_response_body<'py>(
-        &mut self,
-        py: Python<'py>,
-        event: &Bound<'py, PyDict>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let body = extract_body_bytes(event)?;
-        let more_body: bool = event
-            .get_item(pyo3::intern!(py, "more_body"))?
-            .map(|b| b.extract())
-            .transpose()?
-            .unwrap_or(false);
-
-        if self.body_tx.is_none() {
-            self.send_first_body_chunk(body, more_body)?;
-        } else {
-            self.send_subsequent_chunk(body, more_body);
-        }
-
         Ok(self.resolved.clone_ref(py).into_bound(py).into_any())
     }
 

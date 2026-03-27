@@ -12,7 +12,9 @@ use crate::dispatch::Dispatch;
 use crate::io::channel::{RequestSlot, ResponseData, Wakeup};
 use crate::protocol::http::error::AppError;
 use crate::supervision::worker_context::WorkerContext;
+use crate::telemetry::context::TraceContext;
 use crate::telemetry::dispatch_metrics;
+use crate::telemetry::timed;
 use crate::transport::types::{BodyStream, InboundRequest, OutboundResponse, ResponseBody};
 use bytes::Bytes;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
@@ -23,7 +25,6 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Instant;
 
 // ── AsgiDispatch ─────────────────────────────────────────────────────────
 
@@ -127,8 +128,7 @@ impl Dispatch for AsgiDispatch {
 
 // ── Dispatch internals ───────────────────────────────────────────────────
 
-/// Zero-GIL HTTP dispatch: collect body → build RequestSlot → push to
-/// crossbeam → signal wakeup → await oneshot response.
+/// Zero-GIL HTTP dispatch: extract trace context, then time the full pipeline.
 async fn dispatch_inner(
     request: InboundRequest,
     body_stream: BodyStream,
@@ -146,14 +146,36 @@ async fn dispatch_inner(
 
     let trace_context = crate::telemetry::context::extract_trace_context();
 
-    let t_total = Instant::now();
-
-    let t0 = Instant::now();
-    let body_bytes = body_stream
-        .collect(body_limit)
+    timed!(
+        dispatch_metrics::record_dispatch_total,
+        dispatch_pipeline(
+            request,
+            body_stream,
+            body_limit,
+            inbound_tx,
+            wakeup,
+            trace_context
+        )
         .await
-        .map_err(|e| AppError::Internal(format!("body collect: {e}")))?;
-    dispatch_metrics::record_body_collect(t0.elapsed().as_micros() as f64);
+    )
+}
+
+/// Collect body → build RequestSlot → push to crossbeam → await response.
+async fn dispatch_pipeline(
+    request: InboundRequest,
+    body_stream: BodyStream,
+    body_limit: usize,
+    inbound_tx: crossbeam_channel::Sender<RequestSlot>,
+    wakeup: Arc<Wakeup>,
+    trace_context: Option<TraceContext>,
+) -> Result<OutboundResponse, AppError> {
+    let body_bytes = timed!(
+        dispatch_metrics::record_body_collect,
+        body_stream
+            .collect(body_limit)
+            .await
+            .map_err(|e| AppError::Internal(format!("body collect: {e}")))?
+    );
 
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
@@ -172,24 +194,21 @@ async fn dispatch_inner(
         response_tx,
     };
 
-    let t0 = Instant::now();
-    inbound_tx
-        .send(slot)
-        .map_err(|_| AppError::Internal("inbound channel closed".to_owned()))?;
-    wakeup.signal();
-    dispatch_metrics::record_crossbeam_send(t0.elapsed().as_micros() as f64);
+    timed!(dispatch_metrics::record_crossbeam_send, {
+        inbound_tx
+            .send(slot)
+            .map_err(|_| AppError::Internal("inbound channel closed".to_owned()))?;
+        wakeup.signal();
+    });
 
-    let t0 = Instant::now();
-    let response_data = response_rx
-        .await
-        .map_err(|_| AppError::Internal("response channel closed".to_owned()))?;
-    dispatch_metrics::record_response_wait(t0.elapsed().as_micros() as f64);
+    let response_data = timed!(
+        dispatch_metrics::record_response_wait,
+        response_rx
+            .await
+            .map_err(|_| AppError::Internal("response channel closed".to_owned()))?
+    );
 
-    let response = response_data_to_outbound(response_data)?;
-
-    dispatch_metrics::record_dispatch_total(t_total.elapsed().as_micros() as f64);
-
-    Ok(response)
+    response_data_to_outbound(response_data)
 }
 
 /// Convert a `ResponseData` from the crossbeam pipeline into an `OutboundResponse`.

@@ -336,6 +336,7 @@ def telemetry_container(
             "OTEL_BLRP_SCHEDULE_DELAY": "500",
             "OTEL_BSP_MAX_EXPORT_BATCH_SIZE": "16",
             "OTEL_BLRP_MAX_EXPORT_BATCH_SIZE": "16",
+            "APX_PERF": "1",
         },
         extra_hosts=extra_hosts or None,
         detach=True,

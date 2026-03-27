@@ -402,11 +402,13 @@ impl AsgiReceive {
             .take();
 
         if let Some(bytes) = taken {
-            let t0 = std::time::Instant::now();
-            let event = self.receive_template.bind(py).copy()?;
-            event.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, &bytes))?;
-            crate::telemetry::dispatch_metrics::record_receive_build(
-                t0.elapsed().as_micros() as f64
+            let event = crate::telemetry::timed!(
+                crate::telemetry::dispatch_metrics::record_receive_build,
+                {
+                    let event = self.receive_template.bind(py).copy()?;
+                    event.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, &bytes))?;
+                    event
+                }
             );
             let event = event.unbind().into_any();
             Py::new(py, ResolvedAwaitableWithValue { value: Some(event) })
@@ -612,9 +614,10 @@ impl AsgiSend {
         py: Python<'py>,
         event: Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let t0 = std::time::Instant::now();
-        let parsed = parse_asgi_send_event(&event)?;
-        crate::telemetry::dispatch_metrics::record_send_parse(t0.elapsed().as_micros() as f64);
+        let parsed = crate::telemetry::timed!(
+            crate::telemetry::dispatch_metrics::record_send_parse,
+            parse_asgi_send_event(&event)?
+        );
 
         let resolved = self.resolved.as_ref();
         match &mut self.inner {
