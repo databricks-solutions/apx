@@ -59,12 +59,13 @@ class AgentConfig(BaseModel):
 
 
 class AgentTool(BaseModel):
-    """A tool derived from a plain Python function."""
+    """A tool derived from a plain Python function or a remote sub-agent."""
 
     name: str
     description: str
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
+    sub_agent_url: str | None = None  # set for sub-agent tools, None for local tools
 
 
 # ---------------------------------------------------------------------------
@@ -337,9 +338,10 @@ class Agent:
     tool schema. All other typed parameters become tool inputs.
     """
 
-    def __init__(self, tools: list[Callable]) -> None:
+    def __init__(self, tools: list[Callable], sub_agents: list[str] | None = None) -> None:
         global _agent_instance
         self._tool_fns = tools
+        self._sub_agent_urls = sub_agents or []
         _agent_instance = self
 
         # Pre-analyze all functions at construction time
@@ -364,7 +366,7 @@ class Agent:
             )
         return router
 
-    def build_tools(self) -> list[AgentTool]:
+    def build_local_tools(self) -> list[AgentTool]:
         return [
             AgentTool(
                 name=fn.__name__,
@@ -374,6 +376,43 @@ class Agent:
             )
             for fn, _, _, input_model in self._analyzed
         ]
+
+    async def fetch_sub_agent_tools(self) -> list[AgentTool]:
+        """Fetch agent cards from sub-agent URLs and build tools from them."""
+        from httpx import AsyncClient
+
+        tools: list[AgentTool] = []
+        async with AsyncClient(timeout=10.0) as client:
+            for url in self._sub_agent_urls:
+                card_url = f"{url.rstrip('/')}/.well-known/agent.json"
+                try:
+                    response = await client.get(card_url)
+                    response.raise_for_status()
+                    card = response.json()
+                except Exception as e:
+                    logger.warning(f"Failed to fetch agent card from {card_url}: {e}")
+                    continue
+
+                # Sanitize the agent name to a valid Python identifier
+                raw_name = card.get("name", url.split("/")[-1])
+                tool_name = raw_name.replace("-", "_").replace(" ", "_")
+
+                tools.append(AgentTool(
+                    name=tool_name,
+                    description=card.get("description", f"Agent at {url}"),
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string", "description": "The message to send to the agent"},
+                        },
+                        "required": ["message"],
+                    },
+                    output_schema={"type": "string"},
+                    sub_agent_url=url.rstrip("/"),
+                ))
+                logger.info(f"Registered sub-agent '{tool_name}' from {url}")
+
+        return tools
 
 
 # ---------------------------------------------------------------------------
@@ -399,8 +438,9 @@ def _build_fmapi_tool_schemas(tools: list[AgentTool]) -> list[dict[str, Any]]:
 async def _dispatch_tool_call(
     request: Request,
     tool_call: dict[str, Any],
+    ctx: AgentContext,
 ) -> Any:
-    """Dispatch a single FMAPI tool call to its matching /tools/{name} route."""
+    """Dispatch a single FMAPI tool call — local via ASGI, sub-agent via HTTP."""
     import json as _json
 
     from httpx import ASGITransport, AsyncClient
@@ -411,21 +451,41 @@ async def _dispatch_tool_call(
     except Exception:
         arguments = {}
 
-    async with AsyncClient(
-        transport=ASGITransport(app=request.app),
-        base_url="http://internal",
-    ) as client:
-        response = await client.post(
-            f"/tools/{fn_name}",
-            json=arguments,
-            headers={"Authorization": request.headers.get("Authorization", "")},
-        )
+    tool = ctx.get_tool(fn_name)
+    obo_header = {"Authorization": request.headers.get("Authorization", "")}
 
-    if response.status_code >= 400:
-        return f"Tool error ({response.status_code}): {response.text}"
-
-    result = response.json()
-    return result if isinstance(result, str) else str(result)
+    if tool and tool.sub_agent_url:
+        # Sub-agent: POST to its /invocations with the message
+        message = arguments.get("message", _json.dumps(arguments))
+        async with AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{tool.sub_agent_url}/invocations",
+                json={"input": [{"role": "user", "content": message}]},
+                headers=obo_header,
+            )
+        if response.status_code >= 400:
+            return f"Sub-agent error ({response.status_code}): {response.text}"
+        data = response.json()
+        # Extract text from ResponsesAgent output format
+        try:
+            return data["output"][0]["content"][0]["text"]
+        except (KeyError, IndexError):
+            return str(data)
+    else:
+        # Local tool: dispatch via ASGI
+        async with AsyncClient(
+            transport=ASGITransport(app=request.app),
+            base_url="http://internal",
+        ) as client:
+            response = await client.post(
+                f"/tools/{fn_name}",
+                json=arguments,
+                headers=obo_header,
+            )
+        if response.status_code >= 400:
+            return f"Tool error ({response.status_code}): {response.text}"
+        result = response.json()
+        return result if isinstance(result, str) else str(result)
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +534,7 @@ async def _handle_invocation(request: Request, body: InvocationRequest) -> Invoc
 
             if finish_reason == "tool_calls":
                 for tool_call in assistant_msg.get("tool_calls", []):
-                    result = await _dispatch_tool_call(request, tool_call)
+                    result = await _dispatch_tool_call(request, tool_call, ctx)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call["id"],
@@ -522,7 +582,8 @@ class _AgentDependency(LifespanDependency):
             yield
             return
 
-        tools = _agent_instance.build_tools()
+        tools = _agent_instance.build_local_tools()
+        tools += await _agent_instance.fetch_sub_agent_tools()
         card = AgentCard(
             name=config.name,
             description=config.description,
