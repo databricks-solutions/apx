@@ -55,6 +55,7 @@ class AgentConfig(BaseModel):
 
     name: str
     description: str = ""
+    model: str = "databricks-meta-llama-3-3-70b-instruct"
 
 
 class AgentTool(BaseModel):
