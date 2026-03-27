@@ -376,23 +376,125 @@ class Agent:
 
 
 # ---------------------------------------------------------------------------
+# LLM loop helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_fmapi_tool_schemas(tools: list[AgentTool]) -> list[dict[str, Any]]:
+    """Convert AgentTools to OpenAI function calling format for FMAPI."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.input_schema or {"type": "object", "properties": {}},
+            },
+        }
+        for t in tools
+    ]
+
+
+async def _dispatch_tool_call(
+    request: Request,
+    tool_call: dict[str, Any],
+) -> Any:
+    """Dispatch a single FMAPI tool call to its matching /tools/{name} route."""
+    import json as _json
+
+    from httpx import ASGITransport, AsyncClient
+
+    fn_name = tool_call["function"]["name"]
+    try:
+        arguments = _json.loads(tool_call["function"].get("arguments", "{}"))
+    except Exception:
+        arguments = {}
+
+    async with AsyncClient(
+        transport=ASGITransport(app=request.app),
+        base_url="http://internal",
+    ) as client:
+        response = await client.post(
+            f"/tools/{fn_name}",
+            json=arguments,
+            headers={"Authorization": request.headers.get("Authorization", "")},
+        )
+
+    if response.status_code >= 400:
+        return f"Tool error ({response.status_code}): {response.text}"
+
+    result = response.json()
+    return result if isinstance(result, str) else str(result)
+
+
+# ---------------------------------------------------------------------------
 # Invocations handler
 # ---------------------------------------------------------------------------
 
 
 async def _handle_invocation(request: Request, body: InvocationRequest) -> InvocationResponse:
-    """Handle a ResponsesAgent /invocations request.
+    """Run the FMAPI LLM loop and return a ResponsesAgent response.
 
-    Phase 1: Protocol stub — accepts the correct format and returns a placeholder.
-    Phase 2 will add the FMAPI LLM loop and tool dispatch.
+    Calls FMAPI with the conversation and tool schemas, dispatches any tool
+    calls back to the registered tool functions via ASGI, and loops until
+    FMAPI returns a final message.
     """
-    # TODO(Phase 2): call FMAPI with body.input + tool schemas, run tool loop
-    return InvocationResponse(
-        output=[
-            OutputItem(
-                content=[OutputTextContent(text="LLM loop not yet implemented (Phase 2).")]
+    import json as _json
+
+    from databricks.sdk import WorkspaceClient
+    from httpx import AsyncClient
+
+    ctx: AgentContext = request.app.state.agent_context
+    ws: WorkspaceClient = request.app.state.workspace_client
+
+    messages = [
+        {"role": m.role, "content": m.content, **({"name": m.name} if m.name else {})}
+        for m in body.input
+    ]
+    tool_schemas = _build_fmapi_tool_schemas(ctx.tools)
+    auth_headers = ws.config.authenticate()
+    fmapi_url = f"{ws.config.host.rstrip('/')}/serving-endpoints/{ctx.config.model}/invocations"
+
+    async with AsyncClient() as client:
+        for _ in range(10):  # max iterations as a safety cap
+            response = await client.post(
+                fmapi_url,
+                json={"messages": messages, "tools": tool_schemas},
+                headers=auth_headers,
+                timeout=60.0,
             )
-        ]
+            response.raise_for_status()
+            data = response.json()
+
+            choice = data["choices"][0]
+            assistant_msg = choice["message"]
+            finish_reason = choice.get("finish_reason") or choice.get("finishReason")
+            messages.append(assistant_msg)
+
+            if finish_reason == "tool_calls":
+                for tool_call in assistant_msg.get("tool_calls", []):
+                    result = await _dispatch_tool_call(request, tool_call)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": result if isinstance(result, str) else _json.dumps(result),
+                    })
+            else:
+                return InvocationResponse(
+                    output=[
+                        OutputItem(
+                            content=[OutputTextContent(text=assistant_msg.get("content") or "")]
+                        )
+                    ]
+                )
+
+    # Safety cap hit — return whatever the last assistant message said
+    last_content = next(
+        (m.get("content", "") for m in reversed(messages) if m.get("role") == "assistant"),
+        "",
+    )
+    return InvocationResponse(
+        output=[OutputItem(content=[OutputTextContent(text=last_content)])]
     )
 
 
