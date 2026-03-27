@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Annotated, Any, AsyncGenerator, TypeAlias, get_args, get_origin, get_type_hints
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, params
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, create_model
 
 from ._base import LifespanDependency
@@ -493,12 +493,14 @@ async def _dispatch_tool_call(
 # ---------------------------------------------------------------------------
 
 
-async def _handle_invocation(request: Request, body: InvocationRequest) -> InvocationResponse:
-    """Run the FMAPI LLM loop and return a ResponsesAgent response.
+async def _run_llm_loop(
+    request: Request,
+    body: InvocationRequest,
+) -> str:
+    """Run the FMAPI LLM loop and return the final response text.
 
-    Calls FMAPI with the conversation and tool schemas, dispatches any tool
-    calls back to the registered tool functions via ASGI, and loops until
-    FMAPI returns a final message.
+    Tool calls are dispatched synchronously before the next FMAPI call.
+    Loops until FMAPI returns a final message or the safety cap is hit.
     """
     import json as _json
 
@@ -541,21 +543,40 @@ async def _handle_invocation(request: Request, body: InvocationRequest) -> Invoc
                         "content": result if isinstance(result, str) else _json.dumps(result),
                     })
             else:
-                return InvocationResponse(
-                    output=[
-                        OutputItem(
-                            content=[OutputTextContent(text=assistant_msg.get("content") or "")]
-                        )
-                    ]
-                )
+                return assistant_msg.get("content") or ""
 
-    # Safety cap hit — return whatever the last assistant message said
-    last_content = next(
+    # Safety cap hit
+    return next(
         (m.get("content", "") for m in reversed(messages) if m.get("role") == "assistant"),
         "",
     )
+
+
+async def _handle_invocation(
+    request: Request,
+    body: InvocationRequest,
+) -> InvocationResponse | StreamingResponse:
+    """Handle /invocations — returns JSON or SSE depending on body.stream."""
+    import json as _json
+
+    if body.stream:
+        async def _sse_generator() -> AsyncGenerator[str, None]:
+            item_id = "msg_001"
+            yield f"event: response.output_item.start\ndata: {_json.dumps({'item_id': item_id})}\n\n"
+            text = await _run_llm_loop(request, body)
+            # Stream the text in chunks
+            chunk_size = 20
+            for i in range(0, len(text), chunk_size):
+                chunk = text[i:i + chunk_size]
+                yield f"event: output_text.delta\ndata: {_json.dumps({'item_id': item_id, 'text': chunk})}\n\n"
+            output_item = OutputItem(content=[OutputTextContent(text=text)])
+            yield f"event: response.output_item.done\ndata: {_json.dumps({'item_id': item_id, 'output': output_item.model_dump()})}\n\n"
+
+        return StreamingResponse(_sse_generator(), media_type="text/event-stream")
+
+    text = await _run_llm_loop(request, body)
     return InvocationResponse(
-        output=[OutputItem(content=[OutputTextContent(text=last_content)])]
+        output=[OutputItem(content=[OutputTextContent(text=text)])]
     )
 
 
@@ -616,8 +637,8 @@ class _AgentDependency(LifespanDependency):
                 raise HTTPException(status_code=404, detail="Agent protocol not configured")
             return ctx.card
 
-        @agent_router.post("/invocations", response_model=InvocationResponse, include_in_schema=False)
-        async def invocations(request: Request, body: InvocationRequest) -> InvocationResponse:
+        @agent_router.post("/invocations", include_in_schema=False)
+        async def invocations(request: Request, body: InvocationRequest) -> Any:
             ctx: AgentContext | None = request.app.state.agent_context
             if ctx is None:
                 raise HTTPException(status_code=404, detail="Agent protocol not configured")
@@ -635,3 +656,53 @@ class _AgentDependency(LifespanDependency):
 
 
 AgentDependency: TypeAlias = Annotated[AgentContext | None, _AgentDependency.depends()]
+
+
+# ---------------------------------------------------------------------------
+# Eval bridge
+# ---------------------------------------------------------------------------
+
+
+def app_predict_fn(url: str) -> Callable[[dict[str, Any]], str]:
+    """Return a predict function for mlflow.genai.evaluate().
+
+    Example::
+
+        from apx.agent import app_predict_fn
+
+        predict = app_predict_fn("https://my-agent.my-workspace.databricksapps.com")
+        results = mlflow.genai.evaluate(
+            data=eval_dataset,
+            predict_fn=predict,
+            scorers=[correctness_scorer],
+        )
+
+    The predict function accepts a dict with a "messages" key (list of message
+    dicts) or a plain string, posts to the agent's /invocations endpoint, and
+    returns the response text.
+    """
+    import httpx
+
+    base = url.rstrip("/")
+
+    def predict(inputs: dict[str, Any]) -> str:
+        if isinstance(inputs, str):
+            messages = [{"role": "user", "content": inputs}]
+        else:
+            messages = inputs.get("messages") or [
+                {"role": "user", "content": str(inputs.get("input", inputs))}
+            ]
+
+        response = httpx.post(
+            f"{base}/invocations",
+            json={"input": messages},
+            timeout=120.0,
+        )
+        response.raise_for_status()
+        data = response.json()
+        try:
+            return data["output"][0]["content"][0]["text"]
+        except (KeyError, IndexError):
+            return str(data)
+
+    return predict
