@@ -3,136 +3,218 @@
 > **Status:** Draft
 > **Author:** Stuart Gano
 > **Date:** 2026-03-24
+> **Updated:** 2026-03-26
 
 ---
 
 ## Problem
 
-Databricks Apps built with apx already have everything an agent needs — typed routes with input/output schemas, OBO auth, health checks, and an OpenAPI spec. But exposing an app as a discoverable, callable agent requires hand-wiring:
+Building an agent on Databricks Apps requires hand-wiring three distinct layers:
 
-1. `/invocations` — the Responses Agent protocol endpoint for MLflow serving
-2. `/.well-known/agent.json` — A2A (Agent-to-Agent) discovery card
-3. MCP server — exposing routes as MCP tools
-4. `app_predict_fn()` — bridge for `mlflow.genai.evaluate()`
+1. **The LLM loop** — calling FMAPI, parsing tool calls, dispatching to handlers, feeding results back, looping until done
+2. **The protocol layer** — implementing `/invocations` (MLflow ResponsesAgent format) and `/.well-known/agent.json` (A2A discovery card) correctly
+3. **Multi-agent orchestration** — treating other agents as tools, calling their `/invocations` endpoints, composing results
 
-Each app that wants agent capabilities reimplements all of these. The Genie Workbench is a case study: ~1,800 lines of agent protocol wiring on top of working domain logic.
+The Genie Workbench is a case study: ~1,800 lines of agent protocol wiring on top of working domain logic. Every agent reimplements the same loop.
 
-Meanwhile, apx routes already declare everything the agent protocol needs — names (`operation_id`), typed inputs (Pydantic models), typed outputs, descriptions (docstrings), and auth requirements (`Dependencies.UserClient`). The gap is purely mechanical.
+---
 
 ## Proposal
 
-Add a `[tool.apx.agent]` configuration in `pyproject.toml` that tells apx to generate agent protocol endpoints from existing routes. Zero new application code required.
+An `Agent` class that takes plain typed functions as tools and handles everything underneath — the LLM loop, protocol compliance, tool dispatch, and OBO auth.
 
-### Configuration
+### Developer experience
+
+```python
+# agent.py
+from .core import Dependencies
+from .core.agent import Agent
+
+Workspace = Dependencies.Workspace
+
+def get_weather(city: str) -> str:
+    """Get current weather for a city."""
+    import httpx
+    return httpx.get(f"https://wttr.in/{city}?format=3").text
+
+def query_genie(question: str, space_id: str, ws: Workspace) -> str:
+    """Answer a natural language question using a Genie Space."""
+    return ws.genie.ask(space_id=space_id, question=question).answer or ""
+
+agent = Agent(
+    model="databricks-meta-llama-3-3-70b-instruct",
+    tools=[get_weather, query_genie],
+)
+```
+
+That's the whole file. `pyproject.toml` provides the name and description:
 
 ```toml
 [tool.apx.agent]
-name = "genie-scorer"
-description = "IQ scoring for Genie Spaces"
+name = "genie-workbench"
+description = "Genie Space quality control platform"
 ```
 
-That's it. When present, apx generates:
+### What apx generates
 
-| Endpoint | Purpose | Generated from |
-|----------|---------|----------------|
-| `POST /invocations` | Responses Agent protocol | Route schemas + dispatch |
-| `GET /.well-known/agent.json` | A2A discovery card | agent config + route metadata |
-| `GET /health` | Liveness probe | Always 200 (already common in apps) |
-| MCP tool descriptors | Tool integration | Route schemas |
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /invocations` | MLflow ResponsesAgent protocol — runs the LLM loop |
+| `GET /.well-known/agent.json` | A2A discovery card (full spec) |
+| `GET /health` | Liveness probe |
 
-### How it works
+### What developers do NOT write
 
-Routes are tools. A normal apx route:
+- No LLM loop
+- No FMAPI integration
+- No tool schema definitions (derived from type hints)
+- No tool dispatch
+- No protocol serialization/deserialization
+- No auth bridging (`Workspace` parameters are injected per-request via OBO)
+- No agent card JSON
 
-```python
-@router.post("/scan", response_model=ScanResult, operation_id="scanSpace")
-def scan_space(request: ScanRequest, user_ws: Dependencies.UserClient) -> ScanResult:
-    """Run IQ scan on a Genie Space."""
-    space_data = get_serialized_space(request.space_id)
-    return calculate_score(space_data)
-```
+---
 
-This route already has:
-- **Tool name:** `scanSpace` (from `operation_id`)
-- **Tool description:** `"Run IQ scan on a Genie Space."` (from docstring)
-- **Input schema:** `ScanRequest` (from Pydantic model)
-- **Output schema:** `ScanResult` (from `response_model`)
-- **Auth:** OBO via `Dependencies.UserClient`
+## Protocol details
 
-The agent protocol layer reads the OpenAPI spec and generates:
+### `/invocations` — MLflow ResponsesAgent format
 
-**Agent card** (`/.well-known/agent.json`):
+**Request:**
 ```json
 {
-  "name": "genie-scorer",
-  "description": "IQ scoring for Genie Spaces",
-  "url": "https://genie-scorer.cloud.databricks.com",
-  "tools": [
+  "input": [
+    {"role": "user", "content": "What's the weather in NYC and what does Genie say about sales there?"}
+  ],
+  "custom_inputs": {}
+}
+```
+
+**What apx does internally:**
+1. Calls FMAPI with the input messages and tool schemas (OpenAI function calling format)
+2. If FMAPI returns tool calls → dispatches each to the matching Python function
+3. Appends tool results to the message history
+4. Loops until FMAPI returns a final message
+5. Returns the ResponsesAgent response
+
+**Response:**
+```json
+{
+  "output": [
     {
-      "name": "scanSpace",
-      "description": "Run IQ scan on a Genie Space.",
-      "inputSchema": { "$ref": "#/components/schemas/ScanRequest" },
-      "outputSchema": { "$ref": "#/components/schemas/ScanResult" }
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {"type": "output_text", "text": "The weather in NYC is 72°F and sunny. Genie reports..."}
+      ]
     }
   ]
 }
 ```
 
-**Invocations endpoint** (`POST /invocations`):
-Accepts Responses Agent protocol messages, extracts tool calls, dispatches to the corresponding route handler, returns structured results.
+### `/.well-known/agent.json` — A2A discovery card
 
-### What developers do NOT write
+```json
+{
+  "schemaVersion": "1.0",
+  "name": "genie-workbench",
+  "description": "Genie Space quality control platform",
+  "url": "https://genie-workbench.my-workspace.databricksapps.com",
+  "protocolVersion": "0.3.0",
+  "capabilities": {
+    "a2aVersion": "0.3.0",
+    "streaming": false,
+    "multiTurn": true
+  },
+  "provider": {
+    "name": "Databricks",
+    "url": "https://databricks.com"
+  },
+  "authSchemes": [
+    {"type": "bearer", "name": "Databricks OBO token"}
+  ],
+  "skills": [
+    {
+      "id": "get_weather",
+      "name": "get_weather",
+      "description": "Get current weather for a city.",
+      "inputSchema": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+      "outputSchema": {"type": "string"}
+    },
+    {
+      "id": "query_genie",
+      "name": "query_genie",
+      "description": "Answer a natural language question using a Genie Space.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "question": {"type": "string"},
+          "space_id": {"type": "string"}
+        },
+        "required": ["question", "space_id"]
+      },
+      "outputSchema": {"type": "string"}
+    }
+  ]
+}
+```
 
-- No agent card JSON
-- No `/invocations` handler
-- No tool schema definitions (they're the route schemas)
-- No tool dispatch table (routes are the dispatch)
-- No auth bridging (routes already use `Dependencies.UserClient`)
-- No MCP tool registration
+Note: `Workspace` parameters are excluded from skill schemas — they are OBO-injected per-request and never part of the agent's external interface.
 
-### Controlling which routes are tools
+---
 
-By default, all routes with an `operation_id` become agent tools. To exclude a route:
+## Tool definition
+
+Tools are plain Python functions. Type hints become the schema, docstrings become descriptions.
 
 ```python
-@router.get("/internal-status", operation_id="internalStatus", include_in_schema=False)
-def internal_status():
+def tool_name(param: type, ws: Workspace) -> return_type:
+    """Tool description."""
     ...
 ```
 
-Or to explicitly opt-in instead of opt-out:
+Rules:
+- Parameters typed as `Dependencies.*` (including `Workspace`) are injected via FastAPI DI and excluded from the tool schema
+- All other typed parameters are tool inputs
+- Return type determines the output schema — `str` for plain text, `BaseModel` subclass for structured output
+- Docstring is required and becomes the tool description in both FMAPI and the A2A card
 
-```toml
-[tool.apx.agent]
-name = "genie-scorer"
-description = "IQ scoring for Genie Spaces"
-tools = ["scanSpace", "getHistory", "toggleStar"]  # only these operation_ids
-```
+---
 
-### SSE streaming routes
+## Multi-agent orchestration
 
-Routes that return `StreamingResponse` with `media_type="text/event-stream"` are marked as streaming tools in the agent card. The invocations endpoint proxies the SSE stream.
+Sub-agents are registered by URL. Each sub-agent is treated as a tool that accepts a `message: str` and returns a `str` — its description comes from its `/.well-known/agent.json`.
 
 ```python
-@router.post("/analyze", operation_id="analyzeSpace")
-async def analyze(request: AnalyzeRequest, user_ws: Dependencies.UserClient) -> StreamingResponse:
-    """Deep analysis of a Genie Space configuration."""
-    async def generate():
-        async for event in analyzer.run(request.space_id):
-            yield f"data: {json.dumps(event)}\n\n"
-    return StreamingResponse(generate(), media_type="text/event-stream")
+agent = Agent(
+    model="databricks-meta-llama-3-3-70b-instruct",
+    tools=[get_weather],
+    sub_agents=[
+        "https://genie-agent.my-workspace.databricksapps.com",
+    ],
+)
 ```
 
-No special handling needed — the framework detects the response type.
+At startup, apx fetches each sub-agent's agent card to get its name and description. When the LLM calls a sub-agent tool, apx POSTs to that agent's `/invocations` with the message, forwarding the OBO token.
 
-### Eval bridge
+### Topology
 
-When agent config is present, apx generates an `app_predict_fn()` that wraps the `/invocations` endpoint for `mlflow.genai.evaluate()`:
+```
+root_agent (APX app)
+├── get_weather (local tool)
+└── genie-agent (sub-agent via /invocations)
+    └── query_genie (tool inside genie-agent)
+```
+
+Each layer is an independently deployable APX app. The root agent composes them without knowing their internals — only their agent cards.
+
+---
+
+## Eval bridge
 
 ```python
 from apx.agent import app_predict_fn
 
-predict = app_predict_fn("https://genie-scorer.cloud.databricks.com")
+predict = app_predict_fn("https://genie-workbench.my-workspace.databricksapps.com")
 results = mlflow.genai.evaluate(
     data=eval_dataset,
     predict_fn=predict,
@@ -140,104 +222,56 @@ results = mlflow.genai.evaluate(
 )
 ```
 
-### Multi-agent deployment
+`app_predict_fn` wraps the `/invocations` endpoint in the ResponsesAgent format expected by `mlflow.genai.evaluate()`.
 
-For apps that serve multiple logical agents (like the Genie Workbench with scoring, analysis, creation, etc.), each agent can be a separate `APIRouter` with its own agent config:
+---
 
-```toml
-[tool.apx.agent]
-name = "genie-workbench"
-description = "Genie Space quality control platform"
+## Implementation phases
 
-[[tool.apx.agent.sub_agents]]
-name = "scorer"
-prefix = "/api/spaces"
-description = "IQ scoring for Genie Spaces"
+### Phase 1 (this PR): Protocol foundation
+- `Agent(model, tools)` class
+- Type hint inspection → tool schemas
+- `Workspace` / `Dependencies.*` parameter exclusion
+- `/invocations` accepting ResponsesAgent format
+- `/.well-known/agent.json` A2A-compliant card
+- `/health`
 
-[[tool.apx.agent.sub_agents]]
-name = "analyzer"
-prefix = "/api/analyze"
-description = "Deep analysis of Genie Space configurations"
-```
+### Phase 2: LLM loop
+- FMAPI integration via `ws.serving_endpoints.query()`
+- OpenAI-compatible tool call parsing
+- Tool dispatch loop
+- Result serialization back to ResponsesAgent format
 
-Routes under each prefix become tools for that sub-agent. Each sub-agent gets its own agent card at `/.well-known/agent/{name}.json`.
+### Phase 3: Sub-agents
+- `Agent(sub_agents=[url, ...])`
+- Agent card fetching at startup
+- Sub-agent dispatch via `/invocations`
+- OBO token forwarding
 
-## Implementation
+### Phase 4: Eval bridge + streaming
+- `app_predict_fn()`
+- SSE streaming from `/invocations`
+- `apx deploy --agents` (multi-agent deployment)
 
-### Phase 1: Agent card generation (Rust CLI)
-
-`apx build` reads `[tool.apx.agent]` from `pyproject.toml`, reads the generated OpenAPI spec, and produces `agent.json`. This is pure metadata — no runtime cost.
-
-### Phase 2: Agent addon (Python)
-
-A new addon (`addons/agent/`) that provides:
-
-```python
-class _AgentDependency(LifespanDependency):
-    @asynccontextmanager
-    async def lifespan(self, app: FastAPI) -> AsyncGenerator[None, None]:
-        # Load agent config from pyproject.toml
-        # Build tool registry from app's OpenAPI spec
-        app.state.agent_config = load_agent_config()
-        app.state.agent_tools = build_tool_registry(app)
-        yield
-
-    @staticmethod
-    def __call__(request: Request) -> AgentContext:
-        return AgentContext(
-            config=request.app.state.agent_config,
-            tools=request.app.state.agent_tools,
-        )
-
-    def get_routers(self) -> list[APIRouter]:
-        agent_router = APIRouter()
-
-        @agent_router.get("/.well-known/agent.json")
-        async def agent_card(request: Request):
-            return request.app.state.agent_config.card
-
-        @agent_router.post("/invocations")
-        async def invocations(request: Request):
-            # Parse agent protocol message
-            # Dispatch to matching route handler
-            # Return structured result
-            ...
-
-        @agent_router.get("/health")
-        async def health():
-            return {"status": "ok"}
-
-        return [agent_router]
-```
-
-This follows the exact same pattern as the SQL and Lakebase addons. Auto-registers on import. Contributes routes via `get_routers()`. Lifecycle via `lifespan()`.
-
-### Phase 3: MCP tool generation (Rust)
-
-The existing MCP server in `crates/mcp/` gains a new tool: `agent_tools` — which reads the agent card and exposes the app's tools as MCP resources. This enables Claude to discover and call agent tools during development.
-
-### Phase 4: `apx deploy --agents`
-
-Extension to the deployment flow that can deploy sub-agents as separate Databricks Apps from the same codebase, using route prefix filtering. Optional — single-app deployment always works.
+---
 
 ## Design principles
 
-1. **Routes are tools.** No new abstraction for defining agent capabilities. If you can write a FastAPI route, you can write an agent tool.
+1. **Functions are tools.** No route decorators, no Pydantic models, no `operation_id`. A typed function with a docstring is sufficient.
 
-2. **Configuration, not code.** Agent protocol is enabled by `pyproject.toml`, not by changing application code.
+2. **`Workspace` is the only Databricks-specific concept.** Everything else is plain Python.
 
-3. **Addon, not framework change.** The agent layer is a `LifespanDependency` addon that composes with existing addons (SQL, Lakebase, etc.). It doesn't modify `create_app()` or the core DI system.
+3. **Protocol-correct by default.** `/invocations` speaks MLflow ResponsesAgent. `/.well-known/agent.json` speaks A2A. Developers never see these formats.
 
-4. **OpenAPI is the source of truth.** Tool schemas, names, descriptions, and dispatch all derive from the OpenAPI spec that apx already generates from routes.
+4. **Composable.** Any APX app can be a sub-agent of another. The root agent only needs a URL.
 
-## What this replaces
+---
 
-In the Genie Workbench, adopting this pattern would eliminate:
+## What this replaces in the Genie Workbench
+
 - 1,757 lines of hand-wired `/invocations` protocol handling (`auto_optimize.py`)
 - ~580 lines of hand-written JSON tool schemas (`create_agent_tools.py`)
 - ~40 lines of tool dispatch tables
-- Separate `auth_bridge.py` / `obo_context()` (routes use `Dependencies.UserClient`)
+- Separate `auth_bridge.py` / `obo_context()`
 - Separate agent card construction
 - Separate health check endpoints
-
-The workbench routes already exist. Adding `[tool.apx.agent]` to `pyproject.toml` would make them agent-callable with zero code changes.
