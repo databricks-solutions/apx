@@ -64,16 +64,92 @@ class AgentTool(BaseModel):
     description: str
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
+
+
+# ---------------------------------------------------------------------------
+# ResponsesAgent protocol models (MLflow/Databricks)
+# ---------------------------------------------------------------------------
+
+
+class Message(BaseModel):
+    """A single message in the conversation history."""
+
+    role: str  # "user" | "assistant" | "system" | "tool"
+    content: str
+    id: str | None = None
+    name: str | None = None
+    tool_call_id: str | None = None
+
+
+class InvocationRequest(BaseModel):
+    """MLflow ResponsesAgent /invocations request format."""
+
+    input: list[Message]
+    custom_inputs: dict[str, Any] = {}
+    stream: bool = False
+
+
+class OutputTextContent(BaseModel):
+    type: str = "output_text"
+    text: str
+
+
+class OutputItem(BaseModel):
+    type: str = "message"
+    role: str = "assistant"
+    id: str | None = None
+    status: str = "completed"
+    content: list[OutputTextContent]
+
+
+class InvocationResponse(BaseModel):
+    """MLflow ResponsesAgent /invocations response format."""
+
+    output: list[OutputItem]
+    custom_outputs: dict[str, Any] = {}
+
+
+# ---------------------------------------------------------------------------
+# A2A discovery card models
+# ---------------------------------------------------------------------------
+
+
+class A2ACapabilities(BaseModel):
+    a2aVersion: str = "0.3.0"
     streaming: bool = False
+    multiTurn: bool = True
+
+
+class A2AProvider(BaseModel):
+    name: str = "Databricks"
+    url: str = "https://databricks.com"
+
+
+class A2AAuthScheme(BaseModel):
+    type: str = "bearer"
+    name: str = "Databricks OBO token"
+
+
+class A2ASkill(BaseModel):
+    id: str
+    name: str
+    description: str
+    inputSchema: dict[str, Any] | None = None
+    outputSchema: dict[str, Any] | None = None
 
 
 class AgentCard(BaseModel):
     """A2A discovery card served at /.well-known/agent.json."""
 
+    schemaVersion: str = "1.0"
     name: str
     description: str
     url: str = ""
-    tools: list[dict[str, Any]]
+    protocolVersion: str = "0.3.0"
+    capabilities: A2ACapabilities = A2ACapabilities()
+    provider: A2AProvider = A2AProvider()
+    authSchemes: list[A2AAuthScheme] = [A2AAuthScheme()]
+    skills: list[A2ASkill] = []
 
 
 class AgentContext:
@@ -304,38 +380,20 @@ class Agent:
 # ---------------------------------------------------------------------------
 
 
-class InvocationRequest(BaseModel):
-    tool: str
-    arguments: dict[str, Any] = {}
+async def _handle_invocation(request: Request, body: InvocationRequest) -> InvocationResponse:
+    """Handle a ResponsesAgent /invocations request.
 
-
-async def _handle_invocation(request: Request, body: InvocationRequest) -> Any:
-    """Dispatch an agent invocation to the matching tool route via ASGI."""
-    agent_ctx: AgentContext = request.app.state.agent_context
-    tool = agent_ctx.get_tool(body.tool)
-
-    if not tool:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Unknown tool: {body.tool}. Available: {[t.name for t in agent_ctx.tools]}",
-        )
-
-    from httpx import ASGITransport, AsyncClient
-
-    async with AsyncClient(
-        transport=ASGITransport(app=request.app),
-        base_url="http://internal",
-    ) as client:
-        response = await client.post(
-            f"/tools/{body.tool}",
-            json=body.arguments,
-            headers={"Authorization": request.headers.get("Authorization", "")},
-        )
-
-    if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
-
-    return response.json()
+    Phase 1: Protocol stub — accepts the correct format and returns a placeholder.
+    Phase 2 will add the FMAPI LLM loop and tool dispatch.
+    """
+    # TODO(Phase 2): call FMAPI with body.input + tool schemas, run tool loop
+    return InvocationResponse(
+        output=[
+            OutputItem(
+                content=[OutputTextContent(text="LLM loop not yet implemented (Phase 2).")]
+            )
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -365,13 +423,14 @@ class _AgentDependency(LifespanDependency):
         card = AgentCard(
             name=config.name,
             description=config.description,
-            tools=[
-                {
-                    "name": t.name,
-                    "description": t.description,
-                    "inputSchema": t.input_schema,
-                    "outputSchema": t.output_schema,
-                }
+            skills=[
+                A2ASkill(
+                    id=t.name,
+                    name=t.name,
+                    description=t.description,
+                    inputSchema=t.input_schema,
+                    outputSchema=t.output_schema,
+                )
                 for t in tools
             ],
         )
@@ -393,8 +452,8 @@ class _AgentDependency(LifespanDependency):
                 raise HTTPException(status_code=404, detail="Agent protocol not configured")
             return ctx.card
 
-        @agent_router.post("/invocations", include_in_schema=False)
-        async def invocations(request: Request, body: InvocationRequest) -> Any:
+        @agent_router.post("/invocations", response_model=InvocationResponse, include_in_schema=False)
+        async def invocations(request: Request, body: InvocationRequest) -> InvocationResponse:
             ctx: AgentContext | None = request.app.state.agent_context
             if ctx is None:
                 raise HTTPException(status_code=404, detail="Agent protocol not configured")
