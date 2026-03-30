@@ -496,13 +496,15 @@ async def _dispatch_tool_call(
         except (KeyError, IndexError):
             return str(data)
     else:
-        # Local tool: dispatch via ASGI
+        # Local tool: dispatch via ASGI to /api/tools/<fn> (api_prefix + /tools/<fn>)
+        from ..._metadata import api_prefix
+
         async with AsyncClient(
             transport=ASGITransport(app=request.app),
             base_url="http://internal",
         ) as client:
             response = await client.post(
-                f"/tools/{fn_name}",
+                f"{api_prefix}/tools/{fn_name}",
                 json=arguments,
                 headers=obo_header,
             )
