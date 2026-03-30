@@ -40,39 +40,43 @@ pub async fn run(args: BuildArgs) -> i32 {
 async fn run_inner(args: BuildArgs) -> Result<(), String> {
     let app_path = find_app_dir(args.app_path)?;
     let build_dir = app_path.join(&args.build_path);
-
     println!("Building project in {}", app_path.display());
+    run_build(&app_path, &build_dir).await?;
+    println!("Build completed");
+    Ok(())
+}
 
+/// Core build logic shared with `apx deploy`.
+pub async fn run_build(app_path: &Path, build_dir: &Path) -> Result<(), String> {
     // Run preflight checks: generate _metadata.py, __dist__, uv sync, version file, bun install if needed
     debug!("Running preflight checks before build");
-    let _preflight = run_preflight_checks(&app_path).await?;
+    let _preflight = run_preflight_checks(app_path).await?;
 
     // Set up build directory
     if build_dir.exists() {
-        fs::remove_dir_all(&build_dir)
+        fs::remove_dir_all(build_dir)
             .map_err(|err| format!("Failed to remove build directory: {err}"))?;
     }
-    ensure_dir(&build_dir)?;
+    ensure_dir(build_dir)?;
     fs::write(build_dir.join(".gitignore"), "*\n")
         .map_err(|err| format!("Failed to write build .gitignore: {err}"))?;
 
-    generate_openapi(&app_path).await?;
+    generate_openapi(app_path).await?;
+    build_ui(app_path).await?;
 
-    if args.skip_ui_build {
-        println!("Skipping UI build");
-    } else {
-        build_ui(&app_path).await?;
-    }
+    // build_path is relative to app_path; find_wheel_file needs the resolved build_dir
+    let build_path = build_dir
+        .strip_prefix(app_path)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|_| build_dir.to_path_buf());
+    build_wheel(app_path, &build_path).await?;
+    copy_app_config_files(app_path, build_dir)?;
 
-    build_wheel(&app_path, &args.build_path).await?;
-    copy_app_config_files(&app_path, &build_dir)?;
-
-    let wheel_file = find_wheel_file(&build_dir)?;
+    let wheel_file = find_wheel_file(build_dir)?;
     let requirements_path = build_dir.join("requirements.txt");
     fs::write(&requirements_path, format!("{wheel_file}\n"))
         .map_err(|err| format!("Failed to write requirements.txt: {err}"))?;
 
-    println!("Build completed");
     Ok(())
 }
 

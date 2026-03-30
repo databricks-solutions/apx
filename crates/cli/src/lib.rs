@@ -7,6 +7,7 @@
 pub(crate) mod __generate_openapi;
 pub(crate) mod build;
 pub(crate) mod bun;
+pub(crate) mod deploy;
 pub(crate) mod common;
 pub(crate) mod components;
 pub(crate) mod dev;
@@ -39,6 +40,8 @@ enum Commands {
     Init(init::InitArgs),
     /// 🔨 Build the project
     Build(build::BuildArgs),
+    /// 🚀 Deploy the project to Databricks Apps
+    Deploy(deploy::DeployArgs),
     /// 🍞 Run a command using bun
     Bun(bun::BunArgs),
     /// 🧩 Components commands
@@ -183,6 +186,7 @@ async fn run_command(args: Vec<String>) -> i32 {
     match cli.command {
         Some(Commands::Init(init_args)) => init::run(init_args).await,
         Some(Commands::Build(build_args)) => build::run(build_args).await,
+        Some(Commands::Deploy(deploy_args)) => deploy::run(deploy_args).await,
         Some(Commands::Bun(bun_args)) => bun::run(bun_args).await,
         Some(Commands::Components(components_cmd)) => match components_cmd {
             ComponentsCommands::Add(args) => components::add::run(args).await,
