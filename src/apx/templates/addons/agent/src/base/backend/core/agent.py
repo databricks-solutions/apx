@@ -612,7 +612,13 @@ def _render_agent_ui(ctx: AgentContext | None) -> str:
   Add <code>[tool.apx.agent]</code> to <code>pyproject.toml</code> and create
   <code>src/{app}/backend/agent_router.py</code> with an <code>Agent(tools=[...])</code> call,
   then restart the dev server.
-</div>""" if not_configured else ""
+</div>""" if not_configured else """
+<div id="mcp-info">
+  <strong>MCP</strong>
+  <code id="mcp-url"></code>
+  <button id="copy-btn" onclick="copyMcpUrl()" title="Copy SSE URL">Copy</button>
+  <span id="copy-ok" style="display:none;color:#4ade80;margin-left:6px">✓ copied</span>
+</div>"""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -635,6 +641,15 @@ def _render_agent_ui(ctx: AgentContext | None) -> str:
                    padding: 12px 20px; font-size: 13px; line-height: 1.6; flex-shrink: 0; }}
   #setup-banner code {{ background: #1a1000; padding: 1px 5px; border-radius: 3px;
                         font-family: monospace; font-size: 12px; }}
+  #mcp-info {{ background: #0f1a0f; border-bottom: 1px solid #1a2a1a; color: #888;
+               padding: 6px 20px; font-size: 12px; display: flex; align-items: center;
+               gap: 8px; flex-shrink: 0; }}
+  #mcp-info strong {{ color: #4ade80; font-size: 11px; letter-spacing: .5px; text-transform: uppercase; }}
+  #mcp-info code {{ background: #0a150a; color: #9cf09c; padding: 2px 8px; border-radius: 4px;
+                    font-family: monospace; font-size: 11px; }}
+  #copy-btn {{ background: transparent; border: 1px solid #2a3a2a; color: #668866;
+               border-radius: 4px; padding: 1px 8px; font-size: 11px; cursor: pointer; }}
+  #copy-btn:hover {{ border-color: #4ade80; color: #4ade80; }}
   #chat {{ flex: 1; overflow-y: auto; padding: 20px; display: flex;
            flex-direction: column; gap: 16px; }}
   .msg {{ max-width: 720px; line-height: 1.55; font-size: 14px; }}
@@ -798,10 +813,74 @@ form.addEventListener('submit', async e => {{
   input.focus();
 }});
 
+// MCP URL (computed client-side so it works on any port)
+const mcpUrlEl = document.getElementById('mcp-url');
+if (mcpUrlEl) mcpUrlEl.textContent = `${{window.location.origin}}/mcp/sse`;
+
+function copyMcpUrl() {{
+  const url = `${{window.location.origin}}/mcp/sse`;
+  navigator.clipboard.writeText(url).then(() => {{
+    const ok = document.getElementById('copy-ok');
+    ok.style.display = 'inline';
+    setTimeout(() => {{ ok.style.display = 'none'; }}, 2000);
+  }});
+}}
+
 input.focus();
 </script>
 </body>
 </html>"""
+
+
+# ---------------------------------------------------------------------------
+# MCP server (SSE transport)
+# ---------------------------------------------------------------------------
+
+
+def _build_mcp_components(ctx: AgentContext, app: FastAPI) -> tuple[Any, Any]:
+    """Build an MCP Server + SseServerTransport from the agent's tool registry.
+
+    Returns (server, sse_transport) to be stored on app.state.
+    Tool calls are dispatched via ASGI to the existing /api/tools/<name> routes
+    so they share the same FastAPI dependency injection (auth, workspace client, etc.).
+    """
+    from mcp.server import Server
+    from mcp.server.sse import SseServerTransport
+    import mcp.types as mcp_types
+
+    server: Any = Server(ctx.config.name)
+    sse = SseServerTransport("/mcp/messages/")
+
+    @server.list_tools()
+    async def _list_tools() -> list[Any]:
+        return [
+            mcp_types.Tool(
+                name=t.name,
+                description=t.description or "",
+                inputSchema=t.input_schema or {"type": "object", "properties": {}},
+            )
+            for t in ctx.tools
+        ]
+
+    @server.call_tool()
+    async def _call_tool(name: str, arguments: dict[str, Any] | None) -> list[Any]:
+        from httpx import ASGITransport, AsyncClient
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://internal",
+        ) as client:
+            response = await client.post(f"/api/tools/{name}", json=arguments or {})
+
+        if response.status_code >= 400:
+            text = f"Tool error ({response.status_code}): {response.text}"
+        else:
+            result = response.json()
+            text = result if isinstance(result, str) else str(result)
+
+        return [mcp_types.TextContent(type="text", text=text)]
+
+    return server, sse
 
 
 # ---------------------------------------------------------------------------
@@ -871,8 +950,20 @@ class _AgentDependency(LifespanDependency):
                 for t in tools
             ],
         )
-        app.state.agent_context = AgentContext(config=config, tools=tools, card=card)
+        ctx = AgentContext(config=config, tools=tools, card=card)
+        app.state.agent_context = ctx
         logger.info(f"Agent protocol enabled: {config.name} ({len(tools)} tools)")
+
+        try:
+            mcp_server, mcp_transport = _build_mcp_components(ctx, app)
+            app.state.mcp_server = mcp_server
+            app.state.mcp_transport = mcp_transport
+            logger.info("MCP server enabled at /mcp/sse")
+        except ImportError:
+            app.state.mcp_server = None
+            app.state.mcp_transport = None
+            logger.warning("mcp package not installed — /mcp endpoints disabled. Add mcp>=1.0.0 to dependencies.")
+
         yield
 
     @staticmethod
@@ -907,6 +998,31 @@ class _AgentDependency(LifespanDependency):
         @agent_router.get("/health", include_in_schema=False)
         async def health() -> dict[str, str]:
             return {"status": "ok"}
+
+        @agent_router.get("/mcp/sse", include_in_schema=False)
+        async def mcp_sse(request: Request) -> Any:
+            """MCP SSE transport — connect MCP clients here."""
+            mcp_server = getattr(request.app.state, "mcp_server", None)
+            mcp_transport = getattr(request.app.state, "mcp_transport", None)
+            if mcp_server is None or mcp_transport is None:
+                raise HTTPException(status_code=503, detail="MCP server not available")
+            async with mcp_transport.connect_sse(
+                request.scope, request.receive, request._send
+            ) as streams:
+                await mcp_server.run(
+                    streams[0], streams[1],
+                    mcp_server.create_initialization_options(),
+                )
+
+        @agent_router.post("/mcp/messages/", include_in_schema=False)
+        async def mcp_messages(request: Request) -> Any:
+            """MCP SSE transport — message channel (used by the SSE transport)."""
+            mcp_transport = getattr(request.app.state, "mcp_transport", None)
+            if mcp_transport is None:
+                raise HTTPException(status_code=503, detail="MCP server not available")
+            await mcp_transport.handle_post_message(
+                request.scope, request.receive, request._send
+            )
 
         @agent_router.get("/_agent", include_in_schema=False)
         async def agent_dev_ui(request: Request) -> HTMLResponse:

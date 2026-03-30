@@ -5,7 +5,7 @@ group = "backend"
 group_display_name = "Backend"
 
 [python]
-dependencies = ["httpx>=0.27.0"]
+dependencies = ["httpx>=0.27.0", "mcp>=1.0.0"]
 
 [python.edits]
 imports = [
