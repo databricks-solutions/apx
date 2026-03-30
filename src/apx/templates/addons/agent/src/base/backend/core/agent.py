@@ -114,6 +114,11 @@ class InvocationRequest(BaseModel):
 
     ``input`` accepts either a list of message dicts or a plain string.
     A plain string is coerced to ``[{"role": "user", "content": <str>}]``.
+
+    ``custom_inputs`` supports the following recognised keys:
+
+    * ``"instructions"`` — per-request system prompt override; takes
+      precedence over the agent's own ``instructions`` setting.
     """
 
     input: list[Message] | str
@@ -125,6 +130,10 @@ class InvocationRequest(BaseModel):
         if isinstance(self.input, str):
             return [Message(role="user", content=self.input)]
         return self.input
+
+    def instructions_override(self) -> str:
+        """Return a per-request instructions override from custom_inputs, or ''."""
+        return str(self.custom_inputs.get("instructions", ""))
 
 
 class OutputTextContent(BaseModel):
@@ -550,20 +559,34 @@ Agent = LlmAgent
 class SequentialAgent(BaseAgent):
     """Runs agents in order, each receiving the previous agent's output as context.
 
+    ``instructions`` is prepended as a ``system`` message to the conversation
+    before the first sub-agent runs. Use this to frame the overall task for the
+    whole pipeline; individual ``LlmAgent``s can still carry their own system
+    prompts via their ``instructions`` param.
+
     Example::
 
         planner = LlmAgent(tools=[search, outline])
         writer  = LlmAgent(tools=[draft, format])
-        agent   = SequentialAgent([planner, writer])
+        agent   = SequentialAgent(
+            [planner, writer],
+            instructions="You are a research-and-write pipeline. Be concise.",
+        )
     """
 
-    def __init__(self, agents: list[BaseAgent]) -> None:
+    def __init__(self, agents: list[BaseAgent], instructions: str = "") -> None:
         if not agents:
             raise ValueError("SequentialAgent requires at least one agent")
         self._agents = agents
+        self._instructions = instructions
+
+    def _prepend_instructions(self, messages: list[Message]) -> list[Message]:
+        if not self._instructions:
+            return list(messages)
+        return [Message(role="system", content=self._instructions), *messages]
 
     async def run(self, messages: list[Message], request: Request) -> str:
-        context = list(messages)
+        context = self._prepend_instructions(messages)
         result = ""
         for sub in self._agents:
             result = await sub.run(context, request)
@@ -571,7 +594,7 @@ class SequentialAgent(BaseAgent):
         return result
 
     async def stream(self, messages: list[Message], request: Request) -> AsyncGenerator[str, None]:
-        context = list(messages)
+        context = self._prepend_instructions(messages)
         for sub in self._agents[:-1]:
             result = await sub.run(context, request)
             context.append(Message(role="assistant", content=result))
@@ -600,27 +623,40 @@ class SequentialAgent(BaseAgent):
 class ParallelAgent(BaseAgent):
     """Runs all agents concurrently with the same input and merges their responses.
 
+    ``instructions`` is prepended as a ``system`` message to the conversation
+    before any sub-agent runs, giving all parallel branches the same framing.
+
     Example::
 
         legal    = LlmAgent(tools=[check_contracts])
         finance  = LlmAgent(tools=[check_budget])
-        agent    = ParallelAgent([legal, finance])
+        agent    = ParallelAgent(
+            [legal, finance],
+            instructions="Analyse this proposal from your domain's perspective.",
+        )
     """
 
-    def __init__(self, agents: list[BaseAgent]) -> None:
+    def __init__(self, agents: list[BaseAgent], instructions: str = "") -> None:
         if not agents:
             raise ValueError("ParallelAgent requires at least one agent")
         self._agents = agents
+        self._instructions = instructions
+
+    def _prepend_instructions(self, messages: list[Message]) -> list[Message]:
+        if not self._instructions:
+            return list(messages)
+        return [Message(role="system", content=self._instructions), *messages]
 
     async def run(self, messages: list[Message], request: Request) -> str:
         import asyncio
 
-        results = await asyncio.gather(*[sub.run(messages, request) for sub in self._agents])
+        context = self._prepend_instructions(messages)
+        results = await asyncio.gather(*[sub.run(context, request) for sub in self._agents])
         return "\n\n".join(str(r) for r in results)
 
     async def stream(self, messages: list[Message], request: Request) -> AsyncGenerator[str, None]:
         # Collect all parallel results then yield the merged text as one chunk.
-        yield await self.run(messages, request)
+        yield await self.run(messages, request)  # run() already applies _prepend_instructions
 
     def get_tool_routers(self) -> list[APIRouter]:
         routers: list[APIRouter] = []
@@ -748,7 +784,9 @@ async def _run_llm_loop(
     ws: WorkspaceClient = request.app.state.workspace_client
 
     # Resolve per-call overrides → AgentConfig fallbacks
-    system_prompt = instructions or ctx.config.instructions
+    # Priority: custom_inputs.instructions > constructor instructions > AgentConfig.instructions
+    custom_inputs: dict[str, Any] = getattr(request.state, "custom_inputs", {})
+    system_prompt = custom_inputs.get("instructions") or instructions or ctx.config.instructions
     effective_temp = temperature if temperature is not None else ctx.config.temperature
     effective_max_tokens = max_tokens if max_tokens is not None else ctx.config.max_tokens
     effective_max_iter = max_iterations if max_iterations is not None else ctx.config.max_iterations
@@ -823,6 +861,7 @@ async def _run_llm_loop(
                         )
                         if _mlflow_available else None
                     )
+                    result: Any = ""
                     try:
                         result = await _dispatch_tool_call(request, tool_call, ctx)
                         if tool_span is not None:
@@ -866,14 +905,22 @@ async def _handle_invocation(
     try:
         import mlflow
 
+        import json as _json_span
+
         root_span = mlflow.start_span(
             name=ctx.config.name,
             span_type="CHAIN",
-            attributes={"agent": ctx.config.name, "model": ctx.config.model},
+            attributes={
+                "agent": ctx.config.name,
+                "model": ctx.config.model,
+                "custom_inputs": _json_span.dumps(body.custom_inputs) if body.custom_inputs else "{}",
+            },
         )
     except ImportError:
         root_span = None
 
+    # Stash per-request custom_inputs on request.state so _run_llm_loop can read them.
+    request.state.custom_inputs = body.custom_inputs
     messages = body.messages()
 
     if body.stream:
@@ -892,16 +939,16 @@ async def _handle_invocation(
 
         return StreamingResponse(_sse_generator(), media_type="text/event-stream")
 
+    text = ""
     try:
         text = await ctx.agent.run(messages, request)
+        return InvocationResponse(
+            output=[OutputItem(content=[OutputTextContent(text=text)])]
+        )
     finally:
         if root_span is not None:
+            root_span.set_attribute("output", text)
             root_span.end()
-    if root_span is not None:
-        root_span.set_attribute("output", text)
-    return InvocationResponse(
-        output=[OutputItem(content=[OutputTextContent(text=text)])]
-    )
 
 
 # ---------------------------------------------------------------------------
