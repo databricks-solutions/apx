@@ -301,10 +301,14 @@ fn test_init_with_agent_addon() {
         "pyproject.toml [tool.apx.agent] should have a model field"
     );
 
-    // httpx dependency added (from addon.toml)
+    // httpx + mcp dependencies added (from addon.toml)
     assert!(
         pyproject_content.contains("httpx"),
         "pyproject.toml should contain httpx dependency"
+    );
+    assert!(
+        pyproject_content.contains("mcp"),
+        "pyproject.toml should contain mcp dependency"
     );
 
     // No UI directory (pure backend agent)

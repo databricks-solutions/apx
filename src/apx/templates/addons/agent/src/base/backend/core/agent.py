@@ -1,4 +1,4 @@
-"""Agent protocol addon — A2A discovery, /invocations, MCP tools, eval bridge.
+"""Agent protocol addon — A2A discovery, /invocations, /mcp, /_agent dev UI, eval bridge.
 
 Define agent tools as plain typed functions and register them with Agent():
 
@@ -22,6 +22,19 @@ Requires [tool.apx.agent] in pyproject.toml:
     [tool.apx.agent]
     name = "my-agent"
     description = "What this agent does"
+    model = "databricks-meta-llama-3-3-70b-instruct"
+
+Endpoints added to the app:
+
+    GET  /.well-known/agent.json   A2A discovery card (name, skills, mcpEndpoint, url)
+    POST /invocations               MLflow ResponsesAgent — runs FMAPI tool-calling loop
+                                    supports stream=true for SSE token streaming
+    GET  /health                    Liveness check
+    POST /api/tools/<fn_name>       One FastAPI route per registered tool
+    GET  /mcp/sse                   MCP server — SSE transport (connect MCP clients here)
+    POST /mcp/messages/             MCP SSE return channel (used by transport, not directly)
+    GET  /_agent                    Built-in dev chat UI — stream messages, inspect skills,
+                                    copy MCP SSE URL for Claude Desktop / Cursor
 """
 
 from __future__ import annotations
