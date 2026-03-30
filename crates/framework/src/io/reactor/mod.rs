@@ -269,8 +269,4 @@ impl Reactor {
     }
 }
 
-impl std::fmt::Debug for Reactor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Reactor").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(Reactor);

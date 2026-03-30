@@ -83,11 +83,7 @@ pub struct Wakeup {
     pending: AtomicBool,
 }
 
-impl std::fmt::Debug for Wakeup {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Wakeup").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(Wakeup);
 
 impl Wakeup {
     /// Create a new wakeup pipe pair.

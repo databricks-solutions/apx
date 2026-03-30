@@ -32,16 +32,12 @@ const WS_SCHEME: &str = "ws";
 
 // ── ScopeInterns ─────────────────────────────────────────────────────────
 
+crate::opaque_debug!(ScopeInterns);
+
 /// Pre-interned Python strings for ASGI scope construction.
 ///
 /// Created once at worker startup, shared across all requests via `AppState`.
 /// Eliminates ~25 transient `PyString` allocations per request.
-impl std::fmt::Debug for ScopeInterns {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ScopeInterns").finish_non_exhaustive()
-    }
-}
-
 pub struct ScopeInterns {
     // ── Scope dict keys ──
     /// Fixed keys used in every ASGI scope dict.
@@ -184,11 +180,7 @@ pub struct SendCache {
     pub(crate) resolved: Py<ResolvedAwaitable>,
 }
 
-impl std::fmt::Debug for SendCache {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SendCache").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(SendCache);
 
 impl SendCache {
     /// Create the send cache. Call once at worker startup with GIL held.
@@ -356,11 +348,7 @@ pub struct AsgiReceive {
     receive_template: Py<PyDict>,
 }
 
-impl std::fmt::Debug for AsgiReceive {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AsgiReceive").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(AsgiReceive);
 
 impl AsgiReceive {
     /// Create for an HTTP request with a known body.
@@ -681,103 +669,142 @@ impl AsgiSend {
                 Self::resolved_awaitable(resolved, py)
             }
             AsgiEvent::ResponseBody { body, more_body } if stream_tx.is_none() => {
-                let Some(raw_status) = status.take() else {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        "ASGI protocol error: body before response start",
-                    ));
-                };
-                let resp_headers = headers.take().unwrap_or_default();
-                let http_status = http::StatusCode::from_u16(raw_status)
-                    .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-                let server_route = None;
-
-                if more_body {
-                    let (stx, srx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-                    let dtx = disconnect_tx.take();
-                    let body_len = body.len();
-                    let stream = super::streaming::AsgiBodyStream::new(srx, Some(body), dtx);
-                    if let Some(tx) = response_tx.take() {
-                        let _ = tx.send(Ok(OutboundResponse {
-                            status: http_status,
-                            headers: resp_headers,
-                            body: ResponseBody::Stream(Box::pin(stream)),
-                            server_route,
-                        }));
-                    }
-                    *stream_tx = Some(stx);
-                    tracing::trace!(name: "apx.asgi.send_first_body_chunk", body_len, "asgi_send: first body chunk (streaming started)");
-                } else {
-                    let _ = disconnect_tx.take();
-                    let body_len = body.len();
-                    if let Some(tx) = response_tx.take() {
-                        let _ = tx.send(Ok(OutboundResponse {
-                            status: http_status,
-                            headers: resp_headers,
-                            body: ResponseBody::Fixed(body),
-                            server_route,
-                        }));
-                    }
-                    tracing::trace!(name: "apx.asgi.send_fixed_body", body_len, "asgi_send: fixed body (complete)");
-                }
-                Self::resolved_awaitable(resolved, py)
+                Self::handle_first_body(
+                    py,
+                    body,
+                    more_body,
+                    status,
+                    headers,
+                    response_tx,
+                    disconnect_tx,
+                    stream_tx,
+                    resolved,
+                )
             }
             AsgiEvent::ResponseBody { body, more_body } => {
-                let Some(tx) = stream_tx.as_ref() else {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        "ASGI protocol error: body after stream closed",
-                    ));
-                };
-                let body_len = body.len();
-                match tx.try_send(AsgiEvent::ResponseBody { body, more_body }) {
-                    Ok(()) => {
-                        tracing::trace!(
-                            name: "apx.asgi.send_stream_chunk",
-                            body_len,
-                            more_body,
-                            "asgi_send: stream chunk sent (no backpressure)"
-                        );
-                        if !more_body {
-                            *stream_tx = None;
-                        }
-                        Self::resolved_awaitable(resolved, py)
-                    }
-                    Err(mpsc::error::TrySendError::Full(event)) => {
-                        tracing::trace!(
-                            name: "apx.asgi.send_stream_backpressure",
-                            body_len,
-                            more_body,
-                            "asgi_send: stream chunk BACKPRESSURE (channel full)"
-                        );
-                        let tx = tx.clone();
-                        let drop_stream = !more_body;
-                        let handle =
-                            crate::io::with_tokio_handle(|h| h.clone()).ok_or_else(|| {
-                                pyo3::exceptions::PyRuntimeError::new_err(
-                                    "no tokio runtime for backpressure send",
-                                )
-                            })?;
-                        let _guard = handle.enter();
-                        if drop_stream {
-                            *stream_tx = None;
-                        }
-                        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-                            let _ = tx.send(event).await;
-                            tracing::trace!(name: "apx.asgi.send_backpressure_resolved", "asgi_send: backpressure resolved");
-                            Ok(Python::attach(|py| py.None()))
-                        })
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        tracing::trace!(name: "apx.asgi.send_stream_channel_closed", "asgi_send: stream channel CLOSED");
-                        *stream_tx = None;
-                        Err(pyo3::exceptions::PyRuntimeError::new_err(
-                            "stream channel closed",
-                        ))
-                    }
-                }
+                Self::handle_stream_body(py, body, more_body, stream_tx, resolved)
             }
             _ => Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "unexpected event type in HTTP mode",
             )),
+        }
+    }
+
+    /// First `http.response.body` — decide streaming vs fixed and send the response.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mutable refs to send state fields"
+    )]
+    fn handle_first_body<'py>(
+        py: Python<'py>,
+        body: Bytes,
+        more_body: bool,
+        status: &mut Option<u16>,
+        headers: &mut Option<HeaderMap>,
+        response_tx: &mut Option<oneshot::Sender<Result<OutboundResponse, AppError>>>,
+        disconnect_tx: &mut Option<oneshot::Sender<()>>,
+        stream_tx: &mut Option<mpsc::Sender<AsgiEvent>>,
+        resolved: Option<&Py<ResolvedAwaitable>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let Some(raw_status) = status.take() else {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "ASGI protocol error: body before response start",
+            ));
+        };
+        let resp_headers = headers.take().unwrap_or_default();
+        let http_status = http::StatusCode::from_u16(raw_status)
+            .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+        let server_route = None;
+
+        if more_body {
+            let (stx, srx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
+            let dtx = disconnect_tx.take();
+            let body_len = body.len();
+            let stream = super::streaming::AsgiBodyStream::new(srx, Some(body), dtx);
+            if let Some(tx) = response_tx.take() {
+                let _ = tx.send(Ok(OutboundResponse {
+                    status: http_status,
+                    headers: resp_headers,
+                    body: ResponseBody::Stream(Box::pin(stream)),
+                    server_route,
+                }));
+            }
+            *stream_tx = Some(stx);
+            tracing::trace!(name: "apx.asgi.send_first_body_chunk", body_len, "asgi_send: first body chunk (streaming started)");
+        } else {
+            let _ = disconnect_tx.take();
+            let body_len = body.len();
+            if let Some(tx) = response_tx.take() {
+                let _ = tx.send(Ok(OutboundResponse {
+                    status: http_status,
+                    headers: resp_headers,
+                    body: ResponseBody::Fixed(body),
+                    server_route,
+                }));
+            }
+            tracing::trace!(name: "apx.asgi.send_fixed_body", body_len, "asgi_send: fixed body (complete)");
+        }
+        Self::resolved_awaitable(resolved, py)
+    }
+
+    /// Subsequent `http.response.body` — push to the streaming channel with backpressure.
+    fn handle_stream_body<'py>(
+        py: Python<'py>,
+        body: Bytes,
+        more_body: bool,
+        stream_tx: &mut Option<mpsc::Sender<AsgiEvent>>,
+        resolved: Option<&Py<ResolvedAwaitable>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let Some(tx) = stream_tx.as_ref() else {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "ASGI protocol error: body after stream closed",
+            ));
+        };
+        let body_len = body.len();
+        match tx.try_send(AsgiEvent::ResponseBody { body, more_body }) {
+            Ok(()) => {
+                tracing::trace!(
+                    name: "apx.asgi.send_stream_chunk",
+                    body_len,
+                    more_body,
+                    "asgi_send: stream chunk sent (no backpressure)"
+                );
+                if !more_body {
+                    *stream_tx = None;
+                }
+                Self::resolved_awaitable(resolved, py)
+            }
+            Err(mpsc::error::TrySendError::Full(event)) => {
+                tracing::trace!(
+                    name: "apx.asgi.send_stream_backpressure",
+                    body_len,
+                    more_body,
+                    "asgi_send: stream chunk BACKPRESSURE (channel full)"
+                );
+                let tx = tx.clone();
+                let drop_stream = !more_body;
+                let handle = crate::io::with_tokio_handle(|h| h.clone()).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "no tokio runtime for backpressure send",
+                    )
+                })?;
+                let _guard = handle.enter();
+                if drop_stream {
+                    *stream_tx = None;
+                }
+                pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                    let _ = tx.send(event).await;
+                    tracing::trace!(name: "apx.asgi.send_backpressure_resolved", "asgi_send: backpressure resolved");
+                    Ok(Python::attach(|py| py.None()))
+                })
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::trace!(name: "apx.asgi.send_stream_channel_closed", "asgi_send: stream channel CLOSED");
+                *stream_tx = None;
+                Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "stream channel closed",
+                ))
+            }
         }
     }
 
@@ -841,11 +868,7 @@ pub struct AsgiWsReceive {
     rx: Arc<Mutex<mpsc::Receiver<WsIncomingEvent>>>,
 }
 
-impl std::fmt::Debug for AsgiWsReceive {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AsgiWsReceive").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(AsgiWsReceive);
 
 impl AsgiWsReceive {
     /// Create a new WebSocket receive callable.

@@ -69,8 +69,8 @@ impl TransportConfig {
 /// v1: `TcpListener` (hyper for HTTP/1 + HTTP/2).
 /// Future: `QuicListener` (quinn for HTTP/3), `UnixListener`, `InMemoryListener`.
 ///
-/// The `serve()` method is intentionally absent — it moves to the hyper service
-/// layer (Step 2 of moonshot plan).
+/// The `serve()` method is intentionally absent — it lives in the hyper service
+/// layer (`protocol::http::service`).
 pub trait Listener: Send + Sync + 'static {
     /// Bind to the configured address.
     fn bind(config: &TransportConfig) -> impl Future<Output = Result<Self, TransportError>> + Send

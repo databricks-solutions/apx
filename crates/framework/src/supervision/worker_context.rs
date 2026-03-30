@@ -21,8 +21,4 @@ pub struct WorkerContext {
     pub launch_fn: Py<pyo3::PyAny>,
 }
 
-impl std::fmt::Debug for WorkerContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkerContext").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(WorkerContext);

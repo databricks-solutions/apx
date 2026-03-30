@@ -12,16 +12,14 @@ All three spans should share the same ``traceId``, and each child's
 
 from __future__ import annotations
 
-import time
-
-import httpx
 import pytest
 
 from .conftest import (
     OtelCollector,
+    find_span,
     flat_spans,
+    make_setup_fixture,
     span_attrs,
-    wait_for_collector_data,
 )
 
 
@@ -29,40 +27,24 @@ from .conftest import (
 class TestNestedSpans:
     """Verify 3-level nested span parent-child chain."""
 
-    @pytest.fixture(autouse=True, scope="class")
-    def _setup(
-        self,
-        telemetry_client: httpx.Client,
-        otel_collector: OtelCollector,
-    ) -> None:
-        r = telemetry_client.get("/api/telemetry/nested-spans")
-        assert r.status_code == 200
-        time.sleep(3)
-        wait_for_collector_data(otel_collector)
-
-    def _find(self, collector: OtelCollector, name: str):
-        for s in flat_spans(collector):
-            if s.name == name:
-                return s
-        all_names = sorted({s.name for s in flat_spans(collector)})
-        pytest.fail(f"span {name!r} not found; available: {all_names}")
+    _setup = make_setup_fixture("/api/telemetry/nested-spans", sleep_time=3)
 
     def test_outer_span_exists(self, otel_collector: OtelCollector) -> None:
-        span = self._find(otel_collector, "test.outer")
+        span = find_span(otel_collector, "test.outer")
         assert span_attrs(span).get("depth") == "1"
 
     def test_middle_span_exists(self, otel_collector: OtelCollector) -> None:
-        span = self._find(otel_collector, "test.middle")
+        span = find_span(otel_collector, "test.middle")
         assert span_attrs(span).get("depth") == "2"
 
     def test_inner_span_exists(self, otel_collector: OtelCollector) -> None:
-        span = self._find(otel_collector, "test.inner")
+        span = find_span(otel_collector, "test.inner")
         assert span_attrs(span).get("depth") == "3"
 
     def test_all_share_same_trace_id(self, otel_collector: OtelCollector) -> None:
-        outer = self._find(otel_collector, "test.outer")
-        middle = self._find(otel_collector, "test.middle")
-        inner = self._find(otel_collector, "test.inner")
+        outer = find_span(otel_collector, "test.outer")
+        middle = find_span(otel_collector, "test.middle")
+        inner = find_span(otel_collector, "test.inner")
 
         assert outer.traceId == middle.traceId, (
             f"outer and middle traceId mismatch: {outer.traceId} != {middle.traceId}"
@@ -72,8 +54,8 @@ class TestNestedSpans:
         )
 
     def test_inner_parent_is_middle(self, otel_collector: OtelCollector) -> None:
-        middle = self._find(otel_collector, "test.middle")
-        inner = self._find(otel_collector, "test.inner")
+        middle = find_span(otel_collector, "test.middle")
+        inner = find_span(otel_collector, "test.inner")
 
         assert inner.parentSpanId == middle.spanId, (
             f"inner.parentSpanId ({inner.parentSpanId}) "
@@ -81,8 +63,8 @@ class TestNestedSpans:
         )
 
     def test_middle_parent_is_outer(self, otel_collector: OtelCollector) -> None:
-        outer = self._find(otel_collector, "test.outer")
-        middle = self._find(otel_collector, "test.middle")
+        outer = find_span(otel_collector, "test.outer")
+        middle = find_span(otel_collector, "test.middle")
 
         assert middle.parentSpanId == outer.spanId, (
             f"middle.parentSpanId ({middle.parentSpanId}) "
@@ -91,7 +73,7 @@ class TestNestedSpans:
 
     def test_outer_is_child_of_http_span(self, otel_collector: OtelCollector) -> None:
         """The outer user span should be a child of the HTTP root span."""
-        outer = self._find(otel_collector, "test.outer")
+        outer = find_span(otel_collector, "test.outer")
         assert outer.parentSpanId, "outer span should have a parentSpanId (HTTP root)"
 
         http_span = None
@@ -105,9 +87,9 @@ class TestNestedSpans:
         )
 
     def test_all_span_ids_are_distinct(self, otel_collector: OtelCollector) -> None:
-        outer = self._find(otel_collector, "test.outer")
-        middle = self._find(otel_collector, "test.middle")
-        inner = self._find(otel_collector, "test.inner")
+        outer = find_span(otel_collector, "test.outer")
+        middle = find_span(otel_collector, "test.middle")
+        inner = find_span(otel_collector, "test.inner")
 
         ids = {outer.spanId, middle.spanId, inner.spanId}
         assert len(ids) == 3, f"expected 3 distinct spanIds; got {ids}"

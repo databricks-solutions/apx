@@ -21,11 +21,7 @@ pub struct RustCounter {
     inner: opentelemetry::metrics::Counter<u64>,
 }
 
-impl std::fmt::Debug for RustCounter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RustCounter").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(RustCounter);
 
 #[pymethods]
 impl RustCounter {
@@ -45,11 +41,7 @@ pub struct RustHistogram {
     inner: opentelemetry::metrics::Histogram<f64>,
 }
 
-impl std::fmt::Debug for RustHistogram {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RustHistogram").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(RustHistogram);
 
 #[pymethods]
 impl RustHistogram {
@@ -69,11 +61,7 @@ pub struct RustGauge {
     inner: opentelemetry::metrics::Gauge<f64>,
 }
 
-impl std::fmt::Debug for RustGauge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RustGauge").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(RustGauge);
 
 #[pymethods]
 impl RustGauge {

@@ -19,11 +19,7 @@ pub struct WorkerChannel {
     writer: OwnedWriteHalf,
 }
 
-impl std::fmt::Debug for WorkerChannel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkerChannel").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(WorkerChannel);
 
 impl WorkerChannel {
     /// Create a channel from a connected UDS split into read/write halves.
@@ -74,11 +70,7 @@ pub struct IpcReader {
     reader: BufReader<OwnedReadHalf>,
 }
 
-impl std::fmt::Debug for IpcReader {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IpcReader").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(IpcReader);
 
 impl IpcReader {
     /// Receive a length-prefixed msgpack message.
@@ -104,11 +96,7 @@ pub struct IpcWriter {
     writer: OwnedWriteHalf,
 }
 
-impl std::fmt::Debug for IpcWriter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IpcWriter").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(IpcWriter);
 
 impl IpcWriter {
     /// Send a length-prefixed msgpack message.

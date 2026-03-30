@@ -54,11 +54,7 @@ pub struct WorkerRuntime {
     pub event_loop: EventLoop,
 }
 
-impl std::fmt::Debug for WorkerRuntime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WorkerRuntime").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(WorkerRuntime);
 
 /// Phase 1: Create TCP listener and initialize the Python interpreter.
 ///

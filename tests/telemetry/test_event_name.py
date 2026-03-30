@@ -11,9 +11,6 @@ macro ``name:`` parameter).
 
 from __future__ import annotations
 
-import time
-
-import httpx
 import pytest
 
 from .conftest import (
@@ -21,8 +18,8 @@ from .conftest import (
     flat_log_records,
     flat_spans,
     log_attrs,
+    make_setup_fixture,
     span_attrs,
-    wait_for_collector_data,
 )
 
 
@@ -30,16 +27,9 @@ from .conftest import (
 class TestEventName:
     """Verify event_name propagation through spans and OTLP log records."""
 
-    @pytest.fixture(autouse=True, scope="class")
-    def _setup(
-        self,
-        telemetry_client: httpx.Client,
-        otel_collector: OtelCollector,
-    ) -> None:
-        r = telemetry_client.get("/api/telemetry/event-name")
-        assert r.status_code == 200
-        time.sleep(5)
-        wait_for_collector_data(otel_collector, require_logs=True)
+    _setup = make_setup_fixture(
+        "/api/telemetry/event-name", sleep_time=5, require_logs=True,
+    )
 
     # ── log.info / log.warn produce spans with event.name attribute ──
 

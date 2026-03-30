@@ -10,16 +10,13 @@ Hits ``/api/telemetry/error-handling`` which exercises:
 
 from __future__ import annotations
 
-import time
-
-import httpx
 import pytest
 
 from .conftest import (
     OtelCollector,
-    flat_spans,
+    find_span,
+    make_setup_fixture,
     span_attrs,
-    wait_for_collector_data,
 )
 
 OTEL_STATUS_UNSET = 0
@@ -30,30 +27,14 @@ OTEL_STATUS_ERROR = 2
 class TestErrorHandling:
     """Verify error attributes, exception events, and status codes."""
 
-    @pytest.fixture(autouse=True, scope="class")
-    def _setup(
-        self,
-        telemetry_client: httpx.Client,
-        otel_collector: OtelCollector,
-    ) -> None:
-        r = telemetry_client.get("/api/telemetry/error-handling")
-        assert r.status_code == 200
-        time.sleep(3)
-        wait_for_collector_data(otel_collector)
-
-    def _find(self, collector: OtelCollector, name: str):
-        for s in flat_spans(collector):
-            if s.name == name:
-                return s
-        all_names = sorted({s.name for s in flat_spans(collector)})
-        pytest.fail(f"span {name!r} not found; available: {all_names}")
+    _setup = make_setup_fixture("/api/telemetry/error-handling", sleep_time=3)
 
     # ── (a) Exception raised inside span context manager ──────────────────
 
     def test_erroring_span_has_error_status(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "test.erroring_span")
+        span = find_span(otel_collector, "test.erroring_span")
         assert span.status.code == OTEL_STATUS_ERROR, (
             f"expected status Error (2); got {span.status.code}"
         )
@@ -61,7 +42,7 @@ class TestErrorHandling:
     def test_erroring_span_status_message(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "test.erroring_span")
+        span = find_span(otel_collector, "test.erroring_span")
         assert "deliberate test error" in span.status.message, (
             f"expected 'deliberate test error' in status message; "
             f"got {span.status.message!r}"
@@ -70,7 +51,7 @@ class TestErrorHandling:
     def test_erroring_span_has_exception_event(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "test.erroring_span")
+        span = find_span(otel_collector, "test.erroring_span")
         exc_events = [e for e in span.events if e.name == "exception"]
         assert exc_events, (
             f"expected 'exception' event on erroring span; "
@@ -80,7 +61,7 @@ class TestErrorHandling:
     def test_erroring_span_exception_type(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "test.erroring_span")
+        span = find_span(otel_collector, "test.erroring_span")
         exc_event = next(e for e in span.events if e.name == "exception")
         attrs = {a.key: (a.value.stringValue or "") for a in exc_event.attributes}
         assert attrs.get("exception.type") == "ValueError", (
@@ -90,7 +71,7 @@ class TestErrorHandling:
     def test_erroring_span_exception_message(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "test.erroring_span")
+        span = find_span(otel_collector, "test.erroring_span")
         exc_event = next(e for e in span.events if e.name == "exception")
         attrs = {a.key: (a.value.stringValue or "") for a in exc_event.attributes}
         assert "deliberate test error" in attrs.get("exception.message", ""), (
@@ -101,7 +82,7 @@ class TestErrorHandling:
     def test_erroring_span_exception_stacktrace(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "test.erroring_span")
+        span = find_span(otel_collector, "test.erroring_span")
         exc_event = next(e for e in span.events if e.name == "exception")
         attrs = {a.key: (a.value.stringValue or "") for a in exc_event.attributes}
         assert attrs.get("exception.stacktrace"), (
@@ -113,14 +94,14 @@ class TestErrorHandling:
     def test_log_exception_span_exists(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "caught runtime error")
+        span = find_span(otel_collector, "caught runtime error")
         attrs = span_attrs(span)
         assert attrs.get("log.level") == "error"
 
     def test_log_exception_has_exception_type(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "caught runtime error")
+        span = find_span(otel_collector, "caught runtime error")
         attrs = span_attrs(span)
         assert attrs.get("exception.type") == "RuntimeError", (
             f"expected exception.type='RuntimeError'; got {attrs.get('exception.type')!r}"
@@ -129,7 +110,7 @@ class TestErrorHandling:
     def test_log_exception_has_exception_message(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "caught runtime error")
+        span = find_span(otel_collector, "caught runtime error")
         attrs = span_attrs(span)
         assert "log exception test" in attrs.get("exception.message", ""), (
             f"expected 'log exception test' in exception.message; "
@@ -139,7 +120,7 @@ class TestErrorHandling:
     def test_log_exception_has_stacktrace(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "caught runtime error")
+        span = find_span(otel_collector, "caught runtime error")
         attrs = span_attrs(span)
         assert attrs.get("exception.stacktrace"), (
             "expected non-empty exception.stacktrace on log.exception span"
@@ -148,7 +129,7 @@ class TestErrorHandling:
     def test_log_exception_has_source_attribute(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "caught runtime error")
+        span = find_span(otel_collector, "caught runtime error")
         attrs = span_attrs(span)
         assert attrs.get("source") == "test"
 
@@ -157,7 +138,7 @@ class TestErrorHandling:
     def test_explicit_error_span_has_error_status(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "test.explicit_error")
+        span = find_span(otel_collector, "test.explicit_error")
         assert span.status.code == OTEL_STATUS_ERROR, (
             f"expected status Error (2); got {span.status.code}"
         )
@@ -165,7 +146,7 @@ class TestErrorHandling:
     def test_explicit_error_span_status_message(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "test.explicit_error")
+        span = find_span(otel_collector, "test.explicit_error")
         assert "manually set error" in span.status.message, (
             f"expected 'manually set error' in status; got {span.status.message!r}"
         )
@@ -175,7 +156,7 @@ class TestErrorHandling:
     def test_clean_span_has_unset_status(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "test.clean_span")
+        span = find_span(otel_collector, "test.clean_span")
         assert span.status.code == OTEL_STATUS_UNSET, (
             f"clean span should have status Unset (0); got {span.status.code}"
         )
@@ -183,7 +164,7 @@ class TestErrorHandling:
     def test_clean_span_has_no_exception_events(
         self, otel_collector: OtelCollector
     ) -> None:
-        span = self._find(otel_collector, "test.clean_span")
+        span = find_span(otel_collector, "test.clean_span")
         exc_events = [e for e in span.events if e.name == "exception"]
         assert not exc_events, (
             f"clean span should have no exception events; found {len(exc_events)}"

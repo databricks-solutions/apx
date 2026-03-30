@@ -660,4 +660,4 @@ logging.getLogger('test.handler').warning('hello from python')
 }
 
 // ── Full HTTP request tests removed (depend on TestServer) ─────────────
-// Rebuilt in Steps 2–3 of the moonshot plan.
+// Require TestServer infrastructure not yet available in this crate.

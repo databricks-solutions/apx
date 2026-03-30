@@ -20,11 +20,7 @@ pub struct SlotReceive {
     receive_template: Py<PyDict>,
 }
 
-impl std::fmt::Debug for SlotReceive {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SlotReceive").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(SlotReceive);
 
 impl SlotReceive {
     /// Create for an HTTP request with a pre-collected body.

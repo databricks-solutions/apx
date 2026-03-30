@@ -59,11 +59,7 @@ impl EventLoop {
     }
 }
 
-impl std::fmt::Debug for EventLoop {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EventLoop").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(EventLoop);
 
 // ── Thread-local tokio runtime handle ────────────────────────────────────
 

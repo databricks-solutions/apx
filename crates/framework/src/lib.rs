@@ -18,6 +18,22 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+/// Implement `Debug` for types whose fields are not printable
+/// (e.g. `Py<T>`, OTel metric handles, file descriptors).
+/// Prints `TypeName { .. }`.
+macro_rules! opaque_debug {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl ::std::fmt::Debug for $ty {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                    f.debug_struct(stringify!($ty)).finish_non_exhaustive()
+                }
+            }
+        )+
+    };
+}
+pub(crate) use opaque_debug;
+
 pub mod dispatch;
 pub(crate) mod protocol;
 pub mod pyapi;

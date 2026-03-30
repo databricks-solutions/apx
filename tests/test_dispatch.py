@@ -1,4 +1,4 @@
-"""Unit tests for the batch-limited drain (P1).
+"""Unit tests for the batch-limited drain.
 
 Tests cover:
 - Batch drain stops after ``max_drain_batch`` items and re-schedules

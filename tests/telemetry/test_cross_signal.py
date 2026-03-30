@@ -16,9 +16,6 @@ Tests verify:
 
 from __future__ import annotations
 
-import time
-
-import httpx
 import pytest
 
 from .conftest import (
@@ -27,8 +24,8 @@ from .conftest import (
     flat_metrics_with_scope,
     flat_spans,
     flat_spans_with_scope,
+    make_setup_fixture,
     span_attrs,
-    wait_for_collector_data,
 )
 
 
@@ -36,16 +33,9 @@ from .conftest import (
 class TestCrossSignal:
     """Verify instrumentation scope names and cross-signal correlation."""
 
-    @pytest.fixture(autouse=True, scope="class")
-    def _setup(
-        self,
-        telemetry_client: httpx.Client,
-        otel_collector: OtelCollector,
-    ) -> None:
-        r = telemetry_client.get("/api/telemetry/cross-signal")
-        assert r.status_code == 200
-        time.sleep(5)
-        wait_for_collector_data(otel_collector, require_logs=True)
+    _setup = make_setup_fixture(
+        "/api/telemetry/cross-signal", sleep_time=5, require_logs=True,
+    )
 
     # ── Instrumentation scope: user spans ─────────────────────────────────
 

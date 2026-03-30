@@ -16,9 +16,6 @@ Tests verify field population across all three signals:
 
 from __future__ import annotations
 
-import time
-
-import httpx
 import pytest
 
 from .conftest import (
@@ -30,8 +27,8 @@ from .conftest import (
     flat_resource_spans,
     flat_spans,
     flat_spans_with_scope,
+    make_setup_fixture,
     span_attrs,
-    wait_for_collector_data,
 )
 
 
@@ -39,16 +36,9 @@ from .conftest import (
 class TestOtlpFields:
     """Verify all OTLP proto fields are properly populated in exported telemetry."""
 
-    @pytest.fixture(autouse=True, scope="class")
-    def _setup(
-        self,
-        telemetry_client: httpx.Client,
-        otel_collector: OtelCollector,
-    ) -> None:
-        r = telemetry_client.get("/api/telemetry/otlp-fields")
-        assert r.status_code == 200
-        time.sleep(5)
-        wait_for_collector_data(otel_collector, require_logs=True)
+    _setup = make_setup_fixture(
+        "/api/telemetry/otlp-fields", sleep_time=5, require_logs=True,
+    )
 
     # ── Resource attributes ───────────────────────────────────────────────
 

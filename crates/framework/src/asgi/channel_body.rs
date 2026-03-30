@@ -24,11 +24,7 @@ impl ChannelBody {
     }
 }
 
-impl std::fmt::Debug for ChannelBody {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ChannelBody").finish_non_exhaustive()
-    }
-}
+crate::opaque_debug!(ChannelBody);
 
 impl futures_core::Stream for ChannelBody {
     type Item = Result<Bytes, std::io::Error>;

@@ -222,6 +222,40 @@ def log_attrs(lr: LogRecord) -> dict[str, str]:
     return {a.key: (a.value.stringValue or "") for a in lr.attributes}
 
 
+def find_span(collector: OtelCollector, name: str) -> Span:
+    """Find a span by name, or fail with a list of available span names."""
+    for s in flat_spans(collector):
+        if s.name == name:
+            return s
+    all_names = sorted({s.name for s in flat_spans(collector)})
+    pytest.fail(f"span {name!r} not found; available: {all_names}")
+
+
+def make_setup_fixture(
+    endpoint: str,
+    sleep_time: float = 3,
+    require_logs: bool = False,
+):
+    """Factory for the common class-scoped ``_setup`` fixture pattern.
+
+    Returns a pytest fixture that: GETs ``endpoint``, sleeps, and waits
+    for the OTEL collector to receive data.
+    """
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _setup(
+        self,
+        telemetry_client: httpx.Client,
+        otel_collector: OtelCollector,
+    ) -> None:
+        r = telemetry_client.get(endpoint)
+        assert r.status_code == 200
+        time.sleep(sleep_time)
+        wait_for_collector_data(otel_collector, require_logs=require_logs)
+
+    return _setup
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

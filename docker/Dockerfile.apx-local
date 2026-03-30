@@ -9,8 +9,9 @@ RUN --mount=type=secret,id=pip_conf,target=/etc/pip.conf \
     pip install --no-cache-dir -r requirements.txt
 
 EXPOSE 8000
-ENV APX_LOG=trace
-ENV APX_BENCH_PROFILE=1
-ENV APX_BENCH_TRACE=1
+ENV APX_LOG=info
+# Uncomment for benchmark profiling/tracing:
+# ENV APX_BENCH_PROFILE=1
+# ENV APX_BENCH_TRACE=1
 
 CMD ["apx", "serve", "app.main", "--host", "0.0.0.0", "--workers", "2"]
