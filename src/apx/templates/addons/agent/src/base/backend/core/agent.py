@@ -34,7 +34,7 @@ from collections.abc import Callable
 from typing import Annotated, Any, AsyncGenerator, Protocol, TypeAlias, get_args, get_origin, get_type_hints
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, params
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, create_model
 
 from ._base import LifespanDependency
@@ -127,7 +127,7 @@ class InvocationResponse(BaseModel):
 
 class A2ACapabilities(BaseModel):
     a2aVersion: str = "0.3.0"
-    streaming: bool = False
+    streaming: bool = True
     multiTurn: bool = True
 
 
@@ -599,11 +599,9 @@ def _render_agent_ui(ctx: AgentContext | None) -> str:
     """Return a self-contained HTML page for interactively testing the agent."""
     agent_name = ctx.config.name if ctx else "Agent"
     agent_desc = ctx.config.description if ctx else ""
+    import json as _json
     skills_json = (
-        "[" + ",".join(
-            f'{{"id":{s.id!r},"name":{s.name!r},"description":{s.description!r}}}'
-            for s in ctx.card.skills
-        ) + "]"
+        _json.dumps([{"id": s.id, "name": s.name, "description": s.description} for s in ctx.card.skills])
         if ctx else "[]"
     )
 
