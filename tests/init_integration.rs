@@ -215,3 +215,104 @@ fn test_init_creates_project_structure() {
 
     println!("All assertions passed!");
 }
+
+#[test]
+#[ignore] // Slow test - run with `cargo test --test init_integration -- --ignored`
+fn test_init_with_agent_addon() {
+    let wheel_dir = TempDir::new().expect("Failed to create wheel temp dir");
+    let project_dir = TempDir::new().expect("Failed to create project temp dir");
+    let app_path = project_dir.path().join("my-agent");
+
+    // Build wheel
+    let build_output = Command::new("maturin")
+        .args(["build", "--out", wheel_dir.path().to_str().unwrap()])
+        .current_dir(project_root())
+        .output()
+        .expect("Failed to run maturin build");
+    if !build_output.status.success() {
+        let stderr = String::from_utf8_lossy(&build_output.stderr);
+        panic!("maturin build failed:\n{stderr}");
+    }
+
+    let wheel_path = find_wheel(wheel_dir.path());
+
+    // Run apx init with agent addon (no UI)
+    let init_output = Command::new("uvx")
+        .args([
+            "--from",
+            wheel_path.to_str().unwrap(),
+            "apx",
+            "init",
+            "--name",
+            "my-agent",
+            "--addons",
+            "agent",
+            "--profile",
+            "WORKSPACE",
+            app_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to run uvx apx init");
+
+    if !init_output.status.success() {
+        let stderr = String::from_utf8_lossy(&init_output.stderr);
+        let stdout = String::from_utf8_lossy(&init_output.stdout);
+        panic!("apx init --addons agent failed:\nstdout: {stdout}\nstderr: {stderr}");
+    }
+
+    let app_slug = "my_agent";
+    let backend = app_path.join("src").join(app_slug).join("backend");
+
+    // agent_router.py scaffolded
+    let agent_router = backend.join("agent_router.py");
+    assert!(
+        agent_router.exists(),
+        "agent_router.py should exist at {}",
+        agent_router.display()
+    );
+    let agent_router_content =
+        fs::read_to_string(&agent_router).expect("Failed to read agent_router.py");
+    assert!(
+        agent_router_content.contains("Agent(tools="),
+        "agent_router.py should register Agent(tools=...)"
+    );
+
+    // core/agent.py scaffolded
+    let agent_core = backend.join("core").join("agent.py");
+    assert!(
+        agent_core.exists(),
+        "core/agent.py should exist at {}",
+        agent_core.display()
+    );
+
+    // pyproject.toml contains [tool.apx.agent]
+    let pyproject = app_path.join("pyproject.toml");
+    let pyproject_content = fs::read_to_string(&pyproject).expect("Failed to read pyproject.toml");
+    assert!(
+        pyproject_content.contains("[tool.apx.agent]"),
+        "pyproject.toml should contain [tool.apx.agent]"
+    );
+    assert!(
+        pyproject_content.contains("name = \"my-agent\""),
+        "pyproject.toml [tool.apx.agent] should have name = \"my-agent\""
+    );
+    assert!(
+        pyproject_content.contains("model = "),
+        "pyproject.toml [tool.apx.agent] should have a model field"
+    );
+
+    // httpx dependency added (from addon.toml)
+    assert!(
+        pyproject_content.contains("httpx"),
+        "pyproject.toml should contain httpx dependency"
+    );
+
+    // No UI directory (pure backend agent)
+    let ui_dir = app_path.join("src").join(app_slug).join("ui");
+    assert!(
+        !ui_dir.exists(),
+        "ui/ should NOT exist for a backend-only agent project"
+    );
+
+    println!("Agent addon assertions passed!");
+}

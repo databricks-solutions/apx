@@ -12,10 +12,10 @@ imports = [
     "from .agent import AgentDependency",
 ]
 [[python.edits.aliases]]
-code = "Agent: TypeAlias = AgentDependency"
+code = "AgentContext: TypeAlias = AgentDependency"
 doc = """
-Agent protocol dependency. Provides agent card and tool registry.
-Recommended usage: `agent: Dependencies.Agent`"""
+Agent protocol context dependency. Injects the AgentContext (card + tool registry) into a route.
+Recommended usage: `ctx: Dependencies.AgentContext`"""
 
 [[python.edits.aliases]]
 code = "Workspace: TypeAlias = UserWorkspaceClientDependency"

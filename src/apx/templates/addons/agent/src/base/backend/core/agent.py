@@ -597,13 +597,22 @@ async def _handle_invocation(
 
 def _render_agent_ui(ctx: AgentContext | None) -> str:
     """Return a self-contained HTML page for interactively testing the agent."""
+    import json as _json
+
     agent_name = ctx.config.name if ctx else "Agent"
     agent_desc = ctx.config.description if ctx else ""
-    import json as _json
     skills_json = (
         _json.dumps([{"id": s.id, "name": s.name, "description": s.description} for s in ctx.card.skills])
         if ctx else "[]"
     )
+    not_configured = ctx is None
+    setup_banner = """
+<div id="setup-banner">
+  <strong>⚠ Agent not configured</strong><br>
+  Add <code>[tool.apx.agent]</code> to <code>pyproject.toml</code> and create
+  <code>src/{app}/backend/agent_router.py</code> with an <code>Agent(tools=[...])</code> call,
+  then restart the dev server.
+</div>""" if not_configured else ""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -622,6 +631,10 @@ def _render_agent_ui(ctx: AgentContext | None) -> str:
             padding: 2px 8px; border-radius: 4px; letter-spacing: .5px; text-transform: uppercase; }}
   h1 {{ font-size: 16px; font-weight: 600; color: #fff; }}
   .desc {{ font-size: 13px; color: #888; margin-left: auto; }}
+  #setup-banner {{ background: #2a1a00; border: 1px solid #5a3a00; color: #ffb84d;
+                   padding: 12px 20px; font-size: 13px; line-height: 1.6; flex-shrink: 0; }}
+  #setup-banner code {{ background: #1a1000; padding: 1px 5px; border-radius: 3px;
+                        font-family: monospace; font-size: 12px; }}
   #chat {{ flex: 1; overflow-y: auto; padding: 20px; display: flex;
            flex-direction: column; gap: 16px; }}
   .msg {{ max-width: 720px; line-height: 1.55; font-size: 14px; }}
@@ -656,7 +669,7 @@ def _render_agent_ui(ctx: AgentContext | None) -> str:
   <h1>{agent_name}</h1>
   <span class="desc">{agent_desc}</span>
 </header>
-
+{setup_banner}
 <div id="chat">
   <div class="msg system">
     Chat with <strong>{agent_name}</strong> below.
@@ -792,6 +805,34 @@ input.focus();
 
 
 # ---------------------------------------------------------------------------
+# Auto-discovery
+# ---------------------------------------------------------------------------
+
+
+def _auto_import_agent_router() -> None:
+    """Import agent_router from the sibling backend package if not already done.
+
+    This removes the need for an explicit side-effect import in app.py.
+    The convention is that agent_router.py lives one level up from core/:
+
+        {pkg}.backend.core.agent   ← this module (__name__)
+        {pkg}.backend.agent_router ← auto-discovered
+    """
+    if _agent_instance is not None:
+        return
+    import importlib
+
+    parts = __name__.split(".")
+    if len(parts) >= 3:
+        # Drop "core.agent" → arrive at "{pkg}.backend"
+        backend_pkg = ".".join(parts[:-2])
+        try:
+            importlib.import_module(f"{backend_pkg}.agent_router")
+        except ImportError:
+            pass  # No agent_router.py — that's fine, agent stays disabled
+
+
+# ---------------------------------------------------------------------------
 # LifespanDependency addon
 # ---------------------------------------------------------------------------
 
@@ -840,6 +881,7 @@ class _AgentDependency(LifespanDependency):
 
     def get_routers(self) -> list[APIRouter]:
         """Tool routes — mounted under the api prefix (e.g. /api/tools/...)."""
+        _auto_import_agent_router()
         if _agent_instance is None:
             return []
         return [_agent_instance.build_router()]
