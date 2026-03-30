@@ -1,0 +1,54 @@
+[project]
+name = "{{app_name}}"
+dynamic = ["version"]
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.119.0",
+    "pydantic-settings>=2.11.0",
+    "uvicorn>=0.37.0",
+    "databricks-sdk>=0.74.0",
+    "httpx>=0.27.0",
+]
+
+[dependency-groups]
+dev = [
+    "ty>=0.0.12",
+]
+
+[tool.apx.metadata]
+app-name = "{{app_name}}"
+app-slug = "{{app_slug}}"
+app-entrypoint = "{{app_slug}}.backend.app:app"
+api-prefix = "/api"
+metadata-path = "src/{{app_slug}}/_metadata.py"
+
+[tool.apx.agent]
+name = "{{app_slug}}"
+description = "Add a description of what this agent does"
+model = "databricks-meta-llama-3-3-70b-instruct"
+# instructions = "You are a helpful assistant. ..."  # optional system prompt
+# temperature = 0.7      # optional; uses model default when absent
+# max_tokens = 2048      # optional; uses model default when absent
+# max_iterations = 10    # tool-calling loop safety cap (default: 10)
+
+[build-system]
+requires = ["hatchling", "uv-dynamic-versioning>=0.7.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+vcs = "git"
+fallback-version = "0.0.0"
+
+[tool.hatch.build.hooks.version]
+path = "src/{{app_slug}}/_version.py"
+template = '''
+version = "{version}"
+'''
+
+[tool.hatch.build]
+artifacts = ["src/{{app_slug}}/__dist__", "src/{{app_slug}}/_metadata.py"]

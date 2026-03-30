@@ -42,6 +42,12 @@ class LifespanDependency(ABC):
         """
         return []
 
+    def get_root_routers(self) -> list[APIRouter]:
+        """Override to contribute routers mounted at the application root (no api prefix).
+        Use for protocol routes such as /.well-known/*, /health, /invocations.
+        """
+        return []
+
     @classmethod
     def depends(cls) -> Any:
         return Depends(cls.__call__)

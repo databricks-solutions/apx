@@ -1,0 +1,25 @@
+[addon]
+name = "agent"
+description = "🤖 Agent protocol (A2A discovery, /invocations, MCP tools, eval bridge)"
+group = "backend"
+group_display_name = "Backend"
+
+[python]
+dependencies = ["httpx>=0.27.0", "mcp>=1.0.0"]
+
+[python.edits]
+imports = [
+    "from .agent import AgentDependency",
+]
+[[python.edits.aliases]]
+code = "AgentContext: TypeAlias = AgentDependency"
+doc = """
+Agent protocol context dependency. Injects the AgentContext (card + tool registry) into a route.
+Recommended usage: `ctx: Dependencies.AgentContext`"""
+
+[[python.edits.aliases]]
+code = "Workspace: TypeAlias = UserWorkspaceClientDependency"
+doc = """
+Workspace client authenticated on behalf of the current user (OBO).
+Shorthand for Dependencies.UserClient in agent tool functions.
+Recommended usage: `ws: Workspace`"""
