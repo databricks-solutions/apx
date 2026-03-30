@@ -107,11 +107,21 @@ class Message(BaseModel):
 
 
 class InvocationRequest(BaseModel):
-    """MLflow ResponsesAgent /invocations request format."""
+    """MLflow ResponsesAgent /invocations request format.
 
-    input: list[Message]
+    ``input`` accepts either a list of message dicts or a plain string.
+    A plain string is coerced to ``[{"role": "user", "content": <str>}]``.
+    """
+
+    input: list[Message] | str
     custom_inputs: dict[str, Any] = {}
     stream: bool = False
+
+    def messages(self) -> list[Message]:
+        """Return input normalised to a list of Messages."""
+        if isinstance(self.input, str):
+            return [Message(role="user", content=self.input)]
+        return self.input
 
 
 class OutputTextContent(BaseModel):
@@ -731,8 +741,27 @@ async def _run_llm_loop(
     auth_headers = ws.config.authenticate()
     fmapi_url = f"{ws.config.host.rstrip('/')}/serving-endpoints/{ctx.config.model}/invocations"
 
+    try:
+        import mlflow
+
+        _mlflow_available = True
+    except ImportError:
+        _mlflow_available = False
+
     async with AsyncClient() as client:
         for _ in range(10):  # max iterations as a safety cap
+            if _mlflow_available:
+                span_ctx = mlflow.start_span(
+                    name="llm",
+                    span_type="LLM",
+                    attributes={
+                        "model": ctx.config.model,
+                        "input_messages": _json.dumps(messages),
+                    },
+                )
+            else:
+                span_ctx = None
+
             response = await client.post(
                 fmapi_url,
                 json={"messages": messages, "tools": tool_schemas},
@@ -747,9 +776,31 @@ async def _run_llm_loop(
             finish_reason = choice.get("finish_reason") or choice.get("finishReason")
             messages.append(assistant_msg)
 
+            if span_ctx is not None:
+                span_ctx.set_attribute("output_message", _json.dumps(assistant_msg))
+                span_ctx.set_attribute("finish_reason", finish_reason or "")
+                span_ctx.end()
+
             if finish_reason == "tool_calls":
                 for tool_call in assistant_msg.get("tool_calls", []):
+                    fn_name = tool_call["function"]["name"]
+                    if _mlflow_available:
+                        tool_span = mlflow.start_span(
+                            name=fn_name,
+                            span_type="TOOL",
+                            attributes={"tool_call_id": tool_call.get("id", "")},
+                        )
+                    else:
+                        tool_span = None
+
                     result = await _dispatch_tool_call(request, tool_call, ctx)
+
+                    if tool_span is not None:
+                        tool_span.set_attribute(
+                            "result", result if isinstance(result, str) else _json.dumps(result)
+                        )
+                        tool_span.end()
+
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call["id"],
@@ -769,27 +820,50 @@ async def _handle_invocation(
     request: Request,
     body: InvocationRequest,
 ) -> InvocationResponse | StreamingResponse:
-    """Handle /invocations — returns JSON or SSE depending on body.stream."""
+    """Handle /invocations — returns JSON or SSE depending on body.stream.
+
+    Each call creates a root MLflow trace (span_type CHAIN) when mlflow is
+    importable. Inner LLM calls and tool dispatches nest as child spans.
+    """
     import json as _json
 
     ctx: AgentContext | None = request.app.state.agent_context
     if ctx is None:
         raise HTTPException(status_code=503, detail="Agent protocol not configured")
 
+    try:
+        import mlflow
+
+        root_span = mlflow.start_span(
+            name=ctx.config.name,
+            span_type="CHAIN",
+            attributes={"agent": ctx.config.name, "model": ctx.config.model},
+        )
+    except ImportError:
+        root_span = None
+
+    messages = body.messages()
+
     if body.stream:
         async def _sse_generator() -> AsyncGenerator[str, None]:
             item_id = "msg_001"
             yield f"event: response.output_item.start\ndata: {_json.dumps({'item_id': item_id})}\n\n"
             full_text = ""
-            async for chunk in ctx.agent.stream(body.input, request):
+            async for chunk in ctx.agent.stream(messages, request):
                 full_text += chunk
                 yield f"event: output_text.delta\ndata: {_json.dumps({'item_id': item_id, 'text': chunk})}\n\n"
             output_item = OutputItem(content=[OutputTextContent(text=full_text)])
             yield f"event: response.output_item.done\ndata: {_json.dumps({'item_id': item_id, 'output': output_item.model_dump()})}\n\n"
+            if root_span is not None:
+                root_span.set_attribute("output", full_text)
+                root_span.end()
 
         return StreamingResponse(_sse_generator(), media_type="text/event-stream")
 
-    text = await ctx.agent.run(body.input, request)
+    text = await ctx.agent.run(messages, request)
+    if root_span is not None:
+        root_span.set_attribute("output", text)
+        root_span.end()
     return InvocationResponse(
         output=[OutputItem(content=[OutputTextContent(text=text)])]
     )
@@ -1259,14 +1333,21 @@ AgentDependency: TypeAlias = Annotated[AgentContext | None, _AgentDependency.dep
 # ---------------------------------------------------------------------------
 
 
-def app_predict_fn(url: str) -> Callable[[dict[str, Any]], str]:
+def app_predict_fn(url: str, token: str | None = None) -> Callable[[dict[str, Any]], str]:
     """Return a predict function for mlflow.genai.evaluate().
+
+    ``token`` is a Databricks personal access token or OBO token used to
+    authenticate against the deployed Databricks App. When omitted, no
+    Authorization header is sent (suitable for local dev or public endpoints).
 
     Example::
 
         from apx.agent import app_predict_fn
 
-        predict = app_predict_fn("https://my-agent.my-workspace.databricksapps.com")
+        predict = app_predict_fn(
+            "https://my-agent.my-workspace.databricksapps.com",
+            token=dbutils.secrets.get("my-scope", "pat"),
+        )
         results = mlflow.genai.evaluate(
             data=eval_dataset,
             predict_fn=predict,
@@ -1280,6 +1361,7 @@ def app_predict_fn(url: str) -> Callable[[dict[str, Any]], str]:
     import httpx
 
     base = url.rstrip("/")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     def predict(inputs: dict[str, Any]) -> str:
         if isinstance(inputs, str):
@@ -1292,6 +1374,7 @@ def app_predict_fn(url: str) -> Callable[[dict[str, Any]], str]:
         response = httpx.post(
             f"{base}/invocations",
             json={"input": messages},
+            headers=headers,
             timeout=120.0,
         )
         response.raise_for_status()
