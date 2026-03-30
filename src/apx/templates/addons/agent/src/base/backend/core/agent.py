@@ -78,6 +78,7 @@ class AgentConfig(BaseModel):
     name: str
     description: str = ""
     model: str = "databricks-meta-llama-3-3-70b-instruct"
+    instructions: str = ""  # system prompt prepended to every conversation
 
 
 class AgentTool(BaseModel):
@@ -253,10 +254,16 @@ def _make_route_handler(
     hints = get_type_hints(fn, include_extras=True)
     dep_annotations = {name: hints[name] for name in dep_param_names if name in hints}
 
+    _is_async = inspect.iscoroutinefunction(fn)
+
     if input_model is not None:
         # Build a handler: (body: InputModel, dep1: Dep1, ...) -> return_type
-        async def handler_with_body(body: Any, **kwargs: Any) -> Any:
-            return fn(**body.model_dump(), **kwargs)
+        if _is_async:
+            async def handler_with_body(body: Any, **kwargs: Any) -> Any:
+                return await fn(**body.model_dump(), **kwargs)
+        else:
+            async def handler_with_body(body: Any, **kwargs: Any) -> Any:  # type: ignore[misc]
+                return fn(**body.model_dump(), **kwargs)
 
         handler_with_body.__annotations__ = {
             "body": input_model,
@@ -268,8 +275,12 @@ def _make_route_handler(
         handler_with_body.__doc__ = fn.__doc__  # type: ignore[method-assign]
         return handler_with_body
     else:
-        async def handler_no_body(**kwargs: Any) -> Any:
-            return fn(**kwargs)
+        if _is_async:
+            async def handler_no_body(**kwargs: Any) -> Any:
+                return await fn(**kwargs)
+        else:
+            async def handler_no_body(**kwargs: Any) -> Any:  # type: ignore[misc]
+                return fn(**kwargs)
 
         handler_no_body.__annotations__ = {**dep_annotations, "return": hints.get("return", Any)}
         _patch_handler_signature(handler_no_body, None, dep_annotations)
@@ -393,18 +404,32 @@ class LlmAgent(BaseAgent):
     as ``Dependencies.*`` are injected by FastAPI and excluded from the schema;
     all other typed parameters become tool inputs derived from their type hints.
 
+    ``instructions`` sets a system prompt prepended to every conversation.
+    When omitted, falls back to ``instructions`` in ``[tool.apx.agent]`` in
+    pyproject.toml. Use the constructor param to override per-agent within a
+    ``SequentialAgent`` or ``ParallelAgent`` composition.
+
     Example::
 
         def query_genie(question: str, space_id: str, ws: Dependencies.UserClient) -> str:
             \"\"\"Answer a question using a Genie Space.\"\"\"
             return ws.genie.ask(space_id=space_id, question=question).answer or ""
 
-        agent = LlmAgent(tools=[query_genie])
+        agent = LlmAgent(
+            tools=[query_genie],
+            instructions="You are a helpful data analyst. Always cite the source.",
+        )
     """
 
-    def __init__(self, tools: list[_ToolFn], sub_agents: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        tools: list[_ToolFn],
+        sub_agents: list[str] | None = None,
+        instructions: str = "",
+    ) -> None:
         self._tool_fns = tools
         self._sub_agent_urls = sub_agents or []
+        self._instructions = instructions
 
         # Pre-analyze all functions at construction time
         self._analyzed: list[tuple[_ToolFn, dict[str, Any], list[str], type[BaseModel] | None]] = []
@@ -414,10 +439,10 @@ class LlmAgent(BaseAgent):
             self._analyzed.append((fn, plain_params, dep_names, input_model))
 
     async def run(self, messages: list[Message], request: Request) -> str:
-        return await _run_llm_loop(messages, request, self.collect_tools())
+        return await _run_llm_loop(messages, request, self.collect_tools(), self._instructions)
 
     async def stream(self, messages: list[Message], request: Request) -> AsyncGenerator[str, None]:
-        text = await _run_llm_loop(messages, request, self.collect_tools())
+        text = await _run_llm_loop(messages, request, self.collect_tools(), self._instructions)
         chunk_size = 20
         for i in range(0, len(text), chunk_size):
             yield text[i : i + chunk_size]
@@ -667,6 +692,7 @@ async def _run_llm_loop(
     input_messages: list[Message],
     request: Request,
     tools: list[AgentTool] | None = None,
+    instructions: str = "",
 ) -> str:
     """Run the FMAPI LLM loop and return the final response text.
 
@@ -677,6 +703,9 @@ async def _run_llm_loop(
     all tools registered on the ``AgentContext`` are used. Pass
     ``self.collect_tools()`` from an ``LlmAgent`` to scope calls to only that
     agent's own tools in a composed hierarchy.
+
+    ``instructions`` is prepended as a system message when non-empty. Falls
+    back to ``AgentConfig.instructions`` from pyproject.toml when not provided.
     """
     import json as _json
 
@@ -686,10 +715,17 @@ async def _run_llm_loop(
     ctx: AgentContext = request.app.state.agent_context
     ws: WorkspaceClient = request.app.state.workspace_client
 
-    messages = [
+    # Resolve effective system prompt: constructor wins, then pyproject, then none.
+    system_prompt = instructions or (ctx.config.instructions if ctx else "")
+
+    base_messages: list[dict[str, Any]] = []
+    if system_prompt:
+        base_messages.append({"role": "system", "content": system_prompt})
+    base_messages += [
         {"role": m.role, "content": m.content, **({"name": m.name} if m.name else {})}
         for m in input_messages
     ]
+    messages = base_messages
     effective_tools = tools if tools is not None else ctx.tools
     tool_schemas = _build_fmapi_tool_schemas(effective_tools)
     auth_headers = ws.config.authenticate()
@@ -1035,11 +1071,13 @@ def _build_mcp_components(ctx: AgentContext, app: FastAPI) -> tuple[Any, Any]:
     async def _call_tool(name: str, arguments: dict[str, Any] | None) -> list[Any]:
         from httpx import ASGITransport, AsyncClient
 
+        from ..._metadata import api_prefix
+
         async with AsyncClient(
             transport=ASGITransport(app=app),
             base_url="http://internal",
         ) as client:
-            response = await client.post(f"/api/tools/{name}", json=arguments or {})
+            response = await client.post(f"{api_prefix}/tools/{name}", json=arguments or {})
 
         if response.status_code >= 400:
             text = f"Tool error ({response.status_code}): {response.text}"
