@@ -414,10 +414,10 @@ class LlmAgent(BaseAgent):
             self._analyzed.append((fn, plain_params, dep_names, input_model))
 
     async def run(self, messages: list[Message], request: Request) -> str:
-        return await _run_llm_loop(messages, request)
+        return await _run_llm_loop(messages, request, self.collect_tools())
 
     async def stream(self, messages: list[Message], request: Request) -> AsyncGenerator[str, None]:
-        text = await _run_llm_loop(messages, request)
+        text = await _run_llm_loop(messages, request, self.collect_tools())
         chunk_size = 20
         for i in range(0, len(text), chunk_size):
             yield text[i : i + chunk_size]
@@ -666,11 +666,17 @@ async def _dispatch_tool_call(
 async def _run_llm_loop(
     input_messages: list[Message],
     request: Request,
+    tools: list[AgentTool] | None = None,
 ) -> str:
     """Run the FMAPI LLM loop and return the final response text.
 
     Tool calls are dispatched synchronously before the next FMAPI call.
     Loops until FMAPI returns a final message or the safety cap is hit.
+
+    ``tools`` overrides the global tool list for this call. When ``None``,
+    all tools registered on the ``AgentContext`` are used. Pass
+    ``self.collect_tools()`` from an ``LlmAgent`` to scope calls to only that
+    agent's own tools in a composed hierarchy.
     """
     import json as _json
 
@@ -684,7 +690,8 @@ async def _run_llm_loop(
         {"role": m.role, "content": m.content, **({"name": m.name} if m.name else {})}
         for m in input_messages
     ]
-    tool_schemas = _build_fmapi_tool_schemas(ctx.tools)
+    effective_tools = tools if tools is not None else ctx.tools
+    tool_schemas = _build_fmapi_tool_schemas(effective_tools)
     auth_headers = ws.config.authenticate()
     fmapi_url = f"{ws.config.host.rstrip('/')}/serving-endpoints/{ctx.config.model}/invocations"
 
