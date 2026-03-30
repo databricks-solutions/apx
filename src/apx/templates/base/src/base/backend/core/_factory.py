@@ -70,6 +70,10 @@ def create_app(
             api_router.include_router(r)
     app.include_router(api_router)
 
+    for dep in all_deps:
+        for r in dep.get_root_routers():
+            app.include_router(r)
+
     for router in routers or []:
         if router is not api_router:
             app.include_router(router)

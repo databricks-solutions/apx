@@ -638,6 +638,13 @@ class _AgentDependency(LifespanDependency):
         return getattr(request.app.state, "agent_context", None)
 
     def get_routers(self) -> list[APIRouter]:
+        """Tool routes — mounted under the api prefix (e.g. /api/tools/...)."""
+        if _agent_instance is None:
+            return []
+        return [_agent_instance.build_router()]
+
+    def get_root_routers(self) -> list[APIRouter]:
+        """Protocol routes — mounted at app root: /.well-known, /invocations, /health."""
         agent_router = APIRouter()
 
         @agent_router.get("/.well-known/agent.json", include_in_schema=False)
@@ -657,10 +664,6 @@ class _AgentDependency(LifespanDependency):
         @agent_router.get("/health", include_in_schema=False)
         async def health() -> dict[str, str]:
             return {"status": "ok"}
-
-        # Tool routes from the registered Agent instance
-        if _agent_instance is not None:
-            agent_router.include_router(_agent_instance.build_router())
 
         return [agent_router]
 
