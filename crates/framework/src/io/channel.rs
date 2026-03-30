@@ -12,7 +12,8 @@ use bytes::Bytes;
 use http::header::HeaderMap;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::transport::types::ProtocolVersion;
@@ -42,6 +43,8 @@ pub struct RequestSlot {
     pub server_addr: SocketAddr,
     /// Trace context extracted from the active OTEL span on the tokio thread.
     pub trace_context: Option<crate::telemetry::context::TraceContext>,
+    /// Timestamp when the slot was created (for pickup_delay measurement).
+    pub created_at: std::time::Instant,
     /// Thread 1 awaits this for the response.
     pub response_tx: oneshot::Sender<ResponseData>,
 }
@@ -66,11 +69,18 @@ pub struct ResponseData {
 
 /// Cross-platform wakeup signal for the asyncio thread.
 ///
-/// Unix: pipe fd pair — `signal()` writes 1 byte, asyncio wakes via
-/// `loop.add_reader(fd)`. No GIL needed. (~300ns)
+/// Unix: socket fd pair — `signal()` writes 1 byte, asyncio wakes via
+/// `loop.add_reader(fd)`. No GIL needed.
+///
+/// Under burst load, multiple tokio tasks may call `signal()` concurrently.
+/// An [`AtomicBool`] flag coalesces redundant writes: only the first
+/// `signal()` after a `drain()` actually writes to the pipe. This
+/// eliminates the `Mutex` contention that serialized all signalers.
 pub struct Wakeup {
     reader: std::os::unix::net::UnixStream,
-    writer: Mutex<std::os::unix::net::UnixStream>,
+    writer: std::os::unix::net::UnixStream,
+    /// Coalescing flag — `true` means a wakeup byte is already in the pipe.
+    pending: AtomicBool,
 }
 
 impl std::fmt::Debug for Wakeup {
@@ -94,19 +104,34 @@ impl Wakeup {
         writer.set_nonblocking(true)?;
         Ok(Self {
             reader,
-            writer: Mutex::new(writer),
+            writer,
+            pending: AtomicBool::new(false),
         })
     }
 
     /// Signal the asyncio thread by writing 1 byte to the pipe.
     ///
-    /// No GIL needed. Errors are silently ignored — the pipe is
-    /// non-blocking, so a full buffer simply means a signal is already
-    /// pending.
+    /// Uses CAS to coalesce: only the thread that flips `false→true`
+    /// writes the byte. All others skip — a wakeup is already pending.
+    /// POSIX guarantees atomicity for writes ≤ `PIPE_BUF`, so one byte
+    /// is safe without a mutex.
     pub fn signal(&self) {
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = io::Write::write_all(&mut *w, &[1u8]);
+        if self
+            .pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            let _ = io::Write::write(&mut &self.writer, &[1u8]);
         }
+    }
+
+    /// Clear the pending flag after the asyncio thread drains the pipe.
+    ///
+    /// Called from [`crate::asgi::queue::RequestQueue::try_recv`] when
+    /// the crossbeam queue is empty, allowing the next `signal()` to
+    /// write a fresh wakeup byte.
+    pub fn drain(&self) {
+        self.pending.store(false, Ordering::Release);
     }
 
     /// Raw file descriptor for the reader end.
@@ -192,6 +217,41 @@ mod tests {
     }
 
     #[test]
+    fn wakeup_coalescing_skips_redundant_writes() {
+        let wakeup = Wakeup::new().unwrap();
+        wakeup.signal();
+        wakeup.signal();
+        wakeup.signal();
+
+        let mut buf = [0u8; 16];
+        let n = io::Read::read(&mut &wakeup.reader, &mut buf).unwrap();
+        assert_eq!(n, 1, "coalesced signals should produce exactly 1 byte");
+
+        let err = io::Read::read(&mut &wakeup.reader, &mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn wakeup_drain_resets_flag() {
+        let wakeup = Wakeup::new().unwrap();
+
+        wakeup.signal();
+        let mut buf = [0u8; 16];
+        let _ = io::Read::read(&mut &wakeup.reader, &mut buf).unwrap();
+
+        // Before drain: second signal is suppressed (flag still true).
+        wakeup.signal();
+        let err = io::Read::read(&mut &wakeup.reader, &mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+
+        // After drain: flag cleared, next signal writes again.
+        wakeup.drain();
+        wakeup.signal();
+        let n = io::Read::read(&mut &wakeup.reader, &mut buf).unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
     fn inbound_channel_send_recv() {
         let ch = InboundChannel::new();
         let (response_tx, _response_rx) = oneshot::channel();
@@ -206,6 +266,7 @@ mod tests {
             client_addr: None,
             server_addr: SocketAddr::from(([127, 0, 0, 1], 8080)),
             trace_context: None,
+            created_at: std::time::Instant::now(),
             response_tx,
         };
         ch.sender().send(slot).unwrap();
@@ -240,6 +301,7 @@ mod tests {
             client_addr: Some(SocketAddr::from(([10, 0, 0, 1], 5000))),
             server_addr: SocketAddr::from(([0, 0, 0, 0], 8000)),
             trace_context: None,
+            created_at: std::time::Instant::now(),
             response_tx,
         };
         let dbg = format!("{slot:?}");

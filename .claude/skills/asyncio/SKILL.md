@@ -170,7 +170,7 @@ For instantly-completing coroutines (like a sentinel `async def sentinel(): pass
 
 ### 3.12+ C struct: `Task.__init__` MUST be called
 
-The C `TaskObj` struct in `_asynciomodule.c` has fields (`task_context`, `task_name`, `task_num_cancels_requested`) that are only initialized by `Task.__init__`. Skipping `__init__` (e.g., a singleton task reused across requests) leaves these fields uninitialized → **segfault** on any access. Granian confirmed this: their singleton `_CBSchedulerTask` falls back to `TaskImpl.asyncio` on 3.12+ for exactly this reason.
+The C `TaskObj` struct in `_asynciomodule.c` has fields (`task_context`, `task_name`, `task_num_cancels_requested`) that are only initialized by `Task.__init__`. Skipping `__init__` (e.g., a singleton task reused across requests) leaves these fields uninitialized → **segfault** on any access. 
 
 **Rule:** Always call `super().__init__()` on Task subclasses. Use `eager_start=True` with an instantly-completing coroutine if you want to minimize `_ready` pollution.
 
@@ -256,7 +256,7 @@ With no sentinel `__step` in `_run_once`, per-step `_enter_task` on the tokio th
 
 ### Per-step `_enter_task` granularity
 
-Wrap `_enter_task`/`_leave_task` around each individual `coro.send()` + result classification, not the entire drive loop. This is the pattern granian uses. The bracket must cover **all code that can execute Python bytecode** (see [PyObject_GetAttr executes Python](#pyobjectgetattr-can-execute-python-bytecode) below), leaving only pure-native budget checks outside.
+Wrap `_enter_task`/`_leave_task` around each individual `coro.send()` + result classification, not the entire drive loop. The bracket must cover **all code that can execute Python bytecode** (see [PyObject_GetAttr executes Python](#pyobjectgetattr-can-execute-python-bytecode) below), leaving only pure-native budget checks outside.
 
 ```
 Per-step pattern (safe):                     Per-drive pattern (unsafe):
@@ -836,7 +836,7 @@ An unconditional `call_soon_threadsafe(lambda: None)` after every drive cycle fi
 2. **Premature event loop wake-up** — for sync handlers, the thread pool's own `call_soon_threadsafe` already wakes the loop. The extra poke causes a useless `_run_once` cycle (processes `__step` + noop) before the real work arrives.
 3. **GIL contention** — the poke call extends the `Python::attach` hold by ~50µs per request. Under 50 concurrent connections, that is ~2.5ms of extra serialized GIL time, plus the event loop thread competing for GIL to process the premature wakes.
 
-Benchmarks showed `resp_wait_p50 = 46ms` for trivial sync handlers like `/api/health` — 96% of total latency was waiting for the suspend-resume round-trip, inflated by the extra event loop work. Streaming throughput dropped 46x vs granian.
+Benchmarks showed `resp_wait_p50 = 46ms` for trivial sync handlers like `/api/health` — 96% of total latency was waiting for the suspend-resume round-trip, inflated by the extra event loop work. 
 
 ### The conditional poke strategy
 

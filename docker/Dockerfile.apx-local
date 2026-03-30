@@ -1,10 +1,12 @@
+# syntax=docker/dockerfile:1
 FROM --platform=linux/amd64 python:3.11-slim
 
 WORKDIR /app
 
 COPY . /app/
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=secret,id=pip_conf,target=/etc/pip.conf \
+    pip install --no-cache-dir -r requirements.txt
 
 EXPOSE 8000
 ENV APX_LOG=trace

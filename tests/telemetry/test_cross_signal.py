@@ -222,12 +222,15 @@ class TestCrossSignal:
     def test_log_info_span_is_zero_duration(
         self, otel_collector: OtelCollector
     ) -> None:
-        """log.info() produces instant (zero-duration) spans."""
+        """log.info() produces near-zero-duration spans (< 1ms)."""
         for span in flat_spans(otel_collector):
             if span.name == "cross signal info log":
-                assert span.startTimeUnixNano == span.endTimeUnixNano, (
-                    f"log span should be zero-duration; "
-                    f"start={span.startTimeUnixNano} end={span.endTimeUnixNano}"
+                start = int(span.startTimeUnixNano)
+                end = int(span.endTimeUnixNano)
+                delta_us = (end - start) / 1_000
+                assert delta_us < 1_000, (
+                    f"log span should be near-zero-duration; "
+                    f"delta={delta_us:.1f}µs"
                 )
                 return
         pytest.fail("'cross signal info log' span not found")

@@ -282,6 +282,8 @@ async def telemetry_error_handling():
 @router.get("/telemetry/otlp-fields")
 async def telemetry_otlp_fields():
     """Exercise all OTLP field improvements for integration testing."""
+    import logging
+
     from apx.telemetry import Counter, Gauge, Histogram, SpanKind, log, span
 
     with span("test.client_call", kind=SpanKind.CLIENT, target="upstream") as s:
@@ -292,6 +294,11 @@ async def telemetry_otlp_fields():
         s.add_event("step.completed", {"step": "1"})
 
     log.info("otlp fields test log", event_name="test.otlp_fields")
+
+    logging.getLogger("test.otlp_fields").info(
+        "otlp fields test log",
+        extra={"event_name": "test.otlp_fields"},
+    )
 
     counter = Counter(
         "test.otlp_fields_counter", description="OTLP fields test", unit="1"

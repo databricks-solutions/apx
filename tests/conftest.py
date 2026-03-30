@@ -18,7 +18,6 @@ import time
 import zipfile
 from pathlib import Path
 
-import docker
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -208,6 +207,35 @@ def _assemble_bench_app(wheel_path: Path, build_dir: Path) -> Path:
     return build_dir
 
 
+def _docker_build(build_dir: Path, tag: str) -> None:
+    """Build a Docker image using BuildKit, mounting ~/.pip/pip.conf if present."""
+    cmd = [
+        "docker",
+        "build",
+        "--platform",
+        "linux/amd64",
+        "--rm",
+        "-t",
+        tag,
+    ]
+
+    pip_conf = Path.home() / ".pip" / "pip.conf"
+    if pip_conf.is_file():
+        cmd += ["--secret", f"id=pip_conf,src={pip_conf}"]
+        print(f"[build] Mounting {pip_conf} as BuildKit secret")
+
+    cmd.append(str(build_dir))
+
+    result = subprocess.run(
+        cmd,
+        cwd=str(PROJECT_ROOT),
+        env={**__import__("os").environ, "DOCKER_BUILDKIT": "1"},
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.fail("Docker image build failed (see output above)")
+
+
 # ---------------------------------------------------------------------------
 # Shared image build fixture
 # ---------------------------------------------------------------------------
@@ -217,7 +245,6 @@ def _assemble_bench_app(wheel_path: Path, build_dir: Path) -> Path:
 def apx_image(request: pytest.FixtureRequest) -> str:
     """Build the APX Docker image once per session. Returns the image tag."""
     skip_build = request.config.getoption("--skip-build")
-    dk = docker.from_env()
 
     if not skip_build:
         t0 = time.monotonic()
@@ -234,13 +261,7 @@ def apx_image(request: pytest.FixtureRequest) -> str:
 
         t2 = time.monotonic()
         print(f"[build] Building Docker image {TEST_IMAGE}...")
-        dk.images.build(
-            path=str(build_dir),
-            dockerfile="Dockerfile",
-            tag=TEST_IMAGE,
-            platform="linux/amd64",
-            rm=True,
-        )
+        _docker_build(build_dir, TEST_IMAGE)
         print(f"[build] Image built in {time.monotonic() - t2:.1f}s")
     else:
         print("\n[build] --skip-build: reusing existing image")

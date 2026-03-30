@@ -111,20 +111,23 @@ class TestHttpMetricsDefaults:
 
 
 class TestApxMetricsDefaults:
-    def test_all_disabled_by_default(self) -> None:
+    def test_all_enabled_by_default(self) -> None:
         m = ApxMetrics()
-        assert m.dispatch_body_collect is False
-        assert m.dispatch_crossbeam_send is False
-        assert m.dispatch_response_wait is False
-        assert m.dispatch_total is False
-        assert m.asgi_receive_build is False
-        assert m.asgi_send_parse is False
-
-    def test_enable_selective(self) -> None:
-        m = ApxMetrics(dispatch_total=True, asgi_send_parse=True)
+        assert m.dispatch_body_collect is True
+        assert m.dispatch_crossbeam_send is True
+        assert m.dispatch_response_wait is True
         assert m.dispatch_total is True
+        assert m.asgi_receive_build is True
         assert m.asgi_send_parse is True
-        assert m.dispatch_body_collect is False
+        assert m.dispatch_pickup_delay is True
+        assert m.dispatch_materialize is True
+        assert m.dispatch_queue_depth is True
+
+    def test_disable_selective(self) -> None:
+        m = ApxMetrics(dispatch_total=False, asgi_send_parse=False)
+        assert m.dispatch_total is False
+        assert m.asgi_send_parse is False
+        assert m.dispatch_body_collect is True
 
 
 # ── Instrumentation models ────────────────────────────────────────────────
@@ -176,7 +179,7 @@ class TestInstrumentationModels:
         a = ApxInstrumentation()
         assert a.type == "apx"
         assert a.enabled is True
-        assert a.metrics.dispatch_total is False
+        assert a.metrics.dispatch_total is True
 
     def test_discriminated_union_from_dict(self) -> None:
         """Configuration parses typed dicts via the discriminated union."""
@@ -393,6 +396,9 @@ EXPECTED_APX_METRICS = {
     "apx.dispatch.total.duration",
     "apx.asgi.receive_build.duration",
     "apx.asgi.send_parse.duration",
+    "apx.dispatch.pickup_delay.duration",
+    "apx.dispatch.materialize.duration",
+    "apx.dispatch.queue_depth",
 }
 
 
@@ -403,7 +409,7 @@ class TestMetricCatalog:
 
     def test_count(self) -> None:
         catalog = metric_catalog()
-        assert len(catalog) == 16
+        assert len(catalog) == 19
 
     def test_entry_type(self) -> None:
         catalog = metric_catalog()
@@ -522,6 +528,9 @@ EXPECTED_UNITS: dict[str, str] = {
     "apx.dispatch.total.duration": "us",
     "apx.asgi.receive_build.duration": "us",
     "apx.asgi.send_parse.duration": "us",
+    "apx.dispatch.pickup_delay.duration": "us",
+    "apx.dispatch.materialize.duration": "us",
+    "apx.dispatch.queue_depth": "1",
 }
 
 EXPECTED_DESCRIPTIONS: dict[str, str] = {
@@ -541,6 +550,9 @@ EXPECTED_DESCRIPTIONS: dict[str, str] = {
     "apx.dispatch.total.duration": "Total dispatch duration from body collect start to response ready",
     "apx.asgi.receive_build.duration": "Time to build the ASGI receive dict for the Python handler",
     "apx.asgi.send_parse.duration": "Time to parse the ASGI send event dict from the Python handler",
+    "apx.dispatch.pickup_delay.duration": "Time from slot creation to asyncio thread pickup",
+    "apx.dispatch.materialize.duration": "Time to build ASGI scope and receive/send callables",
+    "apx.dispatch.queue_depth": "Pending request slots in the crossbeam channel at drain time",
 }
 
 

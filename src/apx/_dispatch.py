@@ -31,20 +31,37 @@ def install_dispatch(
     which appends ``_drain_queue`` directly to ``_ready`` (no fd needed).
     """
 
-    async def _guarded(scope: Any, receive: Any, send: Any) -> None:
+    # At ~85µs per materialize(), 8 items ≈ 680µs GIL hold — well under
+    # the 5ms GIL switch interval (sys.getswitchinterval()), keeping the
+    # drain responsive without excessive re-scheduling overhead.
+    max_drain_batch: int = 8
+
+    async def _guarded(
+        scope: dict[str, Any],
+        receive: Any,
+        send: Any,
+    ) -> None:
         try:
             await app(scope, receive, send)
         except Exception as exc:
-            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            tb = "".join(
+                traceback.format_exception(type(exc), exc, exc.__traceback__)
+            )
             send.send_error(tb)
 
     def _drain_queue() -> None:
-        while True:
-            result = queue.try_recv()
+        for _ in range(max_drain_batch):
+            result: tuple[Any, Any, Any] | None = queue.try_recv()
             if result is None:
-                break
+                return
             scope, receive, send = result
             loop.create_task(_guarded(scope, receive, send))
+        # Batch full — more items may remain.  Yield to the event loop
+        # so _run_once can process I/O, fire done callbacks, and give
+        # thread pool workers a GIL window before we drain more.
+        # call_soon (not threadsafe): we're already on the asyncio
+        # thread, no selector wake needed.
+        loop.call_soon(_drain_queue)
 
     if wakeup_fd is not None:
 

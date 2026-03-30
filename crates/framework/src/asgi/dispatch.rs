@@ -191,6 +191,7 @@ async fn dispatch_pipeline(
         client_addr: request.client_addr,
         server_addr: request.server_addr,
         trace_context,
+        created_at: std::time::Instant::now(),
         response_tx,
     };
 

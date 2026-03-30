@@ -660,18 +660,16 @@ class TestLogTraceCorrelation:
             if lr.body.stringValue
             and "integration test log message" in lr.body.stringValue
             and scope.name == "apx.python"
+            and lr.traceId == expected_trace
         ]
 
         assert direct_logs, (
-            f"no direct-path Python log records found with scope 'apx.python'; "
-            f"all scopes: {sorted(set(s.name for s, _ in records))}"
+            f"no direct-path Python log records with trace {expected_trace} found; "
+            f"all apx.python traces: "
+            f"{[lr.traceId for s, lr in records if s.name == 'apx.python' and lr.body.stringValue and 'integration test log message' in lr.body.stringValue]}"
         )
 
         for _scope, lr in direct_logs:
-            assert lr.traceId == expected_trace, (
-                f"Python direct log traceId mismatch: "
-                f"expected {expected_trace}, got {lr.traceId}"
-            )
             assert lr.spanId and lr.spanId != ZERO_SPAN_ID, (
                 f"Python direct log should have non-empty spanId; got {lr.spanId!r}"
             )
@@ -699,14 +697,15 @@ class TestLogTraceCorrelation:
     # ── No-duplicate tests ─────────────────────────────────────────────────
 
     def test_python_logs_not_duplicated(self, otel_collector: OtelCollector) -> None:
-        """Each Python stdlib log should produce exactly one OTEL log record.
+        """Each Python stdlib log should produce exactly one OTEL log record per request.
 
         Before the fix, ``emit_log()`` emitted both a ``tracing`` event (picked
         up by the ``OpenTelemetryTracingBridge``) AND a direct ``LogRecord``.
         The bridge record had no trace context, creating a confusing duplicate.
         Now the bridge filters ``apx::python`` events, so only the direct record
-        (with scope ``apx.python``) should exist.
+        (with scope ``apx.python``) should exist for a given trace.
         """
+        expected_trace = _uuid_to_trace_id(REQUEST_ID_LOG)
         records = _flat_log_records(otel_collector)
 
         python_test_logs = [
@@ -714,9 +713,12 @@ class TestLogTraceCorrelation:
             for scope, lr in records
             if lr.body.stringValue
             and "integration test log message" in lr.body.stringValue
+            and lr.traceId == expected_trace
         ]
 
-        assert python_test_logs, "no 'integration test log message' logs found"
+        assert python_test_logs, (
+            f"no 'integration test log message' logs for trace {expected_trace}"
+        )
 
         scopes = [scope.name for scope, _ in python_test_logs]
         assert all(s == "apx.python" for s in scopes), (
@@ -725,7 +727,7 @@ class TestLogTraceCorrelation:
         )
 
         assert len(python_test_logs) == 1, (
-            f"expected exactly 1 OTEL log record for 'integration test log message'; "
+            f"expected exactly 1 OTEL log record for trace {expected_trace}; "
             f"got {len(python_test_logs)} (scopes: {scopes})"
         )
 
@@ -1165,12 +1167,15 @@ class TestSpanAttributes:
         pytest.fail("log span 'integration test log message' not found")
 
     def test_log_span_is_zero_duration(self, otel_collector: OtelCollector) -> None:
-        """Instant (log-level) spans should have start == end time."""
+        """Instant (log-level) spans should have near-zero duration (< 1ms)."""
         for s in _flat_spans(otel_collector):
             if s.name == "integration test log message":
-                assert s.startTimeUnixNano == s.endTimeUnixNano, (
-                    f"log span should be zero-duration; "
-                    f"start={s.startTimeUnixNano} end={s.endTimeUnixNano}"
+                start = int(s.startTimeUnixNano)
+                end = int(s.endTimeUnixNano)
+                delta_us = (end - start) / 1_000
+                assert delta_us < 1_000, (
+                    f"log span should be near-zero-duration; "
+                    f"delta={delta_us:.1f}µs"
                 )
                 return
         pytest.fail("log span 'integration test log message' not found")

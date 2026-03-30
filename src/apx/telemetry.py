@@ -693,6 +693,9 @@ class ApxMetrics(BaseModel):
     dispatch_total: bool = True
     asgi_receive_build: bool = True
     asgi_send_parse: bool = True
+    dispatch_pickup_delay: bool = True
+    dispatch_materialize: bool = True
+    dispatch_queue_depth: bool = True
 
 
 class CaptureHeaders(BaseModel):

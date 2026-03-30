@@ -25,6 +25,9 @@ super::toggle_store!(TOGGLES: ApxMetricToggles = ApxMetricToggles {
     dispatch_total: false,
     asgi_receive_build: false,
     asgi_send_parse: false,
+    dispatch_pickup_delay: false,
+    dispatch_materialize: false,
+    dispatch_queue_depth: false,
 });
 
 // ── Metric declarations ───────────────────────────────────────────────────
@@ -89,4 +92,25 @@ dispatch_metric!(
     asgi_send_parse,
     defs::ASGI_SEND_PARSE,
     "Record `apx.asgi.send_parse.duration` if enabled."
+);
+dispatch_metric!(
+    record_pickup_delay,
+    pickup_delay_hist,
+    dispatch_pickup_delay,
+    defs::DISPATCH_PICKUP_DELAY,
+    "Record `apx.dispatch.pickup_delay.duration` if enabled."
+);
+dispatch_metric!(
+    record_materialize,
+    materialize_hist,
+    dispatch_materialize,
+    defs::DISPATCH_MATERIALIZE,
+    "Record `apx.dispatch.materialize.duration` if enabled."
+);
+dispatch_metric!(
+    record_queue_depth,
+    queue_depth_hist,
+    dispatch_queue_depth,
+    defs::DISPATCH_QUEUE_DEPTH,
+    "Record `apx.dispatch.queue_depth` if enabled."
 );

@@ -162,6 +162,27 @@ pub const ASGI_SEND_PARSE: MetricDef = MetricDef {
     unit: "us",
 };
 
+/// Time from slot creation on the tokio thread to pickup on the asyncio thread.
+pub const DISPATCH_PICKUP_DELAY: MetricDef = MetricDef {
+    name: "apx.dispatch.pickup_delay.duration",
+    description: "Time from slot creation to asyncio thread pickup",
+    unit: "us",
+};
+
+/// Time to build the ASGI scope dict and receive/send callables.
+pub const DISPATCH_MATERIALIZE: MetricDef = MetricDef {
+    name: "apx.dispatch.materialize.duration",
+    description: "Time to build ASGI scope and receive/send callables",
+    unit: "us",
+};
+
+/// Number of pending request slots in the crossbeam channel at drain time.
+pub const DISPATCH_QUEUE_DEPTH: MetricDef = MetricDef {
+    name: "apx.dispatch.queue_depth",
+    description: "Pending request slots in the crossbeam channel at drain time",
+    unit: "1",
+};
+
 // ── Catalog ──────────────────────────────────────────────────────────────
 
 /// A metric definition with additional classification metadata.
@@ -258,6 +279,21 @@ pub static ALL_METRICS: &[MetricCatalogEntry] = &[
     },
     MetricCatalogEntry {
         def: ASGI_SEND_PARSE,
+        group: "apx",
+        scope: "worker",
+    },
+    MetricCatalogEntry {
+        def: DISPATCH_PICKUP_DELAY,
+        group: "apx",
+        scope: "worker",
+    },
+    MetricCatalogEntry {
+        def: DISPATCH_MATERIALIZE,
+        group: "apx",
+        scope: "worker",
+    },
+    MetricCatalogEntry {
+        def: DISPATCH_QUEUE_DEPTH,
         group: "apx",
         scope: "worker",
     },

@@ -16,7 +16,7 @@ import time
 import httpx
 import pytest
 
-from conftest import (
+from .conftest import (
     OtelCollector,
     flat_log_records,
     flat_spans,

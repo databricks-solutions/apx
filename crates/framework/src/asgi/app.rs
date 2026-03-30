@@ -199,13 +199,16 @@ impl AppSource for ModuleImport {
         let app = self.load_callable(py)?;
         let interns = Arc::new(ScopeInterns::new(py, server_addr));
 
-        let queue =
-            RequestQueue::new(py, &ctx.pipeline.inbound, Arc::clone(&interns)).map_err(|e| {
-                AppLoadError::ImportFailed {
-                    module: "RequestQueue".to_owned(),
-                    source: e,
-                }
-            })?;
+        let queue = RequestQueue::new(
+            py,
+            &ctx.pipeline.inbound,
+            Arc::clone(&ctx.pipeline.wakeup),
+            Arc::clone(&interns),
+        )
+        .map_err(|e| AppLoadError::ImportFailed {
+            module: "RequestQueue".to_owned(),
+            source: e,
+        })?;
         let queue_obj = Py::new(py, queue).map_err(|e| AppLoadError::ImportFailed {
             module: "RequestQueue".to_owned(),
             source: e,

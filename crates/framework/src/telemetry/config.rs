@@ -174,6 +174,12 @@ pub struct ApxMetricToggles {
     pub asgi_receive_build: bool,
     /// Toggle for [`super::defs::ASGI_SEND_PARSE`].
     pub asgi_send_parse: bool,
+    /// Toggle for [`super::defs::DISPATCH_PICKUP_DELAY`].
+    pub dispatch_pickup_delay: bool,
+    /// Toggle for [`super::defs::DISPATCH_MATERIALIZE`].
+    pub dispatch_materialize: bool,
+    /// Toggle for [`super::defs::DISPATCH_QUEUE_DEPTH`].
+    pub dispatch_queue_depth: bool,
 }
 
 // ── Public defaults (used by supervisor) ─────────────────────────────────
@@ -462,6 +468,9 @@ fn parse_apx_metric_toggles(dict: &Bound<'_, PyDict>) -> ApxMetricToggles {
         dispatch_total: extract_bool_or(dict, "dispatch_total", false),
         asgi_receive_build: extract_bool_or(dict, "asgi_receive_build", false),
         asgi_send_parse: extract_bool_or(dict, "asgi_send_parse", false),
+        dispatch_pickup_delay: extract_bool_or(dict, "dispatch_pickup_delay", false),
+        dispatch_materialize: extract_bool_or(dict, "dispatch_materialize", false),
+        dispatch_queue_depth: extract_bool_or(dict, "dispatch_queue_depth", false),
     }
 }
 
