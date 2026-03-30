@@ -28,10 +28,10 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any, AsyncGenerator, TypeAlias, get_args, get_origin, get_type_hints
+from collections.abc import Callable
+from typing import Annotated, Any, AsyncGenerator, Protocol, TypeAlias, get_args, get_origin, get_type_hints
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, params
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -40,6 +40,15 @@ from pydantic import BaseModel, create_model
 from ._base import LifespanDependency
 
 logger = logging.getLogger(__name__)
+
+
+class _ToolFn(Protocol):
+    """Minimal protocol for tool functions — carries __name__ and __doc__."""
+
+    __name__: str
+    __doc__: str | None
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
 
 # Module-level Agent instance, set when user calls Agent(tools=[...])
 _agent_instance: Agent | None = None
@@ -179,7 +188,7 @@ def _is_fastapi_dependency(annotation: Any) -> bool:
     return any(isinstance(arg, params.Depends) for arg in get_args(annotation))
 
 
-def _inspect_tool_fn(fn: Callable) -> tuple[dict[str, tuple[Any, Any]], list[str]]:
+def _inspect_tool_fn(fn: _ToolFn) -> tuple[dict[str, tuple[Any, Any]], list[str]]:
     """Inspect a tool function's signature.
 
     Returns:
@@ -206,46 +215,50 @@ def _inspect_tool_fn(fn: Callable) -> tuple[dict[str, tuple[Any, Any]], list[str
     return plain_params, dep_param_names
 
 
-def _make_input_model(fn: Callable, plain_params: dict[str, tuple[Any, Any]]) -> type[BaseModel] | None:
+def _make_input_model(fn: _ToolFn, plain_params: dict[str, tuple[Any, Any]]) -> type[BaseModel] | None:
     """Dynamically create a Pydantic input model from the plain parameters."""
     if not plain_params:
         return None
     fields = {name: (annotation, default) for name, (annotation, default) in plain_params.items()}
-    return create_model(f"{fn.__name__}_input", **fields)
+    return create_model(f"{fn.__name__}_input", **fields)  # type: ignore
 
 
 def _make_route_handler(
-    fn: Callable,
+    fn: _ToolFn,
     input_model: type[BaseModel] | None,
     dep_param_names: list[str],
-) -> Callable:
+) -> Any:
     """Create a FastAPI route handler that calls fn with injected dependencies."""
     hints = get_type_hints(fn, include_extras=True)
     dep_annotations = {name: hints[name] for name in dep_param_names if name in hints}
 
     if input_model is not None:
         # Build a handler: (body: InputModel, dep1: Dep1, ...) -> return_type
-        async def handler(body: input_model, **kwargs: Any) -> Any:  # type: ignore[valid-type]
+        async def handler_with_body(body: Any, **kwargs: Any) -> Any:
             return fn(**body.model_dump(), **kwargs)
 
-        # Inject dependency annotations into the handler's __annotations__
-        # so FastAPI can resolve them
-        handler.__annotations__ = {"body": input_model, **dep_annotations, "return": hints.get("return", Any)}
-        _patch_handler_signature(handler, input_model, dep_annotations)
+        handler_with_body.__annotations__ = {
+            "body": input_model,
+            **dep_annotations,
+            "return": hints.get("return", Any),
+        }
+        _patch_handler_signature(handler_with_body, input_model, dep_annotations)
+        handler_with_body.__name__ = fn.__name__  # type: ignore[method-assign]
+        handler_with_body.__doc__ = fn.__doc__  # type: ignore[method-assign]
+        return handler_with_body
     else:
-        async def handler(**kwargs: Any) -> Any:
+        async def handler_no_body(**kwargs: Any) -> Any:
             return fn(**kwargs)
 
-        handler.__annotations__ = {**dep_annotations, "return": hints.get("return", Any)}
-        _patch_handler_signature(handler, None, dep_annotations)
-
-    handler.__name__ = fn.__name__
-    handler.__doc__ = fn.__doc__
-    return handler
+        handler_no_body.__annotations__ = {**dep_annotations, "return": hints.get("return", Any)}
+        _patch_handler_signature(handler_no_body, None, dep_annotations)
+        handler_no_body.__name__ = fn.__name__  # type: ignore[method-assign]
+        handler_no_body.__doc__ = fn.__doc__  # type: ignore[method-assign]
+        return handler_no_body
 
 
 def _patch_handler_signature(
-    handler: Callable,
+    handler: Any,
     input_model: type[BaseModel] | None,
     dep_annotations: dict[str, Any],
 ) -> None:
@@ -282,10 +295,7 @@ def _load_agent_config() -> AgentConfig | None:
         else:
             return None
 
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        import tomli as tomllib  # type: ignore[no-redef]
+    import tomllib
 
     with open(pyproject_path, "rb") as f:
         data = tomllib.load(f)
@@ -308,7 +318,7 @@ def _schema_for_model(model: type[BaseModel] | None) -> dict[str, Any] | None:
     return model.model_json_schema()
 
 
-def _schema_for_return(fn: Callable) -> dict[str, Any] | None:
+def _schema_for_return(fn: _ToolFn) -> dict[str, Any] | None:
     hints = get_type_hints(fn)
     return_type = hints.get("return")
     if return_type is None or return_type is type(None):
@@ -338,14 +348,14 @@ class Agent:
     tool schema. All other typed parameters become tool inputs.
     """
 
-    def __init__(self, tools: list[Callable], sub_agents: list[str] | None = None) -> None:
+    def __init__(self, tools: list[_ToolFn], sub_agents: list[str] | None = None) -> None:
         global _agent_instance
         self._tool_fns = tools
         self._sub_agent_urls = sub_agents or []
         _agent_instance = self
 
         # Pre-analyze all functions at construction time
-        self._analyzed: list[tuple[Callable, dict, list[str], type[BaseModel] | None]] = []
+        self._analyzed: list[tuple[_ToolFn, dict[str, Any], list[str], type[BaseModel] | None]] = []
         for fn in tools:
             plain_params, dep_names = _inspect_tool_fn(fn)
             input_model = _make_input_model(fn, plain_params)
