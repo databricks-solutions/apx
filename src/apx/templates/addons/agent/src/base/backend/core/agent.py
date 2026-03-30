@@ -34,7 +34,7 @@ from collections.abc import Callable
 from typing import Annotated, Any, AsyncGenerator, Protocol, TypeAlias, get_args, get_origin, get_type_hints
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, params
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, create_model
 
 from ._base import LifespanDependency
@@ -591,6 +591,209 @@ async def _handle_invocation(
 
 
 # ---------------------------------------------------------------------------
+# Dev UI
+# ---------------------------------------------------------------------------
+
+
+def _render_agent_ui(ctx: AgentContext | None) -> str:
+    """Return a self-contained HTML page for interactively testing the agent."""
+    agent_name = ctx.config.name if ctx else "Agent"
+    agent_desc = ctx.config.description if ctx else ""
+    skills_json = (
+        "[" + ",".join(
+            f'{{"id":{s.id!r},"name":{s.name!r},"description":{s.description!r}}}'
+            for s in ctx.card.skills
+        ) + "]"
+        if ctx else "[]"
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{agent_name} — APX Dev UI</title>
+<style>
+  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #0d0d0d; color: #e8e8e8; height: 100vh;
+         display: flex; flex-direction: column; }}
+  header {{ padding: 12px 20px; background: #111; border-bottom: 1px solid #2a2a2a;
+            display: flex; align-items: center; gap: 12px; flex-shrink: 0; }}
+  .badge {{ background: #1e3a5f; color: #60b0ff; font-size: 11px; font-weight: 600;
+            padding: 2px 8px; border-radius: 4px; letter-spacing: .5px; text-transform: uppercase; }}
+  h1 {{ font-size: 16px; font-weight: 600; color: #fff; }}
+  .desc {{ font-size: 13px; color: #888; margin-left: auto; }}
+  #chat {{ flex: 1; overflow-y: auto; padding: 20px; display: flex;
+           flex-direction: column; gap: 16px; }}
+  .msg {{ max-width: 720px; line-height: 1.55; font-size: 14px; }}
+  .msg.user {{ align-self: flex-end; background: #1a3a5c; color: #cce4ff;
+               padding: 10px 14px; border-radius: 12px 12px 2px 12px; }}
+  .msg.assistant {{ align-self: flex-start; color: #ddd; white-space: pre-wrap; }}
+  .msg.assistant.streaming::after {{ content: "▋"; animation: blink .7s step-end infinite; }}
+  .msg.system {{ align-self: center; font-size: 12px; color: #555; font-style: italic; }}
+  @keyframes blink {{ 50% {{ opacity: 0; }} }}
+  #tools-panel {{ padding: 0 20px 10px; flex-shrink: 0; }}
+  details {{ font-size: 12px; color: #555; cursor: pointer; }}
+  details summary {{ color: #666; user-select: none; }}
+  .skill {{ display: inline-block; background: #1a1a1a; border: 1px solid #2a2a2a;
+            border-radius: 6px; padding: 3px 8px; margin: 4px 4px 0 0;
+            font-size: 11px; color: #888; }}
+  form {{ display: flex; gap: 8px; padding: 12px 20px;
+          background: #111; border-top: 1px solid #2a2a2a; flex-shrink: 0; }}
+  textarea {{ flex: 1; background: #1a1a1a; border: 1px solid #333; color: #e8e8e8;
+              border-radius: 8px; padding: 10px 14px; font-size: 14px; resize: none;
+              font-family: inherit; line-height: 1.4; outline: none; max-height: 160px; }}
+  textarea:focus {{ border-color: #3a7bd5; }}
+  button {{ background: #2563eb; color: #fff; border: none; border-radius: 8px;
+            padding: 10px 18px; font-size: 14px; cursor: pointer; align-self: flex-end;
+            white-space: nowrap; font-weight: 500; transition: background .15s; }}
+  button:hover {{ background: #1d4ed8; }}
+  button:disabled {{ background: #1a3060; color: #666; cursor: not-allowed; }}
+</style>
+</head>
+<body>
+<header>
+  <span class="badge">APX dev</span>
+  <h1>{agent_name}</h1>
+  <span class="desc">{agent_desc}</span>
+</header>
+
+<div id="chat">
+  <div class="msg system">
+    Chat with <strong>{agent_name}</strong> below.
+    Conversations are sent as full history each time (stateless agent).
+  </div>
+</div>
+
+<div id="tools-panel">
+  <details id="skills-details">
+    <summary>Skills</summary>
+    <div id="skills-list" style="margin-top:6px"></div>
+  </details>
+</div>
+
+<form id="form" autocomplete="off">
+  <textarea id="input" rows="1" placeholder="Type a message…" required></textarea>
+  <button id="send-btn" type="submit">Send</button>
+</form>
+
+<script>
+const SKILLS = {skills_json};
+const chat = document.getElementById('chat');
+const form = document.getElementById('form');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send-btn');
+const skillsList = document.getElementById('skills-list');
+const skillsDetails = document.getElementById('skills-details');
+
+// Render skills
+if (SKILLS.length) {{
+  SKILLS.forEach(s => {{
+    const el = document.createElement('span');
+    el.className = 'skill';
+    el.title = s.description;
+    el.textContent = s.name;
+    skillsList.appendChild(el);
+  }});
+}} else {{
+  skillsDetails.style.display = 'none';
+}}
+
+// Conversation history (MLflow ResponsesAgent format)
+const history = [];
+
+function addMsg(role, text, streaming) {{
+  const div = document.createElement('div');
+  div.className = `msg ${{role}}${{streaming ? ' streaming' : ''}}`;
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}}
+
+// Auto-grow textarea
+input.addEventListener('input', () => {{
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+}});
+
+// Submit on Enter (Shift+Enter = newline)
+input.addEventListener('keydown', e => {{
+  if (e.key === 'Enter' && !e.shiftKey) {{ e.preventDefault(); form.requestSubmit(); }}
+}});
+
+form.addEventListener('submit', async e => {{
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+
+  input.value = '';
+  input.style.height = 'auto';
+  sendBtn.disabled = true;
+
+  addMsg('user', text);
+  history.push({{ role: 'user', content: text }});
+
+  const assistantDiv = addMsg('assistant', '', true);
+  let full = '';
+
+  try {{
+    const res = await fetch('/invocations', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ input: history, stream: true }}),
+    }});
+
+    if (!res.ok) {{
+      const err = await res.text();
+      throw new Error(`${{res.status}} ${{err}}`);
+    }}
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {{
+      const {{ done, value }} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {{ stream: true }});
+      const lines = buf.split('\\n');
+      buf = lines.pop(); // hold incomplete line
+
+      let eventType = '';
+      for (const line of lines) {{
+        if (line.startsWith('event: ')) {{ eventType = line.slice(7).trim(); }}
+        else if (line.startsWith('data: ')) {{
+          try {{
+            const payload = JSON.parse(line.slice(6));
+            if (eventType === 'output_text.delta' && payload.text) {{
+              full += payload.text;
+              assistantDiv.textContent = full;
+              chat.scrollTop = chat.scrollHeight;
+            }}
+          }} catch {{}}
+        }}
+      }}
+    }}
+  }} catch (err) {{
+    full = `Error: ${{err.message}}`;
+    assistantDiv.textContent = full;
+  }}
+
+  assistantDiv.classList.remove('streaming');
+  history.push({{ role: 'assistant', content: full }});
+  sendBtn.disabled = false;
+  input.focus();
+}});
+
+input.focus();
+</script>
+</body>
+</html>"""
+
+
+# ---------------------------------------------------------------------------
 # LifespanDependency addon
 # ---------------------------------------------------------------------------
 
@@ -664,6 +867,11 @@ class _AgentDependency(LifespanDependency):
         @agent_router.get("/health", include_in_schema=False)
         async def health() -> dict[str, str]:
             return {"status": "ok"}
+
+        @agent_router.get("/_agent", include_in_schema=False)
+        async def agent_dev_ui(request: Request) -> HTMLResponse:
+            ctx: AgentContext | None = request.app.state.agent_context
+            return HTMLResponse(_render_agent_ui(ctx))
 
         return [agent_router]
 

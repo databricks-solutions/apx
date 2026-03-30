@@ -8,7 +8,8 @@ use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
 use apx_core::api_generator::generate_openapi;
 use apx_core::common::{
-    ensure_dir, format_elapsed_ms, run_command_streaming_with_output, run_preflight_checks, spinner,
+    ensure_dir, format_elapsed_ms, read_project_metadata, run_command_streaming_with_output,
+    run_preflight_checks, spinner,
 };
 use apx_core::external::uv::Uv;
 
@@ -62,7 +63,10 @@ pub async fn run_build(app_path: &Path, build_dir: &Path) -> Result<(), String> 
         .map_err(|err| format!("Failed to write build .gitignore: {err}"))?;
 
     generate_openapi(app_path).await?;
-    build_ui(app_path).await?;
+    let meta = read_project_metadata(app_path)?;
+    if meta.has_ui() {
+        build_ui(app_path).await?;
+    }
 
     // build_path is relative to app_path; find_wheel_file needs the resolved build_dir
     let build_path = build_dir
