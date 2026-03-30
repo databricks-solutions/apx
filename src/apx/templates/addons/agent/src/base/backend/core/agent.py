@@ -79,6 +79,9 @@ class AgentConfig(BaseModel):
     description: str = ""
     model: str = "databricks-meta-llama-3-3-70b-instruct"
     instructions: str = ""  # system prompt prepended to every conversation
+    temperature: float | None = None  # None = use model default
+    max_tokens: int | None = None  # None = use model default
+    max_iterations: int = 10  # safety cap on the tool-calling loop
 
 
 class AgentTool(BaseModel):
@@ -436,10 +439,16 @@ class LlmAgent(BaseAgent):
         tools: list[_ToolFn],
         sub_agents: list[str] | None = None,
         instructions: str = "",
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        max_iterations: int | None = None,
     ) -> None:
         self._tool_fns = tools
         self._sub_agent_urls = sub_agents or []
         self._instructions = instructions
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+        self._max_iterations = max_iterations
 
         # Pre-analyze all functions at construction time
         self._analyzed: list[tuple[_ToolFn, dict[str, Any], list[str], type[BaseModel] | None]] = []
@@ -449,10 +458,24 @@ class LlmAgent(BaseAgent):
             self._analyzed.append((fn, plain_params, dep_names, input_model))
 
     async def run(self, messages: list[Message], request: Request) -> str:
-        return await _run_llm_loop(messages, request, self.collect_tools(), self._instructions)
+        return await _run_llm_loop(
+            messages, request,
+            tools=self.collect_tools(),
+            instructions=self._instructions,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+            max_iterations=self._max_iterations,
+        )
 
     async def stream(self, messages: list[Message], request: Request) -> AsyncGenerator[str, None]:
-        text = await _run_llm_loop(messages, request, self.collect_tools(), self._instructions)
+        text = await _run_llm_loop(
+            messages, request,
+            tools=self.collect_tools(),
+            instructions=self._instructions,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+            max_iterations=self._max_iterations,
+        )
         chunk_size = 20
         for i in range(0, len(text), chunk_size):
             yield text[i : i + chunk_size]
@@ -703,19 +726,18 @@ async def _run_llm_loop(
     request: Request,
     tools: list[AgentTool] | None = None,
     instructions: str = "",
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    max_iterations: int | None = None,
 ) -> str:
     """Run the FMAPI LLM loop and return the final response text.
 
     Tool calls are dispatched synchronously before the next FMAPI call.
-    Loops until FMAPI returns a final message or the safety cap is hit.
+    Loops until FMAPI returns a final message or the iteration cap is hit.
 
-    ``tools`` overrides the global tool list for this call. When ``None``,
-    all tools registered on the ``AgentContext`` are used. Pass
-    ``self.collect_tools()`` from an ``LlmAgent`` to scope calls to only that
-    agent's own tools in a composed hierarchy.
-
-    ``instructions`` is prepended as a system message when non-empty. Falls
-    back to ``AgentConfig.instructions`` from pyproject.toml when not provided.
+    Per-call params (``tools``, ``instructions``, ``temperature``,
+    ``max_tokens``, ``max_iterations``) override the values in
+    ``AgentConfig`` from pyproject.toml. ``None`` means "use config default".
     """
     import json as _json
 
@@ -725,8 +747,11 @@ async def _run_llm_loop(
     ctx: AgentContext = request.app.state.agent_context
     ws: WorkspaceClient = request.app.state.workspace_client
 
-    # Resolve effective system prompt: constructor wins, then pyproject, then none.
-    system_prompt = instructions or (ctx.config.instructions if ctx else "")
+    # Resolve per-call overrides → AgentConfig fallbacks
+    system_prompt = instructions or ctx.config.instructions
+    effective_temp = temperature if temperature is not None else ctx.config.temperature
+    effective_max_tokens = max_tokens if max_tokens is not None else ctx.config.max_tokens
+    effective_max_iter = max_iterations if max_iterations is not None else ctx.config.max_iterations
 
     base_messages: list[dict[str, Any]] = []
     if system_prompt:
@@ -741,65 +766,72 @@ async def _run_llm_loop(
     auth_headers = ws.config.authenticate()
     fmapi_url = f"{ws.config.host.rstrip('/')}/serving-endpoints/{ctx.config.model}/invocations"
 
+    # Build optional FMAPI params
+    fmapi_extra: dict[str, Any] = {}
+    if effective_temp is not None:
+        fmapi_extra["temperature"] = effective_temp
+    if effective_max_tokens is not None:
+        fmapi_extra["max_tokens"] = effective_max_tokens
+
     try:
-        import mlflow
+        import mlflow as _mlflow
 
         _mlflow_available = True
     except ImportError:
         _mlflow_available = False
 
     async with AsyncClient() as client:
-        for _ in range(10):  # max iterations as a safety cap
-            if _mlflow_available:
-                span_ctx = mlflow.start_span(
+        for _ in range(effective_max_iter):
+            llm_span = (
+                _mlflow.start_span(
                     name="llm",
                     span_type="LLM",
-                    attributes={
-                        "model": ctx.config.model,
-                        "input_messages": _json.dumps(messages),
-                    },
+                    attributes={"model": ctx.config.model, "input_messages": _json.dumps(messages)},
                 )
-            else:
-                span_ctx = None
-
-            response = await client.post(
-                fmapi_url,
-                json={"messages": messages, "tools": tool_schemas},
-                headers=auth_headers,
-                timeout=60.0,
+                if _mlflow_available else None
             )
-            response.raise_for_status()
-            data = response.json()
+            try:
+                response = await client.post(
+                    fmapi_url,
+                    json={"messages": messages, "tools": tool_schemas, **fmapi_extra},
+                    headers=auth_headers,
+                    timeout=60.0,
+                )
+                response.raise_for_status()
+                data = response.json()
 
-            choice = data["choices"][0]
-            assistant_msg = choice["message"]
-            finish_reason = choice.get("finish_reason") or choice.get("finishReason")
-            messages.append(assistant_msg)
+                choice = data["choices"][0]
+                assistant_msg = choice["message"]
+                finish_reason = choice.get("finish_reason") or choice.get("finishReason")
+                messages.append(assistant_msg)
 
-            if span_ctx is not None:
-                span_ctx.set_attribute("output_message", _json.dumps(assistant_msg))
-                span_ctx.set_attribute("finish_reason", finish_reason or "")
-                span_ctx.end()
+                if llm_span is not None:
+                    llm_span.set_attribute("output_message", _json.dumps(assistant_msg))
+                    llm_span.set_attribute("finish_reason", finish_reason or "")
+            finally:
+                if llm_span is not None:
+                    llm_span.end()
 
             if finish_reason == "tool_calls":
                 for tool_call in assistant_msg.get("tool_calls", []):
                     fn_name = tool_call["function"]["name"]
-                    if _mlflow_available:
-                        tool_span = mlflow.start_span(
+                    tool_span = (
+                        _mlflow.start_span(
                             name=fn_name,
                             span_type="TOOL",
                             attributes={"tool_call_id": tool_call.get("id", "")},
                         )
-                    else:
-                        tool_span = None
-
-                    result = await _dispatch_tool_call(request, tool_call, ctx)
-
-                    if tool_span is not None:
-                        tool_span.set_attribute(
-                            "result", result if isinstance(result, str) else _json.dumps(result)
-                        )
-                        tool_span.end()
+                        if _mlflow_available else None
+                    )
+                    try:
+                        result = await _dispatch_tool_call(request, tool_call, ctx)
+                        if tool_span is not None:
+                            tool_span.set_attribute(
+                                "result", result if isinstance(result, str) else _json.dumps(result)
+                            )
+                    finally:
+                        if tool_span is not None:
+                            tool_span.end()
 
                     messages.append({
                         "role": "tool",
@@ -809,7 +841,7 @@ async def _run_llm_loop(
             else:
                 return assistant_msg.get("content") or ""
 
-    # Safety cap hit
+    # Iteration cap hit — return last assistant message
     return next(
         (m.get("content", "") for m in reversed(messages) if m.get("role") == "assistant"),
         "",
@@ -860,10 +892,13 @@ async def _handle_invocation(
 
         return StreamingResponse(_sse_generator(), media_type="text/event-stream")
 
-    text = await ctx.agent.run(messages, request)
+    try:
+        text = await ctx.agent.run(messages, request)
+    finally:
+        if root_span is not None:
+            root_span.end()
     if root_span is not None:
         root_span.set_attribute("output", text)
-        root_span.end()
     return InvocationResponse(
         output=[OutputItem(content=[OutputTextContent(text=text)])]
     )

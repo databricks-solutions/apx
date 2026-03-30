@@ -29,6 +29,9 @@ name = "{{app_slug}}"
 description = "Add a description of what this agent does"
 model = "databricks-meta-llama-3-3-70b-instruct"
 # instructions = "You are a helpful assistant. ..."  # optional system prompt
+# temperature = 0.7      # optional; uses model default when absent
+# max_tokens = 2048      # optional; uses model default when absent
+# max_iterations = 10    # tool-calling loop safety cap (default: 10)
 
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning>=0.7.0"]
