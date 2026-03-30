@@ -155,12 +155,13 @@ class AgentCard(BaseModel):
     schemaVersion: str = "1.0"
     name: str
     description: str
-    url: str = ""
+    url: str = ""  # populated at request time from request.base_url
     protocolVersion: str = "0.3.0"
     capabilities: A2ACapabilities = A2ACapabilities()
     provider: A2AProvider = A2AProvider()
     authSchemes: list[A2AAuthScheme] = [A2AAuthScheme()]
     skills: list[A2ASkill] = []
+    mcpEndpoint: str | None = None  # SSE URL for MCP clients; populated at request time
 
 
 class AgentContext:
@@ -986,7 +987,12 @@ class _AgentDependency(LifespanDependency):
             ctx: AgentContext | None = request.app.state.agent_context
             if ctx is None:
                 raise HTTPException(status_code=404, detail="Agent protocol not configured")
-            return ctx.card
+            base = str(request.base_url).rstrip("/")
+            mcp_available = getattr(request.app.state, "mcp_server", None) is not None
+            return ctx.card.model_copy(update={
+                "url": base,
+                "mcpEndpoint": f"{base}/mcp/sse" if mcp_available else None,
+            })
 
         @agent_router.post("/invocations", include_in_schema=False)
         async def invocations(request: Request, body: InvocationRequest) -> Any:
