@@ -64,7 +64,7 @@ class _ToolFn(Protocol):
     def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
 
 # Module-level Agent instance, set when user calls Agent(tools=[...])
-_agent_instance: Agent | None = None
+_agent_instance: "BaseAgent | None" = None
 
 
 # ---------------------------------------------------------------------------
@@ -178,12 +178,19 @@ class AgentCard(BaseModel):
 
 
 class AgentContext:
-    """Provides agent config and tool registry to route handlers."""
+    """Provides agent config, tool registry, and root agent to route handlers."""
 
-    def __init__(self, config: AgentConfig, tools: list[AgentTool], card: AgentCard):
+    def __init__(
+        self,
+        config: AgentConfig,
+        tools: list[AgentTool],
+        card: AgentCard,
+        agent: "BaseAgent",
+    ):
         self.config = config
         self.tools = tools
         self.card = card
+        self.agent = agent
         self._tool_map: dict[str, AgentTool] = {t.name: t for t in tools}
 
     def get_tool(self, name: str) -> AgentTool | None:
@@ -343,12 +350,48 @@ def _schema_for_return(fn: _ToolFn) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
-# Agent class — the user-facing API
+# Agent types — user-facing API
 # ---------------------------------------------------------------------------
 
 
-class Agent:
-    """Register plain typed functions as agent tools.
+class BaseAgent:
+    """Abstract base for all APX agent types.
+
+    Subclass to create custom orchestration patterns, or use the built-in
+    ``LlmAgent`` (alias: ``Agent``), ``SequentialAgent``, and ``ParallelAgent``.
+    """
+
+    async def run(self, messages: list[Message], request: Request) -> str:
+        """Run and return the final text response."""
+        raise NotImplementedError
+
+    async def stream(self, messages: list[Message], request: Request) -> AsyncGenerator[str, None]:
+        """Yield text chunks as the agent produces them.
+
+        The default implementation runs to completion and yields the result
+        as a single chunk. Override for true token streaming.
+        """
+        yield await self.run(messages, request)
+
+    def get_tool_routers(self) -> list[APIRouter]:
+        """Return FastAPI routers for this agent's tool endpoints."""
+        return []
+
+    def collect_tools(self) -> list[AgentTool]:
+        """Return AgentTool descriptors for all local tools in this agent tree."""
+        return []
+
+    async def fetch_remote_tools(self) -> list[AgentTool]:
+        """Fetch AgentTool descriptors from remote sub-agents (A2A)."""
+        return []
+
+
+class LlmAgent(BaseAgent):
+    """LLM-powered agent with tool calling via FMAPI.
+
+    Typed tool functions are registered at construction time. Parameters typed
+    as ``Dependencies.*`` are injected by FastAPI and excluded from the schema;
+    all other typed parameters become tool inputs derived from their type hints.
 
     Example::
 
@@ -356,17 +399,12 @@ class Agent:
             \"\"\"Answer a question using a Genie Space.\"\"\"
             return ws.genie.ask(space_id=space_id, question=question).answer or ""
 
-        agent = Agent(tools=[query_genie])
-
-    Dependencies.* parameters are injected by FastAPI and excluded from the
-    tool schema. All other typed parameters become tool inputs.
+        agent = LlmAgent(tools=[query_genie])
     """
 
     def __init__(self, tools: list[_ToolFn], sub_agents: list[str] | None = None) -> None:
-        global _agent_instance
         self._tool_fns = tools
         self._sub_agent_urls = sub_agents or []
-        _agent_instance = self
 
         # Pre-analyze all functions at construction time
         self._analyzed: list[tuple[_ToolFn, dict[str, Any], list[str], type[BaseModel] | None]] = []
@@ -374,6 +412,15 @@ class Agent:
             plain_params, dep_names = _inspect_tool_fn(fn)
             input_model = _make_input_model(fn, plain_params)
             self._analyzed.append((fn, plain_params, dep_names, input_model))
+
+    async def run(self, messages: list[Message], request: Request) -> str:
+        return await _run_llm_loop(messages, request)
+
+    async def stream(self, messages: list[Message], request: Request) -> AsyncGenerator[str, None]:
+        text = await _run_llm_loop(messages, request)
+        chunk_size = 20
+        for i in range(0, len(text), chunk_size):
+            yield text[i : i + chunk_size]
 
     def build_router(self) -> APIRouter:
         """Build an APIRouter with a POST route for each tool."""
@@ -390,7 +437,10 @@ class Agent:
             )
         return router
 
-    def build_local_tools(self) -> list[AgentTool]:
+    def get_tool_routers(self) -> list[APIRouter]:
+        return [self.build_router()]
+
+    def collect_tools(self) -> list[AgentTool]:
         return [
             AgentTool(
                 name=fn.__name__,
@@ -401,7 +451,7 @@ class Agent:
             for fn, _, _, input_model in self._analyzed
         ]
 
-    async def fetch_sub_agent_tools(self) -> list[AgentTool]:
+    async def fetch_remote_tools(self) -> list[AgentTool]:
         """Fetch agent cards from sub-agent URLs and build tools from them."""
         from httpx import AsyncClient
 
@@ -417,18 +467,14 @@ class Agent:
                     logger.warning(f"Failed to fetch agent card from {card_url}: {e}")
                     continue
 
-                # Sanitize the agent name to a valid Python identifier
                 raw_name = card.get("name", url.split("/")[-1])
                 tool_name = raw_name.replace("-", "_").replace(" ", "_")
-
                 tools.append(AgentTool(
                     name=tool_name,
                     description=card.get("description", f"Agent at {url}"),
                     input_schema={
                         "type": "object",
-                        "properties": {
-                            "message": {"type": "string", "description": "The message to send to the agent"},
-                        },
+                        "properties": {"message": {"type": "string", "description": "Message to send"}},
                         "required": ["message"],
                     },
                     output_schema={"type": "string"},
@@ -436,6 +482,104 @@ class Agent:
                 ))
                 logger.info(f"Registered sub-agent '{tool_name}' from {url}")
 
+        return tools
+
+
+# Backwards-compatible alias
+Agent = LlmAgent
+
+
+class SequentialAgent(BaseAgent):
+    """Runs agents in order, each receiving the previous agent's output as context.
+
+    Example::
+
+        planner = LlmAgent(tools=[search, outline])
+        writer  = LlmAgent(tools=[draft, format])
+        agent   = SequentialAgent([planner, writer])
+    """
+
+    def __init__(self, agents: list[BaseAgent]) -> None:
+        if not agents:
+            raise ValueError("SequentialAgent requires at least one agent")
+        self._agents = agents
+
+    async def run(self, messages: list[Message], request: Request) -> str:
+        context = list(messages)
+        result = ""
+        for sub in self._agents:
+            result = await sub.run(context, request)
+            context.append(Message(role="assistant", content=result))
+        return result
+
+    async def stream(self, messages: list[Message], request: Request) -> AsyncGenerator[str, None]:
+        context = list(messages)
+        for sub in self._agents[:-1]:
+            result = await sub.run(context, request)
+            context.append(Message(role="assistant", content=result))
+        async for chunk in self._agents[-1].stream(context, request):
+            yield chunk
+
+    def get_tool_routers(self) -> list[APIRouter]:
+        routers: list[APIRouter] = []
+        for sub in self._agents:
+            routers.extend(sub.get_tool_routers())
+        return routers
+
+    def collect_tools(self) -> list[AgentTool]:
+        tools: list[AgentTool] = []
+        for sub in self._agents:
+            tools.extend(sub.collect_tools())
+        return tools
+
+    async def fetch_remote_tools(self) -> list[AgentTool]:
+        tools: list[AgentTool] = []
+        for sub in self._agents:
+            tools.extend(await sub.fetch_remote_tools())
+        return tools
+
+
+class ParallelAgent(BaseAgent):
+    """Runs all agents concurrently with the same input and merges their responses.
+
+    Example::
+
+        legal    = LlmAgent(tools=[check_contracts])
+        finance  = LlmAgent(tools=[check_budget])
+        agent    = ParallelAgent([legal, finance])
+    """
+
+    def __init__(self, agents: list[BaseAgent]) -> None:
+        if not agents:
+            raise ValueError("ParallelAgent requires at least one agent")
+        self._agents = agents
+
+    async def run(self, messages: list[Message], request: Request) -> str:
+        import asyncio
+
+        results = await asyncio.gather(*[sub.run(messages, request) for sub in self._agents])
+        return "\n\n".join(str(r) for r in results)
+
+    async def stream(self, messages: list[Message], request: Request) -> AsyncGenerator[str, None]:
+        # Collect all parallel results then yield the merged text as one chunk.
+        yield await self.run(messages, request)
+
+    def get_tool_routers(self) -> list[APIRouter]:
+        routers: list[APIRouter] = []
+        for sub in self._agents:
+            routers.extend(sub.get_tool_routers())
+        return routers
+
+    def collect_tools(self) -> list[AgentTool]:
+        tools: list[AgentTool] = []
+        for sub in self._agents:
+            tools.extend(sub.collect_tools())
+        return tools
+
+    async def fetch_remote_tools(self) -> list[AgentTool]:
+        tools: list[AgentTool] = []
+        for sub in self._agents:
+            tools.extend(await sub.fetch_remote_tools())
         return tools
 
 
@@ -520,8 +664,8 @@ async def _dispatch_tool_call(
 
 
 async def _run_llm_loop(
+    input_messages: list[Message],
     request: Request,
-    body: InvocationRequest,
 ) -> str:
     """Run the FMAPI LLM loop and return the final response text.
 
@@ -538,7 +682,7 @@ async def _run_llm_loop(
 
     messages = [
         {"role": m.role, "content": m.content, **({"name": m.name} if m.name else {})}
-        for m in body.input
+        for m in input_messages
     ]
     tool_schemas = _build_fmapi_tool_schemas(ctx.tools)
     auth_headers = ws.config.authenticate()
@@ -585,22 +729,24 @@ async def _handle_invocation(
     """Handle /invocations — returns JSON or SSE depending on body.stream."""
     import json as _json
 
+    ctx: AgentContext | None = request.app.state.agent_context
+    if ctx is None:
+        raise HTTPException(status_code=503, detail="Agent protocol not configured")
+
     if body.stream:
         async def _sse_generator() -> AsyncGenerator[str, None]:
             item_id = "msg_001"
             yield f"event: response.output_item.start\ndata: {_json.dumps({'item_id': item_id})}\n\n"
-            text = await _run_llm_loop(request, body)
-            # Stream the text in chunks
-            chunk_size = 20
-            for i in range(0, len(text), chunk_size):
-                chunk = text[i:i + chunk_size]
+            full_text = ""
+            async for chunk in ctx.agent.stream(body.input, request):
+                full_text += chunk
                 yield f"event: output_text.delta\ndata: {_json.dumps({'item_id': item_id, 'text': chunk})}\n\n"
-            output_item = OutputItem(content=[OutputTextContent(text=text)])
+            output_item = OutputItem(content=[OutputTextContent(text=full_text)])
             yield f"event: response.output_item.done\ndata: {_json.dumps({'item_id': item_id, 'output': output_item.model_dump()})}\n\n"
 
         return StreamingResponse(_sse_generator(), media_type="text/event-stream")
 
-    text = await _run_llm_loop(request, body)
+    text = await ctx.agent.run(body.input, request)
     return InvocationResponse(
         output=[OutputItem(content=[OutputTextContent(text=text)])]
     )
@@ -905,26 +1051,33 @@ def _build_mcp_components(ctx: AgentContext, app: FastAPI) -> tuple[Any, Any]:
 
 
 def _auto_import_agent_router() -> None:
-    """Import agent_router from the sibling backend package if not already done.
+    """Import agent_router and register the module-level ``agent`` variable.
 
-    This removes the need for an explicit side-effect import in app.py.
-    The convention is that agent_router.py lives one level up from core/:
+    Convention: ``agent_router.py`` lives one level up from ``core/`` and
+    exposes a module-level ``agent`` variable that is a ``BaseAgent`` instance:
 
         {pkg}.backend.core.agent   ← this module (__name__)
-        {pkg}.backend.agent_router ← auto-discovered
+        {pkg}.backend.agent_router ← discovered here; its ``agent`` is registered
+
+    Sub-agents constructed inside ``agent_router.py`` do NOT auto-register —
+    only the top-level ``agent`` assignment does. This avoids sub-agents in a
+    ``SequentialAgent`` or ``ParallelAgent`` accidentally overwriting the root.
     """
+    global _agent_instance
     if _agent_instance is not None:
         return
     import importlib
 
     parts = __name__.split(".")
     if len(parts) >= 3:
-        # Drop "core.agent" → arrive at "{pkg}.backend"
         backend_pkg = ".".join(parts[:-2])
         try:
-            importlib.import_module(f"{backend_pkg}.agent_router")
+            module = importlib.import_module(f"{backend_pkg}.agent_router")
+            candidate = getattr(module, "agent", None)
+            if isinstance(candidate, BaseAgent):
+                _agent_instance = candidate
         except ImportError:
-            pass  # No agent_router.py — that's fine, agent stays disabled
+            pass  # No agent_router.py — agent stays disabled
 
 
 # ---------------------------------------------------------------------------
@@ -944,14 +1097,14 @@ class _AgentDependency(LifespanDependency):
 
         if _agent_instance is None:
             logger.warning(
-                "No Agent() registered. Create one with Agent(tools=[...]) in your agent module."
+                "No agent registered. Set a module-level `agent = LlmAgent(tools=[...])` (or SequentialAgent/ParallelAgent) in agent_router.py."
             )
             app.state.agent_context = None
             yield
             return
 
-        tools = _agent_instance.build_local_tools()
-        tools += await _agent_instance.fetch_sub_agent_tools()
+        tools = _agent_instance.collect_tools()
+        tools += await _agent_instance.fetch_remote_tools()
         card = AgentCard(
             name=config.name,
             description=config.description,
@@ -966,7 +1119,7 @@ class _AgentDependency(LifespanDependency):
                 for t in tools
             ],
         )
-        ctx = AgentContext(config=config, tools=tools, card=card)
+        ctx = AgentContext(config=config, tools=tools, card=card, agent=_agent_instance)
         app.state.agent_context = ctx
         logger.info(f"Agent protocol enabled: {config.name} ({len(tools)} tools)")
 
@@ -991,7 +1144,7 @@ class _AgentDependency(LifespanDependency):
         _auto_import_agent_router()
         if _agent_instance is None:
             return []
-        return [_agent_instance.build_router()]
+        return _agent_instance.get_tool_routers()
 
     def get_root_routers(self) -> list[APIRouter]:
         """Protocol routes — mounted at app root: /.well-known, /invocations, /health."""
