@@ -75,7 +75,7 @@ pub(crate) async fn http_health_probe(host: &str, port: u16, path: &str) -> Prob
         }
         Err(err) => {
             let elapsed_ms = start.elapsed().as_millis();
-            debug!(url = %url, error = %err, elapsed_ms, "Health probe failed");
+            debug!(url = %url, error = %err, elapsed_ms, "Health probe failed with error: {err}");
             ProbeResult::Failed
         }
     }

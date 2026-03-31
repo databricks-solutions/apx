@@ -30,6 +30,7 @@ pub struct RequestQueue {
     scope_interns: Arc<ScopeInterns>,
     receive_template: Py<PyDict>,
     resolved: Py<ResolvedAwaitable>,
+    dev_mode: bool,
 }
 
 crate::opaque_debug!(RequestQueue);
@@ -43,6 +44,7 @@ impl RequestQueue {
         inbound: &InboundChannel,
         wakeup: Arc<Wakeup>,
         scope_interns: Arc<ScopeInterns>,
+        dev_mode: bool,
     ) -> PyResult<Self> {
         let receive_template = build_receive_template(py)?;
         let resolved = Py::new(py, ResolvedAwaitable)?;
@@ -52,6 +54,7 @@ impl RequestQueue {
             scope_interns,
             receive_template,
             resolved,
+            dev_mode,
         })
     }
 }
@@ -120,7 +123,7 @@ impl RequestQueue {
             let receive = SlotReceive::new(slot.body, self.receive_template.clone_ref(py));
             let receive_obj = Py::new(py, receive)?.into_bound(py).into_any();
 
-            let send = SlotSend::new(slot.response_tx, self.resolved.clone_ref(py));
+            let send = SlotSend::new(slot.response_tx, self.resolved.clone_ref(py), self.dev_mode);
             let send_obj = Py::new(py, send)?.into_bound(py).into_any();
 
             let scope_any = scope.into_bound(py).into_any();

@@ -15,6 +15,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::scope::ResolvedAwaitable;
 
+/// Generic 500 body returned to clients in production mode.
+const INTERNAL_ERROR_BODY: Bytes = Bytes::from_static(b"Internal Server Error");
+
 // ── SlotSend ─────────────────────────────────────────────────────────────
 
 /// ASGI `send` callable for the 2-thread pipeline.
@@ -29,6 +32,7 @@ pub struct SlotSend {
     response_tx: Option<oneshot::Sender<ResponseData>>,
     body_tx: Option<mpsc::UnboundedSender<Bytes>>,
     resolved: Py<ResolvedAwaitable>,
+    dev_mode: bool,
 }
 
 impl std::fmt::Debug for SlotSend {
@@ -46,6 +50,7 @@ impl SlotSend {
     pub(crate) fn new(
         response_tx: oneshot::Sender<ResponseData>,
         resolved: Py<ResolvedAwaitable>,
+        dev_mode: bool,
     ) -> Self {
         Self {
             status: None,
@@ -53,6 +58,7 @@ impl SlotSend {
             response_tx: Some(response_tx),
             body_tx: None,
             resolved,
+            dev_mode,
         }
     }
 }
@@ -62,17 +68,27 @@ impl SlotSend {
     /// Forward an unhandled app exception as a 500 response.
     ///
     /// Called by the `_guarded` wrapper in `_dispatch.py` when the ASGI
-    /// app raises an `Exception`.
-    fn send_error(&mut self, _traceback: String) {
+    /// app raises an `Exception`. Always logs the full traceback
+    /// server-side; the response body depends on `dev_mode`.
+    fn send_error(&mut self, traceback: String) {
+        tracing::error!(
+            name: "apx.dispatch.unhandled_exception",
+            "{traceback}",
+        );
         if let Some(response_tx) = self.response_tx.take() {
             let (body_tx, body_rx) = mpsc::unbounded_channel();
-            let _ = body_tx.send(Bytes::from_static(b"Internal Server Error"));
+            let body = if self.dev_mode {
+                Bytes::from(traceback)
+            } else {
+                INTERNAL_ERROR_BODY
+            };
+            let _ = body_tx.send(body);
             drop(body_tx);
             let response = ResponseData {
                 status: 500,
                 headers: vec![(
                     Bytes::from_static(b"content-type"),
-                    Bytes::from_static(b"text/plain"),
+                    Bytes::from_static(b"text/plain; charset=utf-8"),
                 )],
                 body_rx,
             };
@@ -230,5 +246,55 @@ fn extract_body_bytes(event: &Bound<'_, PyDict>) -> PyResult<Bytes> {
             Ok(Bytes::from_owner(backed))
         }
         Err(_) => Ok(Bytes::from(obj.extract::<Vec<u8>>()?)),
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test code uses unwrap/assert for clarity"
+)]
+mod tests {
+    use super::*;
+
+    fn make_slot_send(dev_mode: bool) -> (SlotSend, oneshot::Receiver<ResponseData>) {
+        let (tx, rx) = oneshot::channel();
+        let resolved = crate::with_py(|py| Py::new(py, ResolvedAwaitable).unwrap());
+        (SlotSend::new(tx, resolved, dev_mode), rx)
+    }
+
+    #[test]
+    fn send_error_prod_mode_returns_generic_body() {
+        let (mut slot, mut rx) = make_slot_send(false);
+        let traceback = "Traceback (most recent call last):\n  NameError: x\n".to_owned();
+        slot.send_error(traceback);
+
+        let mut response = rx.try_recv().unwrap();
+        assert_eq!(response.status, 500);
+        let body = response.body_rx.try_recv().unwrap();
+        assert_eq!(body.as_ref(), b"Internal Server Error");
+    }
+
+    #[test]
+    fn send_error_dev_mode_returns_traceback_body() {
+        let (mut slot, mut rx) = make_slot_send(true);
+        let traceback = "Traceback (most recent call last):\n  NameError: x\n".to_owned();
+        slot.send_error(traceback);
+
+        let mut response = rx.try_recv().unwrap();
+        assert_eq!(response.status, 500);
+        let body = response.body_rx.try_recv().unwrap();
+        let body_str = std::str::from_utf8(body.as_ref()).unwrap();
+        assert!(body_str.contains("Traceback"));
+        assert!(body_str.contains("NameError"));
+    }
+
+    #[test]
+    fn send_error_without_response_tx_does_not_panic() {
+        let (mut slot, _rx) = make_slot_send(false);
+        drop(slot.response_tx.take());
+        slot.send_error("some error".to_owned());
     }
 }

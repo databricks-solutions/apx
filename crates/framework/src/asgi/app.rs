@@ -77,6 +77,28 @@ pub enum AppLoadError {
     },
 }
 
+// ── format_pyerr ─────────────────────────────────────────────────────────
+
+/// Render a Python exception with its full traceback.
+///
+/// Uses `traceback.format_exception(err)` to produce the same multi-line
+/// output that Python prints on unhandled exceptions. Falls back to
+/// `PyErr`'s `Display` (type + message only) if the traceback module is
+/// unavailable or the formatting call itself fails.
+pub fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
+    format_pyerr_inner(py, err).unwrap_or_else(|| err.to_string())
+}
+
+/// Inner helper: returns `None` on any failure so the caller can fall back.
+fn format_pyerr_inner(py: Python<'_>, err: &PyErr) -> Option<String> {
+    let tb_mod = py.import(c"traceback").ok()?;
+    let lines = tb_mod
+        .call_method1(c"format_exception", (err.value(py),))
+        .ok()?;
+    let joined: String = lines.extract::<Vec<String>>().ok()?.join("");
+    Some(joined)
+}
+
 // ── parse_specifier ──────────────────────────────────────────────────────
 
 /// Split a specifier into `(module, attr)`.
@@ -135,13 +157,15 @@ pub trait AppSource: Send + Sync + std::fmt::Debug {
 #[derive(Debug)]
 pub struct ModuleImport {
     specifier: String,
+    dev_mode: bool,
 }
 
 impl ModuleImport {
     /// Create a new loader from a specifier string.
-    pub fn new(specifier: impl Into<String>) -> Self {
+    pub fn new(specifier: impl Into<String>, dev_mode: bool) -> Self {
         Self {
             specifier: specifier.into(),
+            dev_mode,
         }
     }
 
@@ -204,6 +228,7 @@ impl AppSource for ModuleImport {
             &ctx.pipeline.inbound,
             Arc::clone(&ctx.pipeline.wakeup),
             Arc::clone(&interns),
+            self.dev_mode,
         )
         .map_err(|e| AppLoadError::ImportFailed {
             module: "RequestQueue".to_owned(),
@@ -305,7 +330,7 @@ mod tests {
     #[test]
     fn load_builtin_callable() {
         crate::with_py(|py| {
-            let loader = ModuleImport::new("json:dumps");
+            let loader = ModuleImport::new("json:dumps", false);
             let app = loader.load_callable(py).unwrap();
             assert!(app.inner().bind(py).is_callable());
         });
@@ -314,7 +339,7 @@ mod tests {
     #[test]
     fn load_plain_module_default_attr_fails() {
         crate::with_py(|py| {
-            let loader = ModuleImport::new("json");
+            let loader = ModuleImport::new("json", false);
             let err = loader.load_callable(py).unwrap_err();
             assert!(matches!(err, AppLoadError::MissingAttribute { .. }));
         });
@@ -323,7 +348,7 @@ mod tests {
     #[test]
     fn load_missing_module() {
         crate::with_py(|py| {
-            let loader = ModuleImport::new("nonexistent_module_xyz:app");
+            let loader = ModuleImport::new("nonexistent_module_xyz:app", false);
             let err = loader.load_callable(py).unwrap_err();
             assert!(matches!(err, AppLoadError::ImportFailed { .. }));
         });
@@ -332,7 +357,7 @@ mod tests {
     #[test]
     fn load_missing_attr() {
         crate::with_py(|py| {
-            let loader = ModuleImport::new("json:nonexistent_attr_xyz");
+            let loader = ModuleImport::new("json:nonexistent_attr_xyz", false);
             let err = loader.load_callable(py).unwrap_err();
             assert!(matches!(err, AppLoadError::MissingAttribute { .. }));
         });
@@ -341,7 +366,7 @@ mod tests {
     #[test]
     fn load_not_callable() {
         crate::with_py(|py| {
-            let loader = ModuleImport::new("json:__name__");
+            let loader = ModuleImport::new("json:__name__", false);
             let err = loader.load_callable(py).unwrap_err();
             assert!(matches!(err, AppLoadError::NotCallable { .. }));
         });
@@ -361,7 +386,7 @@ mod tests {
     #[test]
     fn error_display_import_failed() {
         crate::with_py(|py| {
-            let loader = ModuleImport::new("nonexistent_module_xyz:app");
+            let loader = ModuleImport::new("nonexistent_module_xyz:app", false);
             let err = loader.load_callable(py).unwrap_err();
             let msg = format!("{err}");
             assert!(msg.contains("import"));
@@ -386,5 +411,38 @@ mod tests {
         };
         let msg = format!("{err}");
         assert!(msg.contains("not callable"));
+    }
+
+    // ── format_pyerr tests ───────────────────────────────────────────────
+
+    #[test]
+    fn format_pyerr_includes_traceback_lines() {
+        crate::with_py(|py| {
+            // Execute code that raises an exception with a traceback.
+            let result = py.run(c"exec('raise ValueError(\"test error\")')", None, None);
+            let err = result.unwrap_err();
+            let formatted = format_pyerr(py, &err);
+
+            assert!(
+                formatted.contains("ValueError"),
+                "should contain exception type, got: {formatted}"
+            );
+            assert!(
+                formatted.contains("test error"),
+                "should contain exception message, got: {formatted}"
+            );
+        });
+    }
+
+    #[test]
+    fn format_pyerr_fallback_on_simple_err() {
+        crate::with_py(|py| {
+            let err = pyo3::exceptions::PyRuntimeError::new_err("simple error");
+            let formatted = format_pyerr(py, &err);
+            assert!(
+                formatted.contains("RuntimeError") || formatted.contains("simple error"),
+                "should contain error info, got: {formatted}"
+            );
+        });
     }
 }

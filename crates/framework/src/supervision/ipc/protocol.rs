@@ -253,6 +253,9 @@ pub struct WorkerBootstrap {
     /// timeout so the worker can send `Drained` before being killed.
     #[serde(default = "default_drain_timeout_secs")]
     pub drain_timeout_secs: u64,
+    /// Enable dev-mode error visibility (tracebacks in 500 response bodies).
+    #[serde(default)]
+    pub dev_mode: bool,
 }
 
 fn default_drain_timeout_secs() -> u64 {
@@ -343,6 +346,7 @@ mod tests {
             loop_policy: "uvloop".to_owned(),
             relay_telemetry: false,
             drain_timeout_secs: 5,
+            dev_mode: false,
         };
         let msg = IpcMessage::Bootstrap(bootstrap);
         let encoded = rmp_serde::to_vec(&msg)
@@ -400,6 +404,31 @@ mod tests {
         match decoded {
             IpcMessage::StartupFailed { error } => {
                 assert!(error.contains("no attribute"));
+            }
+            other => unreachable!("expected StartupFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ipc_message_startup_failed_multiline_traceback_roundtrip() {
+        let traceback = "\
+Traceback (most recent call last):
+  File \"/app/router.py\", line 11, in <module>
+    x = undefined_var
+NameError: name 'undefined_var' is not defined
+";
+        let msg = IpcMessage::StartupFailed {
+            error: traceback.to_owned(),
+        };
+        let encoded = rmp_serde::to_vec(&msg)
+            .unwrap_or_else(|e| unreachable!("StartupFailed should be serializable: {e}"));
+        let decoded: IpcMessage = rmp_serde::from_slice(&encoded)
+            .unwrap_or_else(|e| unreachable!("StartupFailed should be deserializable: {e}"));
+        match decoded {
+            IpcMessage::StartupFailed { error } => {
+                assert!(error.contains("Traceback"));
+                assert!(error.contains("NameError"));
+                assert!(error.contains("router.py"));
             }
             other => unreachable!("expected StartupFailed, got {other:?}"),
         }
@@ -476,6 +505,7 @@ mod tests {
             loop_policy: "uvloop".to_owned(),
             relay_telemetry: false,
             drain_timeout_secs: 5,
+            dev_mode: false,
         };
         let encoded = rmp_serde::to_vec(&bootstrap).unwrap();
         let decoded: WorkerBootstrap = rmp_serde::from_slice(&encoded).unwrap();
@@ -494,6 +524,7 @@ mod tests {
             loop_policy: default_loop_policy(),
             relay_telemetry: false,
             drain_timeout_secs: 5,
+            dev_mode: false,
         };
         assert_eq!(bootstrap.loop_policy, "uvloop");
     }
@@ -510,6 +541,7 @@ mod tests {
             loop_policy: "uvloop".to_owned(),
             relay_telemetry: true,
             drain_timeout_secs: 5,
+            dev_mode: false,
         };
         let encoded = rmp_serde::to_vec(&bootstrap).unwrap();
         let decoded: WorkerBootstrap = rmp_serde::from_slice(&encoded).unwrap();

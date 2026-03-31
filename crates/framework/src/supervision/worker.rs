@@ -8,7 +8,7 @@ use super::ipc::channel::WorkerChannel;
 use super::ipc::protocol::{BootstrapError, IpcMessage, Nonce, WorkerBootstrap};
 use super::signal::shutdown_signal;
 use super::worker_context::WorkerContext;
-use crate::asgi::app::{AppSource, ModuleImport};
+use crate::asgi::app::{AppSource, ModuleImport, format_pyerr};
 use crate::io::EventLoop;
 use crate::protocol::http::service::{ApxService, ServiceConfig, serve_tcp};
 use crate::transport::{Listener, TransportConfig, TransportError};
@@ -39,6 +39,18 @@ pub enum WorkerError {
     /// Serving requests failed.
     #[error("serve failed: {0}")]
     Serve(std::io::Error),
+}
+
+/// Format a worker error with full Python traceback when available.
+///
+/// Pattern-matches through the error chain to find a `PyErr` inside
+/// `AppLoadError::ImportFailed` and renders its traceback. Falls back to
+/// the standard `Display` chain for non-Python errors.
+fn format_worker_error(err: &WorkerError) -> String {
+    if let WorkerError::AppLoad(crate::asgi::app::AppLoadError::ImportFailed { source, .. }) = err {
+        return Python::attach(|py| format_pyerr(py, source));
+    }
+    err.to_string()
 }
 
 /// Phase 1 runtime: TCP listener + Python interpreter (expensive, survives reloads).
@@ -138,7 +150,12 @@ fn load_app(runtime: &WorkerRuntime, bootstrap: &WorkerBootstrap) -> Result<AppR
     let server_addr = runtime.listener.local_addr();
     let event_loop_py = runtime.event_loop.event_loop_py();
     let dispatch = Python::attach(|py| {
-        ModuleImport::new(bootstrap.app_module.as_str()).build(py, ctx, event_loop_py, server_addr)
+        ModuleImport::new(bootstrap.app_module.as_str(), bootstrap.dev_mode).build(
+            py,
+            ctx,
+            event_loop_py,
+            server_addr,
+        )
     })?;
 
     let telemetry = Python::attach(|py| {
@@ -288,11 +305,10 @@ pub async fn run_worker(
     let ready = match load_app(&runtime, &bootstrap) {
         Ok(ready) => ready,
         Err(e) => {
+            let detail = format_worker_error(&e);
             let _ = runtime
                 .channel
-                .send(&IpcMessage::StartupFailed {
-                    error: e.to_string(),
-                })
+                .send(&IpcMessage::StartupFailed { error: detail })
                 .await;
             return Err(e);
         }

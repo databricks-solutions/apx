@@ -469,6 +469,7 @@ async fn bootstrap_worker(
         } else {
             config.drain_timeout.as_secs()
         },
+        dev_mode: config.dev_mode,
     };
 
     channel
