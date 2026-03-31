@@ -24,7 +24,7 @@
 use std::fs;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 // Re-export from apx-common crate
 pub use apx_common::{
@@ -69,7 +69,7 @@ fn spawn_daemon() -> Result<u32, String> {
         .map_err(|e| format!("Failed to spawn agent: {e}"))?;
 
     let pid = child.id();
-    info!("Spawned flux daemon with pid={}", pid);
+    debug!("Spawned flux daemon with pid={}", pid);
 
     Ok(pid)
 }
@@ -124,7 +124,7 @@ pub fn start() -> Result<(), String> {
     }
 
     // Start the daemon
-    info!("Starting flux daemon on port {}", FLUX_PORT);
+    debug!("Starting flux daemon on port {}", FLUX_PORT);
     let pid = spawn_daemon()?;
 
     // Wait for it to be ready
@@ -134,7 +134,7 @@ pub fn start() -> Result<(), String> {
     let lock = FluxLock::new(pid);
     write_lock(&lock)?;
 
-    info!("Flux daemon started successfully (pid={})", pid);
+    debug!("Flux daemon started successfully (pid={})", pid);
     Ok(())
 }
 
@@ -152,7 +152,7 @@ pub fn ensure_running() -> Result<(), String> {
                 return Ok(());
             }
             // Version mismatch or old lock without version — restart
-            info!(
+            debug!(
                 "Flux version mismatch (running: {:?}, expected: {}), restarting",
                 lock.version,
                 apx_common::VERSION
@@ -182,7 +182,7 @@ pub fn stop() -> Result<(), String> {
         return Ok(());
     }
 
-    info!("Stopping flux daemon (pid={})", lock.pid);
+    debug!("Stopping flux daemon (pid={})", lock.pid);
 
     // Kill the process tree
     if let Err(e) = crate::dev::common::kill_process_tree(lock.pid, "flux-daemon") {
@@ -193,6 +193,6 @@ pub fn stop() -> Result<(), String> {
     std::thread::sleep(Duration::from_millis(500));
 
     remove_lock()?;
-    info!("Flux daemon stopped");
+    debug!("Flux daemon stopped");
     Ok(())
 }

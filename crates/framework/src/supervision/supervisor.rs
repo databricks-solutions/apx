@@ -113,11 +113,18 @@ const WORKER_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorError> {
     validate_config(&config)?;
 
+    let startup_start = std::time::Instant::now();
     let nonce = Nonce::generate();
     let socket_dir = tempfile::tempdir().map_err(|e| SupervisorError::IpcCreate {
         index: 0,
         source: e,
     })?;
+
+    let has_otel = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .is_some();
+    let telemetry_label = if has_otel { "on" } else { "off" };
 
     tracing::info!(
         name: "apx.supervisor.started",
@@ -125,7 +132,10 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
         host = %config.host,
         port = config.port,
         app = %config.app_module,
-        "starting supervisor"
+        "starting server with {} event loop, telemetry {}, {} worker(s)",
+        config.loop_policy,
+        telemetry_label,
+        config.workers,
     );
 
     let mut workers = Vec::with_capacity(config.workers);
@@ -136,6 +146,14 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
     }
 
     let (system_config, process_config) = recv_telemetry_config(&mut workers[0].channel).await;
+
+    let startup_ms = startup_start.elapsed().as_millis();
+    tracing::info!(
+        name: "apx.supervisor.ready",
+        elapsed_ms = startup_ms,
+        "server ready in {}ms",
+        startup_ms,
+    );
 
     let _system_metrics_handle =
         crate::telemetry::system_metrics::spawn_system_metrics(&system_config);
@@ -158,10 +176,24 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
                 shutdown_workers(&mut workers, config.drain_timeout).await;
                 break;
             }
-            Some(()) = recv_dev_reload(&mut dev_watcher) => {
-                tracing::info!(name: "apx.supervisor.dev_reload", "source changed, restarting workers");
+            Some(info) = recv_dev_reload(&mut dev_watcher) => {
+                let summary = format_reload_files(&info.files);
+                tracing::info!(
+                    name: "apx.supervisor.dev_reload",
+                    "reload triggered by changes in {}",
+                    summary,
+                );
+                tracing::info!(name: "apx.supervisor.dev_reload_stop", "stopping workers for reload");
+                let reload_start = std::time::Instant::now();
                 kill_workers(&mut workers, config.drain_timeout).await;
                 respawn_all_workers(&mut workers, &config, &nonce, socket_dir.path()).await?;
+                let reload_ms = reload_start.elapsed().as_millis();
+                tracing::info!(
+                    name: "apx.supervisor.ready",
+                    elapsed_ms = reload_ms,
+                    "server ready in {}ms",
+                    reload_ms,
+                );
             }
         }
     }
@@ -186,7 +218,7 @@ async fn recv_telemetry_config(
 
     match tokio::time::timeout(WORKER_READINESS_TIMEOUT, channel.recv()).await {
         Ok(Ok(IpcMessage::TelemetryConfig(relay))) => {
-            tracing::info!(name: "apx.supervisor.telemetry_config_received", "received telemetry config from worker 0");
+            tracing::debug!(name: "apx.supervisor.telemetry_config_received", "received telemetry config from worker 0");
             (relay.system, relay.process)
         }
         Ok(Ok(other)) => {
@@ -280,7 +312,7 @@ async fn spawn_worker(
     })?;
 
     let child = spawn_worker_process(index, config, nonce, sock_str)?;
-    tracing::info!(name: "apx.supervisor.worker_spawned", worker = index, pid = child.id(), "spawned worker");
+    tracing::debug!(name: "apx.supervisor.worker_spawned", worker = index, pid = child.id(), "spawned worker");
 
     let channel = bootstrap_worker(index, config, nonce, &listener, relay_telemetry).await?;
 
@@ -373,7 +405,7 @@ async fn bootstrap_worker(
 
     match msg {
         IpcMessage::Ready => {
-            tracing::info!(name: "apx.supervisor.worker_ready", worker = index, "worker ready");
+            tracing::debug!(name: "apx.supervisor.worker_ready", worker = index, "worker ready");
             Ok(channel)
         }
         other => Err(SupervisorError::Ipc {
@@ -455,10 +487,24 @@ async fn respawn_one_worker(
 }
 
 /// Receive a dev reload signal, or pend forever when no watcher is active.
-async fn recv_dev_reload(watcher: &mut Option<DevWatcher>) -> Option<()> {
+async fn recv_dev_reload(
+    watcher: &mut Option<DevWatcher>,
+) -> Option<super::dev_watcher::ReloadInfo> {
     match watcher.as_mut() {
         Some(w) => w.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+/// Format a list of changed files for human-readable log output.
+///
+/// Returns `"path/to/file.py"` for a single file, or
+/// `"path/to/file.py (+N more)"` when multiple files changed.
+fn format_reload_files(files: &[PathBuf]) -> String {
+    match files.len() {
+        0 => "unknown files".to_owned(),
+        1 => files[0].display().to_string(),
+        n => format!("{} (+{} more)", files[0].display(), n - 1),
     }
 }
 

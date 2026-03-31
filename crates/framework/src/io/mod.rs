@@ -33,7 +33,7 @@ impl EventLoop {
             set_tokio_handle(handle);
         }
 
-        tracing::info!(name: "apx.io.event_loop_initialized", "event loop initialized (asyncio delegation)");
+        tracing::debug!(name: "apx.io.event_loop_initialized", "event loop initialized (asyncio delegation)");
 
         Ok(Self { reactor })
     }

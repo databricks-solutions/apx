@@ -321,8 +321,8 @@ async fn proxy_http(
     let should_log = should_log_request(&path_and_query, is_ui);
     let start = Instant::now();
 
-    if should_log {
-        info!("~> {} {} {}", target_name, method, path_and_query,);
+    if should_log && is_ui {
+        info!("~> {} {} {}", target_name, method, path_and_query);
     }
 
     let url = format!("http://{host}:{target_port}{path_and_query}");
@@ -354,16 +354,17 @@ async fn proxy_http(
         Err(err) => {
             let elapsed = start.elapsed().as_millis();
             if err.is_connect() {
-                // Connection refused is expected during startup while upstream boots
                 debug!(
                     target = target_name,
                     path = %path_and_query,
                     "Proxy request failed - upstream not ready yet."
                 );
-                debug!(
-                    "<~ {} {} {} 502 [{}ms] (upstream not ready)",
-                    target_name, method, path_and_query, elapsed
-                );
+                if is_ui {
+                    debug!(
+                        "<~ {} {} {} 502 [{}ms] (upstream not ready)",
+                        target_name, method, path_and_query, elapsed
+                    );
+                }
             } else {
                 warn!(
                     target = target_name,
@@ -373,17 +374,19 @@ async fn proxy_http(
                     error = %err,
                     "Proxy request failed - could not connect to upstream server."
                 );
-                info!(
-                    "<~ {} {} {} 502 [{}ms] (connection failed: {})",
-                    target_name, method, path_and_query, elapsed, err
-                );
+                if is_ui {
+                    info!(
+                        "<~ {} {} {} 502 [{}ms] (connection failed: {})",
+                        target_name, method, path_and_query, elapsed, err
+                    );
+                }
             }
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
     let status = response.status();
     let headers = response.headers().clone();
-    if should_log {
+    if should_log && is_ui {
         let elapsed = start.elapsed().as_millis();
         info!(
             "<~ {} {} {} {} [{}ms]",

@@ -63,7 +63,7 @@ pub async fn run(args: ServeArgs) -> i32 {
     match apx_framework::supervision::worker::connect_to_supervisor().await {
         Ok(Some((channel, bootstrap))) => {
             // Worker mode.
-            tracing::info!("running as worker");
+            tracing::debug!("running as worker");
             if let Err(e) = apx_framework::supervision::worker::run_worker(channel, bootstrap).await
             {
                 eprintln!("Worker error: {e}");

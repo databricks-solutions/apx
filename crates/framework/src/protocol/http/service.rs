@@ -279,7 +279,11 @@ impl ApxService {
             let _active = ActiveRequestGuard::enter(&method, scheme);
             let start = std::time::Instant::now();
 
+            tracing::info!(name: "apx.http.request", "~> {} {}", method, path);
+
             let Ok(permit) = Arc::clone(&self.semaphore).try_acquire_owned() else {
+                let elapsed_ms = start.elapsed().as_millis();
+                tracing::info!(name: "apx.http.response", "<~ {} {} 503 [{}ms]", method, path, elapsed_ms);
                 let resp =
                     error_response(hyper::StatusCode::SERVICE_UNAVAILABLE, "service overloaded");
                 http::record_duration(
@@ -320,6 +324,7 @@ impl ApxService {
             let route = server_route.as_deref().unwrap_or(&path);
             let status = response.status().as_u16();
             let elapsed = start.elapsed().as_secs_f64();
+            let elapsed_ms = (elapsed * 1000.0) as u64;
             let error_type = if status >= 400 {
                 Some(status.to_string())
             } else {
@@ -335,6 +340,8 @@ impl ApxService {
                 route,
                 error_type.as_deref(),
             );
+
+            tracing::info!(name: "apx.http.response", "<~ {} {} {} [{}ms]", method, route, status, elapsed_ms);
 
             response
         }

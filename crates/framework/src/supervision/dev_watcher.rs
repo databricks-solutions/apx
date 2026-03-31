@@ -11,7 +11,7 @@
 //! the `notify` watcher and exposes an async `recv()` API.
 
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
@@ -26,6 +26,13 @@ const PYCACHE_DIR: &str = "__pycache__";
 
 /// File extension to ignore (compiled bytecode).
 const BYTECODE_EXTENSION: &str = "pyc";
+
+/// Reload signal carrying the list of changed files.
+#[derive(Debug, Clone)]
+pub struct ReloadInfo {
+    /// Python source files that changed, deduplicated.
+    pub files: Vec<PathBuf>,
+}
 
 /// Errors from creating the dev file watcher.
 #[derive(Debug, thiserror::Error)]
@@ -42,7 +49,7 @@ pub enum DevWatcherError {
 /// file changed since the last signal."
 pub struct DevWatcher {
     watcher: notify::RecommendedWatcher,
-    rx: mpsc::Receiver<()>,
+    rx: mpsc::Receiver<ReloadInfo>,
 }
 
 impl std::fmt::Debug for DevWatcher {
@@ -67,7 +74,7 @@ impl DevWatcher {
             }
         })?;
 
-        let (reload_tx, reload_rx) = mpsc::channel::<()>(1);
+        let (reload_tx, reload_rx) = mpsc::channel::<ReloadInfo>(1);
         let dir = watch_dir.to_path_buf();
 
         tokio::spawn(debounce_loop(event_rx, reload_tx));
@@ -82,9 +89,9 @@ impl DevWatcher {
 
     /// Wait for the next reload signal.
     ///
-    /// Returns `Some(())` when at least one `.py` file changed,
+    /// Returns `Some(ReloadInfo)` when at least one `.py` file changed,
     /// or `None` if the watcher was dropped.
-    pub async fn recv(&mut self) -> Option<()> {
+    pub async fn recv(&mut self) -> Option<ReloadInfo> {
         self.rx.recv().await
     }
 
@@ -132,25 +139,44 @@ pub fn is_reload_event(event: &Event) -> bool {
 // ── Debounce loop ────────────────────────────────────────────────────────
 
 /// Background task: receives raw `notify` events, filters and debounces
-/// them, then sends a single `()` reload signal per batch.
-async fn debounce_loop(mut event_rx: mpsc::Receiver<Event>, reload_tx: mpsc::Sender<()>) {
+/// them, then sends a [`ReloadInfo`] with changed file paths per batch.
+async fn debounce_loop(mut event_rx: mpsc::Receiver<Event>, reload_tx: mpsc::Sender<ReloadInfo>) {
     while let Some(event) = event_rx.recv().await {
         if !is_reload_event(&event) {
             continue;
         }
 
-        tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
-        drain_pending(&mut event_rx);
+        let mut files: Vec<PathBuf> = collect_py_paths(&event);
 
-        if reload_tx.send(()).await.is_err() {
+        tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
+        drain_pending(&mut event_rx, &mut files);
+
+        files.sort();
+        files.dedup();
+
+        if reload_tx.send(ReloadInfo { files }).await.is_err() {
             break;
         }
     }
 }
 
-/// Drain all pending events from the channel without blocking.
-fn drain_pending(rx: &mut mpsc::Receiver<Event>) {
-    while rx.try_recv().is_ok() {}
+/// Extract `.py` file paths from a notify event.
+fn collect_py_paths(event: &Event) -> Vec<PathBuf> {
+    event
+        .paths
+        .iter()
+        .filter(|p| should_watch(p))
+        .cloned()
+        .collect()
+}
+
+/// Drain all pending events from the channel, collecting `.py` paths.
+fn drain_pending(rx: &mut mpsc::Receiver<Event>, files: &mut Vec<PathBuf>) {
+    while let Ok(event) = rx.try_recv() {
+        if is_reload_event(&event) {
+            files.extend(collect_py_paths(&event));
+        }
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -278,7 +304,11 @@ mod tests {
             result.is_ok(),
             "expected reload signal after .py file change"
         );
-        assert_eq!(result.unwrap(), Some(()));
+        let info = result.unwrap().unwrap();
+        assert!(
+            !info.files.is_empty(),
+            "expected at least one changed file path"
+        );
     }
 
     #[tokio::test]

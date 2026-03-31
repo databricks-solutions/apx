@@ -116,7 +116,7 @@ pub fn record_duration(
     duration_histogram().record(duration_secs, &attrs);
 
     FIRST.call_once(|| {
-        tracing::info!(
+        tracing::debug!(
             name: "apx.http.first_request_recorded",
             target: "apx::telemetry",
             method,

@@ -31,20 +31,20 @@ fn install_loop_policy(py: Python<'_>, policy: &str) {
                     tracing::error!(name: "apx.reactor.set_event_loop_policy_failed", error = %e, "asyncio.set_event_loop_policy() failed");
                     return;
                 }
-                tracing::info!(name: "apx.reactor.uvloop_policy_installed", "installed uvloop event loop policy");
+                tracing::debug!(name: "apx.reactor.uvloop_policy_installed", "installed uvloop event loop policy");
             }
             Err(e) => {
                 tracing::warn!(name: "apx.reactor.uvloop_unavailable_fallback", error = %e, "uvloop not available, falling back to asyncio");
             }
         }
     } else {
-        tracing::info!(name: "apx.reactor.event_loop_policy", policy, "using asyncio event loop policy");
+        tracing::debug!(name: "apx.reactor.event_loop_policy", policy, "using asyncio event loop policy");
     }
 }
 
 /// Create an asyncio event loop.
 fn create_event_loop(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-    tracing::info!(name: "apx.reactor.creating_event_loop", "creating asyncio event loop");
+    tracing::debug!(name: "apx.reactor.creating_event_loop", "creating asyncio event loop");
     py.import(c"asyncio")?.call_method0(c"new_event_loop")
 }
 
@@ -166,13 +166,13 @@ impl Reactor {
         events
             .call_method1(c"_set_running_loop", (&event_loop,))
             .map_err(|e| format!("_set_running_loop: {e}"))?;
-        tracing::info!(name: "apx.reactor.set_running_loop_installed", "reactor: _set_running_loop installed");
+        tracing::debug!(name: "apx.reactor.set_running_loop_installed", "reactor: _set_running_loop installed");
 
         // Eager task factory (Python 3.12+).
         if let Ok(eager_factory) = asyncio.getattr(c"eager_task_factory") {
             match event_loop.call_method1(c"set_task_factory", (eager_factory,)) {
                 Ok(_) => {
-                    tracing::info!(name: "apx.reactor.eager_task_factory_enabled", "eager task factory enabled (Python 3.12+)");
+                    tracing::debug!(name: "apx.reactor.eager_task_factory_enabled", "eager task factory enabled (Python 3.12+)");
                 }
                 Err(e) => {
                     tracing::debug!(name: "apx.reactor.eager_task_factory_unavailable", "eager task factory not available: {e}");
@@ -207,7 +207,7 @@ impl Reactor {
             })
             .map_err(|e| format!("spawn asyncio thread: {e}"))?;
 
-        tracing::info!(name: "apx.reactor.initialized", "reactor initialized (asyncio delegation)");
+        tracing::debug!(name: "apx.reactor.initialized", "reactor initialized (asyncio delegation)");
 
         Ok(Self {
             event_loop: event_loop.unbind(),

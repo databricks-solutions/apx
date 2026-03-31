@@ -73,7 +73,7 @@ async fn collection_loop(toggles: super::config::SystemGlobalToggles, interval: 
             sys.refresh_memory();
             let cpu_pct = sys.global_cpu_usage();
             let mem_used_mb = (sys.total_memory() - sys.available_memory()) / (1024 * 1024);
-            tracing::info!(
+            tracing::debug!(
                 name: "apx.telemetry.system_metrics.first_collection",
                 target: "apx::telemetry",
                 interval_ms = interval.as_millis(),

@@ -181,7 +181,7 @@ pub async fn run_worker(
         None
     };
 
-    tracing::info!(
+    tracing::debug!(
         name: "apx.worker.telemetry_bootstrap_complete",
         target: "apx::telemetry",
         process_metrics = telemetry_config.process.enabled,

@@ -70,18 +70,8 @@ where
             }
         } else {
             let level = event.metadata().level();
-            write!(writer, "{level:>5} ")?;
-
-            if let Some(id) = worker_id() {
-                write!(writer, "[worker-{id}] ")?;
-            }
-
-            let target = event.metadata().target();
-            write!(writer, "{target}: ")?;
-
-            if let (Some(file), Some(line)) = (event.metadata().file(), event.metadata().line()) {
-                write!(writer, "{file}:{line}: ")?;
-            }
+            let role = role_label();
+            write!(writer, "{level:>5} | [{role}] ")?;
 
             ctx.format_fields(writer.by_ref(), event)?;
             writeln!(writer)
@@ -89,11 +79,16 @@ where
     }
 }
 
-/// Return the `APX_WORKER_ID` env var value, cached after the first call.
-fn worker_id() -> Option<&'static str> {
-    static ID: OnceLock<Option<String>> = OnceLock::new();
-    ID.get_or_init(|| std::env::var("APX_WORKER_ID").ok())
-        .as_deref()
+/// Return the process role label, cached after the first call.
+///
+/// Workers have `APX_WORKER_ID` set and produce `"worker-N"`;
+/// the supervisor (no env var) produces `"supervisor"`.
+fn role_label() -> &'static str {
+    static LABEL: OnceLock<String> = OnceLock::new();
+    LABEL.get_or_init(|| match std::env::var("APX_WORKER_ID") {
+        Ok(id) => format!("worker-{id}"),
+        Err(_) => "supervisor".to_owned(),
+    })
 }
 
 /// Visitor that extracts the message field from a tracing event.
