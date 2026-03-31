@@ -1,8 +1,11 @@
 from importlib.metadata import version
+import signal
 
 __version__ = version("apx")
 
 __all__ = ["__version__"]
+
+GRACEFUL_EXIT_CODE = 128 + signal.SIGINT
 
 
 def _main() -> None:
@@ -11,4 +14,7 @@ def _main() -> None:
 
     from apx._core import run_cli
 
-    sys.exit(run_cli(sys.argv))
+    try:
+        sys.exit(run_cli(sys.argv))
+    except KeyboardInterrupt:
+        sys.exit(GRACEFUL_EXIT_CODE)

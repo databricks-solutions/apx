@@ -17,9 +17,6 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Minimum drain timeout (seconds) even if request_timeout_secs is lower.
-const MIN_DRAIN_TIMEOUT_SECS: u64 = 5;
-
 /// Errors during worker operation.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerError {
@@ -246,13 +243,14 @@ pub async fn run_worker(
         .await
         .map_err(WorkerError::Serve)?;
 
-    // Drain in-flight connections (bounded by request timeout).
-    let drain_timeout =
-        Duration::from_secs(bootstrap.request_timeout_secs.max(MIN_DRAIN_TIMEOUT_SECS));
-    let _ = tokio::time::timeout(drain_timeout, async {
-        while connections.join_next().await.is_some() {}
-    })
-    .await;
+    if bootstrap.drain_timeout_secs > 0 {
+        let _ = tokio::time::timeout(Duration::from_secs(bootstrap.drain_timeout_secs), async {
+            while connections.join_next().await.is_some() {}
+        })
+        .await;
+    }
+    // When drain_timeout_secs == 0 (dev mode), connections JoinSet drops
+    // immediately -- no HTTP drain, fastest possible restart.
 
     // Best-effort: tell supervisor we're done draining.
     let _ = ipc_writer.send(&IpcMessage::Drained).await;

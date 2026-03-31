@@ -5,7 +5,7 @@
 
 use crate::supervision::ipc::channel::{accept, connect, listen};
 use crate::supervision::ipc::protocol::IpcMessage;
-use crate::supervision::supervisor::{WorkerHandle, shutdown_workers};
+use crate::supervision::supervisor::{WorkerHandle, kill_workers, shutdown_workers};
 use std::time::Instant;
 use tokio::process::Command;
 
@@ -125,5 +125,69 @@ async fn shutdown_returns_quickly_when_workers_exit_after_drain() {
     assert!(
         elapsed < std::time::Duration::from_secs(2),
         "fast shutdown took too long: {elapsed:?}"
+    );
+}
+
+/// `kill_workers` sends SIGTERM, then SIGKILL after the cleanup timeout.
+/// An unkillable process (ignores SIGTERM) must be reaped within
+/// `cleanup_timeout + SIGKILL margin`.
+#[tokio::test]
+async fn kill_workers_sigkills_after_cleanup_timeout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = dir.path().join("kill.sock");
+    let sock_str = sock.to_str().expect("path");
+
+    let child = spawn_unkillable();
+    let (sup_ch, _worker_ch) = uds_pair(sock_str).await;
+
+    let mut workers = vec![WorkerHandle::new_for_test(0, child, sup_ch)];
+
+    let cleanup = std::time::Duration::from_secs(1);
+    let start = Instant::now();
+    kill_workers(&mut workers, cleanup).await;
+    let elapsed = start.elapsed();
+
+    let status = workers[0]
+        .child
+        .try_wait()
+        .expect("try_wait should not error");
+    assert!(
+        status.is_some(),
+        "worker process should have exited after kill_workers"
+    );
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "kill_workers took too long: {elapsed:?}"
+    );
+}
+
+/// When a process handles SIGTERM promptly, `kill_workers` returns without
+/// escalating to SIGKILL.
+#[tokio::test]
+async fn kill_workers_returns_quickly_when_workers_exit_on_sigterm() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = dir.path().join("killfast.sock");
+    let sock_str = sock.to_str().expect("path");
+
+    let child = Command::new("sleep")
+        .arg("300")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn sleep");
+
+    let (sup_ch, _worker_ch) = uds_pair(sock_str).await;
+
+    let mut workers = vec![WorkerHandle::new_for_test(0, child, sup_ch)];
+
+    let start = Instant::now();
+    kill_workers(&mut workers, std::time::Duration::from_secs(5)).await;
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "kill_workers should return quickly when process exits on SIGTERM: {elapsed:?}"
     );
 }

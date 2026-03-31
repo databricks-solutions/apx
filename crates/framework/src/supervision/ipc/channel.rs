@@ -200,6 +200,7 @@ mod tests {
             nonce,
             loop_policy: "uvloop".to_owned(),
             relay_telemetry: false,
+            drain_timeout_secs: 5,
         };
 
         let supervisor_handle = tokio::spawn(async move {

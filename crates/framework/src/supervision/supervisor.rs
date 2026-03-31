@@ -160,7 +160,7 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
             }
             Some(()) = recv_dev_reload(&mut dev_watcher) => {
                 tracing::info!(name: "apx.supervisor.dev_reload", "source changed, restarting workers");
-                shutdown_workers(&mut workers, config.drain_timeout).await;
+                kill_workers(&mut workers, config.drain_timeout).await;
                 respawn_all_workers(&mut workers, &config, &nonce, socket_dir.path()).await?;
             }
         }
@@ -354,6 +354,11 @@ async fn bootstrap_worker(
         nonce: nonce.clone(),
         loop_policy: config.loop_policy.clone(),
         relay_telemetry,
+        drain_timeout_secs: if config.dev_mode {
+            0
+        } else {
+            config.drain_timeout.as_secs()
+        },
     };
 
     channel
@@ -586,6 +591,36 @@ async fn sigterm_then_sigkill(workers: &mut [WorkerHandle]) {
 async fn kill_all(workers: &mut [WorkerHandle]) {
     for worker in workers.iter_mut() {
         let _ = worker.child.kill().await;
+    }
+}
+
+/// Dev-reload shutdown: SIGTERM workers, wait for cleanup, SIGKILL stragglers.
+///
+/// Unlike `shutdown_workers` (production path), this skips IPC Drain entirely.
+/// Workers receive SIGTERM, run Python lifespan cleanup, and exit.
+pub(crate) async fn kill_workers(workers: &mut [WorkerHandle], cleanup_timeout: Duration) {
+    for worker in workers.iter() {
+        if let Some(pid) = worker.child.id() {
+            send_signal(pid, Signal::Term).await;
+        }
+    }
+
+    let wait_all = async {
+        for worker in workers.iter_mut() {
+            let _ = worker.child.wait().await;
+        }
+    };
+
+    if tokio::time::timeout(cleanup_timeout, wait_all)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            name: "apx.supervisor.dev_reload_kill",
+            timeout_secs = cleanup_timeout.as_secs(),
+            "workers did not exit within cleanup timeout, sending SIGKILL",
+        );
+        kill_all(workers).await;
     }
 }
 

@@ -242,6 +242,15 @@ pub struct WorkerBootstrap {
     /// If true, the worker sends a `TelemetryConfig` message after app load.
     #[serde(default)]
     pub relay_telemetry: bool,
+    /// Maximum seconds the worker should spend draining in-flight connections
+    /// before giving up and exiting. Must be less than the supervisor's drain
+    /// timeout so the worker can send `Drained` before being killed.
+    #[serde(default = "default_drain_timeout_secs")]
+    pub drain_timeout_secs: u64,
+}
+
+fn default_drain_timeout_secs() -> u64 {
+    5
 }
 
 // ── Bootstrap errors ────────────────────────────────────────────────────
@@ -327,6 +336,7 @@ mod tests {
             nonce: Nonce::generate(),
             loop_policy: "uvloop".to_owned(),
             relay_telemetry: false,
+            drain_timeout_secs: 5,
         };
         let msg = IpcMessage::Bootstrap(bootstrap);
         let encoded = rmp_serde::to_vec(&msg)
@@ -442,6 +452,7 @@ mod tests {
             nonce: Nonce::from_string("abc123".to_owned()),
             loop_policy: "uvloop".to_owned(),
             relay_telemetry: false,
+            drain_timeout_secs: 5,
         };
         let encoded = rmp_serde::to_vec(&bootstrap).unwrap();
         let decoded: WorkerBootstrap = rmp_serde::from_slice(&encoded).unwrap();
@@ -459,6 +470,7 @@ mod tests {
             nonce: Nonce::from_string("abc123".to_owned()),
             loop_policy: default_loop_policy(),
             relay_telemetry: false,
+            drain_timeout_secs: 5,
         };
         assert_eq!(bootstrap.loop_policy, "uvloop");
     }
@@ -474,6 +486,7 @@ mod tests {
             nonce: Nonce::from_string("abc123".to_owned()),
             loop_policy: "uvloop".to_owned(),
             relay_telemetry: true,
+            drain_timeout_secs: 5,
         };
         let encoded = rmp_serde::to_vec(&bootstrap).unwrap();
         let decoded: WorkerBootstrap = rmp_serde::from_slice(&encoded).unwrap();
