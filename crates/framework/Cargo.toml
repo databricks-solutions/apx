@@ -43,6 +43,7 @@ http-body = "1"
 http-body-util.workspace = true
 sysinfo.workspace = true
 which.workspace = true
+notify.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 crossbeam-channel.workspace = true

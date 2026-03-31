@@ -117,6 +117,8 @@ pub async fn run_worker(
     let mut runtime = init_worker(&bootstrap, channel).await?;
     signal_readiness(&mut runtime.channel).await?;
 
+    apply_python_log_config()?;
+
     // Create the 3-thread dispatch pipeline (no GIL needed).
     let pipeline = Arc::new(
         crate::io::channel::DispatchPipeline::new()
@@ -301,6 +303,40 @@ pub async fn connect_to_supervisor()
     }
 
     Ok(Some((channel, bootstrap)))
+}
+
+// ── Python logging config ───────────────────────────────────────────────
+
+/// Apply the customer's Python logging config when `APX_PYTHON_LOG_CONFIG`
+/// is set (dev mode only).  Supports JSON (`logging.config.dictConfig`) and
+/// Python (`logging.config.fileConfig`) config files.
+fn apply_python_log_config() -> Result<(), WorkerError> {
+    let config_path = match std::env::var("APX_PYTHON_LOG_CONFIG") {
+        Ok(p) if !p.is_empty() => p,
+        _ => return Ok(()),
+    };
+
+    Python::attach(|py| {
+        let locals = pyo3::types::PyDict::new(py);
+        locals.set_item("_path", &config_path)?;
+
+        let path = std::path::Path::new(&config_path);
+        if path.extension().is_some_and(|ext| ext == "py") {
+            py.run(
+                c"import logging.config; logging.config.fileConfig(_path)",
+                None,
+                Some(&locals),
+            )?;
+        } else {
+            py.run(
+                c"import json, logging.config, pathlib; logging.config.dictConfig(json.loads(pathlib.Path(_path).read_text()))",
+                None,
+                Some(&locals),
+            )?;
+        }
+        Ok(())
+    })
+    .map_err(|e: PyErr| WorkerError::PythonInit(format!("log config: {e}")))
 }
 
 // ── launch wrapper ──────────────────────────────────────────────────────
@@ -518,6 +554,45 @@ _el2.close()
                 send_errors.is_empty(),
                 "CancelledError must not be forwarded to send_error: {send_errors:?}"
             );
+        });
+    }
+
+    // SAFETY: these env-var tests are single-threaded (#[test] with no async
+    // or parallel spawns), so set_var / remove_var cannot race.
+    #[expect(unsafe_code, reason = "env-var manipulation in single-threaded test")]
+    #[test]
+    fn apply_log_config_noop_when_unset() {
+        unsafe { std::env::remove_var("APX_PYTHON_LOG_CONFIG") };
+        apply_python_log_config().expect("noop when env var absent");
+    }
+
+    #[expect(unsafe_code, reason = "env-var manipulation in single-threaded test")]
+    #[test]
+    fn apply_log_config_noop_when_empty() {
+        unsafe { std::env::set_var("APX_PYTHON_LOG_CONFIG", "") };
+        let result = apply_python_log_config();
+        unsafe { std::env::remove_var("APX_PYTHON_LOG_CONFIG") };
+        result.expect("noop when env var empty");
+    }
+
+    #[expect(unsafe_code, reason = "env-var manipulation in single-threaded test")]
+    #[test]
+    fn apply_log_config_json() {
+        crate::with_py(|_py| {
+            let dir = tempfile::tempdir().expect("tmpdir");
+            let config_path = dir.path().join("logging.json");
+            std::fs::write(
+                &config_path,
+                r#"{"version": 1, "disable_existing_loggers": false, "handlers": {}, "loggers": {}}"#,
+            )
+            .expect("write config");
+
+            unsafe {
+                std::env::set_var("APX_PYTHON_LOG_CONFIG", config_path.to_str().expect("utf8"));
+            }
+            let result = apply_python_log_config();
+            unsafe { std::env::remove_var("APX_PYTHON_LOG_CONFIG") };
+            result.expect("dictConfig should succeed");
         });
     }
 }

@@ -54,7 +54,7 @@ pub struct ServerConfig {
     pub app_dir: PathBuf,
     /// Pre-bound TCP listener for the main server port.
     pub listener: tokio::net::TcpListener,
-    /// Port assigned to the backend (uvicorn) subprocess.
+    /// Port assigned to the backend subprocess.
     pub backend_port: u16,
     /// Port assigned to the frontend subprocess, if the project has a UI.
     pub frontend_port: Option<u16>,
@@ -157,7 +157,7 @@ pub async fn run_server(config: ServerConfig) -> Result<(), String> {
     process_manager.start_processes();
     debug!("Process spawning started in background");
 
-    // Start .env watcher — restarts uvicorn when environment variables change
+    // Start .env watcher — restarts backend when environment variables change
     spawn_polling_watcher(
         EnvWatcher::new(Arc::clone(&process_manager), app_dir.join(".env")),
         shutdown_tx.subscribe(),
@@ -254,7 +254,7 @@ pub async fn run_server(config: ServerConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// Watches the `.env` file for changes and restarts uvicorn when environment
+/// Watches the `.env` file for changes and restarts the backend when environment
 /// variables are added, removed, or modified.
 ///
 /// On the first poll the current variables are recorded as the baseline.
@@ -296,13 +296,13 @@ impl PollingWatcher for EnvWatcher {
             }
         };
         if self.has_loaded && current_vars != self.last_vars {
-            info!(".env changed, restarting uvicorn");
+            info!(".env changed, restarting backend");
             if let Err(err) = self
                 .process_manager
-                .restart_uvicorn_with_env(current_vars.clone())
+                .restart_backend_with_env(current_vars.clone())
                 .await
             {
-                warn!("Failed to restart uvicorn: {err}");
+                warn!("Failed to restart backend: {err}");
             }
         }
         self.last_vars = current_vars;

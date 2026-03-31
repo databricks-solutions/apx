@@ -156,13 +156,13 @@ impl ProcessManager {
                 debug!("Skipping frontend (backend-only project)");
             }
 
-            // 3. Uvicorn (critical)
-            debug!("Starting uvicorn backend process...");
+            // 3. Backend (critical)
+            debug!("Starting backend process...");
             if let Err(e) = pm.backend.spawn().await {
                 warn!("Failed to start backend: {}", e);
                 return; // Critical failure
             }
-            debug!("Uvicorn backend started successfully");
+            debug!("Backend started successfully");
 
             debug!("All processes spawned, starting file watcher");
             pm.backend.start_file_watcher();
@@ -259,8 +259,8 @@ impl ProcessManager {
         self.frontend.is_some()
     }
 
-    /// Restart the backend (uvicorn) process with updated environment variables.
-    pub async fn restart_uvicorn_with_env(
+    /// Restart the backend process with updated environment variables.
+    pub async fn restart_backend_with_env(
         &self,
         new_vars: HashMap<String, String>,
     ) -> Result<(), String> {

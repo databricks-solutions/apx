@@ -313,6 +313,7 @@ dependencies = [
  "hyper-tungstenite",
  "hyper-util",
  "mimalloc",
+ "notify",
  "opentelemetry 0.29.1",
  "opentelemetry_sdk 0.29.0",
  "pyo3",

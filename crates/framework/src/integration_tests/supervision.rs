@@ -64,7 +64,7 @@ async fn shutdown_kills_workers_that_linger_after_drain() {
     let mut workers = vec![WorkerHandle::new_for_test(0, child, sup_ch)];
 
     let start = Instant::now();
-    shutdown_workers(&mut workers).await;
+    shutdown_workers(&mut workers, std::time::Duration::from_secs(5)).await;
     let elapsed = start.elapsed();
 
     // The process should be reaped after shutdown_workers returns.
@@ -118,7 +118,7 @@ async fn shutdown_returns_quickly_when_workers_exit_after_drain() {
     let mut workers = vec![WorkerHandle::new_for_test(0, child, sup_ch)];
 
     let start = Instant::now();
-    shutdown_workers(&mut workers).await;
+    shutdown_workers(&mut workers, std::time::Duration::from_secs(5)).await;
     let elapsed = start.elapsed();
 
     // Should complete well under the SIGKILL_TIMEOUT since the process exits fast.

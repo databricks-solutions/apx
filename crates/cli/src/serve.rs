@@ -36,6 +36,15 @@ pub struct ServeArgs {
     /// Event loop policy: "asyncio" (stdlib) or "uvloop" (default).
     #[arg(long = "loop", default_value = "uvloop")]
     loop_policy: String,
+
+    /// Enable dev-mode file watcher (restarts workers on .py changes).
+    #[arg(long, hide = true)]
+    dev: bool,
+
+    /// Maximum seconds to wait for workers to drain in-flight requests
+    /// before warning and killing them.
+    #[arg(long, default_value_t = 5)]
+    drain_timeout: u64,
 }
 
 /// Validate the CLI target as a Python dotted module path.
@@ -85,6 +94,8 @@ pub async fn run(args: ServeArgs) -> i32 {
                     Some(args.max_concurrent)
                 },
                 loop_policy: args.loop_policy,
+                dev_mode: args.dev,
+                drain_timeout: Duration::from_secs(args.drain_timeout),
             };
 
             if let Err(e) = apx_framework::supervision::supervisor::run_supervisor(config).await {

@@ -1,7 +1,11 @@
-//! Backend (uvicorn) lifecycle manager for the APX dev server.
+//! Backend lifecycle manager for the APX dev server.
 //!
-//! Encapsulates uvicorn spawning, log config resolution, log forwarding,
-//! file watching, and environment variable management.
+//! Spawns `apx serve --dev` (the framework runtime with hot-reload) as
+//! the backend process. Handles log forwarding, config-file watching
+//! (`.env`, `pyproject.toml`, `uv.lock`), and environment variable management.
+//!
+//! Python source file watching (`.py` changes) is handled by the framework's
+//! supervisor `DevWatcher`; this module only watches config/dependency files.
 // Runs inside the dev server process (in-process for attached mode,
 // child process for detached mode). Never in the MCP server process
 // — stdout output here is safe.
@@ -24,11 +28,8 @@ use crate::dev::embedded_db::EmbeddedDb;
 use crate::dev::otel::forward_log_to_flux;
 use crate::dev::token;
 use crate::dotenv::DotenvFile;
-use crate::external::uv::UvTool;
-use crate::python_logging::{
-    DevConfig, LogConfigResult, default_logging_config, resolve_log_config,
-    write_logging_config_json,
-};
+use crate::external::ToolCommand;
+use crate::python_logging::{DevConfig, resolve_log_config};
 use apx_common::hosts::CLIENT_HOST;
 
 /// Files that trigger a backend restart when modified.
@@ -65,7 +66,7 @@ pub struct BackendConfig {
 // Backend
 // ---------------------------------------------------------------------------
 
-/// Self-contained backend (uvicorn) lifecycle manager.
+/// Self-contained backend lifecycle manager.
 /// `ProcessManager` interacts only through this API.
 pub struct Backend {
     child: Arc<Mutex<Option<Child>>>,
@@ -94,11 +95,14 @@ impl Backend {
         &self.cfg.dev_token
     }
 
-    /// Spawn uvicorn. Resolves log config, builds the command, attaches log
-    /// forwarders, and stores the child handle.
+    /// Spawn the framework backend (`apx serve --dev`).
     pub async fn spawn(&self) -> Result<(), String> {
-        let log_config = self.resolve_and_validate_log_config().await?;
-        let tool_cmd = self.build_uvicorn_command(&log_config).await?;
+        let log_config_path =
+            resolve_log_config(&self.cfg.dev_config, &self.cfg.app_slug, &self.cfg.app_dir).await?;
+
+        let vars = self.cfg.dotenv_vars.lock().await;
+        let tool_cmd = self.build_serve_command(&vars, &log_config_path.to_string_path())?;
+        drop(vars);
 
         let mut child = tool_cmd.spawn().map_err(String::from)?;
         self.attach_log_forwarders(&mut child);
@@ -119,7 +123,7 @@ impl Backend {
     }
 
     /// Watch `.env`, `pyproject.toml`, and `uv.lock` for changes and restart
-    /// uvicorn when any of them change.
+    /// the backend when any of them change.
     pub fn start_file_watcher(self: &Arc<Self>) {
         let backend = Arc::clone(self);
         let restarting = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -150,100 +154,55 @@ impl Backend {
         });
     }
 
-    // -- private: log config --
-
-    /// Resolve uvicorn logging config. For JSON configs, validates via Python
-    /// and falls back to the default config on failure.
-    async fn resolve_and_validate_log_config(&self) -> Result<String, String> {
-        let result =
-            resolve_log_config(&self.cfg.dev_config, &self.cfg.app_slug, &self.cfg.app_dir).await?;
-
-        match &result {
-            LogConfigResult::PythonFile(path) => Ok(path.display().to_string()),
-            LogConfigResult::JsonConfig(path) => self.validate_json_log_config(path).await,
-        }
-    }
-
-    /// Run Python's `logging.config.dictConfig` against a JSON config file.
-    /// Returns the config path on success, or generates a default fallback.
-    async fn validate_json_log_config(
-        &self,
-        config_path: &std::path::Path,
-    ) -> Result<String, String> {
-        const VALIDATE_LOGGING_CONFIG: &str = "import sys, json, logging.config; logging.config.dictConfig(json.load(open(sys.argv[1])))";
-
-        let output = UvTool::new("python")
-            .await?
-            .cmd()
-            .args([
-                "-c",
-                VALIDATE_LOGGING_CONFIG,
-                &config_path.display().to_string(),
-            ])
-            .cwd(&self.cfg.app_dir)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .exec()
-            .await
-            .map_err(|e| format!("Failed to validate logging config: {e}"))?;
-
-        if output.exit_code == Some(0) {
-            return Ok(config_path.display().to_string());
-        }
-
-        warn!(
-            "Logging config validation failed, falling back to default:\n{}",
-            output.stderr
-        );
-        eprintln!(
-            "⚠️  Custom logging config is invalid, using default config:\n{}",
-            output.stderr
-        );
-
-        let default = default_logging_config(&self.cfg.app_slug);
-        let path = write_logging_config_json(&default, &self.cfg.app_dir)
-            .await
-            .map_err(|e| format!("Failed to write fallback logging config: {e}"))?;
-        Ok(path.display().to_string())
-    }
-
     // -- private: command construction --
 
-    /// Construct the `uv run uvicorn` command with all env vars.
-    async fn build_uvicorn_command(
-        &self,
-        log_config: &str,
-    ) -> Result<crate::external::ToolCommand, String> {
-        let cfg = &self.cfg;
+    /// Resolve the `apx` binary path.
+    fn resolve_apx_binary() -> PathBuf {
+        which::which("apx")
+            .unwrap_or_else(|_| std::env::current_exe().unwrap_or_else(|_| PathBuf::from("apx")))
+    }
 
-        let mut cmd = UvTool::new("uvicorn")
-            .await?
-            .cmd()
-            .args([
-                &cfg.app_entrypoint,
-                "--host",
-                &cfg.host,
-                "--port",
-                &cfg.backend_port.to_string(),
-                "--reload",
-                "--log-config",
-                log_config,
-            ])
+    /// Extract the module path from `app_entrypoint`.
+    ///
+    /// The entrypoint may be `"backend.app:app"` (module:attr style) or just
+    /// `"backend.app"`. The framework only needs the module part — the
+    /// attribute defaults to `"app"` in `ModuleImport`.
+    fn parse_module(entrypoint: &str) -> &str {
+        entrypoint.split(':').next().unwrap_or(entrypoint)
+    }
+
+    /// Build the `apx serve --dev` command with all env vars.
+    fn build_serve_command(
+        &self,
+        dotenv_vars: &HashMap<String, String>,
+        log_config_path: &str,
+    ) -> Result<ToolCommand, String> {
+        let cfg = &self.cfg;
+        let exe = Self::resolve_apx_binary();
+        let module = Self::parse_module(&cfg.app_entrypoint);
+
+        let mut cmd = ToolCommand::new(exe, "apx")
+            .arg("serve")
+            .arg(module)
+            .args(["--host", &cfg.host])
+            .args(["--port", &cfg.backend_port.to_string()])
+            .args(["--workers", "1"])
+            .arg("--dev")
+            .args(["--loop", "uvloop"])
             .cwd(&cfg.app_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // APX runtime context
+            .env("PYTHONPATH", &cfg.app_dir)
             .env("APX_BACKEND_PORT", cfg.backend_port.to_string())
             .env("APX_DEV_DB_PORT", cfg.db_port.to_string())
             .env("APX_DEV_SERVER_PORT", cfg.dev_server_port.to_string())
             .env("APX_DEV_SERVER_HOST", &cfg.host)
             .env(token::DEV_TOKEN_ENV, &cfg.dev_token)
-            // Databricks SDK user-agent tracking
             .env("DATABRICKS_SDK_UPSTREAM", "apx")
             .env("DATABRICKS_SDK_UPSTREAM_VERSION", apx_common::VERSION)
-            // Force Python to flush stdout/stderr immediately
-            .env("PYTHONUNBUFFERED", "1");
+            .env("PYTHONUNBUFFERED", "1")
+            .env("APX_PYTHON_LOG_CONFIG", log_config_path);
 
         if let Some(fp) = cfg.frontend_port {
             cmd = cmd.env("APX_FRONTEND_PORT", fp.to_string());
@@ -254,8 +213,7 @@ impl Backend {
             warn!("No database found for backend, APX_DEV_DB_PWD will not be set");
         }
 
-        let vars = cfg.dotenv_vars.lock().await;
-        for (key, value) in vars.iter() {
+        for (key, value) in dotenv_vars {
             cmd = cmd.env(key, value);
         }
 
@@ -418,7 +376,7 @@ fn try_acquire_restart(flag: &std::sync::atomic::AtomicBool) -> bool {
 
 /// Execute a single file-change restart cycle: sync deps, reload env, respawn.
 async fn handle_file_change(backend: &Backend, file_name: &str) {
-    info!("{} changed, restarting uvicorn", file_name);
+    info!("{} changed, restarting backend", file_name);
 
     if DEPENDENCY_FILES.contains(&file_name) {
         info!("Running uv sync due to {} change", file_name);
@@ -438,5 +396,35 @@ async fn handle_file_change(backend: &Backend, file_name: &str) {
     }
     if let Err(e) = backend.spawn().await {
         warn!("Failed to restart backend: {}", e);
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_module_strips_attr() {
+        assert_eq!(Backend::parse_module("backend.app:app"), "backend.app");
+    }
+
+    #[test]
+    fn parse_module_bare_module() {
+        assert_eq!(Backend::parse_module("backend.app"), "backend.app");
+    }
+
+    #[test]
+    fn parse_module_nested() {
+        assert_eq!(
+            Backend::parse_module("myproject.api.main:create_app"),
+            "myproject.api.main"
+        );
+    }
+
+    #[test]
+    fn parse_module_single_component() {
+        assert_eq!(Backend::parse_module("app"), "app");
     }
 }

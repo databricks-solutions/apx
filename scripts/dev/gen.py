@@ -83,6 +83,16 @@ def find_wheel(dist_dir: Path) -> Path:
     return wheels[0]
 
 
+def python_version_from_wheel(wheel: Path) -> str | None:
+    """Extract the CPython version tag from a wheel filename (e.g. 'cp311' -> '3.11')."""
+    import re
+
+    m = re.search(r"-cp(\d)(\d+)-", wheel.name)
+    if m:
+        return f"{m.group(1)}.{m.group(2)}"
+    return None
+
+
 def patch_pyproject(pyproject_path: Path, wheel_path: Path) -> None:
     """Remove the apx-index source config and point apx dep to local wheel."""
     doc = tomlkit.parse(pyproject_path.read_text())
@@ -168,7 +178,7 @@ def main() -> None:
 
     project_root = Path(__file__).resolve().parent.parent.parent
     dist_dir = project_root / "dist"
-    total = 7
+    total = 8
 
     profile_label = profile or "interactive"
     print(
@@ -204,15 +214,11 @@ def main() -> None:
                 print(f"  {DIM}Nothing to remove{RESET}")
 
         with stage("Initializing project", 4, total):
-            cmd = [
-                "uvx",
-                "--no-cache",
-                "--from",
-                str(wheel),
-                "apx",
-                "init",
-                str(folder),
-            ]
+            cmd = ["uvx", "--no-cache"]
+            py_ver = python_version_from_wheel(wheel)
+            if py_ver:
+                cmd += ["--python", py_ver]
+            cmd += ["--from", str(wheel), "apx", "init", str(folder)]
             if profile:
                 cmd += ["-p", profile]
             cmd += extra_args

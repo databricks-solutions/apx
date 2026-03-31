@@ -92,15 +92,14 @@ pub struct RootLoggerConfig {
 /// Result of resolving log configuration
 #[derive(Debug, Clone)]
 pub enum LogConfigResult {
-    /// JSON config file path (.apx/uvicorn_logging.json)
+    /// JSON config file path (.apx/logging.json)
     JsonConfig(PathBuf),
     /// External Python file path
     PythonFile(PathBuf),
 }
 
 impl LogConfigResult {
-    /// Get the path as a string for passing to uvicorn
-    #[cfg(test)]
+    /// Get the path as a string for passing to the backend process.
     pub fn to_string_path(&self) -> String {
         match self {
             LogConfigResult::JsonConfig(p) | LogConfigResult::PythonFile(p) => {
@@ -462,7 +461,7 @@ pub async fn write_logging_config_json(
         .await
         .map_err(|e| format!("Failed to create .apx directory: {e}"))?;
 
-    let config_path = config_dir.join("uvicorn_logging.json");
+    let config_path = config_dir.join("logging.json");
 
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize logging config: {e}"))?;
