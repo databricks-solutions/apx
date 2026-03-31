@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use opentelemetry::metrics::AsyncInstrument;
 use sysinfo::{Pid, System};
 
+use super::Refreshable;
 use super::config::ProcessMetricToggles;
 use super::defs;
 use super::http::framework_meter;
@@ -38,7 +39,9 @@ impl ProcessState {
             last_refresh: Instant::now(),
         }
     }
+}
 
+impl Refreshable for ProcessState {
     fn ensure_fresh(&mut self) {
         if self.last_refresh.elapsed() < STALENESS_THRESHOLD {
             return;
@@ -81,37 +84,42 @@ pub fn register_process_metrics(toggles: ProcessMetricToggles) {
     );
 }
 
-// ── Per-metric observe helpers ───────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+/// Refresh state and look up the tracked process, invoking `f` if found.
+fn with_process<F>(state: &Arc<Mutex<ProcessState>>, f: F)
+where
+    F: FnOnce(&sysinfo::Process),
+{
+    super::with_fresh(state, |s| {
+        if let Some(process) = s.sys.process(s.pid) {
+            f(process);
+        }
+    });
+}
+
+// ── Per-metric observe callbacks ─────────────────────────────────────────
 
 fn observe_process_cpu(state: &Arc<Mutex<ProcessState>>, instrument: &dyn AsyncInstrument<f64>) {
-    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-    s.ensure_fresh();
-    let Some(process) = s.sys.process(s.pid) else {
-        return;
-    };
-    let usage = f64::from(process.cpu_usage()) / 100.0;
-    instrument.observe(usage, &[]);
+    with_process(state, |p| {
+        let usage = f64::from(p.cpu_usage()) / 100.0;
+        instrument.observe(usage, &[]);
+    });
 }
 
 fn observe_process_memory(state: &Arc<Mutex<ProcessState>>, instrument: &dyn AsyncInstrument<f64>) {
-    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-    s.ensure_fresh();
-    let Some(process) = s.sys.process(s.pid) else {
-        return;
-    };
-    instrument.observe(process.memory() as f64, &[]);
+    with_process(state, |p| {
+        instrument.observe(p.memory() as f64, &[]);
+    });
 }
 
 fn observe_process_threads(
     state: &Arc<Mutex<ProcessState>>,
     instrument: &dyn AsyncInstrument<f64>,
 ) {
-    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-    s.ensure_fresh();
-    let Some(process) = s.sys.process(s.pid) else {
-        return;
-    };
-    if let Some(tasks) = process.tasks() {
-        instrument.observe(tasks.len() as f64, &[]);
-    }
+    with_process(state, |p| {
+        if let Some(tasks) = p.tasks() {
+            instrument.observe(tasks.len() as f64, &[]);
+        }
+    });
 }

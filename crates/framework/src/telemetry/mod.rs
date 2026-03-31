@@ -75,6 +75,25 @@ macro_rules! timed {
 }
 pub(crate) use timed;
 
+/// State that can be refreshed before reading.
+///
+/// Implemented by `SystemState` and `ProcessState` to share the
+/// lock-refresh-read pattern across observable metric callbacks.
+pub(super) trait Refreshable {
+    fn ensure_fresh(&mut self);
+}
+
+/// Lock a shared `Refreshable`, refresh if stale, then invoke `f`.
+pub(super) fn with_fresh<S, F>(state: &std::sync::Arc<std::sync::Mutex<S>>, f: F)
+where
+    S: Refreshable,
+    F: FnOnce(&S),
+{
+    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+    s.ensure_fresh();
+    f(&s);
+}
+
 /// Bootstrap Python-side telemetry: install log handler + init context var.
 ///
 /// Called once during worker startup, after the Python interpreter and

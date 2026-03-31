@@ -14,6 +14,7 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::AsyncInstrument;
 use sysinfo::{Disks, Networks, System};
 
+use super::Refreshable;
 use super::config::SystemGlobalToggles;
 use super::defs;
 use super::http::framework_meter;
@@ -42,7 +43,9 @@ impl SystemState {
             last_refresh: Instant::now(),
         }
     }
+}
 
+impl Refreshable for SystemState {
     fn ensure_fresh(&mut self) {
         if self.last_refresh.elapsed() < STALENESS_THRESHOLD {
             return;
@@ -95,65 +98,65 @@ pub fn register_system_metrics(toggles: SystemGlobalToggles) {
     );
 }
 
-// ── Per-metric observe helpers ───────────────────────────────────────────
+// ── Per-metric observe callbacks ─────────────────────────────────────────
 
 fn observe_cpu(state: &Arc<Mutex<SystemState>>, instrument: &dyn AsyncInstrument<f64>) {
-    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-    s.ensure_fresh();
-    let usage = f64::from(s.sys.global_cpu_usage()) / 100.0;
-    instrument.observe(usage, &[]);
+    super::with_fresh(state, |s| {
+        let usage = f64::from(s.sys.global_cpu_usage()) / 100.0;
+        instrument.observe(usage, &[]);
+    });
 }
 
 fn observe_memory(state: &Arc<Mutex<SystemState>>, instrument: &dyn AsyncInstrument<f64>) {
-    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-    s.ensure_fresh();
-    let total = s.sys.total_memory();
-    let available = s.sys.available_memory();
-    if total > 0 {
-        instrument.observe(1.0 - (available as f64 / total as f64), &[]);
-    }
+    super::with_fresh(state, |s| {
+        let total = s.sys.total_memory();
+        let available = s.sys.available_memory();
+        if total > 0 {
+            instrument.observe(1.0 - (available as f64 / total as f64), &[]);
+        }
+    });
 }
 
 fn observe_paging(state: &Arc<Mutex<SystemState>>, instrument: &dyn AsyncInstrument<f64>) {
-    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-    s.ensure_fresh();
-    let total = s.sys.total_swap();
-    let used = s.sys.used_swap();
-    if total > 0 {
-        instrument.observe(used as f64 / total as f64, &[]);
-    }
+    super::with_fresh(state, |s| {
+        let total = s.sys.total_swap();
+        let used = s.sys.used_swap();
+        if total > 0 {
+            instrument.observe(used as f64 / total as f64, &[]);
+        }
+    });
 }
 
 fn observe_disk_io(state: &Arc<Mutex<SystemState>>, instrument: &dyn AsyncInstrument<f64>) {
-    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-    s.ensure_fresh();
-    let Some(disks) = &s.disks else { return };
-    let (read, written) = disks.iter().fold((0_u64, 0_u64), |(r, w), disk| {
-        let usage = disk.usage();
-        (r + usage.read_bytes, w + usage.written_bytes)
+    super::with_fresh(state, |s| {
+        let Some(disks) = &s.disks else { return };
+        let (read, written) = disks.iter().fold((0_u64, 0_u64), |(r, w), disk| {
+            let usage = disk.usage();
+            (r + usage.read_bytes, w + usage.written_bytes)
+        });
+        instrument.observe(read as f64, &[KeyValue::new("disk.io.direction", "read")]);
+        instrument.observe(
+            written as f64,
+            &[KeyValue::new("disk.io.direction", "write")],
+        );
     });
-    instrument.observe(read as f64, &[KeyValue::new("disk.io.direction", "read")]);
-    instrument.observe(
-        written as f64,
-        &[KeyValue::new("disk.io.direction", "write")],
-    );
 }
 
 fn observe_network_io(state: &Arc<Mutex<SystemState>>, instrument: &dyn AsyncInstrument<f64>) {
-    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-    s.ensure_fresh();
-    let Some(networks) = &s.networks else { return };
-    let (rx, tx) = networks
-        .iter()
-        .fold((0_u64, 0_u64), |(r, t), (_name, data)| {
-            (r + data.total_received(), t + data.total_transmitted())
-        });
-    instrument.observe(
-        rx as f64,
-        &[KeyValue::new("network.io.direction", "receive")],
-    );
-    instrument.observe(
-        tx as f64,
-        &[KeyValue::new("network.io.direction", "transmit")],
-    );
+    super::with_fresh(state, |s| {
+        let Some(networks) = &s.networks else { return };
+        let (rx, tx) = networks
+            .iter()
+            .fold((0_u64, 0_u64), |(r, t), (_name, data)| {
+                (r + data.total_received(), t + data.total_transmitted())
+            });
+        instrument.observe(
+            rx as f64,
+            &[KeyValue::new("network.io.direction", "receive")],
+        );
+        instrument.observe(
+            tx as f64,
+            &[KeyValue::new("network.io.direction", "transmit")],
+        );
+    });
 }
