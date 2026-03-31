@@ -66,7 +66,10 @@ pub async fn run(args: ServeArgs) -> i32 {
             tracing::debug!("running as worker");
             if let Err(e) = apx_framework::supervision::worker::run_worker(channel, bootstrap).await
             {
-                eprintln!("Worker error: {e}");
+                eprintln!(
+                    "{}",
+                    apx_framework::supervision::worker::format_worker_error(&e)
+                );
                 return 1;
             }
         }

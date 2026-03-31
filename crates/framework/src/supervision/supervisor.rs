@@ -164,8 +164,7 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
         Err(e) if config.dev_mode => {
             tracing::error!(
                 name: "apx.supervisor.startup_failed",
-                error = %e,
-                "startup failed, waiting for file change to retry",
+                "startup failed, waiting for file change to retry\n{e}",
             );
             SupervisorMode::Degraded
         }
@@ -271,8 +270,7 @@ async fn try_reload(
         Err(e) => {
             tracing::error!(
                 name: "apx.supervisor.reload_failed",
-                error = %e,
-                "reload failed, waiting for file change to retry",
+                "reload failed, waiting for file change to retry\n{e}",
             );
             SupervisorMode::Degraded
         }

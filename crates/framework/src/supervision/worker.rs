@@ -46,7 +46,7 @@ pub enum WorkerError {
 /// Pattern-matches through the error chain to find a `PyErr` inside
 /// `AppLoadError::ImportFailed` and renders its traceback. Falls back to
 /// the standard `Display` chain for non-Python errors.
-fn format_worker_error(err: &WorkerError) -> String {
+pub fn format_worker_error(err: &WorkerError) -> String {
     if let WorkerError::AppLoad(crate::asgi::app::AppLoadError::ImportFailed { source, .. }) = err {
         return Python::attach(|py| format_pyerr(py, source));
     }
