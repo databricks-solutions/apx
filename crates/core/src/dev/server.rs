@@ -157,6 +157,35 @@ pub async fn run_server(config: ServerConfig) -> Result<(), String> {
     process_manager.start_processes();
     debug!("Process spawning started in background");
 
+    // Print the user-facing URL once all critical services are healthy.
+    {
+        let pm = Arc::clone(&process_manager);
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => break,
+                    () = tokio::time::sleep(Duration::from_millis(500)) => {
+                        let (fe, be, _db) = pm.status().await;
+                        let healthy = if pm.has_ui() {
+                            fe == "healthy" && be == "healthy"
+                        } else {
+                            be == "healthy"
+                        };
+                        if healthy {
+                            info!(
+                                "server is available at http://{}:{}",
+                                apx_common::hosts::BROWSER_HOST,
+                                port,
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // Start .env watcher — restarts backend when environment variables change
     spawn_polling_watcher(
         EnvWatcher::new(Arc::clone(&process_manager), app_dir.join(".env")),
