@@ -18,11 +18,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-/// ASGI protocol version string.
-const ASGI_VERSION: &str = "3.0";
-
-/// ASGI spec version string.
-const ASGI_SPEC_VERSION: &str = "2.4";
+use super::{ASGI_SPEC_VERSION, ASGI_VERSION};
 
 /// Default HTTP scheme (TLS detection is a future extension).
 const DEFAULT_SCHEME: &str = "http";

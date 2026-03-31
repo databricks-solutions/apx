@@ -258,11 +258,7 @@ impl LifespanSend {
 
 // ── Scope builder ────────────────────────────────────────────────────────
 
-/// ASGI protocol version string.
-const ASGI_VERSION: &str = "3.0";
-
-/// ASGI spec version string.
-const ASGI_SPEC_VERSION: &str = "2.4";
+use super::{ASGI_SPEC_VERSION, ASGI_VERSION};
 
 /// Build the ASGI lifespan scope dict.
 fn build_lifespan_scope(py: Python<'_>) -> PyResult<Py<PyDict>> {
