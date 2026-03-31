@@ -11,7 +11,6 @@ use crate::asgi::scope::{
 use crate::asgi::slot_receive::SlotReceive;
 use crate::asgi::slot_send::SlotSend;
 use crate::io::channel::{InboundChannel, RequestSlot, Wakeup};
-use crate::transport::types::{BodyStream, InboundRequest, TransportKind};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::sync::Arc;
@@ -111,11 +110,10 @@ impl RequestQueue {
                 crate::telemetry::context::set_python_context(py, ctx)?;
             }
 
-            let request = slot_to_inbound_request(&slot);
             let scope = scope_from_template(
                 py,
                 &self.scope_interns.scope_template,
-                &request,
+                &slot,
                 None,
                 &self.scope_interns,
             )?;
@@ -130,22 +128,4 @@ impl RequestQueue {
             pyo3::types::PyTuple::new(py, [scope_any, receive_obj, send_obj])
         })
     }
-}
-
-/// Build a temporary [`InboundRequest`] from a [`RequestSlot`] for
-/// `scope_from_template`. The body is already consumed so we pass `Empty`.
-fn slot_to_inbound_request(slot: &RequestSlot) -> InboundRequest {
-    InboundRequest::new(
-        slot.method.clone(),
-        slot.path.clone(),
-        slot.query_string.clone(),
-        slot.headers.clone(),
-        BodyStream::Empty,
-        slot.protocol,
-        TransportKind::Tcp,
-        slot.client_addr,
-        slot.server_addr,
-        Vec::new(),
-        http::Extensions::new(),
-    )
 }

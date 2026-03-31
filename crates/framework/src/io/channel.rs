@@ -51,18 +51,24 @@ pub struct RequestSlot {
 
 // ── ResponseData ─────────────────────────────────────────────────────────
 
-/// Response flowing from Thread 2 → Thread 3 → Thread 1.
-///
-/// Uses an unbounded mpsc channel for the body to unify streaming and
-/// non-streaming responses under a single code path.
+/// Body payload flowing from Thread 2 (asyncio) to Thread 1 (tokio).
+#[derive(Debug)]
+pub enum SlotBody {
+    /// Complete body for non-streaming responses (95% of traffic).
+    Complete(Bytes),
+    /// Streaming body fed chunk-by-chunk via an mpsc channel.
+    Chunked(mpsc::UnboundedReceiver<Bytes>),
+}
+
+/// Response flowing from Thread 2 → Thread 1 via tokio oneshot.
 #[derive(Debug)]
 pub struct ResponseData {
     /// HTTP status code.
     pub status: u16,
     /// Response headers as raw byte pairs (name, value).
     pub headers: Vec<(Bytes, Bytes)>,
-    /// Streaming body channel — one chunk per `send(http.response.body)`.
-    pub body_rx: mpsc::UnboundedReceiver<Bytes>,
+    /// Response body — complete or streaming.
+    pub body: SlotBody,
 }
 
 // ── Wakeup ───────────────────────────────────────────────────────────────

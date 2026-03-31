@@ -9,7 +9,7 @@
 use crate::asgi::channel_body::ChannelBody;
 use crate::asgi::scope::ScopeInterns;
 use crate::dispatch::Dispatch;
-use crate::io::channel::{RequestSlot, ResponseData, Wakeup};
+use crate::io::channel::{RequestSlot, ResponseData, SlotBody, Wakeup};
 use crate::protocol::http::error::AppError;
 use crate::supervision::worker_context::WorkerContext;
 use crate::telemetry::context::TraceContext;
@@ -216,15 +216,11 @@ async fn dispatch_pipeline(
 fn response_data_to_outbound(data: ResponseData) -> Result<OutboundResponse, AppError> {
     let status =
         http::StatusCode::from_u16(data.status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-    let mut headers = HeaderMap::with_capacity(data.headers.len());
-    for (name, value) in &data.headers {
-        let header_name = HeaderName::from_bytes(name)
-            .map_err(|e| AppError::Internal(format!("invalid header name: {e}")))?;
-        let header_value = HeaderValue::from_bytes(value)
-            .map_err(|e| AppError::Internal(format!("invalid header value: {e}")))?;
-        headers.append(header_name, header_value);
-    }
-    let body = ResponseBody::Stream(Box::pin(ChannelBody::new(data.body_rx)));
+    let headers = build_response_headers(&data.headers)?;
+    let body = match data.body {
+        SlotBody::Complete(bytes) => ResponseBody::Fixed(bytes),
+        SlotBody::Chunked(rx) => ResponseBody::Stream(Box::pin(ChannelBody::new(rx))),
+    };
 
     Ok(OutboundResponse {
         status,
@@ -232,6 +228,22 @@ fn response_data_to_outbound(data: ResponseData) -> Result<OutboundResponse, App
         body,
         server_route: None,
     })
+}
+
+/// Parse raw byte-pair headers into an `http::HeaderMap`.
+///
+/// Uses `from_lowercase` because ASGI guarantees response header names
+/// are lowercase byte strings, skipping the case-folding pass.
+fn build_response_headers(raw: &[(Bytes, Bytes)]) -> Result<HeaderMap, AppError> {
+    let mut headers = HeaderMap::with_capacity(raw.len());
+    for (name, value) in raw {
+        let header_name = HeaderName::from_lowercase(name)
+            .map_err(|e| AppError::Internal(format!("invalid header name: {e}")))?;
+        let header_value = HeaderValue::from_bytes(value)
+            .map_err(|e| AppError::Internal(format!("invalid header value: {e}")))?;
+        headers.append(header_name, header_value);
+    }
+    Ok(headers)
 }
 
 /// Client-visible body for internal errors.

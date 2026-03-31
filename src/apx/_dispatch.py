@@ -31,10 +31,10 @@ def install_dispatch(
     which appends ``_drain_queue`` directly to ``_ready`` (no fd needed).
     """
 
-    # At ~85µs per materialize(), 8 items ≈ 680µs GIL hold — well under
+    # At ~31µs per materialize(), 32 items ≈ 1ms GIL hold — well under
     # the 5ms GIL switch interval (sys.getswitchinterval()), keeping the
     # drain responsive without excessive re-scheduling overhead.
-    max_drain_batch: int = 8
+    max_drain_batch: int = 32
 
     async def _guarded(
         scope: dict[str, Any],

@@ -6,7 +6,7 @@
 //! Subsequent body chunks are pushed via the mpsc sender. Dropping the
 //! sender signals EOF.
 
-use crate::io::channel::ResponseData;
+use crate::io::channel::{ResponseData, SlotBody};
 use bytes::Bytes;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
@@ -76,21 +76,18 @@ impl SlotSend {
             "{traceback}",
         );
         if let Some(response_tx) = self.response_tx.take() {
-            let (body_tx, body_rx) = mpsc::unbounded_channel();
             let body = if self.dev_mode {
                 Bytes::from(traceback)
             } else {
                 INTERNAL_ERROR_BODY
             };
-            let _ = body_tx.send(body);
-            drop(body_tx);
             let response = ResponseData {
                 status: 500,
                 headers: vec![(
                     Bytes::from_static(b"content-type"),
                     Bytes::from_static(b"text/plain; charset=utf-8"),
                 )],
-                body_rx,
+                body: SlotBody::Complete(body),
             };
             let _ = response_tx.send(response);
         }
@@ -155,7 +152,10 @@ impl SlotSend {
         Ok(self.resolved.clone_ref(py).into_bound(py).into_any())
     }
 
-    /// First body chunk: create mpsc, build `ResponseData`, push `OutboundSlot`.
+    /// First body chunk: build `ResponseData` and fire the tokio oneshot.
+    ///
+    /// Non-streaming (`more_body == false`): carries the body inline,
+    /// skipping the mpsc channel + ChannelBody + Box::pin allocation.
     fn send_first_body_chunk(&mut self, body: Bytes, more_body: bool) -> PyResult<()> {
         let status = self.status.take().ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err(
@@ -164,21 +164,21 @@ impl SlotSend {
         })?;
         let headers = self.raw_headers.take().unwrap_or_default();
 
-        let (body_tx, body_rx) = mpsc::unbounded_channel();
-        if !body.is_empty() {
-            let _ = body_tx.send(body);
-        }
-
-        if more_body {
+        let slot_body = if more_body {
+            let (body_tx, body_rx) = mpsc::unbounded_channel();
+            if !body.is_empty() {
+                let _ = body_tx.send(body);
+            }
             self.body_tx = Some(body_tx);
+            SlotBody::Chunked(body_rx)
         } else {
-            drop(body_tx);
-        }
+            SlotBody::Complete(body)
+        };
 
         let response = ResponseData {
             status,
             headers,
-            body_rx,
+            body: slot_body,
         };
 
         if let Some(response_tx) = self.response_tx.take() {
@@ -254,7 +254,8 @@ fn extract_body_bytes(event: &Bound<'_, PyDict>) -> PyResult<Bytes> {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    reason = "test code uses unwrap/assert for clarity"
+    clippy::panic,
+    reason = "test code uses unwrap/assert/panic for clarity"
 )]
 mod tests {
     use super::*;
@@ -271,10 +272,12 @@ mod tests {
         let traceback = "Traceback (most recent call last):\n  NameError: x\n".to_owned();
         slot.send_error(traceback);
 
-        let mut response = rx.try_recv().unwrap();
+        let response = rx.try_recv().unwrap();
         assert_eq!(response.status, 500);
-        let body = response.body_rx.try_recv().unwrap();
-        assert_eq!(body.as_ref(), b"Internal Server Error");
+        match response.body {
+            SlotBody::Complete(b) => assert_eq!(b.as_ref(), b"Internal Server Error"),
+            SlotBody::Chunked(_) => panic!("expected Complete body"),
+        }
     }
 
     #[test]
@@ -283,12 +286,16 @@ mod tests {
         let traceback = "Traceback (most recent call last):\n  NameError: x\n".to_owned();
         slot.send_error(traceback);
 
-        let mut response = rx.try_recv().unwrap();
+        let response = rx.try_recv().unwrap();
         assert_eq!(response.status, 500);
-        let body = response.body_rx.try_recv().unwrap();
-        let body_str = std::str::from_utf8(body.as_ref()).unwrap();
-        assert!(body_str.contains("Traceback"));
-        assert!(body_str.contains("NameError"));
+        match response.body {
+            SlotBody::Complete(b) => {
+                let body_str = std::str::from_utf8(b.as_ref()).unwrap();
+                assert!(body_str.contains("Traceback"));
+                assert!(body_str.contains("NameError"));
+            }
+            SlotBody::Chunked(_) => panic!("expected Complete body"),
+        }
     }
 
     #[test]

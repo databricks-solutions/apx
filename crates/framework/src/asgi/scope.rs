@@ -6,6 +6,7 @@
 //! These types enable Starlette's `Request`, `StreamingResponse`, and `WebSocket`
 //! to work unmodified against a Rust-backed ASGI server.
 
+use crate::io::channel::RequestSlot;
 use crate::protocol::http::error::AppError;
 use crate::transport::types::{InboundRequest, OutboundResponse, ProtocolVersion, ResponseBody};
 use bytes::Bytes;
@@ -53,6 +54,9 @@ pub struct ScopeInterns {
     // ── Scope template ──
     /// Pre-built HTTP scope dict with fixed fields. `dict.copy()` per request.
     pub(crate) scope_template: Py<PyDict>,
+    // ── Cached empty dict ──
+    /// Shared empty dict for parameterless routes (avoids `PyDict::new` per request).
+    pub(crate) empty_dict: Py<PyDict>,
 }
 
 /// Fixed dict keys used in ASGI scope construction.
@@ -269,6 +273,7 @@ impl ScopeInterns {
             server_tuple,
             versions,
             scope_template,
+            empty_dict: PyDict::new(py).unbind(),
         }
     }
 }
@@ -1119,6 +1124,71 @@ fn extract_bytes_field(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     }
 }
 
+// ── ScopeSource ─────────────────────────────────────────────────────────
+
+/// Read-only access to the fields needed for ASGI scope construction.
+///
+/// Implemented by both [`InboundRequest`] (legacy ASGI path, WS path) and
+/// [`RequestSlot`] (zero-GIL crossbeam path), so `scope_from_template`
+/// can accept either without an intermediate clone.
+pub trait ScopeSource {
+    fn method(&self) -> &http::Method;
+    fn path(&self) -> &str;
+    fn query_string(&self) -> &Bytes;
+    fn headers(&self) -> &HeaderMap;
+    fn protocol(&self) -> ProtocolVersion;
+    fn client_addr(&self) -> Option<SocketAddr>;
+    fn path_params(&self) -> &[(String, String)];
+}
+
+impl ScopeSource for InboundRequest {
+    fn method(&self) -> &http::Method {
+        &self.method
+    }
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn query_string(&self) -> &Bytes {
+        &self.query_string
+    }
+    fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+    fn protocol(&self) -> ProtocolVersion {
+        self.protocol
+    }
+    fn client_addr(&self) -> Option<SocketAddr> {
+        self.client_addr
+    }
+    fn path_params(&self) -> &[(String, String)] {
+        &self.path_params
+    }
+}
+
+impl ScopeSource for RequestSlot {
+    fn method(&self) -> &http::Method {
+        &self.method
+    }
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn query_string(&self) -> &Bytes {
+        &self.query_string
+    }
+    fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+    fn protocol(&self) -> ProtocolVersion {
+        self.protocol
+    }
+    fn client_addr(&self) -> Option<SocketAddr> {
+        self.client_addr
+    }
+    fn path_params(&self) -> &[(String, String)] {
+        &[]
+    }
+}
+
 // ── scope_from_template ──────────────────────────────────────────────────
 
 /// Build an HTTP scope from the pre-populated template.
@@ -1128,7 +1198,7 @@ fn extract_bytes_field(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
 pub fn scope_from_template(
     py: Python<'_>,
     template: &Py<PyDict>,
-    request: &InboundRequest,
+    request: &impl ScopeSource,
     fastapi_app: Option<&Py<PyAny>>,
     interns: &ScopeInterns,
 ) -> PyResult<Py<PyDict>> {
@@ -1141,10 +1211,10 @@ pub fn scope_from_template(
                 "scope template copy returned non-dict: {e}"
             ))
         })?;
-    if request.protocol != ProtocolVersion::Http11 {
+    if request.protocol() != ProtocolVersion::Http11 {
         scope.set_item(
             interns.keys.http_version.bind(py),
-            interns.versions.get(py, request.protocol),
+            interns.versions.get(py, request.protocol()),
         )?;
     }
     set_scope_request_fields(py, &scope, request, interns)?;
@@ -1230,23 +1300,22 @@ fn set_ws_scope_request_fields(
 fn set_scope_request_fields(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
-    request: &InboundRequest,
+    request: &impl ScopeSource,
     interns: &ScopeInterns,
 ) -> PyResult<()> {
     dict.set_item(
         interns.keys.http_version.bind(py),
-        interns.versions.get(py, request.protocol),
+        interns.versions.get(py, request.protocol()),
     )?;
-    dict.set_item(interns.keys.method.bind(py), request.method.as_str())?;
-    // ASGI spec: "path" is the decoded URL path, "raw_path" is the raw bytes.
-    dict.set_item(interns.keys.path.bind(py), percent_decode(&request.path))?;
+    dict.set_item(interns.keys.method.bind(py), request.method().as_str())?;
+    dict.set_item(interns.keys.path.bind(py), percent_decode(request.path()))?;
     dict.set_item(
         interns.keys.raw_path.bind(py),
-        PyBytes::new(py, request.path.as_bytes()),
+        PyBytes::new(py, request.path().as_bytes()),
     )?;
     dict.set_item(
         interns.keys.query_string.bind(py),
-        PyBytes::new(py, &request.query_string),
+        PyBytes::new(py, request.query_string()),
     )?;
     Ok(())
 }
@@ -1258,11 +1327,11 @@ fn set_scope_request_fields(
 fn set_scope_headers(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
-    request: &InboundRequest,
+    request: &impl ScopeSource,
     interns: &ScopeInterns,
 ) -> PyResult<()> {
-    let mut pairs: Vec<Bound<'_, PyAny>> = Vec::with_capacity(request.headers.len());
-    for (name, value) in &request.headers {
+    let mut pairs: Vec<Bound<'_, PyAny>> = Vec::with_capacity(request.headers().len());
+    for (name, value) in request.headers() {
         let n = interns
             .headers
             .get(py, name)
@@ -1280,11 +1349,11 @@ fn set_scope_headers(
 fn set_scope_addresses(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
-    request: &InboundRequest,
+    request: &impl ScopeSource,
     interns: &ScopeInterns,
 ) -> PyResult<()> {
     dict.set_item(interns.keys.server.bind(py), interns.server_tuple.bind(py))?;
-    match request.client_addr {
+    match request.client_addr() {
         Some(addr) => {
             dict.set_item(
                 interns.keys.client.bind(py),
@@ -1301,14 +1370,25 @@ fn set_scope_addresses(
 /// Values are URL-decoded because axum's `RawPathParams` provides percent-encoded
 /// strings, but Starlette/FastAPI expects decoded values (matching what Starlette's
 /// own router would produce).
+///
+/// When path_params is empty (parameterless routes), reuses a pre-built
+/// empty dict singleton from `ScopeInterns` to avoid a `PyDict::new` per request.
 fn set_scope_path_params(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
-    request: &InboundRequest,
+    request: &impl ScopeSource,
     interns: &ScopeInterns,
 ) -> PyResult<()> {
+    let params = request.path_params();
+    if params.is_empty() {
+        dict.set_item(
+            interns.keys.path_params.bind(py),
+            interns.empty_dict.bind(py),
+        )?;
+        return Ok(());
+    }
     let pp = PyDict::new(py);
-    for (k, v) in &request.path_params {
+    for (k, v) in params {
         pp.set_item(k.as_str(), percent_decode(v.as_str()))?;
     }
     dict.set_item(interns.keys.path_params.bind(py), pp)?;
