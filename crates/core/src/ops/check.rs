@@ -8,7 +8,8 @@ use tracing::debug;
 
 /// Run type checking (tsc + ty) in parallel for the given app directory.
 pub async fn run_check(app_dir: &Path, mode: OutputMode) -> Result<(), String> {
-    // Run preflight checks (installs deps if needed)
+    emit(mode, "🔍 Checking the codebase...");
+
     let preflight = run_preflight_checks(app_dir).await?;
     let has_ui = preflight.has_ui;
 
