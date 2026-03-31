@@ -57,8 +57,10 @@ pub(crate) async fn http_health_probe(host: &str, port: u16) -> ProbeResult {
             let elapsed_ms = start.elapsed().as_millis();
             if status == 200 {
                 debug!(url = %url, status, elapsed_ms, "Health probe OK");
+            } else if status >= 400 {
+                warn!(url = %url, status, elapsed_ms, "Health probe returned {status}");
             } else {
-                warn!(url = %url, status, elapsed_ms, "Health probe returned non-200");
+                debug!(url = %url, status, elapsed_ms, "Health probe returned {status}");
             }
             ProbeResult::Responded
         }

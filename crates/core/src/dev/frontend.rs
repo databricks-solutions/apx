@@ -2,15 +2,21 @@
 //!
 //! Encapsulates bun/vite spawning, OTEL configuration, and health monitoring.
 //! No bun/vite-specific details leak beyond this module.
+//!
+//! Stdout/stderr are piped and forwarded with a `ui` prefix, matching the
+//! pattern used by [`super::backend`] for `app` logs.
+#![allow(clippy::print_stdout)]
 
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
 use crate::dev::common::{DevProcess, ProbeResult, ProcessStatus, http_health_probe};
+use crate::dev::otel::forward_log_to_flux;
 use crate::dev::token;
 use crate::external::uv::ApxTool;
 use apx_common::hosts::CLIENT_HOST;
@@ -62,15 +68,55 @@ impl Frontend {
 
     /// Spawn the frontend dev server (`apx frontend dev` via uv).
     ///
-    /// Frontend logs are NOT piped through apx stdout/stderr — the frontend
-    /// process sends logs directly to flux via OTEL SDK. See entrypoint.ts.
+    /// Stdout/stderr are piped and forwarded with a `ui` prefix via
+    /// [`format_process_log_line`]. Structured telemetry still reaches
+    /// flux directly through the OTEL SDK in `entrypoint.ts`.
     pub async fn spawn(&self) -> Result<(), String> {
         let cmd = self.build_command().await?;
-        let child = cmd.spawn().map_err(String::from)?;
+        let mut child = cmd.spawn().map_err(String::from)?;
+
+        self.attach_log_forwarders(&mut child);
 
         let mut guard = self.child.lock().await;
         *guard = Some(child);
         Ok(())
+    }
+
+    // -- private: log forwarding --
+
+    /// Spawn tasks to read stdout/stderr, prefix with `ui`, and forward to flux.
+    fn attach_log_forwarders(&self, child: &mut Child) {
+        let service_name = format!("{}_ui", self.cfg.app_slug);
+        let app_path = self.cfg.app_dir.display().to_string();
+
+        if let Some(stdout) = child.stdout.take() {
+            let svc = service_name.clone();
+            let path = app_path.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    println!(
+                        "{}",
+                        apx_common::format::format_process_log_line("ui", &line)
+                    );
+                    forward_log_to_flux(&line, "INFO", &svc, &path).await;
+                }
+            });
+        }
+
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    eprintln!(
+                        "{}",
+                        apx_common::format::format_process_log_line("ui", &line)
+                    );
+                    let severity = apx_common::format::parse_python_severity(&line);
+                    forward_log_to_flux(&line, severity, &service_name, &app_path).await;
+                }
+            });
+        }
     }
 
     // -- private: command construction --
@@ -85,9 +131,8 @@ impl Frontend {
             .args(["frontend", "dev"])
             .cwd(&cfg.app_dir)
             .stdin(Stdio::null())
-            // Inherit stdout/stderr for local visibility, but don't capture/forward
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             // APX runtime context
             .env("APX_BACKEND_PORT", cfg.backend_port.to_string())
             .env("APX_DEV_DB_PORT", cfg.db_port.to_string())

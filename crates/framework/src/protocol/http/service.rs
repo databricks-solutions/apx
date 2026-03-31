@@ -489,7 +489,7 @@ pub async fn serve_tcp(
                 connections.spawn(serve_connection(stream, svc));
             }
             () = &mut shutdown => {
-                tracing::info!(name: "apx.http.accept_shutdown", "shutdown signal received, stopping accept loop");
+                tracing::debug!(name: "apx.http.accept_shutdown", "shutdown signal received, stopping accept loop");
                 break;
             }
         }
