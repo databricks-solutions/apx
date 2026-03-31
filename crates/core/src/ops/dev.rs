@@ -21,7 +21,7 @@ use crate::flux;
 use crate::ops::healthcheck::wait_for_healthy_with_logs;
 use crate::registry::Registry;
 use apx_common::hosts::{BIND_HOST, BROWSER_HOST};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Prepare the app directory for dev server startup.
 fn prepare_app_dir(app_dir: &Path) -> Result<(), String> {
@@ -487,6 +487,11 @@ async fn launch_attached(
     }
 
     crate::tracing_init::enable_dev_format();
+
+    info!(
+        "server is available at http://{}:{}",
+        BROWSER_HOST, server.port,
+    );
 
     let mut last_error = String::new();
 

@@ -154,15 +154,6 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
         startup_ms,
     );
 
-    if config.dev_mode {
-        tracing::info!(
-            name: "apx.supervisor.listening",
-            "server is available at http://{}:{}",
-            config.host,
-            config.port,
-        );
-    }
-
     let _system_metrics_handle =
         crate::telemetry::system_metrics::spawn_system_metrics(&system_config);
     let _supervisor_process_handle =
