@@ -78,6 +78,81 @@ pub enum Shutdown {
     Stop,
 }
 
+/// Status of an individual managed dev subprocess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProcessStatus {
+    /// Service responded to health probe.
+    Healthy,
+    /// Process is running but not yet responding.
+    Starting,
+    /// Process is not running (never started or exited cleanly).
+    Stopped,
+    /// Process exited unexpectedly and cannot recover.
+    Failed,
+    /// Could not determine process state.
+    Error,
+    /// Status check itself returned an unexpected result.
+    Unknown,
+    /// Process was not started because the project does not require it (e.g. no UI).
+    Skipped,
+}
+
+impl ProcessStatus {
+    /// Whether this process is considered ready for aggregate health.
+    pub fn is_ready(self) -> bool {
+        matches!(self, Self::Healthy | Self::Skipped)
+    }
+
+    /// Whether this process has permanently failed.
+    pub fn is_failed(self) -> bool {
+        matches!(self, Self::Failed)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Starting => "starting",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+            Self::Error => "error",
+            Self::Unknown => "unknown",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+impl std::fmt::Display for ProcessStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Aggregate health of the dev server (derived from individual process statuses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerHealth {
+    /// All critical services are healthy.
+    Ok,
+    /// One or more critical services are not yet ready.
+    Starting,
+}
+
+impl ServerHealth {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Starting => "starting",
+        }
+    }
+}
+
+impl std::fmt::Display for ServerHealth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Directory name for the dev lock file.
 pub const DEV_LOCK_DIR: &str = ".apx";
 /// Lock file name within the dev lock directory.
@@ -206,8 +281,8 @@ pub(crate) trait DevProcess: Send + Sync {
     /// Human-readable label for log messages ("backend", "db").
     fn label(&self) -> &'static str;
 
-    /// Report current process status as a static label.
-    async fn status(&self) -> &'static str;
+    /// Report current process status.
+    async fn status(&self) -> ProcessStatus;
 }
 
 /// Kill a child process tree immediately (used for restart operations).

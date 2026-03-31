@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 use apx_databricks_sdk::DatabricksClient;
 
 use crate::api_generator::start_openapi_watcher;
-use crate::dev::common::{Shutdown, lock_path, remove_lock};
+use crate::dev::common::{ProcessStatus, ServerHealth, Shutdown, lock_path, remove_lock};
 use crate::dev::logging::BrowserLogPayload;
 use crate::dev::otel::build_otlp_log_payload_from_ms;
 use crate::dev::process::ProcessManager;
@@ -39,10 +39,10 @@ struct AppState {
 
 #[derive(serde::Serialize)]
 struct HealthResponse {
-    status: &'static str,
-    frontend_status: String,
-    backend_status: String,
-    db_status: String,
+    status: ServerHealth,
+    frontend_status: ProcessStatus,
+    backend_status: ProcessStatus,
+    db_status: ProcessStatus,
     /// True if any critical process (frontend/backend) has permanently failed and cannot recover
     failed: bool,
 }
@@ -167,12 +167,7 @@ pub async fn run_server(config: ServerConfig) -> Result<(), String> {
                     _ = shutdown_rx.recv() => break,
                     () = tokio::time::sleep(Duration::from_millis(500)) => {
                         let (fe, be, _db) = pm.status().await;
-                        let healthy = if pm.has_ui() {
-                            fe == "healthy" && be == "healthy"
-                        } else {
-                            be == "healthy"
-                        };
-                        if healthy {
+                        if fe.is_ready() && be.is_ready() {
                             info!(
                                 "server is available at http://{}:{}",
                                 apx_common::hosts::BROWSER_HOST,
@@ -395,25 +390,16 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<HealthRespon
     let probe_start = std::time::Instant::now();
     let (frontend_status, backend_status, db_status) = state.process_manager.status().await;
     let probe_elapsed_ms = probe_start.elapsed().as_millis();
-    let has_ui = state.process_manager.has_ui();
 
-    // Check if any critical process has permanently failed (crashed/exited)
-    let failed = if has_ui {
-        frontend_status == "failed" || backend_status == "failed"
+    let failed = frontend_status.is_failed() || backend_status.is_failed();
+    let status = if frontend_status.is_ready() && backend_status.is_ready() {
+        ServerHealth::Ok
     } else {
-        backend_status == "failed"
+        ServerHealth::Starting
     };
-
-    // DB is non-critical - only critical services must be healthy for "ok" status
-    let all_healthy = if has_ui {
-        frontend_status == "healthy" && backend_status == "healthy"
-    } else {
-        backend_status == "healthy"
-    };
-    let status = if all_healthy { "ok" } else { "starting" };
 
     debug!(
-        status,
+        %status,
         frontend = %frontend_status,
         backend = %backend_status,
         db = %db_status,

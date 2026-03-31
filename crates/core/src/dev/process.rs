@@ -19,7 +19,7 @@ use tracing::{debug, warn};
 
 use crate::common::read_project_metadata;
 use crate::dev::backend::{Backend, BackendConfig};
-use crate::dev::common::{DevProcess, build_parent_map};
+use crate::dev::common::{DevProcess, ProcessStatus, build_parent_map};
 use crate::dev::embedded_db::EmbeddedDb;
 use crate::dev::frontend::{Frontend, FrontendConfig};
 use crate::dotenv::DotenvFile;
@@ -235,19 +235,19 @@ impl ProcessManager {
 
     /// Get the status of all managed processes.
     /// Runs all three checks in parallel using tokio::join! to avoid blocking.
-    pub async fn status(&self) -> (String, String, String) {
+    pub async fn status(&self) -> (ProcessStatus, ProcessStatus, ProcessStatus) {
         let (frontend_status, backend_status, db_status) = tokio::join!(
             async {
                 match self.frontend.as_ref() {
-                    Some(f) => DevProcess::status(f.as_ref()).await.to_string(),
-                    None => "n/a".to_string(),
+                    Some(f) => DevProcess::status(f.as_ref()).await,
+                    None => ProcessStatus::Skipped,
                 }
             },
-            async { self.backend.status().await.to_string() },
+            async { self.backend.status().await },
             async {
                 match self.db.get() {
-                    Some(db) => DevProcess::status(db).await.to_string(),
-                    None => "stopped".to_string(),
+                    Some(db) => DevProcess::status(db).await,
+                    None => ProcessStatus::Stopped,
                 }
             },
         );

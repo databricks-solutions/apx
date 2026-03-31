@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, warn};
 
-use crate::dev::common::DevProcess;
+use crate::dev::common::{DevProcess, ProcessStatus};
 use crate::dev::otel::forward_log_to_flux;
 use crate::dev::token;
 use crate::external::ExternalTool;
@@ -100,15 +100,15 @@ impl EmbeddedDb {
     }
 
     /// Process-alive check (no HTTP probe — PGlite has no HTTP endpoint).
-    pub async fn status(&self) -> &'static str {
+    pub async fn status(&self) -> ProcessStatus {
         let mut guard = self.child.lock().await;
         match guard.as_mut() {
             Some(child) => match child.try_wait() {
-                Ok(Some(_)) => "stopped",
-                Ok(None) => "healthy",
-                Err(_) => "unknown",
+                Ok(Some(_)) => ProcessStatus::Stopped,
+                Ok(None) => ProcessStatus::Healthy,
+                Err(_) => ProcessStatus::Unknown,
             },
-            None => "stopped",
+            None => ProcessStatus::Stopped,
         }
     }
 
@@ -296,7 +296,7 @@ impl DevProcess for EmbeddedDb {
         "db"
     }
 
-    async fn status(&self) -> &'static str {
+    async fn status(&self) -> ProcessStatus {
         EmbeddedDb::status(self).await
     }
 }

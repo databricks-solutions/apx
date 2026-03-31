@@ -23,7 +23,9 @@ use tokio::sync::Mutex;
 use tokio::time::Duration;
 use tracing::{info, warn};
 
-use crate::dev::common::{DevProcess, ProbeResult, http_health_probe, stop_child_tree};
+use crate::dev::common::{
+    DevProcess, ProbeResult, ProcessStatus, http_health_probe, stop_child_tree,
+};
 use crate::dev::embedded_db::EmbeddedDb;
 use crate::dev::otel::forward_log_to_flux;
 use crate::dev::token;
@@ -278,21 +280,21 @@ impl DevProcess for Backend {
         "backend"
     }
 
-    async fn status(&self) -> &'static str {
+    async fn status(&self) -> ProcessStatus {
         let mut guard = self.child.lock().await;
         match guard.as_mut() {
-            None => return "stopped",
+            None => return ProcessStatus::Stopped,
             Some(process) => match process.try_wait() {
                 Ok(None) => {} // still running — continue to HTTP probe
-                Ok(Some(_)) => return "failed",
-                Err(_) => return "error",
+                Ok(Some(_)) => return ProcessStatus::Failed,
+                Err(_) => return ProcessStatus::Error,
             },
         }
         drop(guard);
 
         match http_health_probe(CLIENT_HOST, self.cfg.backend_port).await {
-            ProbeResult::Responded => "healthy",
-            ProbeResult::Failed => "starting",
+            ProbeResult::Responded => ProcessStatus::Healthy,
+            ProbeResult::Failed => ProcessStatus::Starting,
         }
     }
 }

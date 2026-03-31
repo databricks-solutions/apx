@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 
 use apx_common::hosts::CLIENT_HOST;
 
+use crate::dev::common::{ProcessStatus, ServerHealth};
 use crate::dev::token::DEV_TOKEN_HEADER;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 5;
@@ -71,16 +72,16 @@ impl Default for HealthCheckConfig {
 }
 
 /// Response from the dev server status endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 pub struct StatusResponse {
     /// Overall server status.
-    pub status: String,
+    pub status: ServerHealth,
     /// Frontend process status.
-    pub frontend_status: String,
+    pub frontend_status: ProcessStatus,
     /// Backend process status.
-    pub backend_status: String,
+    pub backend_status: ProcessStatus,
     /// Embedded database status.
-    pub db_status: String,
+    pub db_status: ProcessStatus,
     /// True if any critical process (frontend/backend) has permanently failed and cannot recover.
     pub failed: bool,
 }

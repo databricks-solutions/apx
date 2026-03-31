@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
-use crate::dev::common::{DevProcess, ProbeResult, http_health_probe};
+use crate::dev::common::{DevProcess, ProbeResult, ProcessStatus, http_health_probe};
 use crate::dev::token;
 use crate::external::uv::ApxTool;
 use apx_common::hosts::CLIENT_HOST;
@@ -122,21 +122,21 @@ impl DevProcess for Frontend {
         "frontend"
     }
 
-    async fn status(&self) -> &'static str {
+    async fn status(&self) -> ProcessStatus {
         let mut guard = self.child.lock().await;
         match guard.as_mut() {
-            None => return "stopped",
+            None => return ProcessStatus::Stopped,
             Some(process) => match process.try_wait() {
                 Ok(None) => {} // still running — continue to HTTP probe
-                Ok(Some(_)) => return "failed",
-                Err(_) => return "error",
+                Ok(Some(_)) => return ProcessStatus::Failed,
+                Err(_) => return ProcessStatus::Error,
             },
         }
         drop(guard);
 
         match http_health_probe(CLIENT_HOST, self.cfg.frontend_port).await {
-            ProbeResult::Responded => "healthy",
-            ProbeResult::Failed => "starting",
+            ProbeResult::Responded => ProcessStatus::Healthy,
+            ProbeResult::Failed => ProcessStatus::Starting,
         }
     }
 }

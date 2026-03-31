@@ -5,6 +5,7 @@ use tracing::{debug, warn};
 
 use crate::common::{OutputMode, emit};
 use crate::dev::client::{HealthCheckConfig, HealthError, status};
+use crate::dev::common::{ProcessStatus, ServerHealth};
 use crate::ops::startup_logs::StartupLogStreamer;
 
 /// Wait for dev server to become healthy while streaming logs line-by-line.
@@ -65,7 +66,7 @@ pub async fn wait_for_healthy_with_logs(
                             ));
                         }
 
-                        if status_response.status == "ok" {
+                        if status_response.status == ServerHealth::Ok {
                             debug!(
                                 "Health check PASSED on attempt {} after {}ms - services ready (frontend: {}, backend: {}, db: {})",
                                 attempt_count,
@@ -75,7 +76,7 @@ pub async fn wait_for_healthy_with_logs(
                                 status_response.db_status
                             );
 
-                            if status_response.db_status != "healthy" {
+                            if status_response.db_status != ProcessStatus::Healthy {
                                 emit(mode, "⚠️  Database not available: local development will work but DB features disabled");
                             }
 
