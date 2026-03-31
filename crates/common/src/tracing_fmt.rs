@@ -44,7 +44,7 @@ where
 {
     fn format_event(
         &self,
-        ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
+        _ctx: &tracing_subscriber::fmt::FmtContext<'_, S, N>,
         mut writer: Writer<'_>,
         event: &tracing::Event<'_>,
     ) -> fmt::Result {
@@ -71,10 +71,11 @@ where
         } else {
             let level = event.metadata().level();
             let role = role_label();
-            write!(writer, "{level:>5} | [{role}] ")?;
 
-            ctx.format_fields(writer.by_ref(), event)?;
-            writeln!(writer)
+            let mut visitor = MessageVisitor(String::new());
+            event.record(&mut visitor);
+
+            writeln!(writer, "{level:>5} | [{role}] {}", visitor.0)
         }
     }
 }

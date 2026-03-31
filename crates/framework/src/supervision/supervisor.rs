@@ -150,10 +150,18 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
     let startup_ms = startup_start.elapsed().as_millis();
     tracing::info!(
         name: "apx.supervisor.ready",
-        elapsed_ms = startup_ms,
         "server ready in {}ms",
         startup_ms,
     );
+
+    if config.dev_mode {
+        tracing::info!(
+            name: "apx.supervisor.listening",
+            "server is available at http://{}:{}",
+            config.host,
+            config.port,
+        );
+    }
 
     let _system_metrics_handle =
         crate::telemetry::system_metrics::spawn_system_metrics(&system_config);
@@ -190,7 +198,6 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
                 let reload_ms = reload_start.elapsed().as_millis();
                 tracing::info!(
                     name: "apx.supervisor.ready",
-                    elapsed_ms = reload_ms,
                     "server ready in {}ms",
                     reload_ms,
                 );
