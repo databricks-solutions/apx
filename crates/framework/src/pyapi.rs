@@ -11,6 +11,10 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::asgi::scope::AsgiReceive>()?;
     m.add_class::<crate::asgi::scope::AsgiSend>()?;
 
+    // ASGI lifespan protocol types
+    m.add_class::<crate::asgi::lifespan::LifespanReceive>()?;
+    m.add_class::<crate::asgi::lifespan::LifespanSend>()?;
+
     // 3-thread dispatch pipeline types
     m.add_class::<crate::asgi::slot_receive::SlotReceive>()?;
     m.add_class::<crate::asgi::slot_send::SlotSend>()?;

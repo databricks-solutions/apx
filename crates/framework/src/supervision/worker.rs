@@ -8,7 +8,7 @@ use super::ipc::channel::WorkerChannel;
 use super::ipc::protocol::{BootstrapError, IpcMessage, Nonce, WorkerBootstrap};
 use super::signal::shutdown_signal;
 use super::worker_context::WorkerContext;
-use crate::asgi::app::{AppSource, ModuleImport, format_pyerr};
+use crate::asgi::app::{ModuleImport, format_pyerr};
 use crate::io::EventLoop;
 use crate::protocol::http::service::{ApxService, ServiceConfig, serve_tcp};
 use crate::transport::{Listener, TransportConfig, TransportError};
@@ -39,6 +39,10 @@ pub enum WorkerError {
     /// Serving requests failed.
     #[error("serve failed: {0}")]
     Serve(std::io::Error),
+
+    /// ASGI lifespan startup failed.
+    #[error("lifespan startup failed: {0}")]
+    LifespanStartup(String),
 }
 
 /// Format a worker error with full Python traceback when available.
@@ -47,10 +51,13 @@ pub enum WorkerError {
 /// `AppLoadError::ImportFailed` and renders its traceback. Falls back to
 /// the standard `Display` chain for non-Python errors.
 pub fn format_worker_error(err: &WorkerError) -> String {
-    if let WorkerError::AppLoad(crate::asgi::app::AppLoadError::ImportFailed { source, .. }) = err {
-        return Python::attach(|py| format_pyerr(py, source));
+    match err {
+        WorkerError::AppLoad(crate::asgi::app::AppLoadError::ImportFailed { source, .. }) => {
+            Python::attach(|py| format_pyerr(py, source))
+        }
+        WorkerError::LifespanStartup(msg) => format!("lifespan startup failed: {msg}"),
+        _ => err.to_string(),
     }
-    err.to_string()
 }
 
 /// Phase 1 runtime: TCP listener + Python interpreter (expensive, survives reloads).
@@ -118,6 +125,10 @@ async fn signal_readiness(channel: &mut WorkerChannel) -> Result<(), WorkerError
 struct AppReady {
     dispatch: Arc<dyn crate::dispatch::Dispatch>,
     telemetry: crate::telemetry::config::TelemetryConfig,
+    /// Raw ASGI callable for the lifespan protocol.
+    asgi_app: Py<PyAny>,
+    /// Cached `apx._bridge.launch` for submitting coroutines to the asyncio thread.
+    launch_fn: Py<PyAny>,
 }
 
 crate::opaque_debug!(AppReady);
@@ -134,23 +145,27 @@ fn load_app(runtime: &WorkerRuntime, bootstrap: &WorkerBootstrap) -> Result<AppR
             .map_err(|e| WorkerError::PythonInit(format!("dispatch pipeline: {e}")))?,
     );
 
-    let ctx = {
+    let (ctx, launch_fn_ref) = {
         let el = &runtime.event_loop;
-        Python::attach(|py| -> Result<Arc<WorkerContext>, WorkerError> {
-            let launch_fn = register_launch(py)
-                .map_err(|e| WorkerError::PythonInit(format!("register launch: {e}")))?;
-            Ok(Arc::new(WorkerContext {
-                pipeline: Arc::clone(&pipeline),
-                call_soon_threadsafe: el.call_soon_threadsafe().clone_ref(py),
-                launch_fn,
-            }))
-        })?
+        Python::attach(
+            |py| -> Result<(Arc<WorkerContext>, Py<PyAny>), WorkerError> {
+                let launch_fn = register_launch(py)
+                    .map_err(|e| WorkerError::PythonInit(format!("register launch: {e}")))?;
+                let launch_fn_ref = launch_fn.clone_ref(py);
+                let ctx = Arc::new(WorkerContext {
+                    pipeline: Arc::clone(&pipeline),
+                    call_soon_threadsafe: el.call_soon_threadsafe().clone_ref(py),
+                    launch_fn,
+                });
+                Ok((ctx, launch_fn_ref))
+            },
+        )?
     };
 
     let server_addr = runtime.listener.local_addr();
     let event_loop_py = runtime.event_loop.event_loop_py();
-    let dispatch = Python::attach(|py| {
-        ModuleImport::new(bootstrap.app_module.as_str(), bootstrap.dev_mode).build(
+    let (dispatch, asgi_app) = Python::attach(|py| {
+        ModuleImport::new(bootstrap.app_module.as_str(), bootstrap.dev_mode).build_with_app(
             py,
             ctx,
             event_loop_py,
@@ -168,6 +183,8 @@ fn load_app(runtime: &WorkerRuntime, bootstrap: &WorkerBootstrap) -> Result<AppR
     Ok(AppReady {
         dispatch,
         telemetry,
+        asgi_app,
+        launch_fn: launch_fn_ref,
     })
 }
 
@@ -235,6 +252,7 @@ async fn serve(
     runtime: WorkerRuntime,
     service: ApxService,
     drain_timeout_secs: u64,
+    lifespan: Option<crate::asgi::lifespan::LifespanHandle>,
 ) -> Result<(), WorkerError> {
     let (ipc_reader, mut ipc_writer) = runtime.channel.split();
 
@@ -280,12 +298,60 @@ async fn serve(
         .await;
     }
 
+    // Trigger ASGI lifespan shutdown while the asyncio loop is still running.
+    if let Some(handle) = lifespan
+        && let Err(e) = handle.trigger_shutdown().await
+    {
+        tracing::warn!(
+            name: "apx.worker.lifespan_shutdown_failed",
+            error = %e,
+            "ASGI lifespan shutdown failed"
+        );
+    }
+
     let _ = ipc_writer.send(&IpcMessage::Drained).await;
 
     apx_core::tracing_init::shutdown_telemetry();
     runtime.event_loop.shutdown();
 
     Ok(())
+}
+
+/// Launch the ASGI lifespan protocol and await startup completion.
+///
+/// Returns `Ok(Some(handle))` if the app completed lifespan startup,
+/// `Ok(None)` if the app does not support lifespan, or `Err` on failure.
+async fn launch_and_await_lifespan(
+    runtime: &WorkerRuntime,
+    ready: &AppReady,
+) -> Result<Option<crate::asgi::lifespan::LifespanHandle>, WorkerError> {
+    let pending = Python::attach(|py| {
+        crate::asgi::lifespan::launch_lifespan(
+            py,
+            &runtime.event_loop,
+            &ready.asgi_app,
+            &ready.launch_fn,
+        )
+    })
+    .map_err(|e| WorkerError::LifespanStartup(format!("{e}")))?;
+
+    match pending.wait_startup().await {
+        Ok(Some(handle)) => {
+            tracing::info!(
+                name: "apx.worker.lifespan_startup_complete",
+                "ASGI lifespan startup complete"
+            );
+            Ok(Some(handle))
+        }
+        Ok(None) => {
+            tracing::info!(
+                name: "apx.worker.lifespan_unsupported",
+                "app does not support ASGI lifespan protocol"
+            );
+            Ok(None)
+        }
+        Err(msg) => Err(WorkerError::LifespanStartup(msg)),
+    }
 }
 
 /// Connect, init, load app, signal readiness, and serve.
@@ -314,6 +380,19 @@ pub async fn run_worker(
         }
     };
 
+    // ASGI lifespan startup — run app startup hooks before accepting traffic.
+    let lifespan = match launch_and_await_lifespan(&runtime, &ready).await {
+        Ok(handle) => handle,
+        Err(e) => {
+            let detail = format_worker_error(&e);
+            let _ = runtime
+                .channel
+                .send(&IpcMessage::StartupFailed { error: detail })
+                .await;
+            return Err(e);
+        }
+    };
+
     signal_readiness(&mut runtime.channel).await?;
     relay_telemetry(&mut runtime.channel, &bootstrap, &ready.telemetry).await?;
     init_metrics(&ready.telemetry);
@@ -325,7 +404,7 @@ pub async fn run_worker(
     }
 
     let service = build_service(&runtime, &bootstrap, ready.dispatch);
-    serve(runtime, service, bootstrap.drain_timeout_secs).await
+    serve(runtime, service, bootstrap.drain_timeout_secs, lifespan).await
 }
 
 /// Detect worker mode and connect to the supervisor's IPC channel.

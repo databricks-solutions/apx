@@ -133,6 +133,7 @@ const DEFAULT_BODY_LIMIT: usize = 10 * 1024 * 1024;
 /// Implementations decide how the app is located (runtime import, manifest,
 /// etc.) and which dispatch strategy to use. The returned `Arc<dyn Dispatch>`
 /// is handed to `ApxService` and shared across all connections.
+#[expect(dead_code, reason = "extension seam for future app loading strategies")]
 pub trait AppSource: Send + Sync + std::fmt::Debug {
     /// Load the app and construct its dispatch pipeline.
     ///
@@ -212,15 +213,18 @@ impl ModuleImport {
     }
 }
 
-impl AppSource for ModuleImport {
-    fn build(
+impl ModuleImport {
+    /// Load the app and build dispatch, returning both the dispatch and the
+    /// raw ASGI callable reference (needed for the lifespan protocol).
+    pub fn build_with_app(
         &self,
         py: Python<'_>,
         ctx: Arc<WorkerContext>,
         event_loop_py: &Py<PyAny>,
         server_addr: SocketAddr,
-    ) -> Result<Arc<dyn Dispatch>, AppLoadError> {
+    ) -> Result<(Arc<dyn Dispatch>, Py<PyAny>), AppLoadError> {
         let app = self.load_callable(py)?;
+        let asgi_app = app.inner().clone_ref(py);
         let interns = Arc::new(ScopeInterns::new(py, server_addr));
 
         let queue = RequestQueue::new(
@@ -264,7 +268,20 @@ impl AppSource for ModuleImport {
             interns,
             ctx,
         );
-        Ok(Arc::new(dispatch))
+        Ok((Arc::new(dispatch), asgi_app))
+    }
+}
+
+impl AppSource for ModuleImport {
+    fn build(
+        &self,
+        py: Python<'_>,
+        ctx: Arc<WorkerContext>,
+        event_loop_py: &Py<PyAny>,
+        server_addr: SocketAddr,
+    ) -> Result<Arc<dyn Dispatch>, AppLoadError> {
+        self.build_with_app(py, ctx, event_loop_py, server_addr)
+            .map(|(dispatch, _)| dispatch)
     }
 }
 
