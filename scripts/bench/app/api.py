@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from contextlib import asynccontextmanager
 
-import diskcache
-from fastapi import APIRouter, Depends, HTTPException, Request
+import aiosqlite
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
 from .models import Item, ItemCreate, ItemUpdate
 
-router = APIRouter()
-
-_CACHE_DIR = "/tmp/bench_items_cache"
-_cache = diskcache.Cache(_CACHE_DIR)
+DB_PATH = "/tmp/bench_items.db"
 
 _DEFAULT_ITEMS = [
     Item(
@@ -24,25 +23,55 @@ _DEFAULT_ITEMS = [
     for i in range(1, 11)
 ]
 
+_CREATE_TABLE = """\
+CREATE TABLE IF NOT EXISTS items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT,
+    price REAL NOT NULL,
+    tags TEXT NOT NULL DEFAULT '[]'
+)"""
 
-def _populate_defaults():
-    _cache.clear()
+_INSERT_ITEM = "INSERT INTO items (id, name, description, price, tags) VALUES (?, ?, ?, ?, ?)"
+_INSERT_ITEM_AUTO = "INSERT INTO items (name, description, price, tags) VALUES (?, ?, ?, ?)"
+
+
+def _row_to_item(row: aiosqlite.Row) -> Item:
+    return Item(id=row[0], name=row[1], description=row[2], price=row[3], tags=json.loads(row[4]))
+
+
+async def _seed_defaults(db: aiosqlite.Connection) -> None:
     for item in _DEFAULT_ITEMS:
-        _cache[f"item:{item.id}"] = item.model_dump()
-    _cache["_counter"] = 10
+        await db.execute(
+            _INSERT_ITEM,
+            (item.id, item.name, item.description, item.price, json.dumps(item.tags)),
+        )
+    await db.commit()
 
 
-# Auto-populate on first boot
-if "_counter" not in _cache:
-    _populate_defaults()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db = await aiosqlite.connect(DB_PATH)
+    await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute(_CREATE_TABLE)
+    cursor = await db.execute("SELECT count(*) FROM items")
+    row = await cursor.fetchone()
+    if row is not None and row[0] == 0:
+        await _seed_defaults(db)
+    app.state.db = db
+    yield
+    await db.close()
 
 
-def _next_id() -> int:
-    return _cache.incr("_counter")
+router = APIRouter()
+
+
+async def _get_db(request: Request) -> aiosqlite.Connection:
+    return request.app.state.db
 
 
 @router.get("/version")
-def version() -> dict[str, str]:
+async def version() -> dict[str, str]:
     """Return the APX package version (includes build timestamp)."""
     try:
         from importlib.metadata import version as pkg_version
@@ -53,70 +82,84 @@ def version() -> dict[str, str]:
 
 
 @router.get("/echo")
-def echo() -> dict[str, bool]:
+async def echo() -> dict[str, bool]:
     """Minimal handler — isolates framework overhead from app logic."""
     return {"echo": True}
 
 
 @router.get("/request-id")
-def request_id(request: Request) -> dict[str, str | None]:
+async def request_id(request: Request) -> dict[str, str | None]:
     """Return the X-Request-Id seen by the ASGI app."""
     return {"request_id": request.headers.get("x-request-id")}
 
 
 @router.get("/health")
-def health() -> dict[str, str]:
+async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @router.get("/items", response_model=list[Item])
-def list_items() -> list[Item]:
-    items = []
-    for key in _cache:
-        if isinstance(key, str) and key.startswith("item:"):
-            items.append(Item(**_cache[key]))
-    items.sort(key=lambda x: x.id)
-    return items
+async def list_items(db: aiosqlite.Connection = Depends(_get_db)) -> list[Item]:
+    cursor = await db.execute("SELECT id, name, description, price, tags FROM items ORDER BY id")
+    rows = await cursor.fetchall()
+    return [_row_to_item(row) for row in rows]
 
 
 @router.get("/items/{item_id}", response_model=Item)
-def get_item(item_id: int) -> Item:
-    data = _cache.get(f"item:{item_id}")
-    if data is None:
+async def get_item(item_id: int, db: aiosqlite.Connection = Depends(_get_db)) -> Item:
+    cursor = await db.execute(
+        "SELECT id, name, description, price, tags FROM items WHERE id = ?", (item_id,)
+    )
+    row = await cursor.fetchone()
+    if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    return Item(**data)
+    return _row_to_item(row)
 
 
 @router.post("/items", response_model=Item, status_code=201)
-def create_item(body: ItemCreate) -> Item:
-    item = Item(id=_next_id(), **body.model_dump())
-    _cache[f"item:{item.id}"] = item.model_dump()
-    return item
+async def create_item(body: ItemCreate, db: aiosqlite.Connection = Depends(_get_db)) -> Item:
+    cursor = await db.execute(
+        _INSERT_ITEM_AUTO,
+        (body.name, body.description, body.price, json.dumps(body.tags)),
+    )
+    await db.commit()
+    assert cursor.lastrowid is not None
+    return Item(id=cursor.lastrowid, **body.model_dump())
 
 
 @router.patch("/items/{item_id}", response_model=Item)
-def update_item(item_id: int, body: ItemUpdate) -> Item:
-    data = _cache.get(f"item:{item_id}")
-    if data is None:
+async def update_item(
+    item_id: int, body: ItemUpdate, db: aiosqlite.Connection = Depends(_get_db)
+) -> Item:
+    cursor = await db.execute(
+        "SELECT id, name, description, price, tags FROM items WHERE id = ?", (item_id,)
+    )
+    row = await cursor.fetchone()
+    if row is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    existing = Item(**data)
+    existing = _row_to_item(row)
     updated = existing.model_copy(update=body.model_dump(exclude_unset=True))
-    _cache[f"item:{item_id}"] = updated.model_dump()
+    await db.execute(
+        "UPDATE items SET name = ?, description = ?, price = ?, tags = ? WHERE id = ?",
+        (updated.name, updated.description, updated.price, json.dumps(updated.tags), item_id),
+    )
+    await db.commit()
     return updated
 
 
 @router.delete("/items/{item_id}", status_code=204)
-def delete_item(item_id: int):
-    _cache.pop(f"item:{item_id}", None)
-    from fastapi.responses import Response
-
+async def delete_item(item_id: int, db: aiosqlite.Connection = Depends(_get_db)):
+    await db.execute("DELETE FROM items WHERE id = ?", (item_id,))
+    await db.commit()
     return Response(status_code=204)
 
 
 @router.post("/items/reset")
-def items_reset():
+async def items_reset(db: aiosqlite.Connection = Depends(_get_db)):
     """Clear all items and repopulate with defaults."""
-    _populate_defaults()
+    await db.execute("DELETE FROM items")
+    await db.execute("DELETE FROM sqlite_sequence WHERE name = 'items'")
+    await _seed_defaults(db)
     return {"status": "reset", "items": 10}
 
 
@@ -147,7 +190,7 @@ async def yield_once():
 
 
 @router.get("/cpu/{n}")
-def cpu_work(n: int):
+async def cpu_work(n: int):
     """GIL hold under concurrency — sum of squares."""
     n = min(n, 1_000_000)
     total = sum(i * i for i in range(n))
@@ -155,7 +198,7 @@ def cpu_work(n: int):
 
 
 @router.get("/large/{kb}")
-def large_response(kb: int):
+async def large_response(kb: int):
     """Large body — send() overhead."""
     kb = min(kb, 1024)
     data = "x" * (kb * 1024)
@@ -372,7 +415,7 @@ async def telemetry_cross_signal():
 
 
 @router.get("/profile/dump")
-def profile_dump():
+async def profile_dump():
     """Return profiling JSONL over HTTP (for remote extraction)."""
     from .profiling import PROFILE_PATH, flush
 
@@ -383,7 +426,7 @@ def profile_dump():
 
 
 @router.delete("/profile/reset")
-def profile_reset():
+async def profile_reset():
     """Clear profiling data for a fresh run."""
     from . import profiling
 
@@ -392,7 +435,7 @@ def profile_reset():
 
 
 @router.get("/_bench/scheduler-stats")
-def scheduler_stats():
+async def scheduler_stats():
     """Return scheduler counters as JSON."""
     try:
         from apx._core import scheduler_stats_json
@@ -401,6 +444,4 @@ def scheduler_stats():
     data = scheduler_stats_json()
     if data is None:
         raise HTTPException(status_code=404, detail="no scheduler stats")
-    import json
-
     return json.loads(data)
