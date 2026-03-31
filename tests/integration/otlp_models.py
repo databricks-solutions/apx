@@ -182,7 +182,10 @@ T = TypeVar("T", TracesExport, LogsExport, MetricsExport)
 
 
 def read_jsonl(path: Path, model: type[T]) -> list[T]:
-    """Parse a JSONL file into a list of typed Pydantic export envelopes."""
+    """Parse a JSONL file into a list of typed Pydantic export envelopes.
+
+    Tolerates a truncated trailing line (the collector may still be writing).
+    """
     if not path.exists():
         return []
     results: list[T] = []
@@ -190,5 +193,8 @@ def read_jsonl(path: Path, model: type[T]) -> list[T]:
         stripped = line.strip()
         if not stripped:
             continue
-        results.append(model.model_validate(json.loads(stripped)))
+        try:
+            results.append(model.model_validate(json.loads(stripped)))
+        except json.JSONDecodeError:
+            pass
     return results

@@ -648,7 +648,7 @@ class SystemMetrics(BaseModel):
     """Machine-wide metric toggles.
 
     Collected once on the supervisor process only. These are global
-    system gauges (CPU, memory, swap, disk I/O, network I/O) that
+    system gauges (CPU, memory, paging, disk I/O, network I/O) that
     are identical regardless of which process reads them, so only
     the supervisor collects them to avoid N redundant copies.
 
@@ -658,7 +658,7 @@ class SystemMetrics(BaseModel):
 
     cpu: bool = True
     memory: bool = True
-    swap: bool = False
+    paging: bool = False
     disk_io: bool = False
     network_io: bool = False
 
@@ -722,11 +722,11 @@ class HttpInstrumentation(BaseModel):
 
 
 class SystemInstrumentation(BaseModel):
-    """Machine-wide metrics instrumentation (CPU, memory, swap, disk, network).
+    """Machine-wide metrics instrumentation (CPU, memory, paging, disk, network).
 
-    Collected on the supervisor only. System-level gauges are global
-    to the machine and identical regardless of which process reads them,
-    so a single collection task on the supervisor avoids redundant work.
+    Collected on the supervisor only via OTEL observable gauges. The SDK
+    invokes registered callbacks at each export cycle, so no manual
+    collection interval is needed.
 
     The first worker relays this configuration to the supervisor via IPC
     after loading the Python app, so user overrides are honoured.
@@ -735,16 +735,14 @@ class SystemInstrumentation(BaseModel):
     type: Literal["system"] = "system"
     enabled: bool = True
     metrics: SystemMetrics = Field(default_factory=SystemMetrics)
-    interval_seconds: float = Field(default=15.0, gt=0)
 
 
 class ProcessInstrumentation(BaseModel):
     """Per-process metrics instrumentation (CPU, RSS, threads).
 
-    Collected per-worker and on the supervisor. Each process spawns a
-    background task that periodically reads its own stats via ``sysinfo``
-    and reports them as OTEL gauges. The first worker relays this
-    configuration to the supervisor via IPC so user overrides are honoured.
+    Collected per-worker and on the supervisor via OTEL observable gauges.
+    The SDK invokes registered callbacks at each export cycle, so no
+    manual collection interval is needed.
 
     Attribution: OTEL Resource carries ``apx.process.type``
     (``"supervisor"`` or ``"worker"``) and ``apx.worker.id``
@@ -754,7 +752,6 @@ class ProcessInstrumentation(BaseModel):
     type: Literal["process"] = "process"
     enabled: bool = True
     metrics: ProcessMetrics = Field(default_factory=ProcessMetrics)
-    interval_seconds: float = Field(default=15.0, gt=0)
 
 
 class ApxInstrumentation(BaseModel):

@@ -4,7 +4,7 @@
 //! creation, config doc comments, and Python toggle models all reference these
 //! constants instead of duplicating string literals.
 
-use opentelemetry::metrics::{Gauge, Histogram, Meter};
+use opentelemetry::metrics::{AsyncInstrument, Gauge, Histogram, Meter, ObservableGauge};
 
 /// Descriptor for an OTEL metric instrument.
 #[derive(Debug, Clone, Copy)]
@@ -40,13 +40,26 @@ impl MetricDef {
             .with_unit(self.unit)
             .build()
     }
+
+    /// Build an observable f64 gauge that reports via a callback.
+    pub fn observable_gauge<F>(self, meter: &Meter, callback: F) -> ObservableGauge<f64>
+    where
+        F: Fn(&dyn AsyncInstrument<f64>) + Send + Sync + 'static,
+    {
+        meter
+            .f64_observable_gauge(self.name)
+            .with_description(self.description)
+            .with_unit(self.unit)
+            .with_callback(callback)
+            .build()
+    }
 }
 
 // ── System-global metrics (supervisor only) ──────────────────────────────
 
 /// System-wide CPU utilization as a fraction (supervisor only).
 pub const SYSTEM_CPU: MetricDef = MetricDef {
-    name: "system.cpu.simple_utilization",
+    name: "system.cpu.utilization",
     description: "System-wide CPU utilization as a fraction",
     unit: "1",
 };
@@ -58,10 +71,10 @@ pub const SYSTEM_MEMORY: MetricDef = MetricDef {
     unit: "1",
 };
 
-/// Fraction of swap space used (supervisor only).
-pub const SYSTEM_SWAP: MetricDef = MetricDef {
-    name: "system.swap.utilization",
-    description: "Fraction of swap space used",
+/// Fraction of paging (swap) space used (supervisor only).
+pub const SYSTEM_PAGING: MetricDef = MetricDef {
+    name: "system.paging.utilization",
+    description: "Fraction of paging (swap) space used",
     unit: "1",
 };
 
@@ -210,7 +223,7 @@ pub static ALL_METRICS: &[MetricCatalogEntry] = &[
         scope: "supervisor",
     },
     MetricCatalogEntry {
-        def: SYSTEM_SWAP,
+        def: SYSTEM_PAGING,
         group: "system",
         scope: "supervisor",
     },

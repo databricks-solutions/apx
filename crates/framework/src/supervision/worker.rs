@@ -318,13 +318,11 @@ pub async fn run_worker(
     relay_telemetry(&mut runtime.channel, &bootstrap, &ready.telemetry).await?;
     init_metrics(&ready.telemetry);
 
-    let _process_metrics_handle = if ready.telemetry.process.enabled {
-        Some(crate::telemetry::process_metrics::spawn_process_metrics(
-            &ready.telemetry.process,
-        ))
-    } else {
-        None
-    };
+    if ready.telemetry.process.enabled {
+        crate::telemetry::process_metrics::register_process_metrics(
+            ready.telemetry.process.metrics,
+        );
+    }
 
     let service = build_service(&runtime, &bootstrap, ready.dispatch);
     serve(runtime, service, bootstrap.drain_timeout_secs).await

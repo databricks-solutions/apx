@@ -40,8 +40,6 @@ pub struct TelemetryConfig {
 pub struct SystemConfig {
     /// Whether system metrics collection is enabled.
     pub enabled: bool,
-    /// Collection interval in seconds.
-    pub interval_secs: f64,
     /// Per-metric enable flags for machine-wide gauges.
     pub metrics: SystemGlobalToggles,
 }
@@ -59,8 +57,8 @@ pub struct SystemGlobalToggles {
     pub system_cpu: bool,
     /// Toggle for [`super::defs::SYSTEM_MEMORY`].
     pub system_memory: bool,
-    /// Toggle for [`super::defs::SYSTEM_SWAP`].
-    pub system_swap: bool,
+    /// Toggle for [`super::defs::SYSTEM_PAGING`].
+    pub system_paging: bool,
     /// Toggle for [`super::defs::SYSTEM_DISK_IO`].
     pub system_disk_io: bool,
     /// Toggle for [`super::defs::SYSTEM_NETWORK_IO`].
@@ -72,7 +70,7 @@ impl Default for SystemGlobalToggles {
         Self {
             system_cpu: true,
             system_memory: true,
-            system_swap: false,
+            system_paging: false,
             system_disk_io: false,
             system_network_io: false,
         }
@@ -84,8 +82,6 @@ impl Default for SystemGlobalToggles {
 pub struct ProcessConfig {
     /// Whether process metrics collection is enabled.
     pub enabled: bool,
-    /// Collection interval in seconds.
-    pub interval_secs: f64,
     /// Per-metric enable flags for process-level gauges.
     pub metrics: ProcessMetricToggles,
 }
@@ -188,7 +184,6 @@ pub struct ApxMetricToggles {
 pub fn default_system_config() -> SystemConfig {
     SystemConfig {
         enabled: true,
-        interval_secs: 15.0,
         metrics: SystemGlobalToggles::default(),
     }
 }
@@ -197,7 +192,6 @@ pub fn default_system_config() -> SystemConfig {
 pub fn default_process_config() -> ProcessConfig {
     ProcessConfig {
         enabled: true,
-        interval_secs: 15.0,
         metrics: ProcessMetricToggles::default(),
     }
 }
@@ -249,7 +243,6 @@ pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
                     name: "apx.telemetry.config.parsed_system",
                     target: "apx::telemetry",
                     enabled = system.enabled,
-                    interval_secs = system.interval_secs,
                     "parsed system instrumentation config"
                 );
             }
@@ -259,7 +252,6 @@ pub fn read_python_config(py: Python<'_>) -> PyResult<TelemetryConfig> {
                     name: "apx.telemetry.config.parsed_process",
                     target: "apx::telemetry",
                     enabled = process.enabled,
-                    interval_secs = process.interval_secs,
                     "parsed process instrumentation config"
                 );
             }
@@ -356,18 +348,13 @@ fn parse_resource_config(dict: &Bound<'_, PyDict>) -> PyResult<ResourceConfig> {
 
 fn parse_system_config(dict: &Bound<'_, PyDict>) -> PyResult<SystemConfig> {
     let enabled = extract_bool(dict, "enabled", true)?;
-    let interval_secs = extract_float(dict, "interval_seconds", 15.0)?;
     let metrics = if let Some(metrics_dict) = dict.get_item("metrics")? {
         parse_system_global_toggles(metrics_dict.cast()?)
     } else {
         SystemGlobalToggles::default()
     };
 
-    Ok(SystemConfig {
-        enabled,
-        interval_secs,
-        metrics,
-    })
+    Ok(SystemConfig { enabled, metrics })
 }
 
 fn parse_system_global_toggles(dict: &Bound<'_, PyDict>) -> SystemGlobalToggles {
@@ -375,7 +362,7 @@ fn parse_system_global_toggles(dict: &Bound<'_, PyDict>) -> SystemGlobalToggles 
     SystemGlobalToggles {
         system_cpu: extract_bool_or(dict, "cpu", defaults.system_cpu),
         system_memory: extract_bool_or(dict, "memory", defaults.system_memory),
-        system_swap: extract_bool_or(dict, "swap", defaults.system_swap),
+        system_paging: extract_bool_or(dict, "paging", defaults.system_paging),
         system_disk_io: extract_bool_or(dict, "disk_io", defaults.system_disk_io),
         system_network_io: extract_bool_or(dict, "network_io", defaults.system_network_io),
     }
@@ -383,18 +370,13 @@ fn parse_system_global_toggles(dict: &Bound<'_, PyDict>) -> SystemGlobalToggles 
 
 fn parse_process_config(dict: &Bound<'_, PyDict>) -> PyResult<ProcessConfig> {
     let enabled = extract_bool(dict, "enabled", true)?;
-    let interval_secs = extract_float(dict, "interval_seconds", 15.0)?;
     let metrics = if let Some(metrics_dict) = dict.get_item("metrics")? {
         parse_process_metric_toggles(metrics_dict.cast()?)
     } else {
         ProcessMetricToggles::default()
     };
 
-    Ok(ProcessConfig {
-        enabled,
-        interval_secs,
-        metrics,
-    })
+    Ok(ProcessConfig { enabled, metrics })
 }
 
 fn parse_process_metric_toggles(dict: &Bound<'_, PyDict>) -> ProcessMetricToggles {
@@ -492,13 +474,6 @@ fn extract_bool(dict: &Bound<'_, PyDict>, key: &str, default: bool) -> PyResult<
 /// Extract a bool from a dict, returning `default` on any error.
 fn extract_bool_or(dict: &Bound<'_, PyDict>, key: &str, default: bool) -> bool {
     extract_bool(dict, key, default).unwrap_or(default)
-}
-
-fn extract_float(dict: &Bound<'_, PyDict>, key: &str, default: f64) -> PyResult<f64> {
-    dict.get_item(key)?
-        .map(|v| v.extract())
-        .transpose()
-        .map(|v| v.unwrap_or(default))
 }
 
 fn extract_string_list(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Vec<String>> {

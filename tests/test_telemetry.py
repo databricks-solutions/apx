@@ -54,7 +54,7 @@ class TestSystemMetricsDefaults:
         m = SystemMetrics()
         assert m.cpu is True
         assert m.memory is True
-        assert m.swap is False
+        assert m.paging is False
         assert m.disk_io is False
         assert m.network_io is False
 
@@ -65,14 +65,14 @@ class TestSystemMetricsDefaults:
 
     def test_enable_all(self) -> None:
         m = SystemMetrics(
-            cpu=True, memory=True, swap=True, disk_io=True, network_io=True
+            cpu=True, memory=True, paging=True, disk_io=True, network_io=True
         )
-        assert all([m.cpu, m.memory, m.swap, m.disk_io, m.network_io])
+        assert all([m.cpu, m.memory, m.paging, m.disk_io, m.network_io])
 
     def test_model_dump_roundtrip(self) -> None:
-        m = SystemMetrics(swap=True)
+        m = SystemMetrics(paging=True)
         data = m.model_dump()
-        assert data["swap"] is True
+        assert data["paging"] is True
         assert data["cpu"] is True
         restored = SystemMetrics.model_validate(data)
         assert restored == m
@@ -156,22 +156,12 @@ class TestInstrumentationModels:
         s = SystemInstrumentation()
         assert s.type == "system"
         assert s.enabled is True
-        assert s.interval_seconds == 15.0
         assert s.metrics.cpu is True
-
-    def test_system_custom_interval(self) -> None:
-        s = SystemInstrumentation(interval_seconds=5.0)
-        assert s.interval_seconds == 5.0
-
-    def test_system_interval_must_be_positive(self) -> None:
-        with pytest.raises(Exception):
-            SystemInstrumentation(interval_seconds=0)
 
     def test_process_defaults(self) -> None:
         p = ProcessInstrumentation()
         assert p.type == "process"
         assert p.enabled is True
-        assert p.interval_seconds == 15.0
         assert p.metrics.cpu is True
         assert p.metrics.memory is False
 
@@ -186,7 +176,7 @@ class TestInstrumentationModels:
         config = Configuration(
             instrumentations=[
                 HttpInstrumentation(enabled=False),
-                SystemInstrumentation(metrics=SystemMetrics(swap=True)),
+                SystemInstrumentation(metrics=SystemMetrics(paging=True)),
                 ProcessInstrumentation(metrics=ProcessMetrics(threads=True)),
                 ApxInstrumentation(metrics=ApxMetrics(dispatch_total=True)),
             ]
@@ -200,7 +190,7 @@ class TestInstrumentationModels:
 
         system = config.instrumentations[1]
         assert isinstance(system, SystemInstrumentation)
-        assert system.metrics.swap is True
+        assert system.metrics.paging is True
         assert system.metrics.cpu is True
 
         process = config.instrumentations[2]
@@ -325,14 +315,14 @@ class TestConfigureMerge:
         configure(
             Configuration(
                 instrumentations=[
-                    SystemInstrumentation(metrics=SystemMetrics(cpu=False, swap=True))
+                    SystemInstrumentation(metrics=SystemMetrics(cpu=False, paging=True))
                 ]
             )
         )
         config = _get_config()
         system = next(i for i in config["instrumentations"] if i["type"] == "system")
         assert system["metrics"]["cpu"] is False
-        assert system["metrics"]["swap"] is True
+        assert system["metrics"]["paging"] is True
         assert system["metrics"]["memory"] is True
 
     def test_full_serialization_roundtrip(self) -> None:
@@ -346,7 +336,6 @@ class TestConfigureMerge:
                         metrics=HttpMetrics(server_active_requests=False),
                     ),
                     ProcessInstrumentation(
-                        interval_seconds=5.0,
                         metrics=ProcessMetrics(memory=True),
                     ),
                 ]
@@ -359,7 +348,6 @@ class TestConfigureMerge:
         assert http["metrics"]["server_request_duration"] is True
 
         process = next(i for i in config["instrumentations"] if i["type"] == "process")
-        assert process["interval_seconds"] == 5.0
         assert process["metrics"]["memory"] is True
         assert process["metrics"]["cpu"] is True
 
@@ -371,9 +359,9 @@ EXPECTED_GROUPS = {"system", "process", "http", "apx"}
 EXPECTED_SCOPES = {"supervisor", "worker", "both"}
 
 EXPECTED_SYSTEM_METRICS = {
-    "system.cpu.simple_utilization",
+    "system.cpu.utilization",
     "system.memory.utilization",
-    "system.swap.utilization",
+    "system.paging.utilization",
     "system.disk.io",
     "system.network.io",
 }
@@ -512,9 +500,9 @@ class TestMetricCatalog:
 VALID_UCUM_UNITS = {"1", "s", "ms", "us", "By", "kBy", "MBy", "%"}
 
 EXPECTED_UNITS: dict[str, str] = {
-    "system.cpu.simple_utilization": "1",
+    "system.cpu.utilization": "1",
     "system.memory.utilization": "1",
-    "system.swap.utilization": "1",
+    "system.paging.utilization": "1",
     "system.disk.io": "By",
     "system.network.io": "By",
     "process.cpu.utilization": "1",
@@ -534,9 +522,9 @@ EXPECTED_UNITS: dict[str, str] = {
 }
 
 EXPECTED_DESCRIPTIONS: dict[str, str] = {
-    "system.cpu.simple_utilization": "System-wide CPU utilization as a fraction",
+    "system.cpu.utilization": "System-wide CPU utilization as a fraction",
     "system.memory.utilization": "Fraction of available memory used",
-    "system.swap.utilization": "Fraction of swap space used",
+    "system.paging.utilization": "Fraction of paging (swap) space used",
     "system.disk.io": "Cumulative disk I/O in bytes",
     "system.network.io": "Cumulative network I/O in bytes",
     "process.cpu.utilization": "Process CPU utilization as a fraction of one core",

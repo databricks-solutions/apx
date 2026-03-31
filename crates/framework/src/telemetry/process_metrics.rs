@@ -1,86 +1,117 @@
-//! Per-process metrics collection via `sysinfo`.
+//! Per-process metrics via OTEL observable gauges.
 //!
-//! Spawns a tokio task that periodically reads CPU, memory, and thread
-//! count for the current process and reports them through the OTEL
-//! metrics pipeline. Collected per-worker (and once for the supervisor).
+//! Registers per-metric observable instruments whose callbacks are invoked by
+//! the SDK at each export cycle. A shared [`ProcessState`] wraps `sysinfo`
+//! types behind `Arc<Mutex<_>>` with a staleness guard so that multiple
+//! callbacks in the same export cycle share a single refresh.
+//!
+//! Collected per-worker and once for the supervisor.
 
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use opentelemetry::metrics::Gauge;
+use opentelemetry::metrics::AsyncInstrument;
 use sysinfo::{Pid, System};
 
-use super::config::ProcessConfig;
+use super::config::ProcessMetricToggles;
 use super::defs;
 use super::http::framework_meter;
 
-/// Spawn the process metrics collection background task.
-///
-/// Returns the `JoinHandle` so the caller can abort on shutdown.
-pub fn spawn_process_metrics(config: &ProcessConfig) -> tokio::task::JoinHandle<()> {
-    let toggles = config.metrics;
-    let interval = Duration::from_secs_f64(config.interval_secs);
-    let pid = Pid::from_u32(std::process::id());
+/// Minimum elapsed time before `sysinfo` data is re-read.
+const STALENESS_THRESHOLD: Duration = Duration::from_secs(1);
 
-    tracing::trace!(
-        name: "apx.telemetry.process_metrics.started",
-        target: "apx::telemetry",
-        interval_secs = config.interval_secs,
-        pid = pid.as_u32(),
-        "spawning process metrics collection task"
-    );
-
-    tokio::spawn(async move {
-        collection_loop(toggles, interval, pid).await;
-    })
+/// Shared mutable state for all process-level observable callbacks.
+struct ProcessState {
+    sys: System,
+    pid: Pid,
+    last_refresh: Instant,
 }
 
-/// Process-level instruments, created once and reused.
-struct Instruments {
-    process_cpu: Option<Gauge<f64>>,
-    process_memory: Option<Gauge<f64>>,
-    process_threads: Option<Gauge<f64>>,
-}
+impl ProcessState {
+    fn new(pid: Pid) -> Self {
+        let mut sys = System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
 
-impl Instruments {
-    fn new(toggles: super::config::ProcessMetricToggles) -> Self {
-        let meter = framework_meter();
         Self {
-            process_cpu: defs::PROCESS_CPU.optional_gauge(&meter, toggles.process_cpu),
-            process_memory: defs::PROCESS_MEMORY.optional_gauge(&meter, toggles.process_memory),
-            process_threads: defs::PROCESS_THREADS.optional_gauge(&meter, toggles.process_threads),
+            sys,
+            pid,
+            last_refresh: Instant::now(),
         }
+    }
+
+    fn ensure_fresh(&mut self) {
+        if self.last_refresh.elapsed() < STALENESS_THRESHOLD {
+            return;
+        }
+        self.sys
+            .refresh_processes(sysinfo::ProcessesToUpdate::Some(&[self.pid]), true);
+        self.last_refresh = Instant::now();
     }
 }
 
-/// Periodic collection loop.
-async fn collection_loop(
-    toggles: super::config::ProcessMetricToggles,
-    interval: Duration,
-    pid: Pid,
+/// Register observable gauges for each enabled process metric.
+///
+/// Callbacks are owned by the meter provider; no handle needs to be stored.
+pub fn register_process_metrics(toggles: ProcessMetricToggles) {
+    let meter = framework_meter();
+    let pid = Pid::from_u32(std::process::id());
+    let state = Arc::new(Mutex::new(ProcessState::new(pid)));
+
+    if toggles.process_cpu {
+        let s = Arc::clone(&state);
+        let _gauge =
+            defs::PROCESS_CPU.observable_gauge(&meter, move |i| observe_process_cpu(&s, i));
+    }
+    if toggles.process_memory {
+        let s = Arc::clone(&state);
+        let _gauge =
+            defs::PROCESS_MEMORY.observable_gauge(&meter, move |i| observe_process_memory(&s, i));
+    }
+    if toggles.process_threads {
+        let s = Arc::clone(&state);
+        let _gauge =
+            defs::PROCESS_THREADS.observable_gauge(&meter, move |i| observe_process_threads(&s, i));
+    }
+
+    tracing::trace!(
+        name: "apx.telemetry.process_metrics.registered",
+        target: "apx::telemetry",
+        pid = pid.as_u32(),
+        "process observable gauges registered"
+    );
+}
+
+// ── Per-metric observe helpers ───────────────────────────────────────────
+
+fn observe_process_cpu(state: &Arc<Mutex<ProcessState>>, instrument: &dyn AsyncInstrument<f64>) {
+    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+    s.ensure_fresh();
+    let Some(process) = s.sys.process(s.pid) else {
+        return;
+    };
+    let usage = f64::from(process.cpu_usage()) / 100.0;
+    instrument.observe(usage, &[]);
+}
+
+fn observe_process_memory(state: &Arc<Mutex<ProcessState>>, instrument: &dyn AsyncInstrument<f64>) {
+    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+    s.ensure_fresh();
+    let Some(process) = s.sys.process(s.pid) else {
+        return;
+    };
+    instrument.observe(process.memory() as f64, &[]);
+}
+
+fn observe_process_threads(
+    state: &Arc<Mutex<ProcessState>>,
+    instrument: &dyn AsyncInstrument<f64>,
 ) {
-    let instruments = Instruments::new(toggles);
-    let mut sys = System::new();
-    let no_attrs: &[opentelemetry::KeyValue] = &[];
-
-    loop {
-        tokio::time::sleep(interval).await;
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
-
-        let Some(process) = sys.process(pid) else {
-            continue;
-        };
-
-        if let Some(gauge) = &instruments.process_cpu {
-            let usage = f64::from(process.cpu_usage()) / 100.0;
-            gauge.record(usage, no_attrs);
-        }
-        if let Some(gauge) = &instruments.process_memory {
-            gauge.record(process.memory() as f64, no_attrs);
-        }
-        if let Some(gauge) = &instruments.process_threads
-            && let Some(tasks) = process.tasks()
-        {
-            gauge.record(tasks.len() as f64, no_attrs);
-        }
+    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+    s.ensure_fresh();
+    let Some(process) = s.sys.process(s.pid) else {
+        return;
+    };
+    if let Some(tasks) = process.tasks() {
+        instrument.observe(tasks.len() as f64, &[]);
     }
 }

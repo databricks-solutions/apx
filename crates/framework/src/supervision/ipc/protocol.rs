@@ -557,18 +557,16 @@ NameError: name 'undefined_var' is not defined
         let relay = TelemetryRelay {
             system: SystemConfig {
                 enabled: true,
-                interval_secs: 10.0,
                 metrics: SystemGlobalToggles {
                     system_cpu: true,
                     system_memory: false,
-                    system_swap: true,
+                    system_paging: true,
                     system_disk_io: false,
                     system_network_io: true,
                 },
             },
             process: ProcessConfig {
                 enabled: false,
-                interval_secs: 5.0,
                 metrics: ProcessMetricToggles {
                     process_cpu: false,
                     process_memory: true,
@@ -582,7 +580,6 @@ NameError: name 'undefined_var' is not defined
         match decoded {
             IpcMessage::TelemetryConfig(r) => {
                 assert!(r.system.enabled);
-                assert!((r.system.interval_secs - 10.0).abs() < f64::EPSILON);
                 assert!(r.system.metrics.system_cpu);
                 assert!(!r.system.metrics.system_memory);
                 assert!(!r.process.enabled);

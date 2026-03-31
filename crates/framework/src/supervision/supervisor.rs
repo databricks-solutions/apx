@@ -174,10 +174,12 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
     if matches!(mode, SupervisorMode::Serving) {
         let (system_config, process_config) = recv_telemetry_config(&mut workers[0].channel).await;
         log_ready(startup_start);
-        let _system_metrics_handle =
-            crate::telemetry::system_metrics::spawn_system_metrics(&system_config);
-        let _supervisor_process_handle =
-            crate::telemetry::process_metrics::spawn_process_metrics(&process_config);
+        if system_config.enabled {
+            crate::telemetry::system_metrics::register_system_metrics(system_config.metrics);
+        }
+        if process_config.enabled {
+            crate::telemetry::process_metrics::register_process_metrics(process_config.metrics);
+        }
     }
 
     let mut dev_watcher = if config.dev_mode {

@@ -302,6 +302,7 @@ def telemetry_container(
         platform="linux/amd64",
         ports={"8000/tcp": None},
         environment={
+            "APX_LOG": "debug",
             "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
             "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
             "OTEL_SERVICE_NAME": "apx-integration-test",
