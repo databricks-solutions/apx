@@ -17,6 +17,12 @@ use apx_databricks_sdk::DatabricksClient;
 
 use crate::api_generator::start_openapi_watcher;
 use crate::dev::common::{ProcessStatus, ServerHealth, Shutdown, lock_path, remove_lock};
+
+/// Maximum time to wait for all services to become healthy during startup.
+const STARTUP_HEALTH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Polling interval for the startup health check loop.
+const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(500);
 use crate::dev::logging::BrowserLogPayload;
 use crate::dev::otel::build_otlp_log_payload_from_ms;
 use crate::dev::process::ProcessManager;
@@ -161,11 +167,20 @@ pub async fn run_server(config: ServerConfig) -> Result<(), String> {
     {
         let pm = Arc::clone(&process_manager);
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let startup_deadline = tokio::time::Instant::now() + STARTUP_HEALTH_TIMEOUT;
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = shutdown_rx.recv() => break,
-                    () = tokio::time::sleep(Duration::from_millis(500)) => {
+                    () = tokio::time::sleep_until(startup_deadline) => {
+                        warn!(
+                            name: "apx.dev.startup_timeout",
+                            "startup health loop timed out after {}s, services may not be fully healthy",
+                            STARTUP_HEALTH_TIMEOUT.as_secs(),
+                        );
+                        break;
+                    }
+                    () = tokio::time::sleep(STARTUP_POLL_INTERVAL) => {
                         let (fe, be, _db) = pm.status().await;
                         if fe.is_ready() && be.is_ready() {
                             info!(

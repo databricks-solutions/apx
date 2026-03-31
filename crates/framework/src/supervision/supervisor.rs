@@ -82,6 +82,14 @@ pub enum SupervisorError {
         /// Worker index.
         index: usize,
     },
+    /// Worker reported a startup failure over IPC (e.g. Python import error).
+    #[error("worker {index} failed to start: {error}")]
+    WorkerStartupFailed {
+        /// Worker index.
+        index: usize,
+        /// Error message from the worker.
+        error: String,
+    },
     /// All workers crashed within the restart window.
     #[error("all {count} workers crashed within restart window")]
     AllWorkersCrashed {
@@ -100,6 +108,18 @@ pub enum SupervisorError {
 const MAX_RESTARTS_PER_WORKER: usize = 5;
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
 const WORKER_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Operational state of the dev-mode supervisor.
+///
+/// In production mode this is always `Serving`. In dev mode the supervisor
+/// transitions to `Degraded` when workers fail to start, and back to
+/// `Serving` when a file change triggers a successful reload.
+enum SupervisorMode {
+    /// All workers are running and serving requests.
+    Serving,
+    /// Workers failed to start; waiting for a file change to retry.
+    Degraded,
+}
 
 /// Run the multi-worker supervisor.
 ///
@@ -139,25 +159,27 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
     );
 
     let mut workers = Vec::with_capacity(config.workers);
-    for i in 0..config.workers {
-        let relay = i == 0;
-        let worker = spawn_worker(i, &config, &nonce, socket_dir.path(), relay).await?;
-        workers.push(worker);
+    let mut mode = match try_spawn_all(&mut workers, &config, &nonce, socket_dir.path()).await {
+        Ok(()) => SupervisorMode::Serving,
+        Err(e) if config.dev_mode => {
+            tracing::error!(
+                name: "apx.supervisor.startup_failed",
+                error = %e,
+                "startup failed, waiting for file change to retry",
+            );
+            SupervisorMode::Degraded
+        }
+        Err(e) => return Err(e),
+    };
+
+    if matches!(mode, SupervisorMode::Serving) {
+        let (system_config, process_config) = recv_telemetry_config(&mut workers[0].channel).await;
+        log_ready(startup_start);
+        let _system_metrics_handle =
+            crate::telemetry::system_metrics::spawn_system_metrics(&system_config);
+        let _supervisor_process_handle =
+            crate::telemetry::process_metrics::spawn_process_metrics(&process_config);
     }
-
-    let (system_config, process_config) = recv_telemetry_config(&mut workers[0].channel).await;
-
-    let startup_ms = startup_start.elapsed().as_millis();
-    tracing::info!(
-        name: "apx.supervisor.ready",
-        "server ready in {}ms",
-        startup_ms,
-    );
-
-    let _system_metrics_handle =
-        crate::telemetry::system_metrics::spawn_system_metrics(&system_config);
-    let _supervisor_process_handle =
-        crate::telemetry::process_metrics::spawn_process_metrics(&process_config);
 
     let mut dev_watcher = if config.dev_mode {
         Some(DevWatcher::new(&config.app_dir)?)
@@ -167,8 +189,20 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
 
     loop {
         tokio::select! {
-            (idx, status) = wait_for_any_exit(&mut workers) => {
-                handle_worker_exit(idx, status, &mut workers, &config, &nonce, socket_dir.path()).await?;
+            (idx, status) = wait_for_any_exit(&mut workers),
+                if matches!(mode, SupervisorMode::Serving) && !workers.is_empty() =>
+            {
+                if config.dev_mode {
+                    tracing::error!(
+                        name: "apx.supervisor.worker_error",
+                        worker = idx,
+                        ?status,
+                        "worker exited, waiting for file change to retry",
+                    );
+                    mode = SupervisorMode::Degraded;
+                } else {
+                    handle_worker_exit(idx, status, &mut workers, &config, &nonce, socket_dir.path()).await?;
+                }
             }
             () = shutdown_signal() => {
                 tracing::info!(name: "apx.supervisor.shutdown", "shutdown signal received, stopping workers");
@@ -176,27 +210,73 @@ pub async fn run_supervisor(config: SupervisorConfig) -> Result<(), SupervisorEr
                 break;
             }
             Some(info) = recv_dev_reload(&mut dev_watcher) => {
-                let summary = format_reload_files(&info.files);
-                tracing::info!(
-                    name: "apx.supervisor.dev_reload",
-                    "reload triggered by changes in {}",
-                    summary,
-                );
-                tracing::info!(name: "apx.supervisor.dev_reload_stop", "stopping workers for reload");
-                let reload_start = std::time::Instant::now();
-                kill_workers(&mut workers, config.drain_timeout).await;
-                respawn_all_workers(&mut workers, &config, &nonce, socket_dir.path()).await?;
-                let reload_ms = reload_start.elapsed().as_millis();
-                tracing::info!(
-                    name: "apx.supervisor.ready",
-                    "server ready in {}ms",
-                    reload_ms,
-                );
+                mode = try_reload(&mut workers, &config, &nonce, socket_dir.path(), &info).await;
             }
         }
     }
 
     Ok(())
+}
+
+/// Spawn all workers for initial startup.
+async fn try_spawn_all(
+    workers: &mut Vec<WorkerHandle>,
+    config: &SupervisorConfig,
+    nonce: &Nonce,
+    socket_dir: &std::path::Path,
+) -> Result<(), SupervisorError> {
+    for i in 0..config.workers {
+        let relay = i == 0;
+        let worker = spawn_worker(i, config, nonce, socket_dir, relay).await?;
+        workers.push(worker);
+    }
+    Ok(())
+}
+
+/// Log the "server ready" message with elapsed time.
+fn log_ready(startup_start: std::time::Instant) {
+    let startup_ms = startup_start.elapsed().as_millis();
+    tracing::info!(
+        name: "apx.supervisor.ready",
+        "server ready in {}ms",
+        startup_ms,
+    );
+}
+
+/// Kill existing workers and attempt to respawn them.
+///
+/// Returns `Serving` on success or `Degraded` on failure.
+async fn try_reload(
+    workers: &mut Vec<WorkerHandle>,
+    config: &SupervisorConfig,
+    nonce: &Nonce,
+    socket_dir: &std::path::Path,
+    info: &super::dev_watcher::ReloadInfo,
+) -> SupervisorMode {
+    let summary = format_reload_files(&info.files);
+    tracing::info!(
+        name: "apx.supervisor.dev_reload",
+        "reload triggered by changes in {}",
+        summary,
+    );
+    tracing::info!(name: "apx.supervisor.dev_reload_stop", "stopping workers for reload");
+    let reload_start = std::time::Instant::now();
+    kill_workers(workers, config.drain_timeout).await;
+
+    match respawn_all_workers(workers, config, nonce, socket_dir).await {
+        Ok(()) => {
+            log_ready(reload_start);
+            SupervisorMode::Serving
+        }
+        Err(e) => {
+            tracing::error!(
+                name: "apx.supervisor.reload_failed",
+                error = %e,
+                "reload failed, waiting for file change to retry",
+            );
+            SupervisorMode::Degraded
+        }
+    }
 }
 
 /// Receive telemetry config from worker 0, falling back to defaults on any
@@ -406,10 +486,13 @@ async fn bootstrap_worker(
             tracing::debug!(name: "apx.supervisor.worker_ready", worker = index, "worker ready");
             Ok(channel)
         }
+        IpcMessage::StartupFailed { error } => {
+            Err(SupervisorError::WorkerStartupFailed { index, error })
+        }
         other => Err(SupervisorError::Ipc {
             index,
             source: super::ipc::protocol::IpcError::Io(std::io::Error::other(format!(
-                "expected Ready, got {other:?}"
+                "expected Ready or StartupFailed, got {other:?}"
             ))),
         }),
     }
@@ -780,5 +863,17 @@ mod tests {
         let err = SupervisorError::Config(ConfigError::ZeroPort);
         let msg = format!("{err}");
         assert!(msg.contains("port"));
+    }
+
+    #[test]
+    fn supervisor_error_display_worker_startup_failed() {
+        let err = SupervisorError::WorkerStartupFailed {
+            index: 0,
+            error: "app load failed: no attribute 'app'".to_owned(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("worker 0"));
+        assert!(msg.contains("failed to start"));
+        assert!(msg.contains("no attribute"));
     }
 }

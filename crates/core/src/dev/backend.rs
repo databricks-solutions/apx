@@ -24,7 +24,7 @@ use tokio::time::Duration;
 use tracing::{info, warn};
 
 use crate::dev::common::{
-    DevProcess, ProbeResult, ProcessStatus, http_health_probe, stop_child_tree,
+    BACKEND_PROBE_PATH, DevProcess, ProbeResult, ProcessStatus, http_health_probe, stop_child_tree,
 };
 use crate::dev::embedded_db::EmbeddedDb;
 use crate::dev::otel::forward_log_to_flux;
@@ -292,7 +292,7 @@ impl DevProcess for Backend {
         }
         drop(guard);
 
-        match http_health_probe(CLIENT_HOST, self.cfg.backend_port).await {
+        match http_health_probe(CLIENT_HOST, self.cfg.backend_port, BACKEND_PROBE_PATH).await {
             ProbeResult::Responded => ProcessStatus::Healthy,
             ProbeResult::Failed => ProcessStatus::Starting,
         }

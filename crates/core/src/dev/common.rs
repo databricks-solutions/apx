@@ -23,6 +23,15 @@ use crate::common::ensure_dir;
 /// to avoid a race where both timeouts fire simultaneously, causing every poll cycle to fail.
 const PROBE_TIMEOUT_SECS: u64 = 1;
 
+/// Health probe path for the backend.
+///
+/// The framework serves `/healthz` as a static short-circuit response in
+/// `ApxService`, so probing this path avoids polluting application logs.
+pub(crate) const BACKEND_PROBE_PATH: &str = "/healthz";
+
+/// Health probe path for the frontend (Vite has no dedicated health endpoint).
+pub(crate) const FRONTEND_PROBE_PATH: &str = "/";
+
 /// Shared HTTP client for health probes.
 /// Reused across all health checks to avoid creating a new client per probe.
 pub(crate) static HEALTH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
@@ -45,11 +54,11 @@ pub(crate) enum ProbeResult {
     Failed,
 }
 
-/// Probe a service by making an HTTP GET request to its root path.
+/// Probe a service by making an HTTP GET request to the given `path`.
 /// Any HTTP response (regardless of status code) means the server is up.
 /// Only connection/timeout failures indicate the server isn't ready yet.
-pub(crate) async fn http_health_probe(host: &str, port: u16) -> ProbeResult {
-    let url = format!("http://{host}:{port}/");
+pub(crate) async fn http_health_probe(host: &str, port: u16, path: &str) -> ProbeResult {
+    let url = format!("http://{host}:{port}{path}");
     let start = std::time::Instant::now();
     match HEALTH_CLIENT.get(&url).send().await {
         Ok(resp) => {

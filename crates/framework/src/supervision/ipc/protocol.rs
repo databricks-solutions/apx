@@ -195,6 +195,12 @@ pub enum IpcMessage {
     /// Worker → Supervisor: telemetry config read from Python for supervisor relay.
     TelemetryConfig(TelemetryRelay),
 
+    /// Worker → Supervisor: startup failed with error details.
+    StartupFailed {
+        /// Human-readable error message from the failed startup step.
+        error: String,
+    },
+
     /// Supervisor → Worker: stop accepting, finish in-flight requests.
     Drain,
 
@@ -380,6 +386,23 @@ mod tests {
         let decoded: IpcMessage = rmp_serde::from_slice(&encoded)
             .unwrap_or_else(|e| unreachable!("Drained should be deserializable: {e}"));
         assert!(matches!(decoded, IpcMessage::Drained));
+    }
+
+    #[test]
+    fn ipc_message_startup_failed_roundtrip() {
+        let msg = IpcMessage::StartupFailed {
+            error: "app load failed: no attribute 'app' in module 'main'".to_owned(),
+        };
+        let encoded = rmp_serde::to_vec(&msg)
+            .unwrap_or_else(|e| unreachable!("StartupFailed should be serializable: {e}"));
+        let decoded: IpcMessage = rmp_serde::from_slice(&encoded)
+            .unwrap_or_else(|e| unreachable!("StartupFailed should be deserializable: {e}"));
+        match decoded {
+            IpcMessage::StartupFailed { error } => {
+                assert!(error.contains("no attribute"));
+            }
+            other => unreachable!("expected StartupFailed, got {other:?}"),
+        }
     }
 
     #[test]

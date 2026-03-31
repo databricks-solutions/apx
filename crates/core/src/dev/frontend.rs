@@ -15,7 +15,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
-use crate::dev::common::{DevProcess, ProbeResult, ProcessStatus, http_health_probe};
+use crate::dev::common::{
+    DevProcess, FRONTEND_PROBE_PATH, ProbeResult, ProcessStatus, http_health_probe,
+};
 use crate::dev::otel::forward_log_to_flux;
 use crate::dev::token;
 use crate::external::uv::ApxTool;
@@ -179,7 +181,7 @@ impl DevProcess for Frontend {
         }
         drop(guard);
 
-        match http_health_probe(CLIENT_HOST, self.cfg.frontend_port).await {
+        match http_health_probe(CLIENT_HOST, self.cfg.frontend_port, FRONTEND_PROBE_PATH).await {
             ProbeResult::Responded => ProcessStatus::Healthy,
             ProbeResult::Failed => ProcessStatus::Starting,
         }

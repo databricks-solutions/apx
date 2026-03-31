@@ -252,7 +252,6 @@ function apxPlugin(): Plugin {
               devServerHost === "0.0.0.0" ? requestHost : devServerHost;
 
             const redirectUrl = `http://${redirectHost}:${devServerPort}${url}`;
-            log(`Redirecting to: ${redirectUrl}`);
             res.statusCode = 302;
             res.setHeader("Location", redirectUrl);
             res.end();
