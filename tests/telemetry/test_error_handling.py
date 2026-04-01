@@ -39,9 +39,7 @@ class TestErrorHandling:
             f"expected status Error (2); got {span.status.code}"
         )
 
-    def test_erroring_span_status_message(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_erroring_span_status_message(self, otel_collector: OtelCollector) -> None:
         span = find_span(otel_collector, "test.erroring_span")
         assert "deliberate test error" in span.status.message, (
             f"expected 'deliberate test error' in status message; "
@@ -58,9 +56,7 @@ class TestErrorHandling:
             f"got events: {[e.name for e in span.events]}"
         )
 
-    def test_erroring_span_exception_type(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_erroring_span_exception_type(self, otel_collector: OtelCollector) -> None:
         span = find_span(otel_collector, "test.erroring_span")
         exc_event = next(e for e in span.events if e.name == "exception")
         attrs = {a.key: (a.value.stringValue or "") for a in exc_event.attributes}
@@ -91,9 +87,7 @@ class TestErrorHandling:
 
     # ── (b) log.exception() captures exception info ───────────────────────
 
-    def test_log_exception_span_exists(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_log_exception_span_exists(self, otel_collector: OtelCollector) -> None:
         span = find_span(otel_collector, "caught runtime error")
         attrs = span_attrs(span)
         assert attrs.get("log.level") == "error"
@@ -117,9 +111,7 @@ class TestErrorHandling:
             f"got {attrs.get('exception.message')!r}"
         )
 
-    def test_log_exception_has_stacktrace(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_log_exception_has_stacktrace(self, otel_collector: OtelCollector) -> None:
         span = find_span(otel_collector, "caught runtime error")
         attrs = span_attrs(span)
         assert attrs.get("exception.stacktrace"), (
@@ -153,9 +145,7 @@ class TestErrorHandling:
 
     # ── (d) Clean span — no error ─────────────────────────────────────────
 
-    def test_clean_span_has_unset_status(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_clean_span_has_unset_status(self, otel_collector: OtelCollector) -> None:
         span = find_span(otel_collector, "test.clean_span")
         assert span.status.code == OTEL_STATUS_UNSET, (
             f"clean span should have status Unset (0); got {span.status.code}"

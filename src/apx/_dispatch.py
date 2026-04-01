@@ -1,7 +1,10 @@
-"""Zero-GIL dispatch loop for the 3-thread architecture.
+"""Zero-GIL dispatch loop with inline coroutine driving.
 
-Installs an fd-based wakeup on the asyncio event loop (Unix) or
-exposes a drain callback for ``call_soon_threadsafe`` (Windows).
+Installs an fd-based wakeup on the asyncio event loop.  Drains
+requests from the Rust crossbeam channel and drives each ASGI
+coroutine inline.  Simple handlers complete in ~21us with zero
+event loop scheduling.  Handlers that suspend on real I/O fall
+back to callback-based continuation.
 
 Called once from Rust during reactor init via
 ``py.import(c"apx._dispatch")?.call_method1(c"install_dispatch", ...)``.
@@ -15,7 +18,16 @@ import traceback
 from collections.abc import Coroutine
 from typing import Any, Callable
 
+from apx._continuation import Continuation
 from apx._core import RequestQueue
+from apx._scheduler import (
+    CallSoonCapture,
+    Completed,
+    Failed,
+    SchedulerTask,
+    Suspended,
+    drive_inline,
+)
 
 
 def install_dispatch(
@@ -24,17 +36,10 @@ def install_dispatch(
     app: Callable[..., Coroutine[Any, Any, None]],
     wakeup_fd: int | None = None,
 ) -> None:
-    """Install the zero-GIL dispatch reader on the asyncio event loop.
+    """Install the inline dispatch driver on the asyncio event loop."""
 
-    On Unix: registers ``wakeup_fd`` with the loop's selector via ``add_reader``.
-    On Windows: ``wakeup_fd`` is ``None`` — Rust uses ``call_soon_threadsafe``
-    which appends ``_drain_queue`` directly to ``_ready`` (no fd needed).
-    """
-
-    # At ~31µs per materialize(), 32 items ≈ 1ms GIL hold — well under
-    # the 5ms GIL switch interval (sys.getswitchinterval()), keeping the
-    # drain responsive without excessive re-scheduling overhead.
-    max_drain_batch: int = 32
+    max_drain_batch: int = 8
+    capture = CallSoonCapture(loop)
 
     async def _guarded(
         scope: dict[str, Any],
@@ -44,10 +49,38 @@ def install_dispatch(
         try:
             await app(scope, receive, send)
         except Exception as exc:
+            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            send.send_error(tb)
+
+    def _dispatch_inline(
+        scope: dict[str, Any],
+        receive: Any,
+        send: Any,
+    ) -> None:
+        """Drive one request inline.  Falls back on suspension."""
+        coro = _guarded(scope, receive, send)
+        try:
+            task = SchedulerTask(loop=loop)
+
+            capture.enter()
+            result = drive_inline(coro, task, loop, capture)
+            capture.leave()
+        except BaseException:
+            coro.close()
+            raise
+
+        if isinstance(result, Completed):
+            return
+        elif isinstance(result, Failed):
             tb = "".join(
-                traceback.format_exception(type(exc), exc, exc.__traceback__)
+                traceback.format_exception(
+                    type(result.exc), result.exc, result.exc.__traceback__
+                )
             )
             send.send_error(tb)
+            return
+        elif isinstance(result, Suspended):
+            Continuation(coro, result.yielded, loop, task, capture)
 
     def _drain_queue() -> None:
         for _ in range(max_drain_batch):
@@ -55,12 +88,7 @@ def install_dispatch(
             if result is None:
                 return
             scope, receive, send = result
-            loop.create_task(_guarded(scope, receive, send))
-        # Batch full — more items may remain.  Yield to the event loop
-        # so _run_once can process I/O, fire done callbacks, and give
-        # thread pool workers a GIL window before we drain more.
-        # call_soon (not threadsafe): we're already on the asyncio
-        # thread, no selector wake needed.
+            _dispatch_inline(scope, receive, send)
         loop.call_soon(_drain_queue)
 
     if wakeup_fd is not None:
@@ -72,7 +100,6 @@ def install_dispatch(
                 pass
             _drain_queue()
 
-        # add_reader is not thread-safe; schedule it onto the asyncio thread.
         loop.call_soon_threadsafe(loop.add_reader, wakeup_fd, _on_readable)
     else:
-        install_dispatch._drain_queue = _drain_queue  # type: ignore[attr-defined]
+        install_dispatch._drain_queue = _drain_queue  # type: ignore[attr-defined, ty:unresolved-attribute]

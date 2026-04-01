@@ -34,14 +34,14 @@ class TestCrossSignal:
     """Verify instrumentation scope names and cross-signal correlation."""
 
     _setup = make_setup_fixture(
-        "/api/telemetry/cross-signal", sleep_time=5, require_logs=True,
+        "/api/telemetry/cross-signal",
+        sleep_time=5,
+        require_logs=True,
     )
 
     # ── Instrumentation scope: user spans ─────────────────────────────────
 
-    def test_user_span_scope_is_apx_user(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_user_span_scope_is_apx_user(self, otel_collector: OtelCollector) -> None:
         """User spans (via apx.telemetry.span) should have scope 'apx.user'."""
         for scope, span in flat_spans_with_scope(otel_collector):
             if span.name == "test.cross_signal_span":
@@ -149,10 +149,7 @@ class TestCrossSignal:
     ) -> None:
         """Stdlib logs should only appear as log records, not as spans."""
         spans = flat_spans(otel_collector)
-        matching = [
-            s for s in spans
-            if "cross signal stdlib warning" in s.name
-        ]
+        matching = [s for s in spans if "cross signal stdlib warning" in s.name]
         assert not matching, (
             f"stdlib log should not produce a span; found {len(matching)} span(s)"
         )
@@ -169,9 +166,7 @@ class TestCrossSignal:
                 )
                 return
         all_names = sorted({m.name for _, m in flat_metrics_with_scope(otel_collector)})
-        pytest.fail(
-            f"test.cross_signal_counter not found; available: {all_names}"
-        )
+        pytest.fail(f"test.cross_signal_counter not found; available: {all_names}")
 
     def test_user_histogram_scope_is_apx_user(
         self, otel_collector: OtelCollector
@@ -219,8 +214,7 @@ class TestCrossSignal:
                 end = int(span.endTimeUnixNano)
                 delta_us = (end - start) / 1_000
                 assert delta_us < 1_000, (
-                    f"log span should be near-zero-duration; "
-                    f"delta={delta_us:.1f}µs"
+                    f"log span should be near-zero-duration; delta={delta_us:.1f}µs"
                 )
                 return
         pytest.fail("'cross signal info log' span not found")

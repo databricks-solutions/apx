@@ -32,12 +32,22 @@ CREATE TABLE IF NOT EXISTS items (
     tags TEXT NOT NULL DEFAULT '[]'
 )"""
 
-_INSERT_ITEM = "INSERT INTO items (id, name, description, price, tags) VALUES (?, ?, ?, ?, ?)"
-_INSERT_ITEM_AUTO = "INSERT INTO items (name, description, price, tags) VALUES (?, ?, ?, ?)"
+_INSERT_ITEM = (
+    "INSERT INTO items (id, name, description, price, tags) VALUES (?, ?, ?, ?, ?)"
+)
+_INSERT_ITEM_AUTO = (
+    "INSERT INTO items (name, description, price, tags) VALUES (?, ?, ?, ?)"
+)
 
 
 def _row_to_item(row: aiosqlite.Row) -> Item:
-    return Item(id=row[0], name=row[1], description=row[2], price=row[3], tags=json.loads(row[4]))
+    return Item(
+        id=row[0],
+        name=row[1],
+        description=row[2],
+        price=row[3],
+        tags=json.loads(row[4]),
+    )
 
 
 async def _seed_defaults(db: aiosqlite.Connection) -> None:
@@ -100,7 +110,9 @@ async def health() -> dict[str, str]:
 
 @router.get("/items", response_model=list[Item])
 async def list_items(db: aiosqlite.Connection = Depends(_get_db)) -> list[Item]:
-    cursor = await db.execute("SELECT id, name, description, price, tags FROM items ORDER BY id")
+    cursor = await db.execute(
+        "SELECT id, name, description, price, tags FROM items ORDER BY id"
+    )
     rows = await cursor.fetchall()
     return [_row_to_item(row) for row in rows]
 
@@ -117,7 +129,9 @@ async def get_item(item_id: int, db: aiosqlite.Connection = Depends(_get_db)) ->
 
 
 @router.post("/items", response_model=Item, status_code=201)
-async def create_item(body: ItemCreate, db: aiosqlite.Connection = Depends(_get_db)) -> Item:
+async def create_item(
+    body: ItemCreate, db: aiosqlite.Connection = Depends(_get_db)
+) -> Item:
     cursor = await db.execute(
         _INSERT_ITEM_AUTO,
         (body.name, body.description, body.price, json.dumps(body.tags)),
@@ -141,7 +155,13 @@ async def update_item(
     updated = existing.model_copy(update=body.model_dump(exclude_unset=True))
     await db.execute(
         "UPDATE items SET name = ?, description = ?, price = ?, tags = ? WHERE id = ?",
-        (updated.name, updated.description, updated.price, json.dumps(updated.tags), item_id),
+        (
+            updated.name,
+            updated.description,
+            updated.price,
+            json.dumps(updated.tags),
+            item_id,
+        ),
     )
     await db.commit()
     return updated
@@ -402,9 +422,7 @@ async def telemetry_cross_signal():
         )
         histogram.observe(42.0, attributes={"scenario": "cross_signal"})
 
-        logging.getLogger("test.cross_signal").warning(
-            "cross signal stdlib warning"
-        )
+        logging.getLogger("test.cross_signal").warning("cross signal stdlib warning")
 
     return {"ok": True}
 

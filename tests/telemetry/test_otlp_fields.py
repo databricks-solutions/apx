@@ -37,14 +37,14 @@ class TestOtlpFields:
     """Verify all OTLP proto fields are properly populated in exported telemetry."""
 
     _setup = make_setup_fixture(
-        "/api/telemetry/otlp-fields", sleep_time=5, require_logs=True,
+        "/api/telemetry/otlp-fields",
+        sleep_time=5,
+        require_logs=True,
     )
 
     # ── Resource attributes ───────────────────────────────────────────────
 
-    def test_resource_has_service_name(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_resource_has_service_name(self, otel_collector: OtelCollector) -> None:
         """resource.attributes must include service.name."""
         for rs in flat_resource_spans(otel_collector):
             attr_keys = {a.key for a in rs.resource.attributes}
@@ -52,9 +52,7 @@ class TestOtlpFields:
                 return
         pytest.fail("service.name not found in resource.attributes")
 
-    def test_resource_has_apx_attributes(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_resource_has_apx_attributes(self, otel_collector: OtelCollector) -> None:
         """resource.attributes must include apx.process.type and apx.worker.id."""
         for rs in flat_resource_spans(otel_collector):
             attr_keys = {a.key for a in rs.resource.attributes}
@@ -64,18 +62,14 @@ class TestOtlpFields:
 
     # ── Resource schema_url ───────────────────────────────────────────────
 
-    def test_resource_schema_url_on_spans(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_resource_schema_url_on_spans(self, otel_collector: OtelCollector) -> None:
         for rs in flat_resource_spans(otel_collector):
             if rs.schemaUrl:
                 assert "opentelemetry.io/schemas" in rs.schemaUrl
                 return
         pytest.fail("ResourceSpans.schemaUrl not populated")
 
-    def test_resource_schema_url_on_logs(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_resource_schema_url_on_logs(self, otel_collector: OtelCollector) -> None:
         for rl in flat_resource_logs(otel_collector):
             if rl.schemaUrl:
                 assert "opentelemetry.io/schemas" in rl.schemaUrl
@@ -93,9 +87,7 @@ class TestOtlpFields:
 
     # ── InstrumentationScope version ──────────────────────────────────────
 
-    def test_span_scope_has_version(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_span_scope_has_version(self, otel_collector: OtelCollector) -> None:
         for scope, s in flat_spans_with_scope(otel_collector):
             if s.name == "test.client_call" and scope.version:
                 return
@@ -106,17 +98,13 @@ class TestOtlpFields:
         "from target, dropping version (opentelemetry-proto transform)",
         strict=False,
     )
-    def test_log_scope_has_version(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_log_scope_has_version(self, otel_collector: OtelCollector) -> None:
         for scope, lr in flat_log_records(otel_collector):
             if scope.name == "apx.python" and scope.version:
                 return
         pytest.fail("Log scope version not populated for apx.python logger")
 
-    def test_metric_scope_has_version(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_metric_scope_has_version(self, otel_collector: OtelCollector) -> None:
         for scope, m in flat_metrics_with_scope(otel_collector):
             if m.name.startswith("test.otlp_fields") and scope.version:
                 return
@@ -124,9 +112,7 @@ class TestOtlpFields:
 
     # ── InstrumentationScope schema_url ───────────────────────────────────
 
-    def test_span_scope_has_schema_url(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_span_scope_has_schema_url(self, otel_collector: OtelCollector) -> None:
         for rs in flat_resource_spans(otel_collector):
             for ss in rs.scopeSpans:
                 if ss.scope.name == "apx.user" and ss.schemaUrl:
@@ -134,9 +120,7 @@ class TestOtlpFields:
                     return
         pytest.fail("ScopeSpans.schemaUrl not populated for apx.user scope")
 
-    def test_log_scope_has_schema_url(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_log_scope_has_schema_url(self, otel_collector: OtelCollector) -> None:
         for rl in flat_resource_logs(otel_collector):
             for sl in rl.scopeLogs:
                 if sl.scope.name == "apx.python" and sl.schemaUrl:
@@ -144,9 +128,7 @@ class TestOtlpFields:
                     return
         pytest.fail("ScopeLogs.schemaUrl not populated for apx.python scope")
 
-    def test_metric_scope_has_schema_url(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_metric_scope_has_schema_url(self, otel_collector: OtelCollector) -> None:
         for rm in flat_resource_metrics(otel_collector):
             for sm in rm.scopeMetrics:
                 if sm.scope.name == "apx.user" and sm.schemaUrl:
@@ -156,9 +138,7 @@ class TestOtlpFields:
 
     # ── Metric start_time_unix_nano ───────────────────────────────────────
 
-    def test_counter_has_start_time(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_counter_has_start_time(self, otel_collector: OtelCollector) -> None:
         """Counter (Sum) should have non-empty start_time_unix_nano."""
         for _, m in flat_metrics_with_scope(otel_collector):
             if m.name == "test.otlp_fields_counter" and m.sum:
@@ -167,9 +147,7 @@ class TestOtlpFields:
                         return
         pytest.fail("Counter start_time_unix_nano not populated")
 
-    def test_histogram_has_start_time(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_histogram_has_start_time(self, otel_collector: OtelCollector) -> None:
         """Histogram should have non-empty start_time_unix_nano."""
         for _, m in flat_metrics_with_scope(otel_collector):
             if m.name == "test.otlp_fields_histogram" and m.histogram:
@@ -178,9 +156,7 @@ class TestOtlpFields:
                         return
         pytest.fail("Histogram start_time_unix_nano not populated")
 
-    def test_gauge_start_time(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_gauge_start_time(self, otel_collector: OtelCollector) -> None:
         """Gauge start_time_unix_nano may or may not be populated depending on SDK version."""
         for _, m in flat_metrics_with_scope(otel_collector):
             if m.name == "test.otlp_fields_gauge" and m.gauge:
@@ -189,9 +165,7 @@ class TestOtlpFields:
 
     # ── Log observed_time_unix_nano ───────────────────────────────────────
 
-    def test_log_has_observed_timestamp(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_log_has_observed_timestamp(self, otel_collector: OtelCollector) -> None:
         """Log records should have non-empty observedTimeUnixNano."""
         for _, lr in flat_log_records(otel_collector):
             body = lr.body.stringValue or ""
@@ -204,9 +178,7 @@ class TestOtlpFields:
 
     # ── Log flags ─────────────────────────────────────────────────────────
 
-    def test_log_flags_has_trace_flags(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_log_flags_has_trace_flags(self, otel_collector: OtelCollector) -> None:
         """When trace context is present, log flags bits 0-7 should carry trace flags."""
         for _, lr in flat_log_records(otel_collector):
             body = lr.body.stringValue or ""
@@ -218,9 +190,7 @@ class TestOtlpFields:
 
     # ── Span kind ─────────────────────────────────────────────────────────
 
-    def test_span_kind_client(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_span_kind_client(self, otel_collector: OtelCollector) -> None:
         """test.client_call should have kind=3 (CLIENT)."""
         for s in flat_spans(otel_collector):
             if s.name == "test.client_call":
@@ -228,9 +198,7 @@ class TestOtlpFields:
                 return
         pytest.fail("test.client_call span not found")
 
-    def test_span_kind_internal_default(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_span_kind_internal_default(self, otel_collector: OtelCollector) -> None:
         """test.internal_work should have kind=1 (INTERNAL)."""
         for s in flat_spans(otel_collector):
             if s.name == "test.internal_work":
@@ -240,9 +208,7 @@ class TestOtlpFields:
 
     # ── Span flags ────────────────────────────────────────────────────────
 
-    def test_span_flags_nonzero(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_span_flags_nonzero(self, otel_collector: OtelCollector) -> None:
         """Sampled spans should have flags with bit 0 set (SAMPLED)."""
         for s in flat_spans(otel_collector):
             if s.name == "test.client_call":
@@ -253,9 +219,7 @@ class TestOtlpFields:
 
     # ── Span events ───────────────────────────────────────────────────────
 
-    def test_span_events_array_populated(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_span_events_array_populated(self, otel_collector: OtelCollector) -> None:
         """test.client_call should have a dns.resolved event with attributes."""
         for s in flat_spans(otel_collector):
             if s.name == "test.client_call":
@@ -271,9 +235,7 @@ class TestOtlpFields:
 
     # ── Log event_name (proto field) ──────────────────────────────────────
 
-    def test_log_event_name_populated(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_log_event_name_populated(self, otel_collector: OtelCollector) -> None:
         """Log with event_name should carry it as an attribute.
 
         The OTEL Rust SDK ``set_event_name`` requires ``&'static str``,

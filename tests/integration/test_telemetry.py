@@ -1175,8 +1175,7 @@ class TestSpanAttributes:
                 end = int(s.endTimeUnixNano)
                 delta_us = (end - start) / 1_000
                 assert delta_us < 1_000, (
-                    f"log span should be near-zero-duration; "
-                    f"delta={delta_us:.1f}µs"
+                    f"log span should be near-zero-duration; delta={delta_us:.1f}µs"
                 )
                 return
         pytest.fail("log span 'integration test log message' not found")

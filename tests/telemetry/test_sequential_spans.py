@@ -97,9 +97,7 @@ class TestSequentialSpans:
             f"a.end={a_end} b.start={b_start}"
         )
 
-    def test_parent_encloses_both_siblings(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_parent_encloses_both_siblings(self, otel_collector: OtelCollector) -> None:
         """Parent span should start before and end after both children."""
         parent = find_span(otel_collector, "test.parent")
         a = find_span(otel_collector, "test.sibling_a")
@@ -113,6 +111,4 @@ class TestSequentialSpans:
         assert p_start <= a_start, (
             f"parent should start before sibling_a: {p_start} > {a_start}"
         )
-        assert p_end >= b_end, (
-            f"parent should end after sibling_b: {p_end} < {b_end}"
-        )
+        assert p_end >= b_end, f"parent should end after sibling_b: {p_end} < {b_end}"

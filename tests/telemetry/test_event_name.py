@@ -28,14 +28,14 @@ class TestEventName:
     """Verify event_name propagation through spans and OTLP log records."""
 
     _setup = make_setup_fixture(
-        "/api/telemetry/event-name", sleep_time=5, require_logs=True,
+        "/api/telemetry/event-name",
+        sleep_time=5,
+        require_logs=True,
     )
 
     # ── log.info / log.warn produce spans with event.name attribute ──
 
-    def test_log_info_span_has_event_name(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_log_info_span_has_event_name(self, otel_collector: OtelCollector) -> None:
         """log.info(event_name='user.login') produces span with event.name attr."""
         for s in flat_spans(otel_collector):
             if s.name == "user logged in":
@@ -46,9 +46,7 @@ class TestEventName:
                 return
         pytest.fail("span 'user logged in' not found")
 
-    def test_log_warn_span_has_event_name(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_log_warn_span_has_event_name(self, otel_collector: OtelCollector) -> None:
         """log.warn(event_name='rate_limit.warning') produces span with event.name attr."""
         for s in flat_spans(otel_collector):
             if s.name == "rate limit near":
@@ -108,10 +106,7 @@ class TestEventName:
             name = lr.eventName
             if not name.startswith("apx."):
                 continue
-            assert name == name.lower(), (
-                f"eventName should be lowercase: {name!r}"
+            assert name == name.lower(), f"eventName should be lowercase: {name!r}"
+            assert all(part.replace("_", "").isalnum() for part in name.split(".")), (
+                f"eventName has invalid segment: {name!r}"
             )
-            assert all(
-                part.replace("_", "").isalnum()
-                for part in name.split(".")
-            ), f"eventName has invalid segment: {name!r}"

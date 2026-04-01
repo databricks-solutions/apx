@@ -65,7 +65,9 @@ class StatusCode(enum.IntEnum):
 
 class SpanHandle:
     """OTEL span usable as sync/async context manager."""
-    def __init__(self, name: str, attributes: dict[str, str] | None = None, kind: int = 1) -> None: ...
+    def __init__(
+        self, name: str, attributes: dict[str, str] | None = None, kind: int = 1
+    ) -> None: ...
     def __enter__(self) -> SpanHandle: ...
     def __exit__(
         self,
@@ -95,7 +97,9 @@ class RustCounter:
 
 class RustHistogram:
     """OTLP histogram backed by Rust."""
-    def observe(self, value: float, attributes: dict[str, str] | None = None) -> None: ...
+    def observe(
+        self, value: float, attributes: dict[str, str] | None = None
+    ) -> None: ...
 
 class RustGauge:
     """OTLP gauge backed by Rust."""
@@ -106,7 +110,9 @@ def create_histogram(
     name: str, description: str = "", unit: str = ""
 ) -> RustHistogram: ...
 def create_gauge(name: str, description: str = "", unit: str = "") -> RustGauge: ...
-def _emit_log(level: int, message: str, logger_name: str, event_name: str = "") -> None: ...
+def _emit_log(
+    level: int, message: str, logger_name: str, event_name: str = ""
+) -> None: ...
 
 class PyMetricDefinition:
     """A framework metric definition."""

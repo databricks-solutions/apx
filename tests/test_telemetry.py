@@ -964,9 +964,7 @@ class TestConfigurationResource:
 
     def test_resource_in_config(self) -> None:
         c = Configuration(
-            resource=Resource(
-                attributes=[Attribute(key="env", value="staging")]
-            )
+            resource=Resource(attributes=[Attribute(key="env", value="staging")])
         )
         assert len(c.resource.attributes) == 1
         assert c.resource.attributes[0].key == "env"
@@ -974,9 +972,7 @@ class TestConfigurationResource:
     def test_get_config_includes_resource(self) -> None:
         configure(
             Configuration(
-                resource=Resource(
-                    attributes=[Attribute(key="team", value="platform")]
-                )
+                resource=Resource(attributes=[Attribute(key="team", value="platform")])
             )
         )
         from apx.telemetry import _get_config
@@ -988,11 +984,7 @@ class TestConfigurationResource:
         configure(Configuration())
 
     def test_get_config_resource_schema_url(self) -> None:
-        configure(
-            Configuration(
-                resource=Resource(schema_url="https://custom.schema")
-            )
-        )
+        configure(Configuration(resource=Resource(schema_url="https://custom.schema")))
         from apx.telemetry import _get_config
 
         config = _get_config()

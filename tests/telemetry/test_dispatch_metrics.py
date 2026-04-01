@@ -48,13 +48,9 @@ class TestDispatchMetrics:
         time.sleep(5)
         wait_for_collector_data(otel_collector)
 
-    def test_all_dispatch_metrics_present(
-        self, otel_collector: OtelCollector
-    ) -> None:
+    def test_all_dispatch_metrics_present(self, otel_collector: OtelCollector) -> None:
         """Every APX dispatch histogram must have at least one data point."""
-        collected_names = {
-            m.name for _, m in flat_metrics_with_scope(otel_collector)
-        }
+        collected_names = {m.name for _, m in flat_metrics_with_scope(otel_collector)}
         missing = APX_DISPATCH_METRICS - collected_names
         assert not missing, (
             f"Missing APX dispatch metrics: {sorted(missing)}. "
@@ -78,9 +74,7 @@ class TestDispatchMetrics:
         duration_metrics = {n for n in APX_DISPATCH_METRICS if n.endswith(".duration")}
         for _, m in flat_metrics_with_scope(otel_collector):
             if m.name in duration_metrics:
-                assert m.unit == "us", (
-                    f"{m.name} unit should be 'us', got {m.unit!r}"
-                )
+                assert m.unit == "us", f"{m.name} unit should be 'us', got {m.unit!r}"
 
     def test_queue_depth_unit_is_dimensionless(
         self, otel_collector: OtelCollector
@@ -88,6 +82,4 @@ class TestDispatchMetrics:
         """queue_depth is a count, not a duration — unit must be '1'."""
         for _, m in flat_metrics_with_scope(otel_collector):
             if m.name == "apx.dispatch.queue_depth":
-                assert m.unit == "1", (
-                    f"{m.name} unit should be '1', got {m.unit!r}"
-                )
+                assert m.unit == "1", f"{m.name} unit should be '1', got {m.unit!r}"

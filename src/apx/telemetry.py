@@ -383,7 +383,9 @@ class _Log:
     __slots__ = ()
 
     @staticmethod
-    def trace(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+    def trace(
+        message: str, *, event_name: str | None = None, **attributes: Any
+    ) -> None:
         """Emit a TRACE-level log.
 
         Example::
@@ -393,7 +395,9 @@ class _Log:
         _emit_log_span("trace", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def debug(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+    def debug(
+        message: str, *, event_name: str | None = None, **attributes: Any
+    ) -> None:
         """Emit a DEBUG-level log.
 
         Example::
@@ -414,7 +418,9 @@ class _Log:
         _emit_log_span("info", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def notice(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+    def notice(
+        message: str, *, event_name: str | None = None, **attributes: Any
+    ) -> None:
         """Emit a NOTICE-level log.
 
         Example::
@@ -434,7 +440,9 @@ class _Log:
         _emit_log_span("warn", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def error(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+    def error(
+        message: str, *, event_name: str | None = None, **attributes: Any
+    ) -> None:
         """Emit an ERROR-level log.
 
         Example::
@@ -444,7 +452,9 @@ class _Log:
         _emit_log_span("error", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def fatal(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+    def fatal(
+        message: str, *, event_name: str | None = None, **attributes: Any
+    ) -> None:
         """Emit a FATAL-level log.
 
         Example::
@@ -454,7 +464,9 @@ class _Log:
         _emit_log_span("fatal", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def exception(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+    def exception(
+        message: str, *, event_name: str | None = None, **attributes: Any
+    ) -> None:
         """Emit an ERROR-level log with the current exception attached.
 
         Must be called from an ``except`` block. Automatically captures
@@ -545,7 +557,9 @@ class Histogram:
             name, description, str(unit)
         )
 
-    def observe(self, value: float, *, attributes: dict[str, str] | None = None) -> None:
+    def observe(
+        self, value: float, *, attributes: dict[str, str] | None = None
+    ) -> None:
         """Record an observation.
 
         Example::
