@@ -29,6 +29,7 @@ from apx._scheduler import (
     drive_inline,
 )
 
+MAX_DRAIN_BATCH: int = 32
 
 def install_dispatch(
     loop: asyncio.AbstractEventLoop,
@@ -36,11 +37,8 @@ def install_dispatch(
     app: Callable[..., Coroutine[Any, Any, None]],
     wakeup_fd: int | None = None,
 ) -> None:
-    """Install the inline dispatch driver on the asyncio event loop."""
-
-    max_drain_batch: int = 8
+    """Install the inline dispatch driver on the asyncio event loop."""    
     capture = CallSoonCapture(loop)
-
     async def _guarded(
         scope: dict[str, Any],
         receive: Any,
@@ -83,7 +81,7 @@ def install_dispatch(
             Continuation(coro, result.yielded, loop, task, capture)
 
     def _drain_queue() -> None:
-        for _ in range(max_drain_batch):
+        for _ in range(MAX_DRAIN_BATCH):
             result: tuple[Any, Any, Any] | None = queue.try_recv()
             if result is None:
                 return
