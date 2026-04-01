@@ -25,20 +25,46 @@ class Forbidden(Exception):
 
     ...
 
-# ── Dispatch primitives ──────────────────────────────────────────────────
+# ── HTTP protocol types ───────────────────────────────────────────────────
 
-class RequestQueue:
-    """Inbound request queue drained by the asyncio dispatch loop."""
-    def try_recv(self) -> tuple[Any, Any, Any] | None: ...
+class ProtocolFactory:
+    """Creates ``RustProtocol`` instances for ``loop.create_server``."""
+    def __call__(self) -> RustProtocol: ...
 
-class SlotReceive:
-    """ASGI receive() callable for the 3-thread dispatch path."""
+class RustProtocol:
+    """asyncio Protocol for HTTP/1.1 connections."""
+    ...
+
+class HttpReceive:
+    """ASGI ``receive`` callable for HTTP requests."""
     def __call__(self) -> Any: ...
 
-class SlotSend:
-    """ASGI send() callable for the 3-thread dispatch path."""
+class RustRouter:
+    """High-performance HTTP path router."""
+    def insert(self, path: str, route_id: int) -> None: ...
+    def match_route(self, path: str) -> tuple[int, dict[str, str]] | None: ...
+
+class RustResponseWriter:
+    """ASGI ``send`` callable that writes HTTP responses."""
     def __call__(self, event: dict[str, Any]) -> Any: ...
-    def send_error(self, traceback: str) -> None: ...
+
+# ── Lifespan types ────────────────────────────────────────────────────────
+
+class LifespanReceive:
+    """ASGI ``receive`` callable for lifespan protocol."""
+    def __init__(self, shutdown_event: Any) -> None: ...
+    def __call__(self) -> Any: ...
+
+class LifespanSend:
+    """ASGI ``send`` callable for lifespan protocol."""
+    def __init__(
+        self,
+        startup_event: Any,
+        startup_result: Any,
+        shutdown_done_event: Any,
+        shutdown_result: Any,
+    ) -> None: ...
+    def __call__(self, event: dict[str, Any]) -> Any: ...
 
 # ── Scheduler primitives ─────────────────────────────────────────────────
 

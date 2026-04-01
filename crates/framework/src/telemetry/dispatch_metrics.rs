@@ -1,6 +1,6 @@
-//! APX framework dispatch timing histograms.
+//! APX request pipeline histograms.
 //!
-//! Records per-phase latency for the ASGI dispatch pipeline via OTEL
+//! Records per-phase latency for the request dispatch pipeline via OTEL
 //! histograms. All instruments are lazily created on first use and guarded
 //! by the `ApxMetricToggles` boolean flags — disabled metrics have zero
 //! overhead.
@@ -10,7 +10,7 @@
 
 use std::sync::OnceLock;
 
-use opentelemetry::metrics::Histogram;
+use opentelemetry::metrics::{Gauge, Histogram};
 
 use super::config::ApxMetricToggles;
 use super::defs;
@@ -19,15 +19,16 @@ use super::http::framework_meter;
 // ── Global toggles ────────────────────────────────────────────────────────
 
 super::toggle_store!(TOGGLES: ApxMetricToggles = ApxMetricToggles {
-    dispatch_body_collect: false,
-    dispatch_crossbeam_send: false,
-    dispatch_response_wait: false,
-    dispatch_total: false,
-    asgi_receive_build: false,
-    asgi_send_parse: false,
-    dispatch_pickup_delay: false,
-    dispatch_materialize: false,
-    dispatch_queue_depth: false,
+    parse: false,
+    scope_build: false,
+    receive_build: false,
+    send_parse: false,
+    response_build: false,
+    response_write: false,
+    handler_wait: false,
+    request_total: false,
+    active_requests: false,
+    connections: false,
 });
 
 // ── Metric declarations ───────────────────────────────────────────────────
@@ -51,66 +52,112 @@ macro_rules! dispatch_metric {
     };
 }
 
+/// Generate a lazy gauge getter and gated `inc_*` / `dec_*` functions.
+macro_rules! dispatch_gauge {
+    ($inc_fn:ident, $dec_fn:ident, $gauge_fn:ident, $toggle:ident, $def:expr, $doc:literal) => {
+        fn $gauge_fn() -> &'static Gauge<f64> {
+            static INST: OnceLock<Gauge<f64>> = OnceLock::new();
+            INST.get_or_init(|| $def.gauge(&framework_meter()))
+        }
+
+        #[doc = $doc]
+        pub fn $inc_fn() {
+            if toggles().$toggle {
+                $gauge_fn().record(1.0, NO_ATTRS);
+            }
+        }
+
+        /// Decrement the gauge.
+        pub fn $dec_fn() {
+            if toggles().$toggle {
+                $gauge_fn().record(-1.0, NO_ATTRS);
+            }
+        }
+    };
+}
+
+// ── Histograms ───────────────────────────────────────────────────────────
+
 dispatch_metric!(
-    record_body_collect,
-    body_collect_hist,
-    dispatch_body_collect,
-    defs::DISPATCH_BODY_COLLECT,
-    "Record `apx.dispatch.body_collect.duration` if enabled."
+    record_parse,
+    parse_hist,
+    parse,
+    defs::PARSE,
+    "Record `apx.parse` if enabled."
 );
+
 dispatch_metric!(
-    record_crossbeam_send,
-    crossbeam_send_hist,
-    dispatch_crossbeam_send,
-    defs::DISPATCH_CROSSBEAM_SEND,
-    "Record `apx.dispatch.crossbeam_send.duration` if enabled."
+    record_scope_build,
+    scope_build_hist,
+    scope_build,
+    defs::SCOPE_BUILD,
+    "Record `apx.scope_build` if enabled."
 );
-dispatch_metric!(
-    record_response_wait,
-    response_wait_hist,
-    dispatch_response_wait,
-    defs::DISPATCH_RESPONSE_WAIT,
-    "Record `apx.dispatch.response_wait.duration` if enabled."
-);
-dispatch_metric!(
-    record_dispatch_total,
-    dispatch_total_hist,
-    dispatch_total,
-    defs::DISPATCH_TOTAL,
-    "Record `apx.dispatch.total.duration` if enabled."
-);
+
 dispatch_metric!(
     record_receive_build,
     receive_build_hist,
-    asgi_receive_build,
-    defs::ASGI_RECEIVE_BUILD,
-    "Record `apx.asgi.receive_build.duration` if enabled."
+    receive_build,
+    defs::RECEIVE_BUILD,
+    "Record `apx.receive_build` if enabled."
 );
+
 dispatch_metric!(
     record_send_parse,
     send_parse_hist,
-    asgi_send_parse,
-    defs::ASGI_SEND_PARSE,
-    "Record `apx.asgi.send_parse.duration` if enabled."
+    send_parse,
+    defs::SEND_PARSE,
+    "Record `apx.send_parse` if enabled."
 );
+
 dispatch_metric!(
-    record_pickup_delay,
-    pickup_delay_hist,
-    dispatch_pickup_delay,
-    defs::DISPATCH_PICKUP_DELAY,
-    "Record `apx.dispatch.pickup_delay.duration` if enabled."
+    record_response_build,
+    response_build_hist,
+    response_build,
+    defs::RESPONSE_BUILD,
+    "Record `apx.response_build` if enabled."
 );
+
 dispatch_metric!(
-    record_materialize,
-    materialize_hist,
-    dispatch_materialize,
-    defs::DISPATCH_MATERIALIZE,
-    "Record `apx.dispatch.materialize.duration` if enabled."
+    record_response_write,
+    response_write_hist,
+    response_write,
+    defs::RESPONSE_WRITE,
+    "Record `apx.response_write` if enabled."
 );
+
 dispatch_metric!(
-    record_queue_depth,
-    queue_depth_hist,
-    dispatch_queue_depth,
-    defs::DISPATCH_QUEUE_DEPTH,
-    "Record `apx.dispatch.queue_depth` if enabled."
+    record_handler_wait,
+    handler_wait_hist,
+    handler_wait,
+    defs::HANDLER_WAIT,
+    "Record `apx.handler_wait` if enabled."
+);
+
+dispatch_metric!(
+    record_dispatch_total,
+    dispatch_total_hist,
+    request_total,
+    defs::REQUEST_TOTAL,
+    "Record `apx.request_total` if enabled."
+);
+
+// ── Gauges ───────────────────────────────────────────────────────────────
+
+dispatch_gauge!(
+    inc_active_requests,
+    dec_active_requests,
+    active_requests_gauge,
+    active_requests,
+    defs::ACTIVE_REQUESTS,
+    "Increment `apx.active_requests`."
+);
+
+dispatch_gauge!(
+    inc_connections,
+    dec_connections,
+    connections_gauge,
+    connections,
+    defs::CONNECTIONS,
+    "Increment `apx.connections`."
 );

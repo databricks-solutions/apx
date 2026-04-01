@@ -691,25 +691,25 @@ class HttpMetrics(BaseModel):
 
 
 class ApxMetrics(BaseModel):
-    """APX framework dispatch pipeline metric toggles.
+    """APX per-worker request pipeline metric toggles.
 
-    Collected per-worker. Each histogram records latency for the
-    dispatch phases within a single worker process. Use
-    ``apx.worker.id`` to drill down; aggregate across workers for
-    server-wide distributions.
+    Each histogram records latency for a phase of request handling
+    within a single worker process. Use ``apx.worker.id`` to drill
+    down; aggregate across workers for server-wide distributions.
 
     If APX_PERF environment variable is not set, none of these metrics are collected.
     """
 
-    dispatch_body_collect: bool = True
-    dispatch_crossbeam_send: bool = True
-    dispatch_response_wait: bool = True
-    dispatch_total: bool = True
-    asgi_receive_build: bool = True
-    asgi_send_parse: bool = True
-    dispatch_pickup_delay: bool = True
-    dispatch_materialize: bool = True
-    dispatch_queue_depth: bool = True
+    parse: bool = True
+    scope_build: bool = True
+    receive_build: bool = True
+    send_parse: bool = True
+    response_build: bool = True
+    response_write: bool = True
+    handler_wait: bool = True
+    request_total: bool = True
+    active_requests: bool = True
+    connections: bool = True
 
 
 class CaptureHeaders(BaseModel):

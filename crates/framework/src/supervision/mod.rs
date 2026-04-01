@@ -5,4 +5,3 @@ pub mod ipc;
 pub mod signal;
 pub mod supervisor;
 pub mod worker;
-pub mod worker_context;

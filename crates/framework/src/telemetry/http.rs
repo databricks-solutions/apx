@@ -9,11 +9,12 @@
 
 use std::sync::OnceLock;
 
-use crate::protocol::http::error::AppError;
 use crate::telemetry::config::HttpMetricToggles;
+use crate::telemetry::context::TraceContext;
 use crate::telemetry::defs;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Histogram, UpDownCounter};
+use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
 
 // ── Global HTTP metric toggles ────────────────────────────────────────────
 
@@ -29,60 +30,16 @@ pub(crate) fn framework_meter() -> opentelemetry::metrics::Meter {
     super::get_meter("apx.framework")
 }
 
-// ── Active requests instrument ────────────────────────────────────────────
-
-fn active_requests_counter() -> &'static UpDownCounter<i64> {
-    static COUNTER: OnceLock<UpDownCounter<i64>> = OnceLock::new();
-    COUNTER.get_or_init(|| {
-        framework_meter()
-            .i64_up_down_counter(defs::HTTP_ACTIVE_REQUESTS.name)
-            .with_description(defs::HTTP_ACTIVE_REQUESTS.description)
-            .with_unit(defs::HTTP_ACTIVE_REQUESTS.unit)
-            .build()
-    })
-}
-
-// ── Active requests guard ─────────────────────────────────────────────────
-
-/// RAII guard that decrements `http.server.active_requests` on drop.
-///
-/// Covers panics, timeouts, and early returns — the counter is always
-/// decremented when the guard goes out of scope.
-///
-/// Returns `None` when the `server_active_requests` toggle is disabled.
-#[derive(Debug)]
-pub struct ActiveRequestGuard {
-    attrs: [KeyValue; 2],
-}
-
-impl ActiveRequestGuard {
-    /// Increment active requests and return a guard that decrements on drop.
-    ///
-    /// Returns `None` if the `server_active_requests` metric is disabled.
-    pub fn enter(method: &str, scheme: &str) -> Option<Self> {
-        if !toggles().server_active_requests {
-            return None;
-        }
-        let attrs = [
-            KeyValue::new("http.request.method", method.to_owned()),
-            KeyValue::new("url.scheme", scheme.to_owned()),
-        ];
-        active_requests_counter().add(1, &attrs);
-        Some(Self { attrs })
-    }
-}
-
-impl Drop for ActiveRequestGuard {
-    fn drop(&mut self) {
-        active_requests_counter().add(-1, &self.attrs);
-    }
-}
-
-// ── Request duration instrument ───────────────────────────────────────────
+// ── Instruments ──────────────────────────────────────────────────────────
 
 fn duration_histogram() -> &'static Histogram<f64> {
     static HIST: OnceLock<Histogram<f64>> = OnceLock::new();
     HIST.get_or_init(|| defs::HTTP_REQUEST_DURATION.histogram(&framework_meter()))
+}
+
+fn active_requests_counter() -> &'static UpDownCounter<i64> {
+    static CTR: OnceLock<UpDownCounter<i64>> = OnceLock::new();
+    CTR.get_or_init(|| defs::HTTP_ACTIVE_REQUESTS.up_down_counter(&framework_meter()))
 }
 
 // ── Request duration ──────────────────────────────────────────────────────
@@ -128,85 +85,106 @@ pub fn record_duration(
     });
 }
 
-// ── Error / protocol helpers ──────────────────────────────────────────────
+// ── Active requests ─────────────────────────────────────────────────────
 
-/// Map an `AppError` variant to an OTEL semconv `error.type` value.
-pub fn error_type_for(err: &AppError) -> &'static str {
-    match err {
-        AppError::Internal(_) => "500",
-        AppError::Timeout => "408",
+/// Increment the `http.server.active_requests` counter.
+pub fn inc_active_requests() {
+    if toggles().server_active_requests {
+        active_requests_counter().add(1, &[]);
     }
 }
 
-/// Map `http::Version` to the semconv `network.protocol.version` string.
-pub fn protocol_version(version: http::Version) -> &'static str {
-    match version {
-        http::Version::HTTP_09 => "0.9",
-        http::Version::HTTP_10 => "1.0",
-        http::Version::HTTP_2 => "2",
-        http::Version::HTTP_3 => "3",
-        _ => "1.1",
+/// Decrement the `http.server.active_requests` counter.
+pub fn dec_active_requests() {
+    if toggles().server_active_requests {
+        active_requests_counter().add(-1, &[]);
     }
 }
 
-// ── Header capture ───────────────────────────────────────────────────────
+// ── Request span ────────────────────────────────────────────────────────
 
-use super::config::HttpConfig;
+/// Parse a UUID string into a 16-byte OTEL trace ID.
+fn uuid_to_trace_id(uuid: &str) -> Option<[u8; 16]> {
+    let hex: String = uuid.chars().filter(|c| *c != '-').collect();
+    hex::decode(&hex).ok()?.try_into().ok()
+}
 
-const REDACTED: &str = "[REDACTED]";
+/// Create a `tracing` span for an HTTP request.
+///
+/// Uses the `x-request-id` UUID as the trace ID so that all spans
+/// and logs within a request share the same trace. Returns the span
+/// and a [`TraceContext`] for propagation to Python.
+///
+/// The returned span must be entered (via `.enter()`) when recording
+/// metrics or logs that should carry the request's trace context.
+pub fn begin_request_span(
+    request_id: &str,
+    method: &str,
+    path: &str,
+) -> (tracing::Span, TraceContext) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-/// Extract header values as OTEL span attributes for the given direction.
-fn capture_headers(
-    direction: &str,
-    header_names: &[String],
-    headers: &http::HeaderMap,
-    sanitize_patterns: &[String],
-) -> Vec<KeyValue> {
-    let mut attrs = Vec::new();
-    for name in header_names {
-        let lower = name.to_lowercase();
-        let values: Vec<&str> = headers
-            .get_all(
-                http::header::HeaderName::from_bytes(lower.as_bytes())
-                    .unwrap_or(http::header::HeaderName::from_static("x-unknown")),
-            )
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .collect();
-        if values.is_empty() {
-            continue;
-        }
-        let normalized = name.to_lowercase().replace('-', "_");
-        let attr_name = format!("http.{direction}.header.{normalized}");
-        let value = if sanitize_patterns
-            .iter()
-            .any(|p| lower.contains(&p.to_lowercase()))
-        {
-            REDACTED.to_owned()
-        } else {
-            values.join(", ")
-        };
-        attrs.push(KeyValue::new(attr_name, value));
+    let span = tracing::info_span!(
+        "http.server.request",
+        "http.request.method" = method,
+        "url.path" = path,
+        "http.response.status_code" = tracing::field::Empty,
+        otel.kind = "server",
+    );
+
+    if let Some(tid) = uuid_to_trace_id(request_id) {
+        let parent_sc = SpanContext::new(
+            TraceId::from_bytes(tid),
+            SpanId::from_bytes(rand::random()),
+            TraceFlags::SAMPLED,
+            true,
+            TraceState::default(),
+        );
+        let parent_cx = opentelemetry::Context::new().with_remote_span_context(parent_sc);
+        span.set_parent(parent_cx);
     }
-    attrs
+
+    let ctx = {
+        let _guard = span.enter();
+        super::context::extract_trace_context().unwrap_or(TraceContext {
+            trace_id: [0; 16],
+            span_id: [0; 8],
+            trace_flags: 0,
+            trace_state: String::new(),
+        })
+    };
+
+    (span, ctx)
 }
 
-/// Extract request header values as OTEL span attributes.
-pub fn capture_request_headers(headers: &http::HeaderMap, config: &HttpConfig) -> Vec<KeyValue> {
-    capture_headers(
-        "request",
-        &config.capture_request_headers,
-        headers,
-        &config.sanitize_headers,
-    )
+/// Record response status on a request span before it ends.
+pub fn finish_request_span(span: &tracing::Span, status: u16) {
+    span.record("http.response.status_code", i64::from(status));
 }
 
-/// Extract response header values as OTEL span attributes.
-pub fn capture_response_headers(headers: &http::HeaderMap, config: &HttpConfig) -> Vec<KeyValue> {
-    capture_headers(
-        "response",
-        &config.capture_response_headers,
-        headers,
-        &config.sanitize_headers,
-    )
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "test code uses expect for clarity")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_uuid_to_trace_id_valid() {
+        let id = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
+        let tid = uuid_to_trace_id(id).expect("valid UUID");
+        assert_eq!(hex::encode(tid), "a1b2c3d4e5f64a7b8c9d0e1f2a3b4c5d");
+    }
+
+    #[test]
+    fn test_uuid_to_trace_id_no_dashes() {
+        let id = "a1b2c3d4e5f64a7b8c9d0e1f2a3b4c5d";
+        let tid = uuid_to_trace_id(id).expect("valid hex");
+        assert_eq!(hex::encode(tid), id);
+    }
+
+    #[test]
+    fn test_uuid_to_trace_id_invalid() {
+        assert!(uuid_to_trace_id("not-a-uuid").is_none());
+        assert!(uuid_to_trace_id("").is_none());
+        assert!(uuid_to_trace_id("zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz").is_none());
+    }
 }

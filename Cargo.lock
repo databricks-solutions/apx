@@ -301,40 +301,28 @@ dependencies = [
  "apx-common",
  "apx-core",
  "bytes",
- "crossbeam-channel",
- "crossbeam-queue",
- "futures-core",
  "futures-util",
  "hex",
  "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-tungstenite",
- "hyper-util",
+ "httparse",
+ "matchit",
  "mimalloc",
  "notify",
  "opentelemetry 0.29.1",
  "opentelemetry_sdk 0.29.0",
  "pyo3",
- "pyo3-async-runtimes",
  "rand 0.8.5",
- "reqwest 0.13.1",
  "rmp-serde",
  "serde",
  "serde_json",
- "socket2",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.18",
  "tikv-jemallocator",
  "tokio",
- "tokio-stream",
- "tokio-tungstenite",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "uuid",
  "which",
 ]
 
@@ -2709,21 +2697,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-tungstenite"
-version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc778da281a749ed28d2be73a9f2cd13030680a1574bc729debd1195e44f00e9"
-dependencies = [
- "http-body-util",
- "hyper",
- "hyper-util",
- "pin-project-lite",
- "tokio",
- "tokio-tungstenite",
- "tungstenite",
-]
-
-[[package]]
 name = "hyper-util"
 version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4606,20 +4579,6 @@ dependencies = [
  "pyo3-build-config",
  "pyo3-ffi",
  "pyo3-macros",
-]
-
-[[package]]
-name = "pyo3-async-runtimes"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e7364a95bf00e8377bbf9b0f09d7ff9715a29d8fcf93b47d1a967363b973178"
-dependencies = [
- "futures-channel",
- "futures-util",
- "once_cell",
- "pin-project-lite",
- "pyo3",
- "tokio",
 ]
 
 [[package]]

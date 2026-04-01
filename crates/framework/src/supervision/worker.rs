@@ -1,28 +1,24 @@
-//! Single worker: initialize Python, bind TCP, serve requests.
+//! Single worker: initialize Python, serve requests via asyncio.
 //!
 //! A worker is a child process spawned by the supervisor. It owns one Python
-//! interpreter, one inline asyncio event loop, and one TCP listener bound via
-//! `SO_REUSEPORT`.
+//! interpreter with an asyncio event loop. TCP binding happens via asyncio's
+//! `loop.create_server()` with `SO_REUSEPORT`.
 
 use super::ipc::channel::WorkerChannel;
 use super::ipc::protocol::{BootstrapError, IpcMessage, Nonce, WorkerBootstrap};
 use super::signal::shutdown_signal;
-use super::worker_context::WorkerContext;
 use crate::asgi::app::{ModuleImport, format_pyerr};
-use crate::io::EventLoop;
-use crate::protocol::http::service::{ApxService, ServiceConfig, serve_tcp};
-use crate::transport::{Listener, TransportConfig, TransportError};
+use crate::asgi::scope::ScopeInterns;
+use crate::protocol::connection::ProtocolFactory;
 use pyo3::prelude::*;
-use std::net::IpAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::net::{IpAddr, SocketAddr};
 
 /// Errors during worker operation.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerError {
     /// TCP listener creation failed.
     #[error("transport: {0}")]
-    Transport(#[from] TransportError),
+    Transport(#[from] crate::transport::TransportError),
 
     /// Python interpreter initialization failed.
     #[error("python init failed: {0}")]
@@ -38,7 +34,7 @@ pub enum WorkerError {
 
     /// Serving requests failed.
     #[error("serve failed: {0}")]
-    Serve(std::io::Error),
+    Serve(String),
 
     /// ASGI lifespan startup failed.
     #[error("lifespan startup failed: {0}")]
@@ -46,10 +42,6 @@ pub enum WorkerError {
 }
 
 /// Format a worker error with full Python traceback when available.
-///
-/// Pattern-matches through the error chain to find a `PyErr` inside
-/// `AppLoadError::ImportFailed` and renders its traceback. Falls back to
-/// the standard `Display` chain for non-Python errors.
 pub fn format_worker_error(err: &WorkerError) -> String {
     match err {
         WorkerError::AppLoad(crate::asgi::app::AppLoadError::ImportFailed { source, .. }) => {
@@ -60,118 +52,47 @@ pub fn format_worker_error(err: &WorkerError) -> String {
     }
 }
 
-/// Phase 1 runtime: TCP listener + Python interpreter (expensive, survives reloads).
-pub struct WorkerRuntime {
-    /// TCP listener bound via the `Listener` trait.
-    pub listener: crate::transport::TcpListener,
-    /// IPC channel to supervisor — stays open for the worker's lifetime.
-    pub channel: WorkerChannel,
-    /// Asyncio event loop (dedicated thread, asyncio delegation).
-    pub event_loop: EventLoop,
-}
-
-crate::opaque_debug!(WorkerRuntime);
-
-/// Phase 1: Create TCP listener and initialize the Python interpreter.
-///
-/// Uses `io::EventLoop` — creates the asyncio loop on a dedicated thread.
-/// Coroutines are submitted via `call_soon_threadsafe(create_task, coro)`.
-///
-/// # Errors
-///
-/// Returns an error if the listener cannot be created or Python init fails.
-pub async fn init_worker(
-    bootstrap: &WorkerBootstrap,
-    channel: WorkerChannel,
-) -> Result<WorkerRuntime, WorkerError> {
-    let host: IpAddr = bootstrap
-        .host
-        .parse()
-        .map_err(|e| TransportError::InvalidHost {
-            host: bootstrap.host.clone(),
-            source: e,
-        })?;
-    let config = TransportConfig::tcp(host, bootstrap.port);
-    let listener = crate::transport::TcpListener::bind(&config).await?;
-
-    // Initialize the Python interpreter.
-    // IMPORTANT: must only be called once per process, only in worker processes.
-    Python::initialize();
-
-    // Initialize asyncio event loop (dedicated thread, asyncio delegation).
-    let event_loop = Python::attach(|py| EventLoop::init(py, &bootstrap.loop_policy))
-        .map_err(|e| WorkerError::PythonInit(format!("event loop: {e}")))?;
-
-    Ok(WorkerRuntime {
-        listener,
-        channel,
-        event_loop,
-    })
-}
-
-/// Signal readiness to supervisor over the IPC channel.
-///
-/// # Errors
-///
-/// Returns an error if the IPC send fails.
-async fn signal_readiness(channel: &mut WorkerChannel) -> Result<(), WorkerError> {
-    channel
-        .send(&IpcMessage::Ready)
-        .await
-        .map_err(WorkerError::from)
-}
-
-/// Loaded app and telemetry config, ready for readiness signal.
+/// Loaded app state, ready to serve.
 struct AppReady {
-    dispatch: Arc<dyn crate::dispatch::Dispatch>,
-    telemetry: crate::telemetry::config::TelemetryConfig,
-    /// Raw ASGI callable for the lifespan protocol.
+    /// ASGI application callable.
     asgi_app: Py<PyAny>,
-    /// Cached `apx._bridge.launch` for submitting coroutines to the asyncio thread.
-    launch_fn: Py<PyAny>,
+    /// Pre-built scope interns for the server address.
+    interns: ScopeInterns,
+    /// Telemetry configuration.
+    telemetry: crate::telemetry::config::TelemetryConfig,
+    /// Server socket address.
+    server_addr: SocketAddr,
 }
 
 crate::opaque_debug!(AppReady);
 
+/// Initialize the Python interpreter.
+fn init_python() {
+    Python::initialize();
+}
+
 /// Load the Python app and read telemetry configuration.
-///
-/// Covers every fallible step between `init_worker` and `signal_readiness`.
-/// On failure the caller sends `StartupFailed` over IPC before exiting.
-fn load_app(runtime: &WorkerRuntime, bootstrap: &WorkerBootstrap) -> Result<AppReady, WorkerError> {
+fn load_app(bootstrap: &WorkerBootstrap) -> Result<AppReady, WorkerError> {
     apply_python_log_config()?;
 
-    let pipeline = Arc::new(
-        crate::io::channel::DispatchPipeline::new()
-            .map_err(|e| WorkerError::PythonInit(format!("dispatch pipeline: {e}")))?,
-    );
+    let host: IpAddr =
+        bootstrap
+            .host
+            .parse()
+            .map_err(|e| crate::transport::TransportError::InvalidHost {
+                host: bootstrap.host.clone(),
+                source: e,
+            })?;
+    let server_addr = SocketAddr::new(host, bootstrap.port);
 
-    let (ctx, launch_fn_ref) = {
-        let el = &runtime.event_loop;
-        Python::attach(
-            |py| -> Result<(Arc<WorkerContext>, Py<PyAny>), WorkerError> {
-                let launch_fn = register_launch(py)
-                    .map_err(|e| WorkerError::PythonInit(format!("register launch: {e}")))?;
-                let launch_fn_ref = launch_fn.clone_ref(py);
-                let ctx = Arc::new(WorkerContext {
-                    pipeline: Arc::clone(&pipeline),
-                    call_soon_threadsafe: el.call_soon_threadsafe().clone_ref(py),
-                    launch_fn,
-                });
-                Ok((ctx, launch_fn_ref))
-            },
-        )?
-    };
-
-    let server_addr = runtime.listener.local_addr();
-    let event_loop_py = runtime.event_loop.event_loop_py();
-    let (dispatch, asgi_app) = Python::attach(|py| {
-        ModuleImport::new(bootstrap.app_module.as_str(), bootstrap.dev_mode).build_with_app(
-            py,
-            ctx,
-            event_loop_py,
-            server_addr,
-        )
-    })?;
+    let (asgi_app, interns) =
+        Python::attach(|py| -> Result<(Py<PyAny>, ScopeInterns), WorkerError> {
+            let app_import = ModuleImport::new(bootstrap.app_module.as_str());
+            let app = app_import.load_callable(py).map_err(WorkerError::AppLoad)?;
+            let asgi_app = app.inner().clone_ref(py);
+            let interns = ScopeInterns::new(py, server_addr);
+            Ok((asgi_app, interns))
+        })?;
 
     let telemetry = Python::attach(|py| {
         crate::telemetry::bootstrap_python_telemetry(py)
@@ -181,11 +102,19 @@ fn load_app(runtime: &WorkerRuntime, bootstrap: &WorkerBootstrap) -> Result<AppR
     })?;
 
     Ok(AppReady {
-        dispatch,
-        telemetry,
         asgi_app,
-        launch_fn: launch_fn_ref,
+        interns,
+        telemetry,
+        server_addr,
     })
+}
+
+/// Signal readiness to supervisor over the IPC channel.
+async fn signal_readiness(channel: &mut WorkerChannel) -> Result<(), WorkerError> {
+    channel
+        .send(&IpcMessage::Ready)
+        .await
+        .map_err(WorkerError::from)
 }
 
 /// Relay telemetry config to the supervisor (worker 0 only).
@@ -230,134 +159,131 @@ fn init_metrics(telemetry: &crate::telemetry::config::TelemetryConfig) {
     );
 }
 
-/// Build the HTTP service from dispatch and bootstrap config.
-fn build_service(
-    runtime: &WorkerRuntime,
-    bootstrap: &WorkerBootstrap,
-    dispatch: Arc<dyn crate::dispatch::Dispatch>,
-) -> ApxService {
-    let mut config = ServiceConfig {
-        timeout: Duration::from_secs(bootstrap.request_timeout_secs),
-        ..ServiceConfig::default()
-    };
-    if let Some(mc) = bootstrap.max_concurrent {
-        config.max_concurrent = mc;
-    }
-    let server_addr = runtime.listener.local_addr();
-    ApxService::new(dispatch, server_addr, &config)
-}
-
-/// Accept connections and serve until shutdown or drain.
-async fn serve(
-    runtime: WorkerRuntime,
-    service: ApxService,
-    drain_timeout_secs: u64,
-    lifespan: Option<crate::asgi::lifespan::LifespanHandle>,
-) -> Result<(), WorkerError> {
-    let (ipc_reader, mut ipc_writer) = runtime.channel.split();
-
-    let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
-    tokio::spawn(async move {
-        let mut reader = ipc_reader;
-        match reader.recv().await {
-            Ok(IpcMessage::Drain) => {
-                tracing::info!(
-                    name: "apx.worker.drain_received",
-                    "received Drain from supervisor"
-                );
-                let _ = drain_tx.send(());
-            }
-            Ok(msg) => tracing::warn!(
-                name: "apx.worker.drain_unexpected_ipc",
-                ?msg,
-                "unexpected IPC message"
-            ),
-            Err(e) => tracing::debug!(
-                name: "apx.worker.drain_ipc_closed",
-                error = %e,
-                "IPC channel closed"
-            ),
-        }
-    });
-
-    let combined_shutdown = async {
-        tokio::select! {
-            () = shutdown_signal() => {}
-            _ = drain_rx => {}
-        }
-    };
-
-    let mut connections = serve_tcp(runtime.listener, service, combined_shutdown)
-        .await
-        .map_err(WorkerError::Serve)?;
-
-    if drain_timeout_secs > 0 {
-        let _ = tokio::time::timeout(Duration::from_secs(drain_timeout_secs), async {
-            while connections.join_next().await.is_some() {}
-        })
-        .await;
-    }
-
-    // Trigger ASGI lifespan shutdown while the asyncio loop is still running.
-    if let Some(handle) = lifespan
-        && let Err(e) = handle.trigger_shutdown().await
-    {
-        tracing::warn!(
-            name: "apx.worker.lifespan_shutdown_failed",
-            error = %e,
-            "ASGI lifespan shutdown failed"
-        );
-    }
-
-    let _ = ipc_writer.send(&IpcMessage::Drained).await;
-
-    apx_core::tracing_init::shutdown_telemetry();
-    runtime.event_loop.shutdown();
-
-    Ok(())
-}
-
-/// Launch the ASGI lifespan protocol and await startup completion.
+/// Run the asyncio server via `asyncio.run(serve(...))`.
 ///
-/// Returns `Ok(Some(handle))` if the app completed lifespan startup,
-/// `Ok(None)` if the app does not support lifespan, or `Err` on failure.
-async fn launch_and_await_lifespan(
-    runtime: &WorkerRuntime,
-    ready: &AppReady,
-) -> Result<Option<crate::asgi::lifespan::LifespanHandle>, WorkerError> {
-    let pending = Python::attach(|py| {
-        crate::asgi::lifespan::launch_lifespan(
-            py,
-            &runtime.event_loop,
-            &ready.asgi_app,
-            &ready.launch_fn,
-        )
-    })
-    .map_err(|e| WorkerError::LifespanStartup(format!("{e}")))?;
+/// The asyncio event loop owns everything: TCP accept, HTTP parsing,
+/// request dispatch, and response writing. Rust provides accelerated
+/// primitives as PyO3 `#[pyclass]` types.
+fn run_server(
+    ready: AppReady,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), WorkerError> {
+    Python::attach(|py| {
+        let asyncio = py
+            .import(c"asyncio")
+            .map_err(|e| WorkerError::Serve(format!("import asyncio: {e}")))?;
 
-    match pending.wait_startup().await {
-        Ok(Some(handle)) => {
-            tracing::info!(
-                name: "apx.worker.lifespan_startup_complete",
-                "ASGI lifespan startup complete"
-            );
-            Ok(Some(handle))
-        }
-        Ok(None) => {
-            tracing::info!(
-                name: "apx.worker.lifespan_unsupported",
-                "app does not support ASGI lifespan protocol"
-            );
-            Ok(None)
-        }
-        Err(msg) => Err(WorkerError::LifespanStartup(msg)),
+        let shutdown_event = asyncio
+            .call_method0(c"Event")
+            .map_err(|e| WorkerError::Serve(format!("create Event: {e}")))?;
+
+        let host = ready.server_addr.ip().to_string();
+        let port = ready.server_addr.port();
+
+        let factory_builder =
+            create_factory_builder(py, ready.asgi_app.clone_ref(py), ready.interns, &host, port)?;
+
+        py.run(
+            c"
+import asyncio as _asyncio
+from apx._server import serve as _serve, _build_on_request
+from apx._scheduler import CallSoonCapture
+
+async def _boot(_app, _factory_fn, _host, _port, _shutdown_event):
+    loop = _asyncio.get_running_loop()
+    capture = CallSoonCapture(loop)
+    on_request = _build_on_request(_app, loop, capture)
+    factory = _factory_fn(on_request)
+    await _serve(_host, _port, _app, factory, shutdown_event=_shutdown_event)
+",
+            None,
+            None,
+        )
+        .map_err(|e| WorkerError::Serve(format!("compile bootstrap: {e}")))?;
+
+        let boot_fn = py
+            .eval(c"_boot", None, None)
+            .map_err(|e| WorkerError::Serve(format!("get _boot: {e}")))?;
+
+        let coro = boot_fn
+            .call1((
+                &ready.asgi_app,
+                factory_builder,
+                &host,
+                port,
+                &shutdown_event,
+            ))
+            .map_err(|e| WorkerError::Serve(format!("create boot coro: {e}")))?;
+
+        let shutdown_event_ref = shutdown_event.unbind();
+        std::thread::spawn(move || {
+            let _ = shutdown_rx.blocking_recv();
+            Python::attach(|py| {
+                let _ = shutdown_event_ref.call_method0(py, pyo3::intern!(py, "set"));
+            });
+        });
+
+        asyncio
+            .call_method1(c"run", (coro,))
+            .map_err(|e| WorkerError::Serve(format!("asyncio.run: {e}")))?;
+
+        Ok(())
+    })
+}
+
+/// Create a Python callable that, given `on_request`, returns a `ProtocolFactory`.
+///
+/// This is a partial application: `ScopeInterns`, host, and port are
+/// captured; the `on_request` callback is provided later (once the
+/// event loop is running and `CallSoonCapture` can be created).
+fn create_factory_builder(
+    py: Python<'_>,
+    _app: Py<PyAny>,
+    interns: ScopeInterns,
+    host: &str,
+    port: u16,
+) -> Result<Py<PyAny>, WorkerError> {
+    let host = host.to_owned();
+
+    let builder = FactoryBuilder {
+        interns: std::sync::Mutex::new(Some(interns)),
+        host,
+        port,
+    };
+    let builder_py = Py::new(py, builder)
+        .map_err(|e| WorkerError::Serve(format!("create FactoryBuilder: {e}")))?;
+
+    Ok(builder_py.into_any())
+}
+
+/// Python-callable that captures `ScopeInterns` and produces a
+/// `ProtocolFactory` when called with `on_request`.
+#[pyclass(module = "apx._core")]
+struct FactoryBuilder {
+    interns: std::sync::Mutex<Option<ScopeInterns>>,
+    host: String,
+    port: u16,
+}
+
+crate::opaque_debug!(FactoryBuilder);
+
+#[pymethods]
+impl FactoryBuilder {
+    fn __call__(&self, py: Python<'_>, on_request: Py<PyAny>) -> PyResult<Py<ProtocolFactory>> {
+        let interns = self
+            .interns
+            .lock()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?
+            .take()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("FactoryBuilder already consumed")
+            })?;
+        let factory = ProtocolFactory::new(on_request, interns, self.host.clone(), self.port);
+        Py::new(py, factory)
     }
 }
 
 /// Connect, init, load app, signal readiness, and serve.
-///
-/// If app loading fails, sends `StartupFailed` over IPC so the supervisor
-/// receives the error message instead of waiting for a readiness timeout.
 ///
 /// # Errors
 ///
@@ -366,35 +292,21 @@ pub async fn run_worker(
     channel: WorkerChannel,
     bootstrap: WorkerBootstrap,
 ) -> Result<(), WorkerError> {
-    let mut runtime = init_worker(&bootstrap, channel).await?;
+    init_python();
 
-    let ready = match load_app(&runtime, &bootstrap) {
+    let ready = match load_app(&bootstrap) {
         Ok(ready) => ready,
         Err(e) => {
             let detail = format_worker_error(&e);
-            let _ = runtime
-                .channel
-                .send(&IpcMessage::StartupFailed { error: detail })
-                .await;
+            let mut ch = channel;
+            let _ = ch.send(&IpcMessage::StartupFailed { error: detail }).await;
             return Err(e);
         }
     };
 
-    // ASGI lifespan startup — run app startup hooks before accepting traffic.
-    let lifespan = match launch_and_await_lifespan(&runtime, &ready).await {
-        Ok(handle) => handle,
-        Err(e) => {
-            let detail = format_worker_error(&e);
-            let _ = runtime
-                .channel
-                .send(&IpcMessage::StartupFailed { error: detail })
-                .await;
-            return Err(e);
-        }
-    };
-
-    signal_readiness(&mut runtime.channel).await?;
-    relay_telemetry(&mut runtime.channel, &bootstrap, &ready.telemetry).await?;
+    let mut channel = channel;
+    signal_readiness(&mut channel).await?;
+    relay_telemetry(&mut channel, &bootstrap, &ready.telemetry).await?;
     init_metrics(&ready.telemetry);
 
     if ready.telemetry.process.enabled {
@@ -403,8 +315,49 @@ pub async fn run_worker(
         );
     }
 
-    let service = build_service(&runtime, &bootstrap, ready.dispatch);
-    serve(runtime, service, bootstrap.drain_timeout_secs, lifespan).await
+    // Set up shutdown coordination between IPC reader and asyncio.
+    let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
+    let (ipc_reader, mut ipc_writer) = channel.split();
+
+    tokio::spawn(async move {
+        let mut reader = ipc_reader;
+        tokio::select! {
+            msg = reader.recv() => {
+                match msg {
+                    Ok(IpcMessage::Drain) => {
+                        tracing::info!(
+                            name: "apx.worker.drain_received",
+                            "received Drain from supervisor"
+                        );
+                        let _ = drain_tx.send(());
+                    }
+                    Ok(msg) => tracing::warn!(
+                        name: "apx.worker.drain_unexpected_ipc",
+                        ?msg,
+                        "unexpected IPC message"
+                    ),
+                    Err(e) => tracing::debug!(
+                        name: "apx.worker.drain_ipc_closed",
+                        error = %e,
+                        "IPC channel closed"
+                    ),
+                }
+            }
+            () = shutdown_signal() => {
+                let _ = drain_tx.send(());
+            }
+        }
+    });
+
+    // Run the asyncio server (blocking — this IS the event loop).
+    let serve_result = tokio::task::spawn_blocking(move || run_server(ready, drain_rx))
+        .await
+        .map_err(|e| WorkerError::Serve(format!("server task panicked: {e}")))?;
+
+    let _ = ipc_writer.send(&IpcMessage::Drained).await;
+    apx_core::tracing_init::shutdown_telemetry();
+
+    serve_result
 }
 
 /// Detect worker mode and connect to the supervisor's IPC channel.
@@ -451,8 +404,7 @@ pub async fn connect_to_supervisor()
 // ── Python logging config ───────────────────────────────────────────────
 
 /// Apply the customer's Python logging config when `APX_PYTHON_LOG_CONFIG`
-/// is set (dev mode only).  Supports JSON (`logging.config.dictConfig`) and
-/// Python (`logging.config.fileConfig`) config files.
+/// is set.
 fn apply_python_log_config() -> Result<(), WorkerError> {
     let config_path = match std::env::var("APX_PYTHON_LOG_CONFIG") {
         Ok(p) if !p.is_empty() => p,
@@ -480,19 +432,6 @@ fn apply_python_log_config() -> Result<(), WorkerError> {
         Ok(())
     })
     .map_err(|e: PyErr| WorkerError::PythonInit(format!("log config: {e}")))
-}
-
-// ── launch wrapper ──────────────────────────────────────────────────────
-
-/// Import `launch` from `apx._bridge`.
-///
-/// `launch(app, scope, receive, send)` runs on the asyncio thread as a
-/// `call_soon_threadsafe` callback. It calls `app(scope, receive, send)`
-/// and wraps the coroutine in error-guarding + `create_task` — all in a
-/// single `_run_once` callback, keeping the tokio thread GIL-free.
-fn register_launch(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let bridge = py.import(c"apx._bridge")?;
-    bridge.getattr(c"launch").map(|f| f.unbind())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -523,181 +462,12 @@ mod tests {
     #[test]
     fn worker_error_display_transport() {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-        let err = WorkerError::Transport(TransportError::Bind {
+        let err = WorkerError::Transport(crate::transport::TransportError::Bind {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8000),
             source: std::io::Error::other("in use"),
         });
         let msg = format!("{err}");
         assert!(msg.contains("transport"));
-    }
-
-    /// `launch` must forward app exceptions through `send.send_error()`
-    /// without re-raising — otherwise asyncio logs "Task exception was
-    /// never retrieved" on every app error (the task is fire-and-forget).
-    #[test]
-    fn launch_forwards_error_without_asyncio_leak() {
-        crate::with_py(|py| {
-            let launch_fn = register_launch(py).expect("register_launch");
-
-            py.run(
-                c"
-import asyncio, gc
-
-_leak_errors = []
-
-def _capture(loop, ctx):
-    _leak_errors.append(ctx.get('message', ''))
-
-class _MockSend:
-    def __init__(self):
-        self.errors = []
-    def send_error(self, tb):
-        self.errors.append(tb)
-
-_mock = _MockSend()
-
-async def _failing_app(scope, receive, send):
-    raise RuntimeError('deliberate test error')
-
-_el = asyncio.new_event_loop()
-_el.set_exception_handler(_capture)
-",
-                None,
-                None,
-            )
-            .expect("define fixtures");
-
-            let app = py.eval(c"_failing_app", None, None).expect("get app");
-            let mock = py.eval(c"_mock", None, None).expect("get mock");
-            let scope = pyo3::types::PyDict::new(py);
-            let el = py.eval(c"_el", None, None).expect("get el");
-
-            // Submit via call_soon_threadsafe — same as production.
-            let csts = el.getattr(c"call_soon_threadsafe").expect("csts");
-            csts.call1((&launch_fn, &app, &scope, py.None(), &mock))
-                .expect("submit via csTS");
-
-            py.run(
-                c"
-async def _drain():
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-    gc.collect()
-    gc.collect()
-    await asyncio.sleep(0)
-
-_el.run_until_complete(_drain())
-_el.close()
-",
-                None,
-                None,
-            )
-            .expect("drain loop");
-
-            let send_errors: Vec<String> = py
-                .eval(c"_mock.errors", None, None)
-                .expect("get send_errors")
-                .extract()
-                .expect("extract");
-            assert!(
-                !send_errors.is_empty(),
-                "send_error must be called on app exception"
-            );
-            assert!(
-                send_errors[0].contains("deliberate test error"),
-                "traceback must contain the error: {}",
-                send_errors[0]
-            );
-
-            let leaks: Vec<String> = py
-                .eval(c"_leak_errors", None, None)
-                .expect("get leak errors")
-                .extract()
-                .expect("extract");
-            let task_leaks: Vec<_> = leaks
-                .iter()
-                .filter(|e| e.contains("Task exception was never retrieved"))
-                .collect();
-            assert!(
-                task_leaks.is_empty(),
-                "launch re-raised, causing asyncio log spam: {task_leaks:?}"
-            );
-        });
-    }
-
-    /// `CancelledError` must propagate through `launch` — it's a control
-    /// flow signal, not an app error. It must NOT be forwarded to
-    /// `send.send_error()`.
-    #[test]
-    fn launch_propagates_cancellation() {
-        crate::with_py(|py| {
-            let launch_fn = register_launch(py).expect("register_launch");
-
-            py.run(
-                c"
-import asyncio
-
-class _MockSend2:
-    def __init__(self):
-        self.errors = []
-    def send_error(self, tb):
-        self.errors.append(tb)
-
-_mock2 = _MockSend2()
-
-async def _slow_app(scope, receive, send):
-    await asyncio.sleep(10)
-
-_el2 = asyncio.new_event_loop()
-",
-                None,
-                None,
-            )
-            .expect("define fixtures");
-
-            let app = py.eval(c"_slow_app", None, None).expect("get app");
-            let mock = py.eval(c"_mock2", None, None).expect("get mock");
-            let scope = pyo3::types::PyDict::new(py);
-            let el = py.eval(c"_el2", None, None).expect("get el");
-
-            let csts = el.getattr(c"call_soon_threadsafe").expect("csts");
-            csts.call1((&launch_fn, &app, &scope, py.None(), &mock))
-                .expect("submit via csTS");
-
-            py.run(
-                c"
-async def _run():
-    await asyncio.sleep(0)  # let launch create the task
-    # Find the app task (not ourselves).
-    app_tasks = [t for t in asyncio.all_tasks(_el2)
-                 if not t.done() and t is not asyncio.current_task()]
-    for t in app_tasks:
-        t.cancel()
-    # Let cancel propagate.
-    for t in app_tasks:
-        try:
-            await t
-        except asyncio.CancelledError:
-            pass
-
-_el2.run_until_complete(_run())
-_el2.close()
-",
-                None,
-                None,
-            )
-            .expect("run test");
-
-            let send_errors: Vec<String> = py
-                .eval(c"_mock2.errors", None, None)
-                .expect("get send_errors")
-                .extract()
-                .expect("extract");
-            assert!(
-                send_errors.is_empty(),
-                "CancelledError must not be forwarded to send_error: {send_errors:?}"
-            );
-        });
     }
 
     // SAFETY: these env-var tests are single-threaded (#[test] with no async

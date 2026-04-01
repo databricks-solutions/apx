@@ -113,21 +113,22 @@ class TestHttpMetricsDefaults:
 class TestApxMetricsDefaults:
     def test_all_enabled_by_default(self) -> None:
         m = ApxMetrics()
-        assert m.dispatch_body_collect is True
-        assert m.dispatch_crossbeam_send is True
-        assert m.dispatch_response_wait is True
-        assert m.dispatch_total is True
-        assert m.asgi_receive_build is True
-        assert m.asgi_send_parse is True
-        assert m.dispatch_pickup_delay is True
-        assert m.dispatch_materialize is True
-        assert m.dispatch_queue_depth is True
+        assert m.parse is True
+        assert m.scope_build is True
+        assert m.receive_build is True
+        assert m.send_parse is True
+        assert m.response_build is True
+        assert m.response_write is True
+        assert m.handler_wait is True
+        assert m.request_total is True
+        assert m.active_requests is True
+        assert m.connections is True
 
     def test_disable_selective(self) -> None:
-        m = ApxMetrics(dispatch_total=False, asgi_send_parse=False)
-        assert m.dispatch_total is False
-        assert m.asgi_send_parse is False
-        assert m.dispatch_body_collect is True
+        m = ApxMetrics(request_total=False, send_parse=False)
+        assert m.request_total is False
+        assert m.send_parse is False
+        assert m.parse is True
 
 
 # ── Instrumentation models ────────────────────────────────────────────────
@@ -169,7 +170,7 @@ class TestInstrumentationModels:
         a = ApxInstrumentation()
         assert a.type == "apx"
         assert a.enabled is True
-        assert a.metrics.dispatch_total is True
+        assert a.metrics.request_total is True
 
     def test_discriminated_union_from_dict(self) -> None:
         """Configuration parses typed dicts via the discriminated union."""
@@ -178,7 +179,7 @@ class TestInstrumentationModels:
                 HttpInstrumentation(enabled=False),
                 SystemInstrumentation(metrics=SystemMetrics(paging=True)),
                 ProcessInstrumentation(metrics=ProcessMetrics(threads=True)),
-                ApxInstrumentation(metrics=ApxMetrics(dispatch_total=True)),
+                ApxInstrumentation(metrics=ApxMetrics(request_total=True)),
             ]
         )
         types = [i.type for i in config.instrumentations]
@@ -199,7 +200,7 @@ class TestInstrumentationModels:
 
         apx = config.instrumentations[3]
         assert isinstance(apx, ApxInstrumentation)
-        assert apx.metrics.dispatch_total is True
+        assert apx.metrics.request_total is True
 
 
 # ── APX_PERF conditional defaults ─────────────────────────────────────────
@@ -226,7 +227,7 @@ class TestApxPerfToggle:
         configure(
             Configuration(
                 instrumentations=[
-                    ApxInstrumentation(metrics=ApxMetrics(dispatch_total=True))
+                    ApxInstrumentation(metrics=ApxMetrics(request_total=True))
                 ]
             )
         )
@@ -234,7 +235,7 @@ class TestApxPerfToggle:
         types = [i["type"] for i in config["instrumentations"]]
         assert "apx" in types
         apx = next(i for i in config["instrumentations"] if i["type"] == "apx")
-        assert apx["metrics"]["dispatch_total"] is True
+        assert apx["metrics"]["request_total"] is True
 
     def test_apx_in_defaults_with_env(self) -> None:
         """With APX_PERF=1, default config includes 'apx' instrumentation."""
@@ -298,7 +299,7 @@ class TestConfigureMerge:
         configure(
             Configuration(
                 instrumentations=[
-                    ApxInstrumentation(metrics=ApxMetrics(dispatch_total=True))
+                    ApxInstrumentation(metrics=ApxMetrics(request_total=True))
                 ]
             )
         )
@@ -378,15 +379,16 @@ EXPECTED_HTTP_METRICS = {
 }
 
 EXPECTED_APX_METRICS = {
-    "apx.dispatch.body_collect.duration",
-    "apx.dispatch.crossbeam_send.duration",
-    "apx.dispatch.response_wait.duration",
-    "apx.dispatch.total.duration",
-    "apx.asgi.receive_build.duration",
-    "apx.asgi.send_parse.duration",
-    "apx.dispatch.pickup_delay.duration",
-    "apx.dispatch.materialize.duration",
-    "apx.dispatch.queue_depth",
+    "apx.parse",
+    "apx.scope_build",
+    "apx.receive_build",
+    "apx.send_parse",
+    "apx.response_build",
+    "apx.response_write",
+    "apx.handler_wait",
+    "apx.request_total",
+    "apx.active_requests",
+    "apx.connections",
 }
 
 
@@ -397,7 +399,7 @@ class TestMetricCatalog:
 
     def test_count(self) -> None:
         catalog = metric_catalog()
-        assert len(catalog) == 19
+        assert len(catalog) == 20
 
     def test_entry_type(self) -> None:
         catalog = metric_catalog()
@@ -510,15 +512,16 @@ EXPECTED_UNITS: dict[str, str] = {
     "process.thread.count": "1",
     "http.server.request.duration": "s",
     "http.server.active_requests": "1",
-    "apx.dispatch.body_collect.duration": "us",
-    "apx.dispatch.crossbeam_send.duration": "us",
-    "apx.dispatch.response_wait.duration": "us",
-    "apx.dispatch.total.duration": "us",
-    "apx.asgi.receive_build.duration": "us",
-    "apx.asgi.send_parse.duration": "us",
-    "apx.dispatch.pickup_delay.duration": "us",
-    "apx.dispatch.materialize.duration": "us",
-    "apx.dispatch.queue_depth": "1",
+    "apx.parse": "us",
+    "apx.scope_build": "us",
+    "apx.receive_build": "us",
+    "apx.send_parse": "us",
+    "apx.response_build": "us",
+    "apx.response_write": "us",
+    "apx.handler_wait": "us",
+    "apx.request_total": "us",
+    "apx.active_requests": "1",
+    "apx.connections": "1",
 }
 
 EXPECTED_DESCRIPTIONS: dict[str, str] = {
@@ -532,15 +535,16 @@ EXPECTED_DESCRIPTIONS: dict[str, str] = {
     "process.thread.count": "Number of threads in the process",
     "http.server.request.duration": "Duration of HTTP server requests",
     "http.server.active_requests": "Number of in-flight HTTP server requests",
-    "apx.dispatch.body_collect.duration": "Time to collect the request body from the network stream",
-    "apx.dispatch.crossbeam_send.duration": "Time to push the request slot to the crossbeam channel and signal wakeup",
-    "apx.dispatch.response_wait.duration": "Time waiting for the Python handler to produce a response",
-    "apx.dispatch.total.duration": "Total dispatch duration from body collect start to response ready",
-    "apx.asgi.receive_build.duration": "Time to build the ASGI receive dict for the Python handler",
-    "apx.asgi.send_parse.duration": "Time to parse the ASGI send event dict from the Python handler",
-    "apx.dispatch.pickup_delay.duration": "Time from slot creation to asyncio thread pickup",
-    "apx.dispatch.materialize.duration": "Time to build ASGI scope and receive/send callables",
-    "apx.dispatch.queue_depth": "Pending request slots in the crossbeam channel at drain time",
+    "apx.parse": "HTTP request parsing time",
+    "apx.scope_build": "ASGI scope dict construction time",
+    "apx.receive_build": "ASGI receive dict construction time",
+    "apx.send_parse": "ASGI send event parsing time",
+    "apx.response_build": "HTTP response header construction time",
+    "apx.response_write": "Transport write time",
+    "apx.handler_wait": "Handler execution time",
+    "apx.request_total": "Total request processing time",
+    "apx.active_requests": "In-flight requests on this worker",
+    "apx.connections": "Active TCP connections on this worker",
 }
 
 

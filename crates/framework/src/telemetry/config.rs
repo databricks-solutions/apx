@@ -142,7 +142,7 @@ impl Default for HttpMetricToggles {
     }
 }
 
-/// APX framework dispatch timing instrumentation configuration.
+/// APX protocol instrumentation configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct ApxConfig {
     /// Whether APX dispatch metrics are enabled.
@@ -151,31 +151,33 @@ pub struct ApxConfig {
     pub metrics: ApxMetricToggles,
 }
 
-/// Per-metric boolean toggles for APX dispatch timing.
+/// Per-metric boolean toggles for the APX dispatch pipeline.
 #[derive(Debug, Clone, Copy, Default)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "one bool per OTEL metric toggle"
 )]
 pub struct ApxMetricToggles {
-    /// Toggle for [`super::defs::DISPATCH_BODY_COLLECT`].
-    pub dispatch_body_collect: bool,
-    /// Toggle for [`super::defs::DISPATCH_CROSSBEAM_SEND`].
-    pub dispatch_crossbeam_send: bool,
-    /// Toggle for [`super::defs::DISPATCH_RESPONSE_WAIT`].
-    pub dispatch_response_wait: bool,
-    /// Toggle for [`super::defs::DISPATCH_TOTAL`].
-    pub dispatch_total: bool,
-    /// Toggle for [`super::defs::ASGI_RECEIVE_BUILD`].
-    pub asgi_receive_build: bool,
-    /// Toggle for [`super::defs::ASGI_SEND_PARSE`].
-    pub asgi_send_parse: bool,
-    /// Toggle for [`super::defs::DISPATCH_PICKUP_DELAY`].
-    pub dispatch_pickup_delay: bool,
-    /// Toggle for [`super::defs::DISPATCH_MATERIALIZE`].
-    pub dispatch_materialize: bool,
-    /// Toggle for [`super::defs::DISPATCH_QUEUE_DEPTH`].
-    pub dispatch_queue_depth: bool,
+    /// Toggle for [`super::defs::PARSE`].
+    pub parse: bool,
+    /// Toggle for [`super::defs::SCOPE_BUILD`].
+    pub scope_build: bool,
+    /// Toggle for [`super::defs::RECEIVE_BUILD`].
+    pub receive_build: bool,
+    /// Toggle for [`super::defs::SEND_PARSE`].
+    pub send_parse: bool,
+    /// Toggle for [`super::defs::RESPONSE_BUILD`].
+    pub response_build: bool,
+    /// Toggle for [`super::defs::RESPONSE_WRITE`].
+    pub response_write: bool,
+    /// Toggle for [`super::defs::HANDLER_WAIT`].
+    pub handler_wait: bool,
+    /// Toggle for [`super::defs::REQUEST_TOTAL`].
+    pub request_total: bool,
+    /// Toggle for [`super::defs::ACTIVE_REQUESTS`].
+    pub active_requests: bool,
+    /// Toggle for [`super::defs::CONNECTIONS`].
+    pub connections: bool,
 }
 
 // ── Public defaults (used by supervisor) ─────────────────────────────────
@@ -444,15 +446,16 @@ fn parse_apx_config(dict: &Bound<'_, PyDict>) -> PyResult<ApxConfig> {
 
 fn parse_apx_metric_toggles(dict: &Bound<'_, PyDict>) -> ApxMetricToggles {
     ApxMetricToggles {
-        dispatch_body_collect: extract_bool_or(dict, "dispatch_body_collect", false),
-        dispatch_crossbeam_send: extract_bool_or(dict, "dispatch_crossbeam_send", false),
-        dispatch_response_wait: extract_bool_or(dict, "dispatch_response_wait", false),
-        dispatch_total: extract_bool_or(dict, "dispatch_total", false),
-        asgi_receive_build: extract_bool_or(dict, "asgi_receive_build", false),
-        asgi_send_parse: extract_bool_or(dict, "asgi_send_parse", false),
-        dispatch_pickup_delay: extract_bool_or(dict, "dispatch_pickup_delay", false),
-        dispatch_materialize: extract_bool_or(dict, "dispatch_materialize", false),
-        dispatch_queue_depth: extract_bool_or(dict, "dispatch_queue_depth", false),
+        parse: extract_bool_or(dict, "parse", false),
+        scope_build: extract_bool_or(dict, "scope_build", false),
+        receive_build: extract_bool_or(dict, "receive_build", false),
+        send_parse: extract_bool_or(dict, "send_parse", false),
+        response_build: extract_bool_or(dict, "response_build", false),
+        response_write: extract_bool_or(dict, "response_write", false),
+        handler_wait: extract_bool_or(dict, "handler_wait", false),
+        request_total: extract_bool_or(dict, "request_total", false),
+        active_requests: extract_bool_or(dict, "active_requests", false),
+        connections: extract_bool_or(dict, "connections", false),
     }
 }
 

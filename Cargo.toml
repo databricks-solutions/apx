@@ -142,6 +142,10 @@ http = "1"
 bytes = "1"
 http-body-util = "0.1"
 
+# Framework: oneshot protocol primitives
+httparse = "1.10"
+matchit = "0.8"
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 warnings = "deny"

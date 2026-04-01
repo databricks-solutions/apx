@@ -8,17 +8,16 @@ use pyo3::types::PyModule;
 
 /// Register framework types into the `apx._core` extension module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<crate::asgi::scope::AsgiReceive>()?;
-    m.add_class::<crate::asgi::scope::AsgiSend>()?;
-
     // ASGI lifespan protocol types
     m.add_class::<crate::asgi::lifespan::LifespanReceive>()?;
     m.add_class::<crate::asgi::lifespan::LifespanSend>()?;
 
-    // 3-thread dispatch pipeline types
-    m.add_class::<crate::asgi::slot_receive::SlotReceive>()?;
-    m.add_class::<crate::asgi::slot_send::SlotSend>()?;
-    m.add_class::<crate::asgi::queue::RequestQueue>()?;
+    // HTTP protocol types
+    m.add_class::<crate::protocol::connection::ProtocolFactory>()?;
+    m.add_class::<crate::protocol::connection::RustProtocol>()?;
+    m.add_class::<crate::protocol::connection::HttpReceive>()?;
+    m.add_class::<crate::protocol::router::RustRouter>()?;
+    m.add_class::<crate::protocol::writer::RustResponseWriter>()?;
 
     // Telemetry
     m.add_class::<crate::telemetry::spans::StatusCode>()?;

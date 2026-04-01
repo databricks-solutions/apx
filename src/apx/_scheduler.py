@@ -1,4 +1,4 @@
-"""Inline coroutine driver for the 3-thread dispatch architecture.
+"""Inline coroutine driver for ASGI request handling.
 
 Drives ASGI coroutines to completion within a single ``_run_once``
 callback, eliminating ``create_task`` scheduling overhead.  Falls back

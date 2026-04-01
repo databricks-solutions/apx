@@ -1,9 +1,9 @@
-"""Verify all 9 APX dispatch pipeline metrics are collected when APX_PERF=1.
+"""Verify APX request pipeline metrics are collected when APX_PERF=1.
 
 The telemetry_container fixture sets ``APX_PERF=1``, which enables all
 ``ApxMetrics`` toggles via ``_apx_perf_enabled()``. After sending HTTP
-requests that exercise the full dispatch pipeline (receive + send), all
-9 histogram metrics must appear in the OTEL collector output.
+requests that exercise the full request pipeline, histogram and gauge
+metrics must appear in the OTEL collector output.
 """
 
 from __future__ import annotations
@@ -19,22 +19,28 @@ from .conftest import (
     wait_for_collector_data,
 )
 
-APX_DISPATCH_METRICS = {
-    "apx.dispatch.body_collect.duration",
-    "apx.dispatch.crossbeam_send.duration",
-    "apx.dispatch.response_wait.duration",
-    "apx.dispatch.total.duration",
-    "apx.asgi.receive_build.duration",
-    "apx.asgi.send_parse.duration",
-    "apx.dispatch.pickup_delay.duration",
-    "apx.dispatch.materialize.duration",
-    "apx.dispatch.queue_depth",
+APX_HISTOGRAM_METRICS = {
+    "apx.parse",
+    "apx.scope_build",
+    "apx.receive_build",
+    "apx.send_parse",
+    "apx.response_build",
+    "apx.response_write",
+    "apx.handler_wait",
+    "apx.request_total",
 }
+
+APX_GAUGE_METRICS = {
+    "apx.active_requests",
+    "apx.connections",
+}
+
+APX_ALL_METRICS = APX_HISTOGRAM_METRICS | APX_GAUGE_METRICS
 
 
 @pytest.mark.integration
 class TestDispatchMetrics:
-    """All APX dispatch histograms must appear when APX_PERF is enabled."""
+    """APX request pipeline metrics must appear when APX_PERF is enabled."""
 
     @pytest.fixture(autouse=True, scope="class")
     def _setup(
@@ -49,37 +55,36 @@ class TestDispatchMetrics:
         wait_for_collector_data(otel_collector)
 
     def test_all_dispatch_metrics_present(self, otel_collector: OtelCollector) -> None:
-        """Every APX dispatch histogram must have at least one data point."""
+        """Every APX metric must have at least one data point."""
         collected_names = {m.name for _, m in flat_metrics_with_scope(otel_collector)}
-        missing = APX_DISPATCH_METRICS - collected_names
+        missing = APX_ALL_METRICS - collected_names
         assert not missing, (
-            f"Missing APX dispatch metrics: {sorted(missing)}. "
+            f"Missing APX metrics: {sorted(missing)}. "
             f"Collected metric names: {sorted(collected_names)}"
         )
 
-    def test_dispatch_metrics_are_histograms(
+    def test_histogram_metrics_are_histograms(
         self, otel_collector: OtelCollector
     ) -> None:
-        """APX dispatch metrics must be exported as histograms."""
+        """APX histogram metrics must be exported as histograms."""
         for _, m in flat_metrics_with_scope(otel_collector):
-            if m.name in APX_DISPATCH_METRICS:
+            if m.name in APX_HISTOGRAM_METRICS:
                 assert m.histogram is not None, (
                     f"{m.name} should be a histogram, got sum={m.sum} gauge={m.gauge}"
                 )
 
-    def test_dispatch_metrics_unit_is_microseconds(
+    def test_histogram_metrics_unit_is_microseconds(
         self, otel_collector: OtelCollector
     ) -> None:
-        """APX dispatch duration metrics must report in microseconds."""
-        duration_metrics = {n for n in APX_DISPATCH_METRICS if n.endswith(".duration")}
+        """APX histogram metrics must report in microseconds."""
         for _, m in flat_metrics_with_scope(otel_collector):
-            if m.name in duration_metrics:
+            if m.name in APX_HISTOGRAM_METRICS:
                 assert m.unit == "us", f"{m.name} unit should be 'us', got {m.unit!r}"
 
-    def test_queue_depth_unit_is_dimensionless(
+    def test_gauge_metrics_unit_is_dimensionless(
         self, otel_collector: OtelCollector
     ) -> None:
-        """queue_depth is a count, not a duration — unit must be '1'."""
+        """Gauge metrics (active_requests, connections) use dimensionless unit."""
         for _, m in flat_metrics_with_scope(otel_collector):
-            if m.name == "apx.dispatch.queue_depth":
+            if m.name in APX_GAUGE_METRICS:
                 assert m.unit == "1", f"{m.name} unit should be '1', got {m.unit!r}"
