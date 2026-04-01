@@ -105,9 +105,14 @@ class CallSoonCapture:
 
     __slots__ = ("_original", "_queue", "_active")
 
+    # Queue entry: (callback, args, context).  Context is preserved so
+    # that Task.__step and Future done-callbacks run in their correct
+    # contextvars snapshot (invariant I2).
+    _Entry = tuple[Callable[..., Any], tuple[Any, ...], contextvars.Context | None]
+
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self._original: Callable[..., Any] = loop.call_soon
-        self._queue: deque[tuple[Callable[..., Any], tuple[Any, ...]]] = deque()
+        self._queue: deque[CallSoonCapture._Entry] = deque()
         self._active: bool = False
         loop.call_soon = self._intercept  # type: ignore[assignment, ty:invalid-assignment]
 
@@ -115,12 +120,12 @@ class CallSoonCapture:
         self,
         callback: Callable[..., Any],
         *args: Any,
-        context: Any = None,
+        context: contextvars.Context | None = None,
     ) -> None:
         if self._active:
-            self._queue.append((callback, args))
+            self._queue.append((callback, args, context))
         else:
-            self._original(callback, *args)
+            self._original(callback, *args, context=context)
 
     def enter(self) -> None:
         """Start capturing ``call_soon`` callbacks."""
@@ -132,15 +137,22 @@ class CallSoonCapture:
         self._active = False
         original = self._original
         while self._queue:
-            cb, args = self._queue.popleft()
-            original(cb, *args)
+            cb, args, ctx = self._queue.popleft()
+            original(cb, *args, context=ctx)
 
     def flush(self, budget: int = FLUSH_BUDGET) -> None:
-        """Process captured callbacks inline (between drive steps)."""
+        """Process captured callbacks inline (between drive steps).
+
+        Callbacks run in their original context so that contextvars
+        (e.g. OTEL trace propagation) are preserved correctly.
+        """
         queue = self._queue
         while queue and budget > 0:
-            cb, args = queue.popleft()
-            cb(*args)
+            cb, args, ctx = queue.popleft()
+            if ctx is not None:
+                ctx.run(cb, *args)
+            else:
+                cb(*args)
             budget -= 1
 
 
@@ -181,12 +193,20 @@ def drive_inline(
     task: SchedulerTask,
     loop: asyncio.AbstractEventLoop,
     capture: CallSoonCapture,
+    *,
+    send_value: Any = None,
+    send_exception: BaseException | None = None,
 ) -> _DriveResult:
     """Drive a coroutine to completion or first real suspension.
 
     Must be called from a ``_run_once`` callback where
     ``current_task() is None``.  Uses per-step ``_enter_task`` /
     ``_leave_task`` brackets (invariant I1).
+
+    On initial entry ``send_value`` is ``None`` (starts the coroutine).
+    On continuation re-entry after a Future resolves, pass the Future's
+    result via ``send_value`` or its exception via ``send_exception``
+    so the coroutine receives the I/O result at its ``await`` point.
 
     Returns:
         Completed — coroutine finished; response already fired.
@@ -201,7 +221,12 @@ def drive_inline(
     while True:
         _enter_task(loop, task)
         try:
-            result = context_run(coro.send, None)
+            if send_exception is not None:
+                result = context_run(coro.throw, send_exception)
+                send_exception = None
+            else:
+                result = context_run(coro.send, send_value)
+                send_value = None
         except StopIteration:
             _leave_task(loop, task)
             return _COMPLETED
