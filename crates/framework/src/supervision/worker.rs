@@ -71,6 +71,49 @@ fn init_python() {
     Python::initialize();
 }
 
+/// Apply the asyncio event loop policy before the loop is created.
+///
+/// uvloop provides ~5-10x faster transport.write() and selector dispatch
+/// compared to the default `_UnixSelectorEventLoop`.
+fn install_loop_policy(
+    py: Python<'_>,
+    asyncio: &Bound<'_, PyModule>,
+    loop_policy: &str,
+) -> Result<(), WorkerError> {
+    if loop_policy == "uvloop" {
+        match py.import(c"uvloop") {
+            Ok(uvloop) => {
+                let policy = uvloop
+                    .call_method0(c"EventLoopPolicy")
+                    .map_err(|e| WorkerError::Serve(format!("uvloop.EventLoopPolicy: {e}")))?;
+                asyncio
+                    .call_method1(c"set_event_loop_policy", (policy,))
+                    .map_err(|e| WorkerError::Serve(format!("set_event_loop_policy: {e}")))?;
+                tracing::info!(
+                    name: "apx.worker.loop_policy",
+                    policy = "uvloop",
+                    "event loop policy set"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    name: "apx.worker.loop_policy_fallback",
+                    requested = "uvloop",
+                    fallback = "asyncio",
+                    "uvloop not available, falling back to default asyncio"
+                );
+            }
+        }
+    } else {
+        tracing::info!(
+            name: "apx.worker.loop_policy",
+            policy = loop_policy,
+            "using default asyncio event loop"
+        );
+    }
+    Ok(())
+}
+
 /// Load the Python app and read telemetry configuration.
 fn load_app(bootstrap: &WorkerBootstrap) -> Result<AppReady, WorkerError> {
     apply_python_log_config()?;
@@ -167,11 +210,17 @@ fn init_metrics(telemetry: &crate::telemetry::config::TelemetryConfig) {
 fn run_server(
     ready: AppReady,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    loop_policy: &str,
 ) -> Result<(), WorkerError> {
     Python::attach(|py| {
         let asyncio = py
             .import(c"asyncio")
             .map_err(|e| WorkerError::Serve(format!("import asyncio: {e}")))?;
+
+        // Apply the event loop policy before asyncio.run() creates the loop.
+        // uvloop is ~5-10x faster than the default selector loop for
+        // transport.write() and selector dispatch.
+        install_loop_policy(py, &asyncio, loop_policy)?;
 
         let shutdown_event = asyncio
             .call_method0(c"Event")
@@ -350,9 +399,11 @@ pub async fn run_worker(
     });
 
     // Run the asyncio server (blocking — this IS the event loop).
-    let serve_result = tokio::task::spawn_blocking(move || run_server(ready, drain_rx))
-        .await
-        .map_err(|e| WorkerError::Serve(format!("server task panicked: {e}")))?;
+    let loop_policy = bootstrap.loop_policy.clone();
+    let serve_result =
+        tokio::task::spawn_blocking(move || run_server(ready, drain_rx, &loop_policy))
+            .await
+            .map_err(|e| WorkerError::Serve(format!("server task panicked: {e}")))?;
 
     let _ = ipc_writer.send(&IpcMessage::Drained).await;
     apx_core::tracing_init::shutdown_telemetry();
