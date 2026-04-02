@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -33,7 +33,6 @@ struct ProtocolShared {
     server_host: String,
     server_port: u16,
     active_requests: AtomicU32,
-    write_paused: AtomicBool,
 }
 
 /// RAII guard for a concurrency slot in `active_requests`.
@@ -110,7 +109,6 @@ impl ProtocolFactory {
                 server_host,
                 server_port,
                 active_requests: AtomicU32::new(0),
-                write_paused: AtomicBool::new(false),
             }),
         }
     }
@@ -167,7 +165,7 @@ impl RustProtocol {
     fn data_received(slf: &Bound<'_, Self>, py: Python<'_>, data: &[u8]) -> PyResult<()> {
         let py_self = slf.clone().unbind();
 
-        // Phase 1: borrow_mut for pure Rust (parse + extract handles).
+        // Borrow mutably only for pure-Rust work (parse + extract handles).
         let (feed_result, keepalive_handle, error_transport) = {
             let mut this = py_self.borrow_mut(py);
             let keepalive = this.keepalive_handle.take();
@@ -182,7 +180,7 @@ impl RustProtocol {
             // borrow_mut dropped here — BEFORE any Python calls.
         };
 
-        // Phase 2: Python calls with NO borrow held.
+        // All Python calls below — borrow is released to avoid PyO3 BorrowError.
         if let Some(handle) = keepalive_handle {
             let _ = handle.call_method0(py, pyo3::intern!(py, "cancel"));
         }
@@ -220,15 +218,6 @@ impl RustProtocol {
         false
     }
 
-    /// Called by asyncio/uvloop when the transport's write buffer
-    /// exceeds the high-water mark.
-    ///
-    /// No-op stub: the method must exist to prevent uvloop from logging
-    /// "protocol.pause_writing() failed". We don't implement write-side
-    /// flow control — this is a safety stub to prevent uvloop errors.
-    ///
-    /// Empty body: we don't implement write-side flow control.
-    /// The `&self` borrow is needed for the asyncio protocol interface.
     /// Called by asyncio when the connection is lost.
     fn connection_lost(&mut self, py: Python<'_>, _exc: Option<&Bound<'_, PyAny>>) {
         self.cancel_keepalive_timer(py);
@@ -236,17 +225,14 @@ impl RustProtocol {
         self.parser.reset();
         dispatch_metrics::dec_connections();
     }
-    /// Called by asyncio/uvloop when the transport's write buffer
-    /// exceeds the high-water mark.
-    fn pause_writing(&self) {
-        self.shared.write_paused.store(true, Ordering::Release);
-    }
+    /// Flow control callback from uvloop. Required by the asyncio
+    /// protocol interface; uvloop logs an error if the method is missing.
+    #[expect(clippy::unused_self, reason = "required by asyncio protocol interface")]
+    fn pause_writing(&self) {}
 
-    /// Called by asyncio/uvloop when the transport's write buffer
-    /// drains below the low-water mark.
-    fn resume_writing(&self) {
-        self.shared.write_paused.store(false, Ordering::Release);
-    }
+    /// Counterpart to `pause_writing` — write buffer drained.
+    #[expect(clippy::unused_self, reason = "required by asyncio protocol interface")]
+    fn resume_writing(&self) {}
 
     /// Close the connection if idle (no active requests).
     ///

@@ -8,9 +8,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any
-
-
 class _ApxHandler(logging.Handler):
     def __init__(self, emit_fn: Callable[[int, str, str, str], None]) -> None:
         super().__init__()
@@ -28,7 +25,3 @@ def install_log_handler(emit_fn: Callable[[int, str, str, str], None]) -> None:
     handler = _ApxHandler(emit_fn)
     logging.root.addHandler(handler)
     logging.root.setLevel(logging.DEBUG)
-
-
-async def resolved(val: Any) -> Any:
-    return val

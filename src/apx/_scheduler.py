@@ -6,8 +6,8 @@ to callback-based continuation for coroutines that suspend on real I/O.
 
 Safety: all driving happens on the asyncio thread during callback
 processing (``current_task() is None``).  Per-step ``_enter_task`` /
-``_leave_task`` brackets maintain invariant I1.  See
-``.plans/framework/io/pythonic-inlining.md`` for the full analysis.
+``_leave_task`` brackets ensure only one task is entered at a time
+per event loop.
 """
 
 from __future__ import annotations
@@ -116,7 +116,7 @@ class CallSoonCapture:
     While active, callbacks are captured into an internal queue instead
     of being appended to the event loop's ``_ready`` deque.  This
     prevents the sentinel ``__step`` from ``SchedulerTask.__init__``
-    (invariant I7) from polluting ``_run_once``.
+    from ``Task.__init__``'s ``call_soon(__step)`` polluting ``_run_once``.
 
     Captured callbacks are processed between drive steps via
     ``flush()`` or spilled back to the real ``call_soon`` on ``leave()``.
@@ -126,7 +126,7 @@ class CallSoonCapture:
 
     # Queue entry: (callback, args, context).  Context is preserved so
     # that Task.__step and Future done-callbacks run in their correct
-    # contextvars snapshot (invariant I2).
+    # contextvars snapshot for per-request isolation.
     _Entry = tuple[Callable[..., Any], tuple[Any, ...], contextvars.Context | None]
 
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -220,7 +220,7 @@ def drive_inline(
 
     Must be called from a ``_run_once`` callback where
     ``current_task() is None``.  Uses per-step ``_enter_task`` /
-    ``_leave_task`` brackets (invariant I1).
+    ``_leave_task`` brackets (one task entered per loop at a time).
 
     On initial entry ``send_value`` is ``None`` (starts the coroutine).
     On continuation re-entry after a Future resolves, pass the Future's

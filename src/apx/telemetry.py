@@ -775,7 +775,7 @@ class ApxInstrumentation(BaseModel):
     Collected per-worker. Records per-phase histograms for the ASGI
     dispatch pipeline. If APX_PERF environment variable is not set, none of these metrics are collected::
 
-        ApxInstrumentation(metrics=ApxMetrics(dispatch_total=True))
+        ApxInstrumentation(metrics=ApxMetrics(request_total=True))
     """
 
     type: Literal["apx"] = "apx"

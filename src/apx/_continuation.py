@@ -28,7 +28,7 @@ class Continuation:
     """Drives a suspended coroutine via done-callbacks.
 
     Each step uses per-step ``_enter_task`` / ``_leave_task`` brackets,
-    keeping invariant I1.  Runs entirely on the asyncio thread.
+    keeping one task entered per loop at a time.  Runs entirely on the asyncio thread.
 
     When an asyncio Future resolves, the continuation delivers the
     result (or exception) to the coroutine via ``drive_inline``'s
