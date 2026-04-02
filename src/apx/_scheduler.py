@@ -256,6 +256,25 @@ def drive_inline(
 
         if result is not None and getattr(result, "_asyncio_future_blocking", False):
             result._asyncio_future_blocking = False
+            # Fast path: if the Future is already resolved, extract its
+            # result and continue driving inline — avoids a full
+            # Continuation round-trip through the event loop.
+            if result.done():
+                if result.cancelled():
+                    send_exception = asyncio.CancelledError()
+                    send_value = None
+                else:
+                    fut_exc = result.exception()
+                    if fut_exc is not None:
+                        send_exception = fut_exc
+                        send_value = None
+                    else:
+                        send_value = result.result()
+                        send_exception = None
+                budget -= 1
+                if budget <= 0 or time.monotonic() > deadline:
+                    return Suspended(None)
+                continue
             return Suspended(result)
 
         capture.flush()

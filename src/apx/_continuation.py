@@ -76,70 +76,34 @@ class Continuation:
 
     def _on_future_done(self, future: asyncio.Future[Any]) -> None:
         self._task._waiter = None
-        self._resolved_future = future
-        # If another task is currently entered (defensive guard),
-        # defer to next callback cycle.
+        # If another task is entered, defer to next callback cycle.
         if asyncio.current_task() is not None:
+            self._resolved_future = future
             self._loop.call_soon(self._step)
             return
-        self._step()
-
-    def _extract_resume(
-        self,
-    ) -> tuple[Any, BaseException | None]:
-        """Extract send_value / send_exception from a resolved Future.
-
-        Mirrors the ``Task.__step`` protocol: deliver the Future's
-        result to the coroutine, or throw its exception.
-        """
-        future = self._resolved_future
-        self._resolved_future = None
-        if future is None:
-            # yield-None re-entry — no value to deliver.
-            return None, None
+        # Fast path: extract result inline and resume immediately.
+        # Avoids _step → _extract_resume → drive_inline indirection.
         if future.cancelled():
-            return None, asyncio.CancelledError()
-        exc = future.exception()
-        if exc is not None:
-            return None, exc
-        return future.result(), None
+            self._resume(None, asyncio.CancelledError())
+        else:
+            fut_exc = future.exception()
+            if fut_exc is not None:
+                self._resume(None, fut_exc)
+            else:
+                self._resume(future.result(), None)
 
-    def _step(self) -> None:
+    def _resume(
+        self,
+        send_value: Any,
+        send_exception: BaseException | None,
+    ) -> None:
+        """Drive the coroutine with the given value or exception.
+
+        Skips the ``_extract_resume`` overhead used by ``_step``.
+        Called directly from ``_on_future_done`` for the fast path.
+        """
         if self._coro is None:
             return
-
-        # Check cancellation flag (asyncio.timeout / anyio.fail_after).
-        if self._task._cancel_flag:
-            self._task._cancel_flag = False
-            _enter_task(self._loop, self._task)
-            try:
-                yielded = self._coro.throw(
-                    asyncio.CancelledError(self._task._cancel_msg)
-                )
-            except StopIteration:
-                # Coroutine caught CancelledError and returned normally.
-                _leave_task(self._loop, self._task)
-                self._finish()
-                return
-            except asyncio.CancelledError:
-                # Coroutine re-raised CancelledError — expected.
-                _leave_task(self._loop, self._task)
-                self._finish()
-                return
-            except BaseException as exc:
-                # Coroutine raised a different exception during cancel
-                # cleanup (e.g. error in a yield-dep finalizer).
-                _leave_task(self._loop, self._task)
-                _log_cancel_exception(exc)
-                self._finish()
-                return
-            _leave_task(self._loop, self._task)
-            self._attach(yielded)
-            return
-
-        # Normal step: deliver the Future result and resume driving.
-        send_value, send_exception = self._extract_resume()
-
         self._capture.enter()
         result = drive_inline(
             self._coro,
@@ -157,6 +121,56 @@ class Continuation:
             self._finish()
         elif isinstance(result, Suspended):
             self._attach(result.yielded)
+
+    def _step(self) -> None:
+        """Resume from yield-None or deferred Future (via call_soon).
+
+        Used when ``_on_future_done`` defers (another task entered)
+        or when the coroutine yielded None (asyncio.sleep(0)).
+        """
+        if self._coro is None:
+            return
+
+        # Check cancellation flag (asyncio.timeout / anyio.fail_after).
+        if self._task._cancel_flag:
+            self._task._cancel_flag = False
+            _enter_task(self._loop, self._task)
+            try:
+                yielded = self._coro.throw(
+                    asyncio.CancelledError(self._task._cancel_msg)
+                )
+            except StopIteration:
+                _leave_task(self._loop, self._task)
+                self._finish()
+                return
+            except asyncio.CancelledError:
+                _leave_task(self._loop, self._task)
+                self._finish()
+                return
+            except BaseException as exc:
+                _leave_task(self._loop, self._task)
+                _log_cancel_exception(exc)
+                self._finish()
+                return
+            _leave_task(self._loop, self._task)
+            self._attach(yielded)
+            return
+
+        # Deferred Future resume (from _on_future_done via call_soon).
+        future = self._resolved_future
+        self._resolved_future = None
+        if future is not None:
+            if future.cancelled():
+                self._resume(None, asyncio.CancelledError())
+            else:
+                fut_exc = future.exception()
+                if fut_exc is not None:
+                    self._resume(None, fut_exc)
+                else:
+                    self._resume(future.result(), None)
+        else:
+            # yield-None re-entry.
+            self._resume(None, None)
 
     def _finish(self) -> None:
         self._coro = None

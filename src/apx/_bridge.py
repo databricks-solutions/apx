@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+
+
 class _ApxHandler(logging.Handler):
     def __init__(self, emit_fn: Callable[[int, str, str, str], None]) -> None:
         super().__init__()
