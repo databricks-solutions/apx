@@ -181,19 +181,22 @@ impl opentelemetry_sdk::logs::LogProcessor for TimestampProcessor {
 
 /// Histogram boundaries for duration metrics recorded in seconds.
 ///
-/// Aligned with OpenTelemetry HTTP semantic conventions for
-/// `http.server.request.duration`.
+/// Extends the OpenTelemetry HTTP semantic convention boundaries with
+/// sub-millisecond resolution (100µs–2.5ms) so fast endpoints like health
+/// probes get meaningful percentile estimates instead of landing in the
+/// catch-all `[0, 5ms)` bucket.
 const DURATION_SECONDS_BOUNDARIES: &[f64] = &[
-    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+    0.000_1, 0.000_25, 0.000_5, 0.001, 0.002_5, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5,
+    0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
 ];
 
 /// Histogram boundaries for duration metrics recorded in microseconds.
 ///
-/// Covers sub-millisecond dispatch latencies (body collect, crossbeam send,
-/// ASGI parse) up to 100ms outliers.
+/// Covers sub-microsecond dispatch phases (scope build, send parse) through
+/// 100ms handler latencies with ≤2.5× gaps between adjacent boundaries.
 const DURATION_MICROSECONDS_BOUNDARIES: &[f64] = &[
-    1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0, 2_500.0, 5_000.0, 10_000.0, 50_000.0,
-    100_000.0,
+    1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0, 2_500.0, 5_000.0, 10_000.0, 25_000.0,
+    50_000.0, 100_000.0,
 ];
 
 /// SDK View that assigns appropriate histogram bucket boundaries based on unit.
@@ -413,4 +416,71 @@ fn init_tracing_with_otel(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn is_strictly_ascending(boundaries: &[f64]) -> bool {
+        boundaries.windows(2).all(|w| w[0] < w[1])
+    }
+
+    #[test]
+    fn seconds_boundaries_are_strictly_ascending() {
+        assert!(
+            is_strictly_ascending(DURATION_SECONDS_BOUNDARIES),
+            "seconds boundaries must be sorted with no duplicates"
+        );
+    }
+
+    #[test]
+    fn microseconds_boundaries_are_strictly_ascending() {
+        assert!(
+            is_strictly_ascending(DURATION_MICROSECONDS_BOUNDARIES),
+            "microseconds boundaries must be sorted with no duplicates"
+        );
+    }
+
+    #[test]
+    fn seconds_boundaries_resolve_sub_millisecond() {
+        let sub_ms_boundaries: Vec<f64> = DURATION_SECONDS_BOUNDARIES
+            .iter()
+            .copied()
+            .filter(|&b| b < 0.001)
+            .collect();
+        assert!(
+            sub_ms_boundaries.len() >= 3,
+            "expected ≥3 boundaries below 1ms for sub-millisecond resolution, \
+             got {sub_ms_boundaries:?}"
+        );
+    }
+
+    #[test]
+    fn microseconds_boundaries_max_gap_ratio() {
+        for w in DURATION_MICROSECONDS_BOUNDARIES.windows(2) {
+            let ratio = w[1] / w[0];
+            assert!(
+                ratio <= 5.1,
+                "gap between {:.0} and {:.0} is {:.1}×, exceeds 5× maximum",
+                w[0],
+                w[1],
+                ratio
+            );
+        }
+    }
+
+    #[test]
+    fn seconds_boundaries_max_gap_ratio() {
+        for w in DURATION_SECONDS_BOUNDARIES.windows(2) {
+            let ratio = w[1] / w[0];
+            assert!(
+                ratio <= 5.1,
+                "gap between {} and {} is {:.1}×, exceeds 5× maximum",
+                w[0],
+                w[1],
+                ratio
+            );
+        }
+    }
 }

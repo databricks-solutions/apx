@@ -189,7 +189,6 @@ impl RustProtocol {
             RustResponseWriter::new(py, transport.clone_ref(py), Some(on_complete.into_any()))?;
 
         self.shared.on_request.call1(py, (scope, receive, send))?;
-        dispatch_metrics::record_dispatch_total(t_dispatch.elapsed().as_micros() as f64);
         Ok(())
     }
 }
@@ -243,6 +242,7 @@ impl OnRequestComplete {
         {
             let _guard = self.request_span.enter();
             dispatch_metrics::record_handler_wait(elapsed.as_micros() as f64);
+            dispatch_metrics::record_dispatch_total(elapsed.as_micros() as f64);
 
             crate::telemetry::http::record_duration(
                 elapsed.as_secs_f64(),

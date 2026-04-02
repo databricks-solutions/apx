@@ -693,8 +693,9 @@ class HttpMetrics(BaseModel):
 class ApxMetrics(BaseModel):
     """APX per-worker request pipeline metric toggles.
 
-    Each histogram records latency for a phase of request handling
-    within a single worker process. Use ``apx.worker.id`` to drill
+    Histograms record latency (microseconds) for each phase of request
+    handling. Up-down counters (``active_requests``, ``connections``)
+    track current in-flight counts. Use ``apx.worker.id`` to drill
     down; aggregate across workers for server-wide distributions.
 
     If APX_PERF environment variable is not set, none of these metrics are collected.

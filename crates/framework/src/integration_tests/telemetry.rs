@@ -659,5 +659,82 @@ logging.getLogger('test.handler').warning('hello from python')
     });
 }
 
+// ── Up-down counter / gauge semantics tests ────────────────────────────
+
+#[test]
+fn up_down_counter_add_semantics() {
+    let tt = setup();
+    let _lock = EXPORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    tt.metric_exporter.reset();
+
+    let meter = opentelemetry::global::meter("test.up_down");
+    let counter = meter.i64_up_down_counter("test.inflight").build();
+
+    counter.add(1, &[]);
+    counter.add(1, &[]);
+    counter.add(1, &[]);
+    counter.add(-1, &[]);
+
+    tt.meter_provider.force_flush().unwrap();
+    let metrics = tt.metric_exporter.get_finished_metrics().unwrap();
+
+    let mut found_value = None;
+    for rm in &metrics {
+        for sm in &rm.scope_metrics {
+            for m in &sm.metrics {
+                if m.name == "test.inflight"
+                    && let Some(sum) = m.data.as_any().downcast_ref::<Sum<i64>>()
+                {
+                    found_value = sum.data_points.first().map(|dp| dp.value);
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        found_value,
+        Some(2),
+        "up-down counter: 3 increments - 1 decrement = 2"
+    );
+}
+
+#[test]
+fn gauge_record_is_absolute_not_additive() {
+    let tt = setup();
+    let _lock = EXPORT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    tt.metric_exporter.reset();
+
+    let meter = opentelemetry::global::meter("test.gauge_abs");
+    let gauge = meter.f64_gauge("test.last_value").build();
+
+    gauge.record(42.0, &[]);
+    gauge.record(7.0, &[]);
+
+    tt.meter_provider.force_flush().unwrap();
+    let metrics = tt.metric_exporter.get_finished_metrics().unwrap();
+
+    let mut found_value = None;
+    for rm in &metrics {
+        for sm in &rm.scope_metrics {
+            for m in &sm.metrics {
+                if m.name == "test.last_value"
+                    && let Some(g) = m
+                        .data
+                        .as_any()
+                        .downcast_ref::<opentelemetry_sdk::metrics::data::Gauge<f64>>()
+                {
+                    found_value = g.data_points.first().map(|dp| dp.value);
+                }
+            }
+        }
+    }
+
+    assert_eq!(
+        found_value,
+        Some(7.0),
+        "gauge records absolute value, not cumulative: last record(7.0) wins"
+    );
+}
+
 // ── Full HTTP request tests removed (depend on TestServer) ─────────────
 // Require TestServer infrastructure not yet available in this crate.

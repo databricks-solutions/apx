@@ -1,16 +1,16 @@
-//! APX request pipeline histograms.
+//! APX request pipeline metrics.
 //!
-//! Records per-phase latency for the request dispatch pipeline via OTEL
-//! histograms. All instruments are lazily created on first use and guarded
-//! by the `ApxMetricToggles` boolean flags — disabled metrics have zero
-//! overhead.
+//! Records per-phase latency via OTEL histograms and connection/request
+//! counts via up-down counters. All instruments are lazily created on
+//! first use and guarded by the `ApxMetricToggles` boolean flags —
+//! disabled metrics have zero overhead.
 //!
 //! Toggles are initialized once per worker process via [`init`] after
 //! reading the Python telemetry config.
 
 use std::sync::OnceLock;
 
-use opentelemetry::metrics::{Gauge, Histogram};
+use opentelemetry::metrics::{Histogram, UpDownCounter};
 
 use super::config::ApxMetricToggles;
 use super::defs;
@@ -52,25 +52,25 @@ macro_rules! dispatch_metric {
     };
 }
 
-/// Generate a lazy gauge getter and gated `inc_*` / `dec_*` functions.
+/// Generate a lazy up-down counter getter and gated `inc_*` / `dec_*` functions.
 macro_rules! dispatch_gauge {
-    ($inc_fn:ident, $dec_fn:ident, $gauge_fn:ident, $toggle:ident, $def:expr, $doc:literal) => {
-        fn $gauge_fn() -> &'static Gauge<f64> {
-            static INST: OnceLock<Gauge<f64>> = OnceLock::new();
-            INST.get_or_init(|| $def.gauge(&framework_meter()))
+    ($inc_fn:ident, $dec_fn:ident, $counter_fn:ident, $toggle:ident, $def:expr, $doc:literal) => {
+        fn $counter_fn() -> &'static UpDownCounter<i64> {
+            static INST: OnceLock<UpDownCounter<i64>> = OnceLock::new();
+            INST.get_or_init(|| $def.up_down_counter(&framework_meter()))
         }
 
         #[doc = $doc]
         pub fn $inc_fn() {
             if toggles().$toggle {
-                $gauge_fn().record(1.0, NO_ATTRS);
+                $counter_fn().add(1, NO_ATTRS);
             }
         }
 
-        /// Decrement the gauge.
+        /// Decrement the counter.
         pub fn $dec_fn() {
             if toggles().$toggle {
-                $gauge_fn().record(-1.0, NO_ATTRS);
+                $counter_fn().add(-1, NO_ATTRS);
             }
         }
     };
@@ -142,7 +142,7 @@ dispatch_metric!(
     "Record `apx.request_total` if enabled."
 );
 
-// ── Gauges ───────────────────────────────────────────────────────────────
+// ── Up-down counters ─────────────────────────────────────────────────────
 
 dispatch_gauge!(
     inc_active_requests,

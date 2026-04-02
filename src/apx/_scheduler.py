@@ -235,6 +235,10 @@ def drive_inline(
             return Failed(exc)
         _leave_task(loop, task)
 
+        if result is not None and getattr(result, "_asyncio_future_blocking", False):
+            result._asyncio_future_blocking = False
+            return Suspended(result)
+
         capture.flush()
 
         if result is None:
@@ -243,6 +247,4 @@ def drive_inline(
                 return Suspended(None)
             continue
 
-        if getattr(result, "_asyncio_future_blocking", False):
-            result._asyncio_future_blocking = False
         return Suspended(result)
