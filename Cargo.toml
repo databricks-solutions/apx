@@ -144,7 +144,10 @@ http-body-util = "0.1"
 
 # Framework: oneshot protocol primitives
 httparse = "1.10"
+httpdate = "1"
 matchit = "0.8"
+percent-encoding = "2"
+uuid = { version = "1", features = ["v4"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

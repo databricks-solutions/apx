@@ -82,6 +82,8 @@ pub struct ParsedHead {
     pub version: HttpVersion,
     /// Content-Length value, if present.
     pub content_length: Option<usize>,
+    /// Whether the request includes `Expect: 100-continue`.
+    pub expect_continue: bool,
 }
 
 /// A fully parsed HTTP request (head + body).
@@ -228,6 +230,7 @@ fn build_head(req: &httparse::Request<'_, '_>) -> Result<ParsedHead, ParseError>
     };
 
     let mut content_length = None;
+    let mut expect_continue = false;
     let mut headers = Vec::with_capacity(req.headers.len());
 
     for header in req.headers.iter() {
@@ -237,6 +240,11 @@ fn build_head(req: &httparse::Request<'_, '_>) -> Result<ParsedHead, ParseError>
             && let Ok(s) = std::str::from_utf8(header.value)
         {
             content_length = s.trim().parse().ok();
+        }
+        if header.name.eq_ignore_ascii_case("expect")
+            && header.value.eq_ignore_ascii_case(b"100-continue")
+        {
+            expect_continue = true;
         }
         headers.push((name, value));
     }
@@ -248,6 +256,7 @@ fn build_head(req: &httparse::Request<'_, '_>) -> Result<ParsedHead, ParseError>
         headers,
         version,
         content_length,
+        expect_continue,
     })
 }
 
@@ -402,5 +411,31 @@ mod tests {
             .expect("parse failed");
         assert_eq!(requests.len(), 1);
         assert!(requests[0].body.is_empty());
+    }
+
+    #[test]
+    fn test_expect_100_continue_detected() {
+        let mut parser = RequestParser::new();
+        let requests = parser
+            .feed(
+                b"POST /upload HTTP/1.1\r\n\
+                  Host: h\r\n\
+                  Expect: 100-continue\r\n\
+                  Content-Length: 5\r\n\r\n\
+                  hello",
+            )
+            .expect("parse failed");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].head.expect_continue);
+    }
+
+    #[test]
+    fn test_expect_100_continue_absent() {
+        let mut parser = RequestParser::new();
+        let requests = parser
+            .feed(b"GET / HTTP/1.1\r\nHost: h\r\n\r\n")
+            .expect("parse failed");
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].head.expect_continue);
     }
 }

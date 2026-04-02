@@ -4,6 +4,7 @@
 //! Sans-I/O core (`build_status_and_headers`, `parse_send_event`) is
 //! testable with `#[test]`.
 
+use std::cell::RefCell;
 use std::time::Instant;
 
 use bytes::{BufMut, Bytes, BytesMut};
@@ -12,6 +13,28 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 
 use crate::asgi::scope::ResolvedAwaitable;
 use crate::telemetry::dispatch_metrics;
+
+// ── Date header cache ───────────────────────────────────────────────
+
+thread_local! {
+    static CACHED_DATE: RefCell<(Instant, Bytes)> = RefCell::new((
+        Instant::now(),
+        Bytes::from_static(b""),
+    ));
+}
+
+/// RFC 7231 `Date` header, cached and refreshed every second.
+fn cached_date_header() -> Bytes {
+    CACHED_DATE.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        if cached.0.elapsed().as_secs() >= 1 || cached.1.is_empty() {
+            let now = httpdate::fmt_http_date(std::time::SystemTime::now());
+            cached.1 = Bytes::from(format!("date: {now}\r\n"));
+            cached.0 = Instant::now();
+        }
+        cached.1.clone()
+    })
+}
 
 /// ASGI send event parsed from a Python dict.
 #[derive(Debug)]
@@ -168,11 +191,21 @@ impl RustResponseWriter {
         };
         dispatch_metrics::record_response_build(t_build.elapsed().as_micros() as f64);
 
+        const MERGE_THRESHOLD: usize = 65_536;
+
         let t_write = Instant::now();
         let write_result = if chunked {
             let mut buf = BytesMut::with_capacity(hdr_bytes.len() + body_bytes.len() + 32);
             buf.put_slice(&hdr_bytes);
             write_chunk(&mut buf, body_bytes);
+            let py_bytes = PyBytes::new(py, &buf);
+            self.transport
+                .call_method1(py, pyo3::intern!(py, "write"), (py_bytes,))
+                .map(|_| ())
+        } else if body_bytes.len() <= MERGE_THRESHOLD {
+            let mut buf = BytesMut::with_capacity(hdr_bytes.len() + body_bytes.len());
+            buf.put_slice(&hdr_bytes);
+            buf.put_slice(body_bytes);
             let py_bytes = PyBytes::new(py, &buf);
             self.transport
                 .call_method1(py, pyo3::intern!(py, "write"), (py_bytes,))
@@ -311,53 +344,169 @@ fn extract_response_headers(
 /// HTTP/1.1 chunked transfer encoding terminator.
 const LAST_CHUNK: &[u8] = b"0\r\n\r\n";
 
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
 /// Write a single HTTP chunk frame: `{hex_len}\r\n{data}\r\n`.
 fn write_chunk(buf: &mut BytesMut, data: &[u8]) {
     if data.is_empty() {
         return;
     }
-    buf.put_slice(format!("{:x}\r\n", data.len()).as_bytes());
+    write_hex(buf, data.len());
+    buf.put_slice(b"\r\n");
     buf.put_slice(data);
     buf.put_slice(b"\r\n");
 }
 
-/// Build the HTTP/1.1 status line + headers as bytes.
-pub fn build_status_and_headers(status: u16, headers: &[(Bytes, Bytes)]) -> Bytes {
-    let reason = reason_phrase(status);
-    let mut buf = BytesMut::with_capacity(256);
+/// Write a `usize` as lowercase hex directly into `buf` (no heap alloc).
+fn write_hex(buf: &mut BytesMut, mut n: usize) {
+    if n == 0 {
+        buf.put_u8(b'0');
+        return;
+    }
+    let mut stack = [0u8; 16];
+    let mut pos = stack.len();
+    while n > 0 {
+        pos -= 1;
+        stack[pos] = HEX_DIGITS[n & 0xf];
+        n >>= 4;
+    }
+    buf.put_slice(&stack[pos..]);
+}
+
+// ── Response head encoding ──────────────────────────────────────────
+
+/// Write the status line for a given code, using cached bytes for
+/// common codes to avoid per-response `to_string()` + concatenation.
+fn write_status_line(buf: &mut BytesMut, status: u16) {
+    match status {
+        200 => {
+            buf.put_slice(b"HTTP/1.1 200 OK\r\n");
+            return;
+        }
+        201 => {
+            buf.put_slice(b"HTTP/1.1 201 Created\r\n");
+            return;
+        }
+        204 => {
+            buf.put_slice(b"HTTP/1.1 204 No Content\r\n");
+            return;
+        }
+        301 => {
+            buf.put_slice(b"HTTP/1.1 301 Moved Permanently\r\n");
+            return;
+        }
+        302 => {
+            buf.put_slice(b"HTTP/1.1 302 Found\r\n");
+            return;
+        }
+        304 => {
+            buf.put_slice(b"HTTP/1.1 304 Not Modified\r\n");
+            return;
+        }
+        307 => {
+            buf.put_slice(b"HTTP/1.1 307 Temporary Redirect\r\n");
+            return;
+        }
+        308 => {
+            buf.put_slice(b"HTTP/1.1 308 Permanent Redirect\r\n");
+            return;
+        }
+        400 => {
+            buf.put_slice(b"HTTP/1.1 400 Bad Request\r\n");
+            return;
+        }
+        401 => {
+            buf.put_slice(b"HTTP/1.1 401 Unauthorized\r\n");
+            return;
+        }
+        403 => {
+            buf.put_slice(b"HTTP/1.1 403 Forbidden\r\n");
+            return;
+        }
+        404 => {
+            buf.put_slice(b"HTTP/1.1 404 Not Found\r\n");
+            return;
+        }
+        405 => {
+            buf.put_slice(b"HTTP/1.1 405 Method Not Allowed\r\n");
+            return;
+        }
+        409 => {
+            buf.put_slice(b"HTTP/1.1 409 Conflict\r\n");
+            return;
+        }
+        422 => {
+            buf.put_slice(b"HTTP/1.1 422 Unprocessable Entity\r\n");
+            return;
+        }
+        429 => {
+            buf.put_slice(b"HTTP/1.1 429 Too Many Requests\r\n");
+            return;
+        }
+        500 => {
+            buf.put_slice(b"HTTP/1.1 500 Internal Server Error\r\n");
+            return;
+        }
+        502 => {
+            buf.put_slice(b"HTTP/1.1 502 Bad Gateway\r\n");
+            return;
+        }
+        503 => {
+            buf.put_slice(b"HTTP/1.1 503 Service Unavailable\r\n");
+            return;
+        }
+        504 => {
+            buf.put_slice(b"HTTP/1.1 504 Gateway Timeout\r\n");
+            return;
+        }
+        _ => {}
+    }
     buf.put_slice(b"HTTP/1.1 ");
     buf.put_slice(status.to_string().as_bytes());
     buf.put_slice(b" ");
-    buf.put_slice(reason.as_bytes());
+    buf.put_slice(reason_phrase(status).as_bytes());
     buf.put_slice(b"\r\n");
+}
+
+/// Encode status line + app headers + extra trailer headers + Date
+/// into a `BytesMut`. Optionally appends body.
+fn encode_head(
+    status: u16,
+    headers: &[(Bytes, Bytes)],
+    extra: &[(&[u8], &[u8])],
+    body: Option<&[u8]>,
+) -> Bytes {
+    let body_len = body.map_or(0, <[u8]>::len);
+    let mut buf = BytesMut::with_capacity(256 + body_len);
+    write_status_line(&mut buf, status);
     for (name, value) in headers {
         buf.put_slice(name);
         buf.put_slice(b": ");
         buf.put_slice(value);
         buf.put_slice(b"\r\n");
     }
+    for &(name, value) in extra {
+        buf.put_slice(name);
+        buf.put_slice(b": ");
+        buf.put_slice(value);
+        buf.put_slice(b"\r\n");
+    }
+    buf.put_slice(&cached_date_header());
     buf.put_slice(b"\r\n");
+    if let Some(b) = body {
+        buf.put_slice(b);
+    }
     buf.freeze()
+}
+
+/// Build the HTTP/1.1 status line + headers as bytes.
+pub fn build_status_and_headers(status: u16, headers: &[(Bytes, Bytes)]) -> Bytes {
+    encode_head(status, headers, &[], None)
 }
 
 /// Build status line + headers with `Transfer-Encoding: chunked`.
 fn build_status_and_headers_chunked(status: u16, headers: &[(Bytes, Bytes)]) -> Bytes {
-    let reason = reason_phrase(status);
-    let mut buf = BytesMut::with_capacity(256);
-    buf.put_slice(b"HTTP/1.1 ");
-    buf.put_slice(status.to_string().as_bytes());
-    buf.put_slice(b" ");
-    buf.put_slice(reason.as_bytes());
-    buf.put_slice(b"\r\n");
-    for (name, value) in headers {
-        buf.put_slice(name);
-        buf.put_slice(b": ");
-        buf.put_slice(value);
-        buf.put_slice(b"\r\n");
-    }
-    buf.put_slice(b"transfer-encoding: chunked\r\n");
-    buf.put_slice(b"\r\n");
-    buf.freeze()
+    encode_head(status, headers, &[(b"transfer-encoding", b"chunked")], None)
 }
 
 /// Build status line + headers with an auto-added `Content-Length`.
@@ -366,53 +515,30 @@ fn build_status_and_headers_with_length(
     headers: &[(Bytes, Bytes)],
     body_len: usize,
 ) -> Bytes {
-    let reason = reason_phrase(status);
-    let mut buf = BytesMut::with_capacity(256);
-    buf.put_slice(b"HTTP/1.1 ");
-    buf.put_slice(status.to_string().as_bytes());
-    buf.put_slice(b" ");
-    buf.put_slice(reason.as_bytes());
-    buf.put_slice(b"\r\n");
-    for (name, value) in headers {
-        buf.put_slice(name);
-        buf.put_slice(b": ");
-        buf.put_slice(value);
-        buf.put_slice(b"\r\n");
-    }
-    buf.put_slice(b"content-length: ");
-    buf.put_slice(body_len.to_string().as_bytes());
-    buf.put_slice(b"\r\n\r\n");
-    buf.freeze()
+    let len_str = body_len.to_string();
+    encode_head(
+        status,
+        headers,
+        &[(b"content-length", len_str.as_bytes())],
+        None,
+    )
 }
 
 /// Build a complete HTTP/1.1 response (status + headers + body).
 fn build_full_response(status: u16, headers: &[(Bytes, Bytes)], body: &[u8]) -> Bytes {
-    let reason = reason_phrase(status);
-    let mut buf = BytesMut::with_capacity(256 + body.len());
-    buf.put_slice(b"HTTP/1.1 ");
-    buf.put_slice(status.to_string().as_bytes());
-    buf.put_slice(b" ");
-    buf.put_slice(reason.as_bytes());
-    buf.put_slice(b"\r\n");
-
-    let mut has_content_length = false;
-    for (name, value) in headers {
-        buf.put_slice(name);
-        buf.put_slice(b": ");
-        buf.put_slice(value);
-        buf.put_slice(b"\r\n");
-        if name.eq_ignore_ascii_case(b"content-length") {
-            has_content_length = true;
-        }
+    let has_content_length = headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case(b"content-length"));
+    if has_content_length {
+        return encode_head(status, headers, &[], Some(body));
     }
-    if !has_content_length {
-        buf.put_slice(b"content-length: ");
-        buf.put_slice(body.len().to_string().as_bytes());
-        buf.put_slice(b"\r\n");
-    }
-    buf.put_slice(b"\r\n");
-    buf.put_slice(body);
-    buf.freeze()
+    let len_str = body.len().to_string();
+    encode_head(
+        status,
+        headers,
+        &[(b"content-length", len_str.as_bytes())],
+        Some(body),
+    )
 }
 
 /// Standard HTTP reason phrase for common status codes.
@@ -457,6 +583,7 @@ mod tests {
         let s = std::str::from_utf8(&result).expect("valid utf8");
         assert!(s.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(s.contains("content-type: text/html\r\n"));
+        assert!(s.contains("date: "));
         assert!(s.ends_with("\r\n\r\n"));
     }
 
@@ -465,6 +592,7 @@ mod tests {
         let result = build_status_and_headers(404, &[]);
         let s = std::str::from_utf8(&result).expect("valid utf8");
         assert!(s.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert!(s.contains("date: "));
     }
 
     #[test]
@@ -476,6 +604,7 @@ mod tests {
         let result = build_full_response(200, &headers, b"hello");
         let s = std::str::from_utf8(&result).expect("valid utf8");
         assert!(s.contains("content-length: 5\r\n"));
+        assert!(s.contains("date: "));
         assert!(s.ends_with("hello"));
     }
 
@@ -519,6 +648,7 @@ mod tests {
         let s = std::str::from_utf8(&result).expect("valid utf8");
         assert!(s.contains("transfer-encoding: chunked\r\n"));
         assert!(s.contains("content-type: text/plain\r\n"));
+        assert!(s.contains("date: "));
     }
 
     #[test]
@@ -530,6 +660,7 @@ mod tests {
         let result = build_status_and_headers_with_length(200, &headers, 42);
         let s = std::str::from_utf8(&result).expect("valid utf8");
         assert!(s.contains("content-length: 42\r\n"));
+        assert!(s.contains("date: "));
     }
 
     #[test]
@@ -549,5 +680,49 @@ mod tests {
     #[test]
     fn test_last_chunk_constant() {
         assert_eq!(LAST_CHUNK, b"0\r\n\r\n");
+    }
+
+    #[test]
+    fn test_date_header_cached_within_second() {
+        let a = cached_date_header();
+        let b = cached_date_header();
+        assert_eq!(a, b, "two calls within 1s must return the same value");
+        assert!(a.starts_with(b"date: "));
+        assert!(a.ends_with(b"\r\n"));
+    }
+
+    #[test]
+    fn test_write_hex_zero() {
+        let mut buf = BytesMut::new();
+        write_hex(&mut buf, 0);
+        assert_eq!(&buf[..], b"0");
+    }
+
+    #[test]
+    fn test_write_hex_small() {
+        let mut buf = BytesMut::new();
+        write_hex(&mut buf, 255);
+        assert_eq!(&buf[..], b"ff");
+    }
+
+    #[test]
+    fn test_write_hex_large() {
+        let mut buf = BytesMut::new();
+        write_hex(&mut buf, 0x1a2b);
+        assert_eq!(&buf[..], b"1a2b");
+    }
+
+    #[test]
+    fn test_write_status_line_cached() {
+        let mut buf = BytesMut::new();
+        write_status_line(&mut buf, 200);
+        assert_eq!(&buf[..], b"HTTP/1.1 200 OK\r\n");
+    }
+
+    #[test]
+    fn test_write_status_line_uncached() {
+        let mut buf = BytesMut::new();
+        write_status_line(&mut buf, 418);
+        assert_eq!(&buf[..], b"HTTP/1.1 418 Unknown\r\n");
     }
 }

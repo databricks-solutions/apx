@@ -42,7 +42,10 @@ which.workspace = true
 notify.workspace = true
 futures-util.workspace = true
 httparse.workspace = true
+httpdate.workspace = true
 matchit.workspace = true
+percent-encoding.workspace = true
+uuid.workspace = true
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

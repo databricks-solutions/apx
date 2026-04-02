@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import sys
 import time
 from collections import deque
 from collections.abc import Callable, Coroutine
 from typing import Any
+
+_PY312 = sys.version_info >= (3, 12)
 
 # ── Constants ────────────────────────────────────────────────────────
 
@@ -44,6 +47,15 @@ async def _park_forever() -> None:
     await asyncio.get_event_loop().create_future()
 
 
+async def _sentinel() -> None:
+    """Minimal coroutine for eager_start (3.12+).
+
+    Completes immediately so the Task reaches ``done()`` after
+    ``eager_start`` finishes synchronously, preventing any stale
+    ``__step`` callback from polluting ``_ready``.
+    """
+
+
 class SchedulerTask(asyncio.Task):
     """Placeholder task for ``_enter_task`` / ``_leave_task`` bracketing.
 
@@ -65,7 +77,14 @@ class SchedulerTask(asyncio.Task):
         # We store it explicitly because CPython's C-implemented Task
         # does not expose ``_context`` as a Python-accessible attribute.
         self._drive_context: contextvars.Context = contextvars.copy_context()
-        super().__init__(_park_forever(), loop=loop)
+        if _PY312:
+            super().__init__(_sentinel(), loop=loop, eager_start=True)  # type: ignore[call-arg]
+        else:
+            ready = getattr(loop, "_ready", None)
+            n_before = len(ready) if ready is not None else 0
+            super().__init__(_park_forever(), loop=loop)
+            if ready is not None and len(ready) > n_before:
+                ready.pop()
         self._log_destroy_pending: bool = False
         self._cancel_flag: bool = False
         self._cancel_msg: str | None = None

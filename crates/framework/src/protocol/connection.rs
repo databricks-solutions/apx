@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -23,6 +23,9 @@ use super::writer::RustResponseWriter;
 /// Maximum concurrent in-flight requests per protocol instance.
 const MAX_CONCURRENT: u32 = 256;
 
+/// Seconds of idle time before closing a keep-alive connection.
+const KEEPALIVE_TIMEOUT_S: f64 = 5.0;
+
 /// Shared state for all protocol instances on this worker.
 struct ProtocolShared {
     on_request: Py<PyAny>,
@@ -30,6 +33,7 @@ struct ProtocolShared {
     server_host: String,
     server_port: u16,
     active_requests: AtomicU32,
+    write_paused: AtomicBool,
 }
 
 /// Factory that creates [`RustProtocol`] instances for `loop.create_server()`.
@@ -58,6 +62,7 @@ impl ProtocolFactory {
                 server_host,
                 server_port,
                 active_requests: AtomicU32::new(0),
+                write_paused: AtomicBool::new(false),
             }),
         }
     }
@@ -74,6 +79,7 @@ impl ProtocolFactory {
                 parser: RequestParser::new(),
                 shared: Arc::clone(&self.shared),
                 client_addr: None,
+                keepalive_handle: None,
             },
         )
     }
@@ -89,6 +95,7 @@ pub struct RustProtocol {
     parser: RequestParser,
     shared: Arc<ProtocolShared>,
     client_addr: Option<SocketAddr>,
+    keepalive_handle: Option<Py<PyAny>>,
 }
 
 crate::opaque_debug!(RustProtocol);
@@ -103,17 +110,51 @@ impl RustProtocol {
         Ok(())
     }
 
+    /// Close the connection if idle (no active requests).
+    ///
+    /// Called by the event loop's `call_later` as the keep-alive timeout.
+    fn close_idle(&mut self, py: Python<'_>) {
+        if self.shared.active_requests.load(Ordering::Relaxed) == 0
+            && let Some(transport) = &self.transport
+        {
+            let _ = transport.call_method0(py, pyo3::intern!(py, "close"));
+        }
+    }
+
     /// Called by asyncio when data is received on the connection.
-    fn data_received(&mut self, py: Python<'_>, data: &[u8]) -> PyResult<()> {
+    fn data_received(slf: &Bound<'_, Self>, py: Python<'_>, data: &[u8]) -> PyResult<()> {
+        let py_self = slf.clone().unbind();
+        let mut this = py_self.borrow_mut(py);
+        this.cancel_keepalive_timer(py);
         let t0 = Instant::now();
-        let requests = self
-            .parser
-            .feed(data)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        let requests = match this.parser.feed(data) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(
+                    name: "apx.protocol.parse_error",
+                    error = %e,
+                    "malformed HTTP request"
+                );
+                if let Some(transport) = &this.transport {
+                    let _ = transport_write(py, transport, REJECT_BAD_REQUEST);
+                    let _ = transport.call_method0(py, pyo3::intern!(py, "close"));
+                }
+                return Ok(());
+            }
+        };
         dispatch_metrics::record_parse(t0.elapsed().as_micros() as f64);
 
+        let event_loop = py
+            .import("asyncio")?
+            .call_method0(pyo3::intern!(py, "get_running_loop"))?
+            .unbind();
+
         for parsed in requests {
-            self.dispatch_request(py, parsed)?;
+            // Temporarily drop the borrow so dispatch_request can create
+            // a Py<RustProtocol> reference for the OnRequestComplete callback.
+            drop(this);
+            Self::dispatch_request_inner(py, &py_self, &event_loop, parsed)?;
+            this = py_self.borrow_mut(py);
         }
         Ok(())
     }
@@ -124,8 +165,23 @@ impl RustProtocol {
         false
     }
 
+    /// Called by asyncio when the transport's write buffer exceeds
+    /// the high-water mark.
+    fn pause_writing(&self) {
+        self.shared.write_paused.store(true, Ordering::Release);
+        tracing::debug!(name: "apx.protocol.pause_writing", "transport write buffer full");
+    }
+
+    /// Called by asyncio when the transport's write buffer drains
+    /// below the low-water mark.
+    fn resume_writing(&self) {
+        self.shared.write_paused.store(false, Ordering::Release);
+        tracing::debug!(name: "apx.protocol.resume_writing", "transport write buffer drained");
+    }
+
     /// Called by asyncio when the connection is lost.
-    fn connection_lost(&mut self, _py: Python<'_>, _exc: Option<&Bound<'_, PyAny>>) {
+    fn connection_lost(&mut self, py: Python<'_>, _exc: Option<&Bound<'_, PyAny>>) {
+        self.cancel_keepalive_timer(py);
         self.transport = None;
         self.parser.reset();
         dispatch_metrics::dec_connections();
@@ -133,16 +189,28 @@ impl RustProtocol {
 }
 
 impl RustProtocol {
-    fn dispatch_request(&self, py: Python<'_>, parsed: ParsedRequest) -> PyResult<()> {
+    fn cancel_keepalive_timer(&mut self, py: Python<'_>) {
+        if let Some(handle) = self.keepalive_handle.take() {
+            let _ = handle.call_method0(py, pyo3::intern!(py, "cancel"));
+        }
+    }
+
+    fn dispatch_request_inner(
+        py: Python<'_>,
+        py_self: &Py<Self>,
+        event_loop: &Py<PyAny>,
+        parsed: ParsedRequest,
+    ) -> PyResult<()> {
+        let this = py_self.borrow(py);
         let t_dispatch = Instant::now();
-        let Some(transport) = &self.transport else {
+        let Some(transport) = &this.transport else {
             return Ok(());
         };
 
-        let active = self.shared.active_requests.fetch_add(1, Ordering::Relaxed);
+        let active = this.shared.active_requests.fetch_add(1, Ordering::Relaxed);
         if active >= MAX_CONCURRENT {
-            self.shared.active_requests.fetch_sub(1, Ordering::Relaxed);
-            write_503(py, transport)?;
+            this.shared.active_requests.fetch_sub(1, Ordering::Relaxed);
+            transport_write(py, transport, REJECT_OVERLOADED)?;
             return Ok(());
         }
         dispatch_metrics::inc_active_requests();
@@ -150,22 +218,28 @@ impl RustProtocol {
 
         transport.call_method0(py, pyo3::intern!(py, "pause_reading"))?;
 
-        let request_id = resolve_request_id(&parsed.head.headers);
+        let (request_id, has_request_id) = resolve_request_id(&parsed.head.headers);
 
         let t_scope = Instant::now();
         let scope = build_scope_from_parsed(
             py,
             &parsed,
-            &self.shared.interns,
-            &self.shared.server_host,
-            self.shared.server_port,
-            self.client_addr,
+            &this.shared.interns,
+            &this.shared.server_host,
+            this.shared.server_port,
+            this.client_addr,
             &request_id,
+            has_request_id,
         )?;
         dispatch_metrics::record_scope_build(t_scope.elapsed().as_micros() as f64);
 
         let t_receive = Instant::now();
-        let receive = HttpReceive::new(py, parsed.body)?;
+        let receive = HttpReceive::new(
+            py,
+            parsed.body,
+            Some(transport.clone_ref(py)),
+            parsed.head.expect_continue,
+        )?;
         dispatch_metrics::record_receive_build(t_receive.elapsed().as_micros() as f64);
 
         let method = parsed.head.method.as_str().to_owned();
@@ -176,19 +250,31 @@ impl RustProtocol {
         crate::telemetry::context::set_python_context(py, &trace_ctx)?;
 
         let transport_clone = transport.clone_ref(py);
+        let shared = Arc::clone(&this.shared);
+        let on_request = this.shared.on_request.clone_ref(py);
+        drop(this);
+
         let on_complete = OnRequestComplete::create(
             py,
             transport_clone,
-            Arc::clone(&self.shared),
+            shared,
             t_dispatch,
             method,
             path,
             request_span,
+            py_self.clone_ref(py),
+            event_loop.clone_ref(py),
         )?;
+
+        let this = py_self.borrow(py);
+        let Some(transport) = &this.transport else {
+            return Ok(());
+        };
         let send =
             RustResponseWriter::new(py, transport.clone_ref(py), Some(on_complete.into_any()))?;
+        drop(this);
 
-        self.shared.on_request.call1(py, (scope, receive, send))?;
+        on_request.call1(py, (scope, receive, send))?;
         Ok(())
     }
 }
@@ -206,11 +292,17 @@ struct OnRequestComplete {
     method: String,
     path: String,
     request_span: tracing::Span,
+    protocol: Py<RustProtocol>,
+    event_loop: Py<PyAny>,
 }
 
 crate::opaque_debug!(OnRequestComplete);
 
 impl OnRequestComplete {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "all fields needed for completion callback; struct builder would add overhead"
+    )]
     fn create(
         py: Python<'_>,
         transport: Py<PyAny>,
@@ -219,6 +311,8 @@ impl OnRequestComplete {
         method: String,
         path: String,
         request_span: tracing::Span,
+        protocol: Py<RustProtocol>,
+        event_loop: Py<PyAny>,
     ) -> PyResult<Py<Self>> {
         Py::new(
             py,
@@ -229,6 +323,8 @@ impl OnRequestComplete {
                 method,
                 path,
                 request_span,
+                protocol,
+                event_loop,
             },
         )
     }
@@ -274,6 +370,18 @@ impl OnRequestComplete {
                 "resume_reading failed (connection likely closed)"
             );
         }
+
+        if let Ok(close_idle) = self.protocol.getattr(py, pyo3::intern!(py, "close_idle"))
+            && let Ok(handle) = self.event_loop.call_method1(
+                py,
+                pyo3::intern!(py, "call_later"),
+                (KEEPALIVE_TIMEOUT_S, close_idle),
+            )
+            && let Ok(mut proto) = self.protocol.try_borrow_mut(py)
+        {
+            proto.keepalive_handle = Some(handle);
+        }
+
         Ok(())
     }
 }
@@ -284,20 +392,30 @@ impl OnRequestComplete {
 ///
 /// First call returns the request body immediately via
 /// `ResolvedAwaitableWithValue`. Subsequent calls return a pending
-/// future (disconnect sentinel).
+/// future (disconnect sentinel). Handles `Expect: 100-continue` by
+/// writing the informational response before delivering the body.
 #[pyclass(module = "apx._core", freelist = 64)]
 pub struct HttpReceive {
     body: std::sync::Mutex<Option<Bytes>>,
+    transport: Option<Py<PyAny>>,
+    expect_continue: bool,
 }
 
 crate::opaque_debug!(HttpReceive);
 
 impl HttpReceive {
-    fn new(py: Python<'_>, body: Bytes) -> PyResult<Py<Self>> {
+    fn new(
+        py: Python<'_>,
+        body: Bytes,
+        transport: Option<Py<PyAny>>,
+        expect_continue: bool,
+    ) -> PyResult<Py<Self>> {
         Py::new(
             py,
             Self {
                 body: std::sync::Mutex::new(Some(body)),
+                transport,
+                expect_continue,
             },
         )
     }
@@ -313,6 +431,12 @@ impl HttpReceive {
             .take();
 
         if let Some(b) = body {
+            if self.expect_continue
+                && let Some(transport) = &self.transport
+            {
+                let _ = transport_write(py, transport, INFORMATIONAL_CONTINUE);
+            }
+
             let event = PyDict::new(py);
             event.set_item(pyo3::intern!(py, "type"), pyo3::intern!(py, "http.request"))?;
             event.set_item(pyo3::intern!(py, "body"), PyBytes::new(py, &b))?;
@@ -338,6 +462,10 @@ impl HttpReceive {
 ///
 /// Bypasses `ScopeSource` trait and `HeaderMap` — works with raw byte
 /// pairs from the parser, avoiding the intermediate allocation.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "scope construction needs all ASGI fields; splitting would fragment the hot path"
+)]
 fn build_scope_from_parsed(
     py: Python<'_>,
     parsed: &ParsedRequest,
@@ -346,6 +474,7 @@ fn build_scope_from_parsed(
     server_port: u16,
     client_addr: Option<SocketAddr>,
     request_id: &str,
+    has_request_id: bool,
 ) -> PyResult<Py<PyDict>> {
     let scope = interns
         .scope_template
@@ -378,7 +507,14 @@ fn build_scope_from_parsed(
         PyBytes::new(py, &parsed.head.query_string),
     )?;
 
-    set_headers_from_parsed(py, &scope, &parsed.head, interns, request_id)?;
+    set_headers_from_parsed(
+        py,
+        &scope,
+        &parsed.head,
+        interns,
+        request_id,
+        has_request_id,
+    )?;
     set_addresses(py, &scope, interns, server_host, server_port, client_addr)?;
     scope.set_item(
         interns.keys.path_params.bind(py),
@@ -390,15 +526,18 @@ fn build_scope_from_parsed(
 }
 
 /// Extract existing `x-request-id` from headers or generate a UUID v4.
-fn resolve_request_id(headers: &[(Bytes, Bytes)]) -> String {
+///
+/// Returns `(request_id, has_request_id)` so the scope builder can
+/// skip a second header scan.
+fn resolve_request_id(headers: &[(Bytes, Bytes)]) -> (String, bool) {
     for (name, value) in headers {
         if name.eq_ignore_ascii_case(b"x-request-id")
             && let Ok(s) = std::str::from_utf8(value)
         {
-            return s.to_owned();
+            return (s.to_owned(), true);
         }
     }
-    generate_uuid_v4()
+    (generate_uuid_v4(), false)
 }
 
 /// Set headers list from raw byte pairs (no `HeaderMap` intermediary).
@@ -410,12 +549,8 @@ fn set_headers_from_parsed(
     head: &ParsedHead,
     interns: &ScopeInterns,
     request_id: &str,
+    has_request_id: bool,
 ) -> PyResult<()> {
-    let has_request_id = head
-        .headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case(b"x-request-id"));
-
     let extra_cap = usize::from(!has_request_id);
     let mut pairs: Vec<Bound<'_, PyAny>> = Vec::with_capacity(head.headers.len() + extra_cap);
 
@@ -439,19 +574,7 @@ fn set_headers_from_parsed(
 
 /// Generate a UUID v4 string (random, RFC 4122 variant 1).
 fn generate_uuid_v4() -> String {
-    let mut bytes: [u8; 16] = rand::random();
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-        u16::from_be_bytes([bytes[4], bytes[5]]),
-        u16::from_be_bytes([bytes[6], bytes[7]]),
-        u16::from_be_bytes([bytes[8], bytes[9]]),
-        u64::from_be_bytes([
-            0, 0, bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
-        ])
-    )
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// Try to use the header intern cache, falling back to `PyBytes::new`.
@@ -461,10 +584,8 @@ fn intern_header_name<'py>(
     interns: &ScopeInterns,
 ) -> Bound<'py, PyBytes> {
     let name_lower = name.to_ascii_lowercase();
-    for (cached_name, cached_py) in &interns.headers.map {
-        if cached_name.as_str().as_bytes() == name_lower.as_slice() {
-            return cached_py.bind(py).clone();
-        }
+    if let Some(cached) = interns.headers.map.get(name_lower.as_slice()) {
+        return cached.bind(py).clone();
     }
     PyBytes::new(py, &name_lower)
 }
@@ -493,45 +614,7 @@ fn set_addresses(
 
 /// Percent-decode a URL path.
 fn percent_decode(input: &str) -> Cow<'_, str> {
-    if !input.contains('%') {
-        return Cow::Borrowed(input);
-    }
-    let mut bytes = Vec::with_capacity(input.len());
-    let mut chars = input.as_bytes().iter().copied();
-    while let Some(b) = chars.next() {
-        if b == b'%' {
-            let hi = chars.next();
-            let lo = chars.next();
-            if let (Some(h), Some(l)) = (hi, lo) {
-                if let (Some(hv), Some(lv)) = (hex_val(h), hex_val(l)) {
-                    bytes.push(hv << 4 | lv);
-                    continue;
-                }
-                bytes.extend_from_slice(&[b'%', h, l]);
-            } else {
-                bytes.push(b'%');
-                if let Some(h) = hi {
-                    bytes.push(h);
-                }
-            }
-        } else {
-            bytes.push(b);
-        }
-    }
-    match String::from_utf8(bytes) {
-        Ok(s) => Cow::Owned(s),
-        Err(e) => Cow::Owned(String::from_utf8_lossy(e.as_bytes()).into_owned()),
-    }
-}
-
-/// Convert a hex ASCII char to its value.
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
+    percent_encoding::percent_decode_str(input).decode_utf8_lossy()
 }
 
 /// Extract the peer address from an asyncio transport.
@@ -550,17 +633,35 @@ fn extract_peer_addr(py: Python<'_>, transport: &Py<PyAny>) -> Option<SocketAddr
     let tuple: &Bound<'_, PyTuple> = bound.cast().ok()?;
     let host: String = tuple.get_item(0).ok()?.extract().ok()?;
     let port: u16 = tuple.get_item(1).ok()?.extract().ok()?;
-    format!("{host}:{port}").parse().ok()
+    let ip: std::net::IpAddr = host.parse().ok()?;
+    Some(SocketAddr::new(ip, port))
 }
 
-/// Write a 503 Service Unavailable response directly.
-fn write_503(py: Python<'_>, transport: &Py<PyAny>) -> PyResult<()> {
-    let body = b"Service Unavailable";
-    let response = format!(
-        "HTTP/1.1 503 Service Unavailable\r\ncontent-length: {}\r\ncontent-type: text/plain\r\n\r\nService Unavailable",
-        body.len(),
-    );
-    let py_bytes = PyBytes::new(py, response.as_bytes());
+// ── Pre-built error responses (sans-I/O: pure data, no transport) ───
+
+/// Sent when the parser cannot decode the incoming bytes as valid HTTP.
+const REJECT_BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\
+    content-length: 11\r\n\
+    content-type: text/plain\r\n\
+    connection: close\r\n\
+    \r\n\
+    Bad Request";
+
+/// Sent when the per-connection concurrency limit is reached.
+const REJECT_OVERLOADED: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\n\
+    content-length: 19\r\n\
+    content-type: text/plain\r\n\
+    \r\n\
+    Service Unavailable";
+
+/// Informational response for `Expect: 100-continue`.
+const INFORMATIONAL_CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
+
+// ── Transport I/O helper ────────────────────────────────────────────
+
+/// Write raw bytes to an asyncio transport.
+fn transport_write(py: Python<'_>, transport: &Py<PyAny>, data: &[u8]) -> PyResult<()> {
+    let py_bytes = PyBytes::new(py, data);
     transport.call_method1(py, pyo3::intern!(py, "write"), (py_bytes,))?;
     Ok(())
 }

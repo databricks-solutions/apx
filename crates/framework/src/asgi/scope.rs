@@ -4,11 +4,13 @@
 //! [`ResolvedAwaitable`] / [`ResolvedAwaitableWithValue`] for zero-overhead
 //! Python awaitables.
 
+use std::collections::HashMap;
+use std::net::SocketAddr;
+
 use crate::transport::types::ProtocolVersion;
 use http::header::{self, HeaderName};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyString, PyTuple};
-use std::net::SocketAddr;
 
 use super::{ASGI_SPEC_VERSION, ASGI_VERSION};
 
@@ -79,9 +81,10 @@ const COMMON_HEADERS: &[HeaderName] = &[
     header::REFERER,
 ];
 
-/// Pre-built `PyBytes` for common HTTP header names.
+/// Pre-built `PyBytes` for common HTTP header names, keyed by
+/// lowercase header bytes for O(1) lookup.
 pub struct HeaderInterns {
-    pub(crate) map: Vec<(HeaderName, Py<PyBytes>)>,
+    pub(crate) map: HashMap<Box<[u8]>, Py<PyBytes>>,
 }
 
 crate::opaque_debug!(HeaderInterns);
@@ -91,7 +94,11 @@ impl HeaderInterns {
     pub fn new(py: Python<'_>) -> Self {
         let map = COMMON_HEADERS
             .iter()
-            .map(|h| (h.clone(), PyBytes::new(py, h.as_str().as_bytes()).unbind()))
+            .map(|h| {
+                let key: Box<[u8]> = h.as_str().as_bytes().into();
+                let val = PyBytes::new(py, h.as_str().as_bytes()).unbind();
+                (key, val)
+            })
             .collect();
         Self { map }
     }

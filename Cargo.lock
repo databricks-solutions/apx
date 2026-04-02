@@ -305,11 +305,13 @@ dependencies = [
  "hex",
  "http",
  "httparse",
+ "httpdate",
  "matchit",
  "mimalloc",
  "notify",
  "opentelemetry 0.29.1",
  "opentelemetry_sdk 0.29.0",
+ "percent-encoding",
  "pyo3",
  "rand 0.8.5",
  "rmp-serde",
@@ -323,6 +325,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid",
  "which",
 ]
 
