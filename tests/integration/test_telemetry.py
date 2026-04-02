@@ -1044,7 +1044,9 @@ class TestMetricCorrectness:
                         f"got {sub_ms} (all bounds: {dp.explicitBounds})"
                     )
                     return
-        pytest.fail("http.server.request.duration histogram with explicitBounds not found")
+        pytest.fail(
+            "http.server.request.duration histogram with explicitBounds not found"
+        )
 
 
 # ---------------------------------------------------------------------------

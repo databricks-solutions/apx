@@ -114,9 +114,10 @@ impl RustResponseWriter {
 impl RustResponseWriter {
     /// ASGI send callable.
     fn __call__(&mut self, py: Python<'_>, event: &Bound<'_, PyDict>) -> PyResult<Py<PyAny>> {
-        let t0 = Instant::now();
-        let parsed = parse_send_event(py, event)?;
-        dispatch_metrics::record_send_parse(t0.elapsed().as_micros() as f64);
+        let parsed = crate::telemetry::timed!(
+            dispatch_metrics::record_send_parse,
+            parse_send_event(py, event)?
+        );
 
         match parsed {
             SendEvent::Start { status, headers } => {
@@ -181,15 +182,16 @@ impl RustResponseWriter {
 
         let chunked = more_body && !has_content_length;
 
-        let t_build = Instant::now();
-        let hdr_bytes = if chunked {
-            build_status_and_headers_chunked(status, headers)
-        } else if !more_body && !has_content_length {
-            build_status_and_headers_with_length(status, headers, body_bytes.len())
-        } else {
-            build_status_and_headers(status, headers)
-        };
-        dispatch_metrics::record_response_build(t_build.elapsed().as_micros() as f64);
+        let hdr_bytes = crate::telemetry::timed!(
+            dispatch_metrics::record_response_build,
+            if chunked {
+                build_status_and_headers_chunked(status, headers)
+            } else if !more_body && !has_content_length {
+                build_status_and_headers_with_length(status, headers, body_bytes.len())
+            } else {
+                build_status_and_headers(status, headers)
+            }
+        );
 
         const MERGE_THRESHOLD: usize = 65_536;
 

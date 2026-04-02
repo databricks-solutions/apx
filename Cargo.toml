@@ -125,7 +125,7 @@ which = "7"
 # instead of silent interpreter corruption in the multi-worker fork model.
 # NOTE: "extension-module" is NOT set here — it is set only in crates/apx
 # (the cdylib). Library crates need to link against libpython for `cargo test`.
-pyo3 = { version = "0.28.2", features = ["macros"] }
+pyo3 = { version = "0.28.2", features = ["macros", "multiple-pymethods"] }
 pyo3-async-runtimes = { version = "0.28.0", features = ["tokio-runtime"] }
 socket2 = "0.6.2"
 

@@ -33,6 +33,7 @@ class ProtocolFactory:
 
 class RustProtocol:
     """asyncio Protocol for HTTP/1.1 connections."""
+
     ...
 
 class HttpReceive:

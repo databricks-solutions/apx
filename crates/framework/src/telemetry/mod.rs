@@ -61,6 +61,22 @@ macro_rules! toggle_store {
 }
 pub(crate) use toggle_store;
 
+/// Time an expression and record its duration in microseconds via a
+/// `dispatch_metrics::record_*` function.
+///
+/// Wraps the common `let t = Instant::now(); let v = expr; record(t.elapsed()); v`
+/// pattern into a single call, enforcing consistent timing across the
+/// request pipeline.
+macro_rules! timed {
+    ($record:path, $expr:expr) => {{
+        let __t0 = ::std::time::Instant::now();
+        let __val = $expr;
+        $record(__t0.elapsed().as_micros() as f64);
+        __val
+    }};
+}
+pub(crate) use timed;
+
 /// State that can be refreshed before reading.
 ///
 /// Implemented by `SystemState` and `ProcessState` to share the

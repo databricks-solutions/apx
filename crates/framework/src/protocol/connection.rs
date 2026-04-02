@@ -36,6 +36,54 @@ struct ProtocolShared {
     write_paused: AtomicBool,
 }
 
+/// RAII guard for a concurrency slot in `active_requests`.
+///
+/// Increments the counter on [`acquire`] and decrements on [`Drop`].
+/// This guarantees the counter is always released — even if the ASGI
+/// app never calls `send`, the handler raises, or the connection
+/// closes mid-request.
+///
+/// The [`release`] method allows explicit decrement (e.g. in
+/// `OnRequestComplete.__call__`) while making `Drop` a no-op.
+struct RequestSlot {
+    shared: Arc<ProtocolShared>,
+    released: bool,
+}
+
+impl RequestSlot {
+    /// Try to acquire a concurrency slot. Returns `None` if the
+    /// worker is at `MAX_CONCURRENT` — the caller should send 503.
+    fn acquire(shared: &Arc<ProtocolShared>) -> Option<Self> {
+        let active = shared.active_requests.fetch_add(1, Ordering::Relaxed);
+        if active >= MAX_CONCURRENT {
+            shared.active_requests.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        dispatch_metrics::inc_active_requests();
+        crate::telemetry::http::inc_active_requests();
+        Some(Self {
+            shared: Arc::clone(shared),
+            released: false,
+        })
+    }
+
+    /// Explicitly release the slot. Subsequent calls and `Drop` are no-ops.
+    fn release(&mut self) {
+        if !self.released {
+            self.released = true;
+            self.shared.active_requests.fetch_sub(1, Ordering::Relaxed);
+            dispatch_metrics::dec_active_requests();
+            crate::telemetry::http::dec_active_requests();
+        }
+    }
+}
+
+impl Drop for RequestSlot {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 /// Factory that creates [`RustProtocol`] instances for `loop.create_server()`.
 ///
 /// Holds shared worker state (interns, dispatch callback, concurrency limit).
@@ -110,24 +158,36 @@ impl RustProtocol {
         Ok(())
     }
 
-    /// Close the connection if idle (no active requests).
-    ///
-    /// Called by the event loop's `call_later` as the keep-alive timeout.
-    fn close_idle(&mut self, py: Python<'_>) {
-        if self.shared.active_requests.load(Ordering::Relaxed) == 0
-            && let Some(transport) = &self.transport
-        {
-            let _ = transport.call_method0(py, pyo3::intern!(py, "close"));
-        }
-    }
-
     /// Called by asyncio when data is received on the connection.
+    ///
+    /// The borrow_mut is held ONLY for pure-Rust operations (parse,
+    /// timer handle read). It is dropped BEFORE any Python calls
+    /// (cancel, close, import) to prevent PyO3 BorrowError when
+    /// uvloop re-enters via `pause_writing` during `transport.write`.
     fn data_received(slf: &Bound<'_, Self>, py: Python<'_>, data: &[u8]) -> PyResult<()> {
         let py_self = slf.clone().unbind();
-        let mut this = py_self.borrow_mut(py);
-        this.cancel_keepalive_timer(py);
-        let t0 = Instant::now();
-        let requests = match this.parser.feed(data) {
+
+        // Phase 1: borrow_mut for pure Rust (parse + extract handles).
+        let (feed_result, keepalive_handle, error_transport) = {
+            let mut this = py_self.borrow_mut(py);
+            let keepalive = this.keepalive_handle.take();
+            let result =
+                crate::telemetry::timed!(dispatch_metrics::record_parse, this.parser.feed(data));
+            let err_transport = if result.is_err() {
+                this.transport.as_ref().map(|t| t.clone_ref(py))
+            } else {
+                None
+            };
+            (result, keepalive, err_transport)
+            // borrow_mut dropped here — BEFORE any Python calls.
+        };
+
+        // Phase 2: Python calls with NO borrow held.
+        if let Some(handle) = keepalive_handle {
+            let _ = handle.call_method0(py, pyo3::intern!(py, "cancel"));
+        }
+
+        let requests = match feed_result {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(
@@ -135,14 +195,13 @@ impl RustProtocol {
                     error = %e,
                     "malformed HTTP request"
                 );
-                if let Some(transport) = &this.transport {
-                    let _ = transport_write(py, transport, REJECT_BAD_REQUEST);
+                if let Some(transport) = error_transport {
+                    let _ = transport_write(py, &transport, REJECT_BAD_REQUEST);
                     let _ = transport.call_method0(py, pyo3::intern!(py, "close"));
                 }
                 return Ok(());
             }
         };
-        dispatch_metrics::record_parse(t0.elapsed().as_micros() as f64);
 
         let event_loop = py
             .import("asyncio")?
@@ -150,11 +209,7 @@ impl RustProtocol {
             .unbind();
 
         for parsed in requests {
-            // Temporarily drop the borrow so dispatch_request can create
-            // a Py<RustProtocol> reference for the OnRequestComplete callback.
-            drop(this);
             Self::dispatch_request_inner(py, &py_self, &event_loop, parsed)?;
-            this = py_self.borrow_mut(py);
         }
         Ok(())
     }
@@ -165,26 +220,43 @@ impl RustProtocol {
         false
     }
 
-    /// Called by asyncio when the transport's write buffer exceeds
-    /// the high-water mark.
-    fn pause_writing(&self) {
-        self.shared.write_paused.store(true, Ordering::Release);
-        tracing::debug!(name: "apx.protocol.pause_writing", "transport write buffer full");
-    }
-
-    /// Called by asyncio when the transport's write buffer drains
-    /// below the low-water mark.
-    fn resume_writing(&self) {
-        self.shared.write_paused.store(false, Ordering::Release);
-        tracing::debug!(name: "apx.protocol.resume_writing", "transport write buffer drained");
-    }
-
+    /// Called by asyncio/uvloop when the transport's write buffer
+    /// exceeds the high-water mark.
+    ///
+    /// No-op stub: the method must exist to prevent uvloop from logging
+    /// "protocol.pause_writing() failed". We don't implement write-side
+    /// flow control — this is a safety stub to prevent uvloop errors.
+    ///
+    /// Empty body: we don't implement write-side flow control.
+    /// The `&self` borrow is needed for the asyncio protocol interface.
     /// Called by asyncio when the connection is lost.
     fn connection_lost(&mut self, py: Python<'_>, _exc: Option<&Bound<'_, PyAny>>) {
         self.cancel_keepalive_timer(py);
         self.transport = None;
         self.parser.reset();
         dispatch_metrics::dec_connections();
+    }
+    /// Called by asyncio/uvloop when the transport's write buffer
+    /// exceeds the high-water mark.
+    fn pause_writing(&self) {
+        self.shared.write_paused.store(true, Ordering::Release);
+    }
+
+    /// Called by asyncio/uvloop when the transport's write buffer
+    /// drains below the low-water mark.
+    fn resume_writing(&self) {
+        self.shared.write_paused.store(false, Ordering::Release);
+    }
+
+    /// Close the connection if idle (no active requests).
+    ///
+    /// Called by the event loop's `call_later` as the keep-alive timeout.
+    fn close_idle(&mut self, py: Python<'_>) {
+        if self.shared.active_requests.load(Ordering::Relaxed) == 0
+            && let Some(transport) = &self.transport
+        {
+            let _ = transport.call_method0(py, pyo3::intern!(py, "close"));
+        }
     }
 }
 
@@ -207,40 +279,94 @@ impl RustProtocol {
             return Ok(());
         };
 
-        let active = this.shared.active_requests.fetch_add(1, Ordering::Relaxed);
-        if active >= MAX_CONCURRENT {
-            this.shared.active_requests.fetch_sub(1, Ordering::Relaxed);
+        let Some(slot) = RequestSlot::acquire(&this.shared) else {
             transport_write(py, transport, REJECT_OVERLOADED)?;
             return Ok(());
+        };
+
+        // Release the borrow before calling into Python.
+        // `slot` owns the concurrency decrement — if anything below
+        // fails or the writer is GC'd without calling send, `Drop`
+        // fires and the counter is released automatically.
+        drop(this);
+
+        let result = Self::dispatch_body(py, py_self, event_loop, parsed, t_dispatch, slot);
+
+        if let Err(e) = result {
+            // `slot` was either moved into OnRequestComplete (and will
+            // be released via Drop when OnRequestComplete is GC'd) or
+            // it was dropped by dispatch_body on error (Drop fires).
+            // Either way, the counter is handled. Just resume reading.
+            if let Ok(this) = py_self.try_borrow(py)
+                && let Some(transport) = &this.transport
+            {
+                let _ = transport.call_method0(py, pyo3::intern!(py, "resume_reading"));
+            }
+            tracing::debug!(
+                name: "apx.protocol.dispatch_error",
+                error = %e,
+                "request dispatch failed"
+            );
+            return Err(e);
         }
-        dispatch_metrics::inc_active_requests();
-        crate::telemetry::http::inc_active_requests();
+        Ok(())
+    }
+
+    /// Inner dispatch body. The `slot` RAII guard ensures the
+    /// active_requests counter is decremented if this function errors
+    /// before transferring the slot into `OnRequestComplete`.
+    fn dispatch_body(
+        py: Python<'_>,
+        py_self: &Py<Self>,
+        event_loop: &Py<PyAny>,
+        parsed: ParsedRequest,
+        t_dispatch: Instant,
+        slot: RequestSlot,
+    ) -> PyResult<()> {
+        // Borrow briefly to extract what we need, then release before
+        // calling into Python (transport.write may trigger pause_writing
+        // which needs to borrow &self).
+        let (transport, shared, on_request, client_addr) = {
+            let this = py_self.borrow(py);
+            let Some(transport) = &this.transport else {
+                return Ok(());
+            };
+            let t = transport.clone_ref(py);
+            let s = Arc::clone(&this.shared);
+            let o = this.shared.on_request.clone_ref(py);
+            let c = this.client_addr;
+            (t, s, o, c)
+        };
+        // Borrow released — safe to call Python methods that may
+        // re-enter RustProtocol (e.g. pause_writing via transport.write).
 
         transport.call_method0(py, pyo3::intern!(py, "pause_reading"))?;
 
         let (request_id, has_request_id) = resolve_request_id(&parsed.head.headers);
 
-        let t_scope = Instant::now();
-        let scope = build_scope_from_parsed(
-            py,
-            &parsed,
-            &this.shared.interns,
-            &this.shared.server_host,
-            this.shared.server_port,
-            this.client_addr,
-            &request_id,
-            has_request_id,
-        )?;
-        dispatch_metrics::record_scope_build(t_scope.elapsed().as_micros() as f64);
+        let scope = crate::telemetry::timed!(
+            dispatch_metrics::record_scope_build,
+            build_scope_from_parsed(
+                py,
+                &parsed,
+                &shared.interns,
+                &shared.server_host,
+                shared.server_port,
+                client_addr,
+                &request_id,
+                has_request_id,
+            )?
+        );
 
-        let t_receive = Instant::now();
-        let receive = HttpReceive::new(
-            py,
-            parsed.body,
-            Some(transport.clone_ref(py)),
-            parsed.head.expect_continue,
-        )?;
-        dispatch_metrics::record_receive_build(t_receive.elapsed().as_micros() as f64);
+        let receive = crate::telemetry::timed!(
+            dispatch_metrics::record_receive_build,
+            HttpReceive::new(
+                py,
+                parsed.body,
+                Some(transport.clone_ref(py)),
+                parsed.head.expect_continue,
+            )?
+        );
 
         let method = parsed.head.method.as_str().to_owned();
         let path = parsed.head.path;
@@ -249,30 +375,19 @@ impl RustProtocol {
             crate::telemetry::http::begin_request_span(&request_id, &method, &path);
         crate::telemetry::context::set_python_context(py, &trace_ctx)?;
 
-        let transport_clone = transport.clone_ref(py);
-        let shared = Arc::clone(&this.shared);
-        let on_request = this.shared.on_request.clone_ref(py);
-        drop(this);
-
         let on_complete = OnRequestComplete::create(
             py,
-            transport_clone,
-            shared,
+            transport.clone_ref(py),
             t_dispatch,
             method,
             path,
             request_span,
             py_self.clone_ref(py),
             event_loop.clone_ref(py),
+            slot,
         )?;
 
-        let this = py_self.borrow(py);
-        let Some(transport) = &this.transport else {
-            return Ok(());
-        };
-        let send =
-            RustResponseWriter::new(py, transport.clone_ref(py), Some(on_complete.into_any()))?;
-        drop(this);
+        let send = RustResponseWriter::new(py, transport, Some(on_complete.into_any()))?;
 
         on_request.call1(py, (scope, receive, send))?;
         Ok(())
@@ -287,13 +402,16 @@ impl RustProtocol {
 #[pyclass(module = "apx._core")]
 struct OnRequestComplete {
     transport: Py<PyAny>,
-    shared: Arc<ProtocolShared>,
     dispatch_start: Instant,
     method: String,
     path: String,
     request_span: tracing::Span,
     protocol: Py<RustProtocol>,
     event_loop: Py<PyAny>,
+    /// RAII concurrency slot — `Drop` decrements `active_requests`
+    /// if `__call__` was never invoked (e.g. app never called `send`,
+    /// or the `RustResponseWriter` was GC'd without completion).
+    slot: RequestSlot,
 }
 
 crate::opaque_debug!(OnRequestComplete);
@@ -306,25 +424,25 @@ impl OnRequestComplete {
     fn create(
         py: Python<'_>,
         transport: Py<PyAny>,
-        shared: Arc<ProtocolShared>,
         dispatch_start: Instant,
         method: String,
         path: String,
         request_span: tracing::Span,
         protocol: Py<RustProtocol>,
         event_loop: Py<PyAny>,
+        slot: RequestSlot,
     ) -> PyResult<Py<Self>> {
         Py::new(
             py,
             Self {
                 transport,
-                shared,
                 dispatch_start,
                 method,
                 path,
                 request_span,
                 protocol,
                 event_loop,
+                slot,
             },
         )
     }
@@ -352,17 +470,10 @@ impl OnRequestComplete {
             crate::telemetry::http::finish_request_span(&self.request_span, status);
         }
 
-        // Always decrement counters, even if the transport is gone.
-        // If resume_reading fails (connection already closed), we must
-        // still release the concurrency slot — otherwise the counter
-        // leaks and eventually all requests get 503.
+        // Resume reading (may fail if connection closed — that's OK).
         let resume_result = self
             .transport
             .call_method0(py, pyo3::intern!(py, "resume_reading"));
-        self.shared.active_requests.fetch_sub(1, Ordering::Relaxed);
-        dispatch_metrics::dec_active_requests();
-        crate::telemetry::http::dec_active_requests();
-
         if let Err(e) = resume_result {
             tracing::debug!(
                 name: "apx.protocol.resume_reading_failed",
@@ -370,6 +481,10 @@ impl OnRequestComplete {
                 "resume_reading failed (connection likely closed)"
             );
         }
+
+        // Release the concurrency slot explicitly. This makes the
+        // Drop a no-op — the counter won't be double-decremented.
+        self.slot.release();
 
         if let Ok(close_idle) = self.protocol.getattr(py, pyo3::intern!(py, "close_idle"))
             && let Ok(handle) = self.event_loop.call_method1(
