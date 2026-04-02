@@ -256,11 +256,24 @@ impl OnRequestComplete {
             crate::telemetry::http::finish_request_span(&self.request_span, status);
         }
 
-        self.transport
-            .call_method0(py, pyo3::intern!(py, "resume_reading"))?;
+        // Always decrement counters, even if the transport is gone.
+        // If resume_reading fails (connection already closed), we must
+        // still release the concurrency slot — otherwise the counter
+        // leaks and eventually all requests get 503.
+        let resume_result = self
+            .transport
+            .call_method0(py, pyo3::intern!(py, "resume_reading"));
         self.shared.active_requests.fetch_sub(1, Ordering::Relaxed);
         dispatch_metrics::dec_active_requests();
         crate::telemetry::http::dec_active_requests();
+
+        if let Err(e) = resume_result {
+            tracing::debug!(
+                name: "apx.protocol.resume_reading_failed",
+                error = %e,
+                "resume_reading failed (connection likely closed)"
+            );
+        }
         Ok(())
     }
 }

@@ -169,28 +169,35 @@ impl RustResponseWriter {
         dispatch_metrics::record_response_build(t_build.elapsed().as_micros() as f64);
 
         let t_write = Instant::now();
-        if chunked {
+        let write_result = if chunked {
             let mut buf = BytesMut::with_capacity(hdr_bytes.len() + body_bytes.len() + 32);
             buf.put_slice(&hdr_bytes);
             write_chunk(&mut buf, body_bytes);
             let py_bytes = PyBytes::new(py, &buf);
             self.transport
-                .call_method1(py, pyo3::intern!(py, "write"), (py_bytes,))?;
+                .call_method1(py, pyo3::intern!(py, "write"), (py_bytes,))
+                .map(|_| ())
         } else {
             let hdr_py = PyBytes::new(py, &hdr_bytes);
             self.transport
-                .call_method1(py, pyo3::intern!(py, "write"), (hdr_py,))?;
-            self.transport
-                .call_method1(py, pyo3::intern!(py, "write"), (data.bind(py),))?;
-        }
+                .call_method1(py, pyo3::intern!(py, "write"), (hdr_py,))
+                .and_then(|_| {
+                    self.transport
+                        .call_method1(py, pyo3::intern!(py, "write"), (data.bind(py),))
+                        .map(|_| ())
+                })
+        };
         dispatch_metrics::record_response_write(t_write.elapsed().as_micros() as f64);
 
         if more_body {
             self.state = WriteState::Streaming { chunked };
         } else {
+            // Always signal completion — even if write failed. The callback
+            // decrements active_requests; skipping it leaks concurrency slots.
             self.signal_complete(py)?;
         }
-        Ok(())
+        // Propagate write error after completion callback has fired.
+        write_result
     }
 
     fn write_continuation(
@@ -203,7 +210,7 @@ impl RustResponseWriter {
         let t_write = Instant::now();
         let body_bytes = data.bind(py).as_bytes();
 
-        if chunked {
+        let write_result = if chunked {
             let terminator_len = if more_body { 0 } else { LAST_CHUNK.len() };
             let mut buf = BytesMut::with_capacity(body_bytes.len() + 32 + terminator_len);
             write_chunk(&mut buf, body_bytes);
@@ -212,21 +219,30 @@ impl RustResponseWriter {
             }
             let py_bytes = PyBytes::new(py, &buf);
             self.transport
-                .call_method1(py, pyo3::intern!(py, "write"), (py_bytes,))?;
+                .call_method1(py, pyo3::intern!(py, "write"), (py_bytes,))
+                .map(|_| ())
         } else {
             self.transport
-                .call_method1(py, pyo3::intern!(py, "write"), (data.bind(py),))?;
-        }
+                .call_method1(py, pyo3::intern!(py, "write"), (data.bind(py),))
+                .map(|_| ())
+        };
         dispatch_metrics::record_response_write(t_write.elapsed().as_micros() as f64);
 
         if more_body {
             self.state = WriteState::Streaming { chunked };
         } else {
+            // Always signal completion — even if write failed.
             self.signal_complete(py)?;
         }
-        Ok(())
+        write_result
     }
 
+    /// Signal response completion to the protocol layer.
+    ///
+    /// Must be called even when `transport.write()` fails — the callback
+    /// decrements the active-request counter and resumes reading. Failing
+    /// to call it leaks concurrency slots until `MAX_CONCURRENT` is hit
+    /// and all new requests receive 503.
     fn signal_complete(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(cb) = &self.on_complete {
             cb.call1(py, (self.response_status,))?;
