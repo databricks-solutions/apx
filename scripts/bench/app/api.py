@@ -63,6 +63,7 @@ async def _seed_defaults(db: aiosqlite.Connection) -> None:
 async def lifespan(app: FastAPI):
     db = await aiosqlite.connect(DB_PATH)
     await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA busy_timeout=5000")
     await db.execute(_CREATE_TABLE)
     cursor = await db.execute("SELECT count(*) FROM items")
     row = await cursor.fetchone()
