@@ -235,14 +235,15 @@ fn run_server(
         py.run(
             c"
 import asyncio as _asyncio
-from apx._server import serve as _serve, _build_on_request
+from apx._server import serve as _serve, _build_on_request, _build_on_ws_connect
 from apx._scheduler import CallSoonCapture
 
 async def _boot(_app, _factory_fn, _host, _port, _shutdown_event):
     loop = _asyncio.get_running_loop()
     capture = CallSoonCapture(loop)
     on_request = _build_on_request(_app, loop, capture)
-    factory = _factory_fn(on_request)
+    on_ws_connect = _build_on_ws_connect(_app)
+    factory = _factory_fn(on_request, on_ws_connect)
     await _serve(_host, _port, _app, factory, shutdown_event=_shutdown_event)
 ",
             None,
@@ -318,7 +319,12 @@ crate::opaque_debug!(FactoryBuilder);
 
 #[pymethods]
 impl FactoryBuilder {
-    fn __call__(&self, py: Python<'_>, on_request: Py<PyAny>) -> PyResult<Py<ProtocolFactory>> {
+    fn __call__(
+        &self,
+        py: Python<'_>,
+        on_request: Py<PyAny>,
+        on_ws_connect: Option<Py<PyAny>>,
+    ) -> PyResult<Py<ProtocolFactory>> {
         let interns = self
             .interns
             .lock()
@@ -327,7 +333,13 @@ impl FactoryBuilder {
             .ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("FactoryBuilder already consumed")
             })?;
-        let factory = ProtocolFactory::new(on_request, interns, self.host.clone(), self.port);
+        let factory = ProtocolFactory::new(
+            on_request,
+            on_ws_connect,
+            interns,
+            self.host.clone(),
+            self.port,
+        );
         Py::new(py, factory)
     }
 }

@@ -14,6 +14,7 @@ from typing import Any
 
 from apx._continuation import Continuation
 from apx._core import LifespanReceive, LifespanSend
+from apx._websocket import WebSocketBridge, build_upgrade_response
 from apx._scheduler import (
     CallSoonCapture,
     Completed,
@@ -80,6 +81,39 @@ def _build_on_request(
             Continuation(coro, result.yielded, loop, task, capture)
 
     return on_request
+
+
+def _build_on_ws_connect(
+    app: Callable[..., Coroutine[Any, Any, None]],
+) -> Callable[..., None]:
+    """Build the on_ws_connect callback for WebSocket upgrades.
+
+    Called from Rust when an HTTP Upgrade: websocket request is detected.
+    Writes the 101 Switching Protocols response, creates a WebSocketBridge,
+    and stores it on the protocol so subsequent data_received calls route
+    to the wsproto parser.
+    """
+
+    def on_ws_connect(
+        scope: dict[str, Any],
+        transport: Any,
+        ws_key: str,
+        protocol: Any,
+    ) -> None:
+        logger.debug("WebSocket upgrade: key=%r len=%d", ws_key, len(ws_key))
+        # Write the 101 Switching Protocols response.
+        response = build_upgrade_response(ws_key)
+        logger.debug("101 response: %r", response[:100])
+        transport.write(response)
+
+        # Create the bridge and store it on the protocol.
+        bridge = WebSocketBridge(transport, scope, app)
+        protocol.set_ws_bridge(bridge)
+
+        # Start the ASGI WebSocket lifecycle as an asyncio task.
+        bridge.start()
+
+    return on_ws_connect
 
 
 async def _run_lifespan(

@@ -29,6 +29,7 @@ const KEEPALIVE_TIMEOUT_S: f64 = 5.0;
 /// Shared state for all protocol instances on this worker.
 struct ProtocolShared {
     on_request: Py<PyAny>,
+    on_ws_connect: Option<Py<PyAny>>,
     interns: ScopeInterns,
     server_host: String,
     server_port: u16,
@@ -98,6 +99,7 @@ impl ProtocolFactory {
     /// Create a factory with shared worker state (Rust-side constructor).
     pub fn new(
         on_request: Py<PyAny>,
+        on_ws_connect: Option<Py<PyAny>>,
         interns: ScopeInterns,
         server_host: String,
         server_port: u16,
@@ -105,6 +107,7 @@ impl ProtocolFactory {
         Self {
             shared: Arc::new(ProtocolShared {
                 on_request,
+                on_ws_connect,
                 interns,
                 server_host,
                 server_port,
@@ -126,6 +129,7 @@ impl ProtocolFactory {
                 shared: Arc::clone(&self.shared),
                 client_addr: None,
                 keepalive_handle: None,
+                ws_bridge: None,
             },
         )
     }
@@ -142,6 +146,9 @@ pub struct RustProtocol {
     shared: Arc<ProtocolShared>,
     client_addr: Option<SocketAddr>,
     keepalive_handle: Option<Py<PyAny>>,
+    /// Active WebSocket bridge — when set, `data_received` forwards
+    /// raw bytes here instead of parsing HTTP.
+    ws_bridge: Option<Py<PyAny>>,
 }
 
 crate::opaque_debug!(RustProtocol);
@@ -164,6 +171,17 @@ impl RustProtocol {
     /// uvloop re-enters via `pause_writing` during `transport.write`.
     fn data_received(slf: &Bound<'_, Self>, py: Python<'_>, data: &[u8]) -> PyResult<()> {
         let py_self = slf.clone().unbind();
+
+        // WebSocket fast path: if a bridge is active, forward raw bytes
+        // to the wsproto parser instead of the HTTP parser.
+        {
+            let this = py_self.borrow(py);
+            if let Some(bridge) = &this.ws_bridge {
+                let py_bytes = PyBytes::new(py, data);
+                bridge.call_method1(py, pyo3::intern!(py, "feed_data"), (py_bytes,))?;
+                return Ok(());
+            }
+        }
 
         // Borrow mutably only for pure-Rust work (parse + extract handles).
         let (feed_result, keepalive_handle, error_transport) = {
@@ -221,6 +239,9 @@ impl RustProtocol {
     /// Called by asyncio when the connection is lost.
     fn connection_lost(&mut self, py: Python<'_>, _exc: Option<&Bound<'_, PyAny>>) {
         self.cancel_keepalive_timer(py);
+        if let Some(bridge) = self.ws_bridge.take() {
+            let _ = bridge.call_method0(py, pyo3::intern!(py, "connection_lost"));
+        }
         self.transport = None;
         self.parser.reset();
         dispatch_metrics::dec_connections();
@@ -239,10 +260,19 @@ impl RustProtocol {
     /// Called by the event loop's `call_later` as the keep-alive timeout.
     fn close_idle(&mut self, py: Python<'_>) {
         if self.shared.active_requests.load(Ordering::Relaxed) == 0
+            && self.ws_bridge.is_none()
             && let Some(transport) = &self.transport
         {
             let _ = transport.call_method0(py, pyo3::intern!(py, "close"));
         }
+    }
+
+    /// Store a WebSocket bridge reference on this protocol.
+    ///
+    /// Called from the Python-side WebSocket handler after upgrade.
+    /// Subsequent `data_received` calls will route to the bridge.
+    fn set_ws_bridge(&mut self, bridge: Py<PyAny>) {
+        self.ws_bridge = Some(bridge);
     }
 }
 
@@ -309,6 +339,11 @@ impl RustProtocol {
         t_dispatch: Instant,
         slot: RequestSlot,
     ) -> PyResult<()> {
+        // WebSocket upgrade: detect and dispatch separately.
+        if is_websocket_upgrade(&parsed.head.headers) {
+            return Self::dispatch_websocket(py, py_self, parsed, slot);
+        }
+
         // Borrow briefly to extract what we need, then release before
         // calling into Python (transport.write may trigger pause_writing
         // which needs to borrow &self).
@@ -378,6 +413,141 @@ impl RustProtocol {
         on_request.call1(py, (scope, receive, send))?;
         Ok(())
     }
+
+    /// Dispatch a WebSocket upgrade request to the Python bridge.
+    ///
+    /// Builds the ASGI WebSocket scope, writes the 101 Switching
+    /// Protocols response, creates a `WebSocketBridge`, and stores
+    /// it so subsequent `data_received` calls route to it.
+    fn dispatch_websocket(
+        py: Python<'_>,
+        py_self: &Py<Self>,
+        parsed: ParsedRequest,
+        _slot: RequestSlot,
+    ) -> PyResult<()> {
+        let (transport, shared, client_addr) = {
+            let this = py_self.borrow(py);
+            let Some(transport) = &this.transport else {
+                return Ok(());
+            };
+            (
+                transport.clone_ref(py),
+                Arc::clone(&this.shared),
+                this.client_addr,
+            )
+        };
+
+        let Some(on_ws_connect) = &shared.on_ws_connect else {
+            // No WS handler registered — reject with 400.
+            transport_write(py, &transport, REJECT_BAD_REQUEST)?;
+            return Ok(());
+        };
+
+        // Build WebSocket ASGI scope.
+        let scope = PyDict::new(py);
+        scope.set_item(pyo3::intern!(py, "type"), pyo3::intern!(py, "websocket"))?;
+        let asgi_dict = PyDict::new(py);
+        asgi_dict.set_item(pyo3::intern!(py, "version"), "3.0")?;
+        asgi_dict.set_item(pyo3::intern!(py, "spec_version"), "2.4")?;
+        scope.set_item(pyo3::intern!(py, "asgi"), asgi_dict)?;
+        scope.set_item(pyo3::intern!(py, "http_version"), "1.1")?;
+        scope.set_item(pyo3::intern!(py, "scheme"), "ws")?;
+        scope.set_item(pyo3::intern!(py, "path"), &parsed.head.path)?;
+        scope.set_item(
+            pyo3::intern!(py, "raw_path"),
+            PyBytes::new(py, parsed.head.path.as_bytes()),
+        )?;
+        scope.set_item(
+            pyo3::intern!(py, "query_string"),
+            PyBytes::new(py, &parsed.head.query_string),
+        )?;
+        scope.set_item(pyo3::intern!(py, "root_path"), "")?;
+
+        // Build headers list (same format as HTTP scope).
+        let header_list = PyList::empty(py);
+        for (name, value) in &parsed.head.headers {
+            let tuple = PyTuple::new(
+                py,
+                [
+                    PyBytes::new(py, name).as_any(),
+                    PyBytes::new(py, value).as_any(),
+                ],
+            )?;
+            header_list.append(tuple)?;
+        }
+        scope.set_item(pyo3::intern!(py, "headers"), header_list)?;
+
+        // Client/server addresses.
+        if let Some(addr) = client_addr {
+            scope.set_item(
+                pyo3::intern!(py, "client"),
+                (addr.ip().to_string(), addr.port()),
+            )?;
+        } else {
+            scope.set_item(pyo3::intern!(py, "client"), py.None())?;
+        }
+        scope.set_item(
+            pyo3::intern!(py, "server"),
+            (&*shared.server_host, shared.server_port),
+        )?;
+
+        // Extract subprotocols from Sec-WebSocket-Protocol header.
+        let subprotocols = PyList::empty(py);
+        for (name, value) in &parsed.head.headers {
+            if name.eq_ignore_ascii_case(b"sec-websocket-protocol")
+                && let Ok(s) = std::str::from_utf8(value)
+            {
+                for proto in s.split(',') {
+                    subprotocols.append(proto.trim())?;
+                }
+            }
+        }
+        scope.set_item(pyo3::intern!(py, "subprotocols"), subprotocols)?;
+        scope.set_item(pyo3::intern!(py, "state"), PyDict::new(py))?;
+
+        // Extract Sec-WebSocket-Key for the 101 response.
+        let mut ws_key = String::new();
+        for (name, value) in &parsed.head.headers {
+            if name.eq_ignore_ascii_case(b"sec-websocket-key")
+                && let Ok(s) = std::str::from_utf8(value)
+            {
+                s.clone_into(&mut ws_key);
+            }
+        }
+
+        // Call the Python-side WebSocket handler.
+        // It builds the 101 response, creates the bridge, and stores
+        // a reference back on this protocol via set_ws_bridge().
+        let scope_obj = scope.unbind().into_any();
+        on_ws_connect.call1(py, (scope_obj, &transport, &ws_key, py_self))?;
+        Ok(())
+    }
+}
+
+// ── WebSocket upgrade detection ─────────────────────────────────
+
+/// Check if a parsed HTTP request is a WebSocket upgrade.
+fn is_websocket_upgrade(headers: &[(Bytes, Bytes)]) -> bool {
+    let mut has_upgrade = false;
+    let mut has_connection = false;
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case(b"upgrade") && value.eq_ignore_ascii_case(b"websocket") {
+            has_upgrade = true;
+        }
+        if name.eq_ignore_ascii_case(b"connection") {
+            for part in value.split(|&b| b == b',') {
+                let trimmed = part
+                    .iter()
+                    .copied()
+                    .skip_while(u8::is_ascii_whitespace)
+                    .collect::<Vec<_>>();
+                if trimmed.eq_ignore_ascii_case(b"upgrade") {
+                    has_connection = true;
+                }
+            }
+        }
+    }
+    has_upgrade && has_connection
 }
 
 /// Callback invoked when a response is fully written.

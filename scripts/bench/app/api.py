@@ -5,7 +5,7 @@ import json
 from contextlib import asynccontextmanager
 
 import aiosqlite
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response, StreamingResponse
 
 from .models import Item, ItemCreate, ItemUpdate
@@ -250,6 +250,36 @@ async def stream_response(chunks: int):
 async def deps_endpoint(a: str = Depends(dep_level_a)):
     """3-level dependency chain — DI + coroutine stack depth."""
     return {"chain": a}
+
+
+# ---------------------------------------------------------------------------
+# WebSocket endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.websocket("/ws/echo")
+async def ws_echo(ws: WebSocket):
+    """Echo WebSocket — returns each message back to the client."""
+    await ws.accept()
+    try:
+        while True:
+            data = await ws.receive_text()
+            await ws.send_text(data)
+    except WebSocketDisconnect:
+        pass
+
+
+@router.websocket("/ws/json")
+async def ws_json(ws: WebSocket):
+    """JSON WebSocket — echoes JSON with a server timestamp."""
+    await ws.accept()
+    try:
+        while True:
+            msg = await ws.receive_json()
+            msg["server_ts"] = asyncio.get_event_loop().time()
+            await ws.send_json(msg)
+    except WebSocketDisconnect:
+        pass
 
 
 # ---------------------------------------------------------------------------
