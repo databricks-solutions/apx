@@ -10,6 +10,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::api_generator::generate_openapi;
+use crate::dotenv::DotenvFile;
 use crate::external::{Bun, Uv};
 use crate::python_logging::{DevConfig, parse_dev_config};
 
@@ -66,6 +67,11 @@ pub struct ProjectMetadata {
     pub ui_registries: Option<HashMap<String, String>>,
     /// Dev server configuration parsed from `[tool.apx.dev]`.
     pub dev_config: DevConfig,
+    /// Optional `[project.scripts]` entry to use instead of uvicorn.
+    /// When set (e.g. `"start-app"`), the dev server runs `uv run <start_script>`
+    /// instead of `uv run uvicorn <app_entrypoint>`. The script receives `--port`
+    /// and `--reload` so it must accept those arguments (MLflow AgentServer does).
+    pub start_script: Option<String>,
 }
 
 impl ProjectMetadata {
@@ -135,6 +141,11 @@ pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, Str
     // Parse dev configuration
     let dev_config = parse_dev_config(&pyproject_value, project_root)?;
 
+    // Detect app.yml command — when present and shaped like ["uv", "run", "<script>"],
+    // the dev server uses `uv run <script>` instead of `uv run uvicorn <app_entrypoint>`.
+    // This mirrors the exact command Databricks Apps uses to start the app in production.
+    let start_script = read_app_yml_start_script(project_root);
+
     Ok(ProjectMetadata {
         app_name,
         app_slug,
@@ -144,7 +155,23 @@ pub fn read_project_metadata(project_root: &Path) -> Result<ProjectMetadata, Str
         ui_root,
         ui_registries,
         dev_config,
+        start_script,
     })
+}
+
+/// Read `app.yml` and return the script name if `command` is shaped like
+/// `["uv", "run", "<script>"]`. Returns `None` if `app.yml` is absent or
+/// the command isn't a `uv run` invocation.
+fn read_app_yml_start_script(project_root: &Path) -> Option<String> {
+    let path = project_root.join("app.yml");
+    let contents = fs::read_to_string(&path).ok()?;
+    let doc: serde_yaml::Value = serde_yaml::from_str(&contents).ok()?;
+    let cmd = doc.get("command")?.as_sequence()?;
+    let parts: Vec<&str> = cmd.iter().filter_map(|v| v.as_str()).collect();
+    match parts.as_slice() {
+        ["uv", "run", script, ..] => Some(script.to_string()),
+        _ => None,
+    }
 }
 
 /// Read Python project dependencies from pyproject.toml `[project].dependencies` array.
@@ -266,12 +293,31 @@ pub async fn ensure_entrypoint_deps(app_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Return true if UV_NATIVE_TLS is enabled — checks the shell environment first,
+/// then falls back to the project's `.env` file. This is needed because `uv sync`
+/// runs before the `.env` file is loaded into the process environment.
+fn resolve_native_tls(app_dir: &Path) -> bool {
+    // Shell env takes precedence
+    if let Ok(val) = std::env::var("UV_NATIVE_TLS") {
+        if val == "1" || val.eq_ignore_ascii_case("true") {
+            return true;
+        }
+    }
+    // Fall back to project .env file
+    DotenvFile::read(&app_dir.join(".env"))
+        .ok()
+        .and_then(|d| d.get_vars().get("UV_NATIVE_TLS").cloned())
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Run `uv sync` to ensure Python dependencies are installed.
 pub async fn uv_sync(app_dir: &Path) -> Result<(), String> {
     tracing::debug!("Running uv sync in {}", app_dir.display());
 
+    let native_tls = resolve_native_tls(app_dir);
     let uv = Uv::new().await?;
-    uv.sync(app_dir).await?.check("uv").map_err(String::from)?;
+    uv.sync(app_dir, native_tls).await?.check("uv").map_err(String::from)?;
 
     tracing::debug!("uv sync completed successfully");
     Ok(())
@@ -294,8 +340,9 @@ pub async fn generate_version_file(
         .ok_or("Failed to determine version file path")?;
 
     // Try running uv-dynamic-versioning (outputs version string to stdout)
+    let native_tls = resolve_native_tls(app_dir);
     let uv = Uv::new().await?;
-    let version = match uv.tool_run(app_dir, "uv-dynamic-versioning").await {
+    let version = match uv.tool_run(app_dir, "uv-dynamic-versioning", native_tls).await {
         Ok(output) if output.exit_code == Some(0) => {
             let v = output.stdout.trim().to_string();
             if v.is_empty() {

@@ -7,6 +7,9 @@ use rust_embed::RustEmbed;
 /// Embedded templates from `src/apx/templates/`.
 #[derive(RustEmbed)]
 #[folder = "../../src/apx/templates"]
+#[exclude = "**/__pycache__/*"]
+#[exclude = "**/*.pyc"]
+#[exclude = "**/*.pyo"]
 struct Templates;
 
 /// Embedded entrypoint.ts content.

@@ -27,6 +27,58 @@
 
 💡 The main idea of `apx` is to provide convenient, fast and AI-friendly development experience.
 
+## Agents
+
+`apx init --addon agent` adds a complete agent framework — tool-calling loop, composition patterns, OBO auth, MCP, and dev UI.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  /_apx/agent (dev UI)          POST /invocations            │
+│       │                              │                      │
+│       └──────────┐  ┌────────────────┘                      │
+│                  ▼  ▼                                       │
+│            ┌───────────┐     ┌──────────────┐               │
+│            │ LlmAgent  │────▶│ FMAPI (LLM)  │               │
+│            └─────┬─────┘     └──────────────┘               │
+│                  │ tool calls                               │
+│       ┌──────────┼──────────┐                               │
+│       ▼          ▼          ▼                               │
+│  ┌─────────┐ ┌────────┐ ┌───────────┐                      │
+│  │ Local   │ │ Genie  │ │ Sub-agent │                      │
+│  │ tools   │ │ Space  │ │ /invoke   │                      │
+│  └────┬────┘ └────┬───┘ └─────┬─────┘                      │
+│       │           │           │                             │
+│       └───────────┴───────────┘                             │
+│            OBO auth (X-Forwarded-Access-Token)              │
+│            forwarded through every call                     │
+└─────────────────────────────────────────────────────────────┘
+         │                    │
+    /mcp/sse              /.well-known/agent.json
+    (MCP server)          (A2A discovery)
+```
+
+**What you get out of the box:**
+
+| Feature | How |
+|---|---|
+| OBO auth in every tool | `ws: Dependencies.UserClient` — token flows automatically |
+| MCP server | `/mcp/sse` — connect Claude Desktop, Cursor, etc. |
+| A2A discovery | `/.well-known/agent.json` — auto-populated at request time |
+| Agent composition | `SequentialAgent`, `ParallelAgent`, `LoopAgent`, `RouterAgent`, `HandoffAgent` |
+| Dev UI | `/_apx/agent` — chat, tool trace, MCP URL copy |
+| Deploy | `apx deploy` — one command to production |
+| MLflow eval | `app_predict_fn(url)` → `mlflow.genai.evaluate()` |
+
+**Define tools as plain functions — type hints become the schema:**
+
+```python
+def query_genie(question: str, space_id: str, ws: Dependencies.Workspace) -> str:
+    """Answer a question using a Genie Space."""
+    return ws.genie.ask(space_id=space_id, question=question).answer or ""
+
+agent = Agent(tools=[query_genie])
+```
+
 ## 🚀 Quickstart
 
 Install `apx`:

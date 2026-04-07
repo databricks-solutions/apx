@@ -173,7 +173,14 @@ pub fn ui_router(frontend_port: u16, dev_token: &str) -> Result<Router, String> 
 }
 
 /// Creates the API utilities proxy router for FastAPI docs and OpenAPI schema
-/// Routes: /docs, /redoc, /openapi.json - proxied directly to backend without /api prefix
+/// Routes proxied directly to the Python backend without prefix transformation:
+///   - /docs, /redoc, /openapi.json     — FastAPI interactive docs
+///   - /invocations                      — Databricks Apps / MLflow serving predict endpoint
+///   - /health                           — agent health check
+///   - /.well-known/agent.json           — A2A agent discovery card
+///   - /mcp/sse, /mcp/messages/          — MCP SSE transport endpoints
+///   - /_apx/agent, /_apx/tools,         — APX dev UI pages (must be direct routes so they
+///     /_apx/probe, /_apx/openapi.json     beat the Rust-internal /_apx nest in server.rs)
 pub fn api_utils_router(
     backend_port: u16,
     token_manager: Arc<TokenManager>,
@@ -187,9 +194,24 @@ pub fn api_utils_router(
         forwarded_user_header,
     };
     Ok(Router::new()
+        // FastAPI docs
         .route("/docs", any(api_utils_proxy_handler))
         .route("/redoc", any(api_utils_proxy_handler))
         .route("/openapi.json", any(api_utils_proxy_handler))
+        // Databricks Apps / MLflow serving standard endpoint
+        .route("/invocations", any(api_utils_proxy_handler))
+        // Agent health check
+        .route("/health", any(api_utils_proxy_handler))
+        // A2A agent discovery
+        .route("/.well-known/agent.json", any(api_utils_proxy_handler))
+        // MCP SSE transport
+        .route("/mcp/sse", any(api_utils_proxy_handler))
+        .route("/mcp/messages/", any(api_utils_proxy_handler))
+        // APX agent dev UI routes — direct routes beat the /_apx nest in server.rs
+        .route("/_apx/agent", any(api_utils_proxy_handler))
+        .route("/_apx/tools", any(api_utils_proxy_handler))
+        .route("/_apx/probe", any(api_utils_proxy_handler))
+        .route("/_apx/openapi.json", any(api_utils_proxy_handler))
         .with_state(state))
 }
 

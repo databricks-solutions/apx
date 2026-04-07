@@ -1,0 +1,33 @@
+[addon]
+name = "agent"
+description = "🤖 Agent protocol (A2A discovery, /invocations, MCP tools, eval bridge)"
+group = "backend"
+group_display_name = "Backend"
+
+[python]
+dependencies = ["apx-agent>=0.1.0", "httpx>=0.27.0"]
+
+[python.edits]
+imports = [
+    "from .agent import AgentDependency",
+]
+[[python.edits.aliases]]
+code = "AgentContext: TypeAlias = AgentDependency"
+doc = """
+Agent protocol context dependency. Injects the AgentContext (card + tool registry) into a route.
+Recommended usage: `ctx: Dependencies.AgentContext`"""
+
+[[python.edits.aliases]]
+code = "AppClient: TypeAlias = ClientDependency"
+doc = """
+App service principal identity. Works locally and in production.
+Use when the agent acts on behalf of the application itself.
+Recommended usage: `ws: Dependencies.AppClient`"""
+
+[[python.edits.aliases]]
+code = "UserClient: TypeAlias = UserWorkspaceClientDependency"
+doc = """
+Logged-in user's identity via OBO token (X-Forwarded-Access-Token).
+Respects per-user UC grants and audit trails. Production only.
+Use when the agent must act as the person who opened the app.
+Recommended usage: `ws: Dependencies.UserClient`"""

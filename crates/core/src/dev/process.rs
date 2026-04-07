@@ -58,6 +58,7 @@ impl ProcessManager {
         let dotenv_vars = Arc::new(Mutex::new(dotenv.get_vars()));
         let app_slug = metadata.app_slug.clone();
         let app_entrypoint = metadata.app_entrypoint.clone();
+        let start_script = metadata.start_script.clone();
         let dev_config = metadata.dev_config;
 
         let app_dir = app_dir
@@ -88,6 +89,7 @@ impl ProcessManager {
             app_dir: app_dir.clone(),
             app_slug: app_slug.clone(),
             app_entrypoint,
+            start_script,
             host: host.to_string(),
             backend_port,
             frontend_port,

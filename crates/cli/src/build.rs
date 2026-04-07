@@ -8,8 +8,10 @@ use crate::common::find_app_dir;
 use crate::run_cli_async_helper;
 use apx_core::api_generator::generate_openapi;
 use apx_core::common::{
-    ensure_dir, format_elapsed_ms, run_command_streaming_with_output, run_preflight_checks, spinner,
+    ensure_dir, format_elapsed_ms, read_project_metadata, run_command_streaming_with_output,
+    run_preflight_checks, spinner,
 };
+use apx_core::dotenv::DotenvFile;
 use apx_core::external::uv::Uv;
 
 const DEFAULT_BUILD_DIR: &str = ".build";
@@ -40,39 +42,46 @@ pub async fn run(args: BuildArgs) -> i32 {
 async fn run_inner(args: BuildArgs) -> Result<(), String> {
     let app_path = find_app_dir(args.app_path)?;
     let build_dir = app_path.join(&args.build_path);
-
     println!("Building project in {}", app_path.display());
+    run_build(&app_path, &build_dir).await?;
+    println!("Build completed");
+    Ok(())
+}
 
+/// Core build logic shared with `apx deploy`.
+pub async fn run_build(app_path: &Path, build_dir: &Path) -> Result<(), String> {
     // Run preflight checks: generate _metadata.py, __dist__, uv sync, version file, bun install if needed
     debug!("Running preflight checks before build");
-    let _preflight = run_preflight_checks(&app_path).await?;
+    let _preflight = run_preflight_checks(app_path).await?;
 
     // Set up build directory
     if build_dir.exists() {
-        fs::remove_dir_all(&build_dir)
+        fs::remove_dir_all(build_dir)
             .map_err(|err| format!("Failed to remove build directory: {err}"))?;
     }
-    ensure_dir(&build_dir)?;
+    ensure_dir(build_dir)?;
     fs::write(build_dir.join(".gitignore"), "*\n")
         .map_err(|err| format!("Failed to write build .gitignore: {err}"))?;
 
-    generate_openapi(&app_path).await?;
-
-    if args.skip_ui_build {
-        println!("Skipping UI build");
-    } else {
-        build_ui(&app_path).await?;
+    generate_openapi(app_path).await?;
+    let meta = read_project_metadata(app_path)?;
+    if meta.has_ui() {
+        build_ui(app_path).await?;
     }
 
-    build_wheel(&app_path, &args.build_path).await?;
-    copy_app_config_files(&app_path, &build_dir)?;
+    // build_path is relative to app_path; find_wheel_file needs the resolved build_dir
+    let build_path = build_dir
+        .strip_prefix(app_path)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|_| build_dir.to_path_buf());
+    build_wheel(app_path, &build_path).await?;
+    copy_app_config_files(app_path, build_dir)?;
 
-    let wheel_file = find_wheel_file(&build_dir)?;
+    let wheel_file = find_wheel_file(build_dir)?;
     let requirements_path = build_dir.join("requirements.txt");
     fs::write(&requirements_path, format!("{wheel_file}\n"))
         .map_err(|err| format!("Failed to write requirements.txt: {err}"))?;
 
-    println!("Build completed");
     Ok(())
 }
 
@@ -90,6 +99,16 @@ async fn build_wheel(app_path: &Path, build_path: &Path) -> Result<(), String> {
     let uv = Uv::new().await?;
     let mut cmd = uv.build_wheel_command(app_path, build_path).into_command();
     cmd.env("UV_DYNAMIC_VERSIONING_BYPASS", build_version);
+
+    // Forward UV_* vars from the project .env so users can set e.g. UV_OFFLINE=1
+    // or UV_NATIVE_TLS=1 once in .env rather than prefixing every command.
+    if let Ok(dotenv) = DotenvFile::read(&app_path.join(".env")) {
+        for (key, value) in dotenv.get_vars() {
+            if key.starts_with("UV_") {
+                cmd.env(&key, &value);
+            }
+        }
+    }
 
     let result =
         run_command_streaming_with_output(cmd, &sp, "🐍 Wheel:", "Failed to build Python wheel")

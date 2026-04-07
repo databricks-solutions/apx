@@ -139,6 +139,23 @@ async fn run_inner(mut args: InitArgs) -> Result<(), String> {
     // Eagerly resolve uv (always needed)
     let _uv = apx_core::external::Uv::new().await?;
 
+    // Support `apx init <addon>` as shorthand for `apx init --addons=<addon>`.
+    // If the first positional is a known addon name (not a file path), treat it
+    // as a preset so `apx init agent` works alongside `apx init --addons=agent`.
+    if args.addons.is_none() && !args.no_addons {
+        if let Some(ref p) = args.app_path {
+            let s = p.to_string_lossy();
+            let is_path_like = s.contains('/') || s.contains('\\') || s.contains('.');
+            if !is_path_like {
+                let known = discover_all_addons();
+                if known.iter().any(|(name, _)| name == s.as_ref()) {
+                    args.addons = Some(vec![s.into_owned()]);
+                    args.app_path = None;
+                }
+            }
+        }
+    }
+
     let (workspace_root, app_path, is_member) = resolve_app_path(&mut args)?;
 
     println!("Welcome to apx 🚀\n");

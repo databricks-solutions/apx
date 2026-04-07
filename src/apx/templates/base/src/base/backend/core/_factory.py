@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 
 from fastapi import APIRouter, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from ..._metadata import api_prefix, app_name, dist_dir
 from ._base import LifespanDependency
@@ -64,11 +65,25 @@ def create_app(
 
     app = FastAPI(title=app_name, lifespan=_composed_lifespan)
 
+    # Allow cross-origin requests so Databricks UI clients (Genie Code, AI Playground)
+    # can reach /mcp and /invocations from a different origin. Databricks Apps enforces
+    # auth at the proxy level before requests reach the app, so wildcard origins are safe.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     api_router: APIRouter = create_router()
     for dep in all_deps:
         for r in dep.get_routers():
             api_router.include_router(r)
     app.include_router(api_router)
+
+    for dep in all_deps:
+        for r in dep.get_root_routers():
+            app.include_router(r)
 
     for router in routers or []:
         if router is not api_router:

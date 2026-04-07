@@ -50,6 +50,10 @@ pub struct BackendConfig {
     pub app_dir: PathBuf,
     pub app_slug: String,
     pub app_entrypoint: String,
+    /// When `Some`, run `uv run <start_script> --port ... --reload` instead of
+    /// `uv run uvicorn <app_entrypoint>`. The script must accept `--port` and
+    /// `--reload` (MLflow AgentServer's `start-app` script does).
+    pub start_script: Option<String>,
     pub host: String,
     pub backend_port: u16,
     pub frontend_port: Option<u16>,
@@ -209,31 +213,58 @@ impl Backend {
 
     // -- private: command construction --
 
-    /// Construct the `uv run uvicorn` command with all env vars.
+    /// Construct the backend command with all env vars.
+    ///
+    /// If `start_script` is set, runs `uv run <script> --port <port> --reload`.
+    /// Otherwise falls back to `uv run uvicorn <app_entrypoint> --port ... --reload`.
     async fn build_uvicorn_command(
         &self,
         log_config: &str,
     ) -> Result<crate::external::ToolCommand, String> {
         let cfg = &self.cfg;
 
-        let mut cmd = UvTool::new("uvicorn")
-            .await?
-            .cmd()
-            .args([
-                &cfg.app_entrypoint,
-                "--host",
-                &cfg.host,
-                "--port",
-                &cfg.backend_port.to_string(),
-                "--reload",
-                "--log-config",
-                log_config,
-            ])
-            .cwd(&cfg.app_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // APX runtime context
+        let cmd = if let Some(ref script) = cfg.start_script {
+            // MLflow AgentServer path: `uv run start-app --host ... --port ... --reload`
+            // AgentServer._parse_server_args() reads --port and --reload from sys.argv.
+            UvTool::new("uvicorn") // borrow the resolved uv path; tool name is overridden below
+                .await?
+                .uv()
+                .cmd()
+                .args([
+                    "run",
+                    script.as_str(),
+                    "--host",
+                    &cfg.host,
+                    "--port",
+                    &cfg.backend_port.to_string(),
+                    "--reload",
+                ])
+                .cwd(&cfg.app_dir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+        } else {
+            UvTool::new("uvicorn")
+                .await?
+                .cmd()
+                .args([
+                    &cfg.app_entrypoint,
+                    "--host",
+                    &cfg.host,
+                    "--port",
+                    &cfg.backend_port.to_string(),
+                    "--reload",
+                    "--log-config",
+                    log_config,
+                ])
+                .cwd(&cfg.app_dir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+        };
+
+        // APX runtime context (shared by both uvicorn and start-app paths)
+        let mut cmd = cmd
             .env("APX_BACKEND_PORT", cfg.backend_port.to_string())
             .env("APX_DEV_DB_PORT", cfg.db_port.to_string())
             .env("APX_DEV_SERVER_PORT", cfg.dev_server_port.to_string())

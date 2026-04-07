@@ -61,13 +61,23 @@ impl Uv {
     // -----------------------------------------------------------------------
 
     /// Run `uv sync` in the given directory.
-    pub async fn sync(&self, cwd: &Path) -> Result<CommandOutput, CommandError> {
-        self.cmd().arg("sync").cwd(cwd).exec().await
+    /// Pass `native_tls: true` to add `--native-tls` (required on networks with SSL inspection).
+    pub async fn sync(&self, cwd: &Path, native_tls: bool) -> Result<CommandOutput, CommandError> {
+        let mut cmd = self.cmd().arg("sync").cwd(cwd);
+        if native_tls {
+            cmd = cmd.arg("--native-tls");
+        }
+        cmd.exec().await
     }
 
     /// Run `uv tool run <tool>` in the given directory.
-    pub async fn tool_run(&self, cwd: &Path, tool: &str) -> Result<CommandOutput, CommandError> {
-        self.cmd().args(["tool", "run", tool]).cwd(cwd).exec().await
+    /// Pass `native_tls: true` to add `--native-tls` (required on networks with SSL inspection).
+    pub async fn tool_run(&self, cwd: &Path, tool: &str, native_tls: bool) -> Result<CommandOutput, CommandError> {
+        let mut cmd = self.cmd().args(["tool", "run", tool]).cwd(cwd);
+        if native_tls {
+            cmd = cmd.arg("--native-tls");
+        }
+        cmd.exec().await
     }
 
     /// Run `uv run --no-sync python -c <code> [script_args]` in the given directory.
@@ -88,12 +98,21 @@ impl Uv {
     /// Build a `ToolCommand` for `uv build --wheel --out-dir <out_dir>`.
     /// Returns the command for the caller to configure streaming output via `.into_command()`.
     pub fn build_wheel_command(&self, cwd: &Path, out_dir: &Path) -> ToolCommand {
-        self.cmd()
+        let mut cmd = self
+            .cmd()
             .arg("build")
             .arg("--wheel")
             .arg("--out-dir")
             .arg(out_dir)
-            .cwd(cwd)
+            .cwd(cwd);
+        // Use cached packages when network is unavailable (e.g. corporate SSL inspection).
+        // Falls back to network automatically if cache is empty.
+        if std::env::var("UV_OFFLINE").as_deref() == Ok("1")
+            || std::env::var("UV_OFFLINE").as_deref() == Ok("true")
+        {
+            cmd = cmd.arg("--offline");
+        }
+        cmd
     }
 
     /// Run `uv run hatch version` and return the version string.
