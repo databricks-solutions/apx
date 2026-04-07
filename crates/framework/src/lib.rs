@@ -34,14 +34,12 @@ macro_rules! opaque_debug {
 }
 pub(crate) use opaque_debug;
 
-pub mod dispatch;
 pub(crate) mod protocol;
 pub mod pyapi;
 pub mod telemetry;
 pub mod transport;
 
 pub(crate) mod asgi;
-pub(crate) mod io;
 pub mod supervision;
 
 #[cfg(test)]

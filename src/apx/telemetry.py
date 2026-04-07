@@ -383,7 +383,9 @@ class _Log:
     __slots__ = ()
 
     @staticmethod
-    def trace(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+    def trace(
+        message: str, *, event_name: str | None = None, **attributes: Any
+    ) -> None:
         """Emit a TRACE-level log.
 
         Example::
@@ -393,7 +395,9 @@ class _Log:
         _emit_log_span("trace", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def debug(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+    def debug(
+        message: str, *, event_name: str | None = None, **attributes: Any
+    ) -> None:
         """Emit a DEBUG-level log.
 
         Example::
@@ -414,7 +418,9 @@ class _Log:
         _emit_log_span("info", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def notice(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+    def notice(
+        message: str, *, event_name: str | None = None, **attributes: Any
+    ) -> None:
         """Emit a NOTICE-level log.
 
         Example::
@@ -434,7 +440,9 @@ class _Log:
         _emit_log_span("warn", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def error(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+    def error(
+        message: str, *, event_name: str | None = None, **attributes: Any
+    ) -> None:
         """Emit an ERROR-level log.
 
         Example::
@@ -444,7 +452,9 @@ class _Log:
         _emit_log_span("error", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def fatal(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+    def fatal(
+        message: str, *, event_name: str | None = None, **attributes: Any
+    ) -> None:
         """Emit a FATAL-level log.
 
         Example::
@@ -454,7 +464,9 @@ class _Log:
         _emit_log_span("fatal", message, event_name=event_name, **attributes)
 
     @staticmethod
-    def exception(message: str, *, event_name: str | None = None, **attributes: Any) -> None:
+    def exception(
+        message: str, *, event_name: str | None = None, **attributes: Any
+    ) -> None:
         """Emit an ERROR-level log with the current exception attached.
 
         Must be called from an ``except`` block. Automatically captures
@@ -545,7 +557,9 @@ class Histogram:
             name, description, str(unit)
         )
 
-    def observe(self, value: float, *, attributes: dict[str, str] | None = None) -> None:
+    def observe(
+        self, value: float, *, attributes: dict[str, str] | None = None
+    ) -> None:
         """Record an observation.
 
         Example::
@@ -677,25 +691,26 @@ class HttpMetrics(BaseModel):
 
 
 class ApxMetrics(BaseModel):
-    """APX framework dispatch pipeline metric toggles.
+    """APX per-worker request pipeline metric toggles.
 
-    Collected per-worker. Each histogram records latency for the
-    dispatch phases within a single worker process. Use
-    ``apx.worker.id`` to drill down; aggregate across workers for
-    server-wide distributions.
+    Histograms record latency (microseconds) for each phase of request
+    handling. Up-down counters (``active_requests``, ``connections``)
+    track current in-flight counts. Use ``apx.worker.id`` to drill
+    down; aggregate across workers for server-wide distributions.
 
     If APX_PERF environment variable is not set, none of these metrics are collected.
     """
 
-    dispatch_body_collect: bool = True
-    dispatch_crossbeam_send: bool = True
-    dispatch_response_wait: bool = True
-    dispatch_total: bool = True
-    asgi_receive_build: bool = True
-    asgi_send_parse: bool = True
-    dispatch_pickup_delay: bool = True
-    dispatch_materialize: bool = True
-    dispatch_queue_depth: bool = True
+    parse: bool = True
+    scope_build: bool = True
+    receive_build: bool = True
+    send_parse: bool = True
+    response_build: bool = True
+    response_write: bool = True
+    handler_wait: bool = True
+    request_total: bool = True
+    active_requests: bool = True
+    connections: bool = True
 
 
 class CaptureHeaders(BaseModel):
@@ -760,7 +775,7 @@ class ApxInstrumentation(BaseModel):
     Collected per-worker. Records per-phase histograms for the ASGI
     dispatch pipeline. If APX_PERF environment variable is not set, none of these metrics are collected::
 
-        ApxInstrumentation(metrics=ApxMetrics(dispatch_total=True))
+        ApxInstrumentation(metrics=ApxMetrics(request_total=True))
     """
 
     type: Literal["apx"] = "apx"

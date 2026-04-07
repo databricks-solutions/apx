@@ -301,36 +301,27 @@ dependencies = [
  "apx-common",
  "apx-core",
  "bytes",
- "crossbeam-channel",
- "crossbeam-queue",
- "futures-core",
  "futures-util",
  "hex",
  "http",
- "http-body",
- "http-body-util",
- "hyper",
- "hyper-tungstenite",
- "hyper-util",
+ "httparse",
+ "httpdate",
+ "matchit",
  "mimalloc",
  "notify",
  "opentelemetry 0.29.1",
  "opentelemetry_sdk 0.29.0",
+ "percent-encoding",
  "pyo3",
- "pyo3-async-runtimes",
  "rand 0.8.5",
- "reqwest 0.13.1",
  "rmp-serde",
  "serde",
  "serde_json",
- "socket2",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.18",
  "tikv-jemallocator",
  "tokio",
- "tokio-stream",
- "tokio-tungstenite",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -2709,21 +2700,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-tungstenite"
-version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc778da281a749ed28d2be73a9f2cd13030680a1574bc729debd1195e44f00e9"
-dependencies = [
- "http-body-util",
- "hyper",
- "hyper-util",
- "pin-project-lite",
- "tokio",
- "tokio-tungstenite",
- "tungstenite",
-]
-
-[[package]]
 name = "hyper-util"
 version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2986,6 +2962,15 @@ name = "interpolator"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71dd52191aae121e8611f1e8dc3e324dd0dd1dee1e6dd91d10ee07a3cfb4d9d8"
+
+[[package]]
+name = "inventory"
+version = "0.3.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc61209c082fbeb19919bee74b176221b27223e27b65d781eb91af24eb1fb46e"
+dependencies = [
+ "rustversion",
+]
 
 [[package]]
 name = "ipnet"
@@ -4600,26 +4585,13 @@ version = "0.28.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf85e27e86080aafd5a22eae58a162e133a589551542b3e5cee4beb27e54f8e1"
 dependencies = [
+ "inventory",
  "libc",
  "once_cell",
  "portable-atomic",
  "pyo3-build-config",
  "pyo3-ffi",
  "pyo3-macros",
-]
-
-[[package]]
-name = "pyo3-async-runtimes"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e7364a95bf00e8377bbf9b0f09d7ff9715a29d8fcf93b47d1a967363b973178"
-dependencies = [
- "futures-channel",
- "futures-util",
- "once_cell",
- "pin-project-lite",
- "pyo3",
- "tokio",
 ]
 
 [[package]]

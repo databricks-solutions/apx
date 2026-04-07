@@ -61,10 +61,12 @@ macro_rules! toggle_store {
 }
 pub(crate) use toggle_store;
 
-/// Time an expression and record elapsed microseconds via a metric function.
+/// Time an expression and record its duration in microseconds via a
+/// `dispatch_metrics::record_*` function.
 ///
-/// Rust equivalent of Python's `with timing(metric): <ops>`.
-/// Works with `?`, `.await`, blocks, and nested `timed!` calls.
+/// Wraps the common `let t = Instant::now(); let v = expr; record(t.elapsed()); v`
+/// pattern into a single call, enforcing consistent timing across the
+/// request pipeline.
 macro_rules! timed {
     ($record:path, $expr:expr) => {{
         let __t0 = ::std::time::Instant::now();

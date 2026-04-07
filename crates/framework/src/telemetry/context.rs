@@ -1,9 +1,9 @@
-//! Trace context propagation between Rust `tracing` spans and Python.
+//! Trace context propagation between Rust and Python.
 //!
-//! Rust request spans live on tokio threads. Before scheduling Python work
-//! on the event loop, we extract the current trace context and inject it
-//! into a Python `ContextVar` so that user-created `SpanHandle` instances
-//! attach as children.
+//! Rust protocol code runs on the asyncio thread alongside Python.
+//! The trace context is propagated via a Python `ContextVar` so that
+//! user-created `SpanHandle` instances attach as children of the
+//! request span.
 //!
 //! Shared primitives (`SerializedContext`, `read_context_var_raw`,
 //! `parse_span_context`) are used by both `spans.rs` and `logging.rs`.

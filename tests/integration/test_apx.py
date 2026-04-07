@@ -12,6 +12,37 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestLifespan:
+    """Verify that the ASGI lifespan protocol fires startup hooks.
+
+    The bench app's lifespan context manager opens an SQLite connection,
+    creates the items table, and seeds 10 default rows. If lifespan
+    never runs, ``app.state.db`` is unset and all DB-dependent routes fail.
+    """
+
+    def test_lifespan_startup_ran(self, client: httpx.Client) -> None:
+        """DB-dependent route works — proves lifespan startup completed."""
+        r = client.get("/api/items")
+        assert r.status_code == 200
+        items = r.json()
+        assert isinstance(items, list)
+        assert len(items) >= 10, "lifespan should have seeded 10 default items"
+
+    def test_db_state_accessible(self, client: httpx.Client) -> None:
+        """Individual item fetch works — app.state.db is live."""
+        r = client.get("/api/items/1")
+        assert r.status_code == 200
+        item = r.json()
+        assert item["id"] == 1
+        assert item["name"] == "Item 1"
+
+
+# ---------------------------------------------------------------------------
 # Health & meta
 # ---------------------------------------------------------------------------
 

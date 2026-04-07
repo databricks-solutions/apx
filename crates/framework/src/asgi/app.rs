@@ -3,18 +3,9 @@
 //! Parses specifiers like `"myapp.main:app"` or `"myapp"` (attr defaults to
 //! `"app"`) and imports the callable via `importlib.import_module`.
 //!
-//! The [`AppSource`] trait is the extension seam for app loading strategies.
-//! `ModuleImport` is the live-import implementation; a future `ManifestSource`
-//! will provide pre-built dispatch pipelines.
+//! [`ModuleImport`] performs a live import from a specifier string.
 
-use crate::asgi::dispatch::AsgiDispatch;
-use crate::asgi::queue::RequestQueue;
-use crate::asgi::scope::ScopeInterns;
-use crate::dispatch::Dispatch;
-use crate::supervision::worker_context::WorkerContext;
 use pyo3::prelude::*;
-use std::net::SocketAddr;
-use std::sync::Arc;
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -24,20 +15,7 @@ const SPECIFIER_SEPARATOR: char = ':';
 /// Default attribute name when no separator is present.
 const DEFAULT_ATTR: &str = "app";
 
-// ── AsgiApp ──────────────────────────────────────────────────────────────
-
-/// A Python ASGI callable, held as a GIL-independent reference.
-#[derive(Debug)]
-pub struct AsgiApp(Py<PyAny>);
-
-impl AsgiApp {
-    /// Access the inner Python object.
-    pub fn inner(&self) -> &Py<PyAny> {
-        &self.0
-    }
-}
-
-// ── AppLoadError ─────────────────────────────────────────────────────────
+// ── AppLoadError ───────────────────────────────────────────────────────────
 
 /// Errors that can occur when loading a Python ASGI app.
 #[derive(Debug, thiserror::Error)]
@@ -77,34 +55,30 @@ pub enum AppLoadError {
     },
 }
 
-// ── format_pyerr ─────────────────────────────────────────────────────────
+// ── AsgiApp ────────────────────────────────────────────────────────────────
 
-/// Render a Python exception with its full traceback.
-///
-/// Uses `traceback.format_exception(err)` to produce the same multi-line
-/// output that Python prints on unhandled exceptions. Falls back to
-/// `PyErr`'s `Display` (type + message only) if the traceback module is
-/// unavailable or the formatting call itself fails.
-pub fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
-    format_pyerr_inner(py, err).unwrap_or_else(|| err.to_string())
+/// A Python ASGI callable, held as a GIL-independent reference.
+#[derive(Debug)]
+pub struct AsgiApp(Py<PyAny>);
+
+impl AsgiApp {
+    /// Access the inner Python object.
+    pub fn inner(&self) -> &Py<PyAny> {
+        &self.0
+    }
 }
 
-/// Inner helper: returns `None` on any failure so the caller can fall back.
-fn format_pyerr_inner(py: Python<'_>, err: &PyErr) -> Option<String> {
-    let tb_mod = py.import(c"traceback").ok()?;
-    let lines = tb_mod
-        .call_method1(c"format_exception", (err.value(py),))
-        .ok()?;
-    let joined: String = lines.extract::<Vec<String>>().ok()?.join("");
-    Some(joined)
-}
-
-// ── parse_specifier ──────────────────────────────────────────────────────
+// ── parse_specifier / ModuleImport ─────────────────────────────────────────
 
 /// Split a specifier into `(module, attr)`.
 ///
 /// Supports `"module:attr"` (explicit) and `"module"` (attr defaults to `"app"`).
-fn parse_specifier(specifier: &str) -> Result<(&str, &str), AppLoadError> {
+///
+/// # Errors
+///
+/// Returns [`AppLoadError::InvalidSpecifier`] if the string is empty, or if either
+/// side of `:` is empty when a separator is present.
+pub fn parse_specifier(specifier: &str) -> Result<(&str, &str), AppLoadError> {
     if specifier.is_empty() {
         return Err(AppLoadError::InvalidSpecifier {
             specifier: specifier.to_owned(),
@@ -123,49 +97,17 @@ fn parse_specifier(specifier: &str) -> Result<(&str, &str), AppLoadError> {
     }
 }
 
-// ── AppSource ────────────────────────────────────────────────────────────
-
-/// Maximum request body size: 10 MiB.
-const DEFAULT_BODY_LIMIT: usize = 10 * 1024 * 1024;
-
-/// Load an ASGI application and build its dispatch pipeline.
-///
-/// Implementations decide how the app is located (runtime import, manifest,
-/// etc.) and which dispatch strategy to use. The returned `Arc<dyn Dispatch>`
-/// is handed to `ApxService` and shared across all connections.
-pub trait AppSource: Send + Sync + std::fmt::Debug {
-    /// Load the app and construct its dispatch pipeline.
-    ///
-    /// Called once per worker with the GIL held. `event_loop_py` is the
-    /// asyncio event loop object needed by `install_dispatch`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppLoadError`] if the app cannot be loaded.
-    fn build(
-        &self,
-        py: Python<'_>,
-        ctx: Arc<WorkerContext>,
-        event_loop_py: &Py<PyAny>,
-        server_addr: SocketAddr,
-    ) -> Result<Arc<dyn Dispatch>, AppLoadError>;
-}
-
-// ── ModuleImport ─────────────────────────────────────────────────────────
-
 /// Runtime import of a Python ASGI callable from a `"module:attr"` specifier.
 #[derive(Debug)]
 pub struct ModuleImport {
     specifier: String,
-    dev_mode: bool,
 }
 
 impl ModuleImport {
     /// Create a new loader from a specifier string.
-    pub fn new(specifier: impl Into<String>, dev_mode: bool) -> Self {
+    pub fn new(specifier: impl Into<String>) -> Self {
         Self {
             specifier: specifier.into(),
-            dev_mode,
         }
     }
 
@@ -212,63 +154,29 @@ impl ModuleImport {
     }
 }
 
-impl AppSource for ModuleImport {
-    fn build(
-        &self,
-        py: Python<'_>,
-        ctx: Arc<WorkerContext>,
-        event_loop_py: &Py<PyAny>,
-        server_addr: SocketAddr,
-    ) -> Result<Arc<dyn Dispatch>, AppLoadError> {
-        let app = self.load_callable(py)?;
-        let interns = Arc::new(ScopeInterns::new(py, server_addr));
+// ── format_pyerr ───────────────────────────────────────────────────────────
 
-        let queue = RequestQueue::new(
-            py,
-            &ctx.pipeline.inbound,
-            Arc::clone(&ctx.pipeline.wakeup),
-            Arc::clone(&interns),
-            self.dev_mode,
-        )
-        .map_err(|e| AppLoadError::ImportFailed {
-            module: "RequestQueue".to_owned(),
-            source: e,
-        })?;
-        let queue_obj = Py::new(py, queue).map_err(|e| AppLoadError::ImportFailed {
-            module: "RequestQueue".to_owned(),
-            source: e,
-        })?;
-
-        let wakeup_fd = ctx.pipeline.wakeup.reader_fd();
-        let dispatch_mod = py
-            .import(c"apx._dispatch")
-            .map_err(|e| AppLoadError::ImportFailed {
-                module: "apx._dispatch".to_owned(),
-                source: e,
-            })?;
-        dispatch_mod
-            .call_method1(
-                c"install_dispatch",
-                (event_loop_py, queue_obj, app.inner(), wakeup_fd),
-            )
-            .map_err(|e| AppLoadError::ImportFailed {
-                module: "install_dispatch".to_owned(),
-                source: e,
-            })?;
-
-        let dispatch = AsgiDispatch::new(
-            ctx.pipeline.inbound.sender().clone(),
-            Arc::clone(&ctx.pipeline.wakeup),
-            DEFAULT_BODY_LIMIT,
-            app.inner().clone_ref(py),
-            interns,
-            ctx,
-        );
-        Ok(Arc::new(dispatch))
-    }
+/// Render a Python exception with its full traceback.
+///
+/// Uses `traceback.format_exception(err)` to produce the same multi-line
+/// output that Python prints on unhandled exceptions. Falls back to
+/// `PyErr`'s `Display` (type + message only) if the traceback module is
+/// unavailable or the formatting call itself fails.
+pub fn format_pyerr(py: Python<'_>, err: &PyErr) -> String {
+    format_pyerr_inner(py, err).unwrap_or_else(|| err.to_string())
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────
+/// Inner helper: returns `None` on any failure so the caller can fall back.
+fn format_pyerr_inner(py: Python<'_>, err: &PyErr) -> Option<String> {
+    let tb_mod = py.import(c"traceback").ok()?;
+    let lines = tb_mod
+        .call_method1(c"format_exception", (err.value(py),))
+        .ok()?;
+    let joined: String = lines.extract::<Vec<String>>().ok()?.join("");
+    Some(joined)
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[expect(
@@ -330,7 +238,7 @@ mod tests {
     #[test]
     fn load_builtin_callable() {
         crate::with_py(|py| {
-            let loader = ModuleImport::new("json:dumps", false);
+            let loader = ModuleImport::new("json:dumps");
             let app = loader.load_callable(py).unwrap();
             assert!(app.inner().bind(py).is_callable());
         });
@@ -339,7 +247,7 @@ mod tests {
     #[test]
     fn load_plain_module_default_attr_fails() {
         crate::with_py(|py| {
-            let loader = ModuleImport::new("json", false);
+            let loader = ModuleImport::new("json");
             let err = loader.load_callable(py).unwrap_err();
             assert!(matches!(err, AppLoadError::MissingAttribute { .. }));
         });
@@ -348,7 +256,7 @@ mod tests {
     #[test]
     fn load_missing_module() {
         crate::with_py(|py| {
-            let loader = ModuleImport::new("nonexistent_module_xyz:app", false);
+            let loader = ModuleImport::new("nonexistent_module_xyz:app");
             let err = loader.load_callable(py).unwrap_err();
             assert!(matches!(err, AppLoadError::ImportFailed { .. }));
         });
@@ -357,7 +265,7 @@ mod tests {
     #[test]
     fn load_missing_attr() {
         crate::with_py(|py| {
-            let loader = ModuleImport::new("json:nonexistent_attr_xyz", false);
+            let loader = ModuleImport::new("json:nonexistent_attr_xyz");
             let err = loader.load_callable(py).unwrap_err();
             assert!(matches!(err, AppLoadError::MissingAttribute { .. }));
         });
@@ -366,7 +274,7 @@ mod tests {
     #[test]
     fn load_not_callable() {
         crate::with_py(|py| {
-            let loader = ModuleImport::new("json:__name__", false);
+            let loader = ModuleImport::new("json:__name__");
             let err = loader.load_callable(py).unwrap_err();
             assert!(matches!(err, AppLoadError::NotCallable { .. }));
         });
@@ -386,7 +294,7 @@ mod tests {
     #[test]
     fn error_display_import_failed() {
         crate::with_py(|py| {
-            let loader = ModuleImport::new("nonexistent_module_xyz:app", false);
+            let loader = ModuleImport::new("nonexistent_module_xyz:app");
             let err = loader.load_callable(py).unwrap_err();
             let msg = format!("{err}");
             assert!(msg.contains("import"));

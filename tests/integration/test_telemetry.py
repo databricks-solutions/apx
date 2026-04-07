@@ -1027,6 +1027,27 @@ class TestMetricCorrectness:
                 return
         pytest.fail("test.custom_counter sum not found")
 
+    # ── Histogram bucket boundaries ───────────────────────────────────────
+
+    def test_http_duration_has_sub_millisecond_boundaries(
+        self, otel_collector: OtelCollector
+    ) -> None:
+        """The view must inject sub-ms boundaries so fast endpoints get useful percentiles."""
+        for m in _flat_metrics(otel_collector):
+            if m.name == "http.server.request.duration" and m.histogram:
+                for dp in m.histogram.dataPoints:
+                    if not dp.explicitBounds:
+                        continue
+                    sub_ms = [b for b in dp.explicitBounds if b < 0.001]
+                    assert len(sub_ms) >= 3, (
+                        f"expected ≥3 boundaries below 1ms for sub-millisecond resolution, "
+                        f"got {sub_ms} (all bounds: {dp.explicitBounds})"
+                    )
+                    return
+        pytest.fail(
+            "http.server.request.duration histogram with explicitBounds not found"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests — span attributes and structure
@@ -1175,8 +1196,7 @@ class TestSpanAttributes:
                 end = int(s.endTimeUnixNano)
                 delta_us = (end - start) / 1_000
                 assert delta_us < 1_000, (
-                    f"log span should be near-zero-duration; "
-                    f"delta={delta_us:.1f}µs"
+                    f"log span should be near-zero-duration; delta={delta_us:.1f}µs"
                 )
                 return
         pytest.fail("log span 'integration test log message' not found")

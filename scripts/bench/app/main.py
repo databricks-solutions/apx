@@ -3,10 +3,10 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from .api import router
+from .api import lifespan, router
 from .profiling import install_profiling
 
-app = FastAPI(title="APX Bench App")
+app = FastAPI(title="APX Bench App", lifespan=lifespan)
 app.include_router(router, prefix="/api")
 
 # Install ASGI profiling middleware when APX_BENCH_PROFILE=1.

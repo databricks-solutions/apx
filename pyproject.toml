@@ -5,7 +5,12 @@ description = "apx is the toolkit for building Databricks Apps"
 readme = { file = "README.md", content-type = "text/markdown" }
 authors = [{ name = "renardeinside", email = "polarpersonal@gmail.com" }]
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2.0", "uvloop>=0.21.0; sys_platform != 'win32'"]
+dependencies = [
+    "orjson>=3.11.7",
+    "pydantic>=2.0",
+    "uvloop>=0.21.0; sys_platform != 'win32'",
+    "wsproto>=1.2",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

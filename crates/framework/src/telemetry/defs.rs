@@ -4,7 +4,9 @@
 //! creation, config doc comments, and Python toggle models all reference these
 //! constants instead of duplicating string literals.
 
-use opentelemetry::metrics::{AsyncInstrument, Gauge, Histogram, Meter, ObservableGauge};
+use opentelemetry::metrics::{
+    AsyncInstrument, Gauge, Histogram, Meter, ObservableGauge, UpDownCounter,
+};
 
 /// Descriptor for an OTEL metric instrument.
 #[derive(Debug, Clone, Copy)]
@@ -36,6 +38,15 @@ impl MetricDef {
     pub fn histogram(self, meter: &Meter) -> Histogram<f64> {
         meter
             .f64_histogram(self.name)
+            .with_description(self.description)
+            .with_unit(self.unit)
+            .build()
+    }
+
+    /// Build an i64 up-down counter from this definition.
+    pub fn up_down_counter(self, meter: &Meter) -> UpDownCounter<i64> {
+        meter
+            .i64_up_down_counter(self.name)
             .with_description(self.description)
             .with_unit(self.unit)
             .build()
@@ -131,68 +142,75 @@ pub const HTTP_ACTIVE_REQUESTS: MetricDef = MetricDef {
     unit: "1",
 };
 
-// ── APX dispatch metrics (per-worker) ────────────────────────────────────
+// ── APX protocol metrics (per-worker) ─────────────────────────────────
 
-/// Time to collect the request body from the network stream.
-pub const DISPATCH_BODY_COLLECT: MetricDef = MetricDef {
-    name: "apx.dispatch.body_collect.duration",
-    description: "Time to collect the request body from the network stream",
+/// HTTP request parsing time.
+pub const PARSE: MetricDef = MetricDef {
+    name: "apx.parse",
+    description: "HTTP request parsing time",
     unit: "us",
 };
 
-/// Time to push the request slot to the crossbeam channel and signal wakeup.
-pub const DISPATCH_CROSSBEAM_SEND: MetricDef = MetricDef {
-    name: "apx.dispatch.crossbeam_send.duration",
-    description: "Time to push the request slot to the crossbeam channel and signal wakeup",
+/// ASGI scope dict construction time.
+pub const SCOPE_BUILD: MetricDef = MetricDef {
+    name: "apx.scope_build",
+    description: "ASGI scope dict construction time",
     unit: "us",
 };
 
-/// Time waiting for the Python handler to produce a response.
-pub const DISPATCH_RESPONSE_WAIT: MetricDef = MetricDef {
-    name: "apx.dispatch.response_wait.duration",
-    description: "Time waiting for the Python handler to produce a response",
+/// ASGI receive dict construction time.
+pub const RECEIVE_BUILD: MetricDef = MetricDef {
+    name: "apx.receive_build",
+    description: "ASGI receive dict construction time",
     unit: "us",
 };
 
-/// Total dispatch duration from body collect start to response ready.
-pub const DISPATCH_TOTAL: MetricDef = MetricDef {
-    name: "apx.dispatch.total.duration",
-    description: "Total dispatch duration from body collect start to response ready",
+/// ASGI send event parsing time.
+pub const SEND_PARSE: MetricDef = MetricDef {
+    name: "apx.send_parse",
+    description: "ASGI send event parsing time",
     unit: "us",
 };
 
-/// Time to build the ASGI receive dict for the Python handler.
-pub const ASGI_RECEIVE_BUILD: MetricDef = MetricDef {
-    name: "apx.asgi.receive_build.duration",
-    description: "Time to build the ASGI receive dict for the Python handler",
+/// HTTP response header construction time.
+pub const RESPONSE_BUILD: MetricDef = MetricDef {
+    name: "apx.response_build",
+    description: "HTTP response header construction time",
     unit: "us",
 };
 
-/// Time to parse the ASGI send event dict from the Python handler.
-pub const ASGI_SEND_PARSE: MetricDef = MetricDef {
-    name: "apx.asgi.send_parse.duration",
-    description: "Time to parse the ASGI send event dict from the Python handler",
+/// Transport write time.
+pub const RESPONSE_WRITE: MetricDef = MetricDef {
+    name: "apx.response_write",
+    description: "Transport write time",
     unit: "us",
 };
 
-/// Time from slot creation on the tokio thread to pickup on the asyncio thread.
-pub const DISPATCH_PICKUP_DELAY: MetricDef = MetricDef {
-    name: "apx.dispatch.pickup_delay.duration",
-    description: "Time from slot creation to asyncio thread pickup",
+/// Handler execution time (dispatch to response complete).
+pub const HANDLER_WAIT: MetricDef = MetricDef {
+    name: "apx.handler_wait",
+    description: "Handler execution time",
     unit: "us",
 };
 
-/// Time to build the ASGI scope dict and receive/send callables.
-pub const DISPATCH_MATERIALIZE: MetricDef = MetricDef {
-    name: "apx.dispatch.materialize.duration",
-    description: "Time to build ASGI scope and receive/send callables",
+/// Total request processing time.
+pub const REQUEST_TOTAL: MetricDef = MetricDef {
+    name: "apx.request_total",
+    description: "Total request processing time",
     unit: "us",
 };
 
-/// Number of pending request slots in the crossbeam channel at drain time.
-pub const DISPATCH_QUEUE_DEPTH: MetricDef = MetricDef {
-    name: "apx.dispatch.queue_depth",
-    description: "Pending request slots in the crossbeam channel at drain time",
+/// In-flight requests on this worker.
+pub const ACTIVE_REQUESTS: MetricDef = MetricDef {
+    name: "apx.active_requests",
+    description: "In-flight requests on this worker",
+    unit: "1",
+};
+
+/// Active TCP connections on this worker.
+pub const CONNECTIONS: MetricDef = MetricDef {
+    name: "apx.connections",
+    description: "Active TCP connections on this worker",
     unit: "1",
 };
 
@@ -264,49 +282,54 @@ pub static ALL_METRICS: &[MetricCatalogEntry] = &[
         group: "http",
         scope: "worker",
     },
-    // APX dispatch (per-worker)
+    // APX request pipeline (per-worker)
     MetricCatalogEntry {
-        def: DISPATCH_BODY_COLLECT,
+        def: PARSE,
         group: "apx",
         scope: "worker",
     },
     MetricCatalogEntry {
-        def: DISPATCH_CROSSBEAM_SEND,
+        def: SCOPE_BUILD,
         group: "apx",
         scope: "worker",
     },
     MetricCatalogEntry {
-        def: DISPATCH_RESPONSE_WAIT,
+        def: RECEIVE_BUILD,
         group: "apx",
         scope: "worker",
     },
     MetricCatalogEntry {
-        def: DISPATCH_TOTAL,
+        def: SEND_PARSE,
         group: "apx",
         scope: "worker",
     },
     MetricCatalogEntry {
-        def: ASGI_RECEIVE_BUILD,
+        def: RESPONSE_BUILD,
         group: "apx",
         scope: "worker",
     },
     MetricCatalogEntry {
-        def: ASGI_SEND_PARSE,
+        def: RESPONSE_WRITE,
         group: "apx",
         scope: "worker",
     },
     MetricCatalogEntry {
-        def: DISPATCH_PICKUP_DELAY,
+        def: HANDLER_WAIT,
         group: "apx",
         scope: "worker",
     },
     MetricCatalogEntry {
-        def: DISPATCH_MATERIALIZE,
+        def: REQUEST_TOTAL,
         group: "apx",
         scope: "worker",
     },
     MetricCatalogEntry {
-        def: DISPATCH_QUEUE_DEPTH,
+        def: ACTIVE_REQUESTS,
+        group: "apx",
+        scope: "worker",
+    },
+    MetricCatalogEntry {
+        def: CONNECTIONS,
         group: "apx",
         scope: "worker",
     },
