@@ -282,6 +282,49 @@ async def ws_json(ws: WebSocket):
         pass
 
 
+@router.websocket("/ws/binary")
+async def ws_binary(ws: WebSocket):
+    """Binary echo WebSocket — returns each binary frame unchanged."""
+    await ws.accept()
+    try:
+        while True:
+            data = await ws.receive_bytes()
+            await ws.send_bytes(data)
+    except WebSocketDisconnect:
+        pass
+
+
+@router.websocket("/ws/close-with-code")
+async def ws_close_with_code(ws: WebSocket):
+    """Accepts, reads one JSON message, then closes with the requested code."""
+    await ws.accept()
+    msg = await ws.receive_json()
+    await ws.close(code=msg.get("code", 1000), reason=msg.get("reason", ""))
+
+
+@router.websocket("/ws/reject")
+async def ws_reject(ws: WebSocket):
+    """Returns immediately without calling accept."""
+    pass
+
+
+@router.websocket("/ws/error-in-handler")
+async def ws_error_in_handler(ws: WebSocket):
+    """Accepts then raises to exercise server-side error handling."""
+    await ws.accept()
+    raise RuntimeError("deliberate test error")
+
+
+@router.websocket("/ws/subprotocol")
+async def ws_subprotocol(ws: WebSocket):
+    """Echoes the negotiated subprotocol back as JSON."""
+    protos: list[str] = ws.scope.get("subprotocols", [])
+    selected = protos[0] if protos else ""
+    await ws.accept(subprotocol=selected or None)
+    await ws.send_json({"selected": selected})
+    await ws.close()
+
+
 # ---------------------------------------------------------------------------
 # Telemetry test endpoint
 # ---------------------------------------------------------------------------
