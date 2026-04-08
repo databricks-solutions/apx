@@ -31,11 +31,13 @@
 
 Install `apx`:
 
+**macOS/Linux:**
 ```bash
-# macOS/Linux
 curl -fsSL https://databricks-solutions.github.io/apx/install.sh | sh
+```
 
-# Windows
+**Windows:**
+```powershell
 irm https://databricks-solutions.github.io/apx/install.ps1 | iex
 ```
 
